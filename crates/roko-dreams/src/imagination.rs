@@ -494,6 +494,8 @@ fn hypothetical_entry(
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 

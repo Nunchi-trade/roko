@@ -847,6 +847,95 @@ pub fn compete(a: &Pheromone, b: &Pheromone, niche_overlap_threshold: f64) -> Co
 }
 
 // ---------------------------------------------------------------------------
+// COORD-06: Cosine similarity for morphogenetic strategy vectors
+// ---------------------------------------------------------------------------
+
+/// Cosine similarity between two strategy vectors.
+///
+/// Returns a value in `[0.0, 1.0]` where 1.0 means identical direction.
+/// If either vector has zero norm, returns 0.0.
+#[must_use]
+pub fn cosine_similarity(a: &[f64; STRATEGY_DIMS], b: &[f64; STRATEGY_DIMS]) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm_a * norm_b < 1e-10 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(0.0, 1.0)
+}
+
+/// A detected niche conflict between two agents with overlapping strategies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NicheConflict {
+    /// First agent identifier.
+    pub agent_a: AgentId,
+    /// Second agent identifier.
+    pub agent_b: AgentId,
+    /// Cosine similarity between the two strategy vectors.
+    pub similarity: f64,
+    /// Indices of the top-3 shared dimensions (highest product of concentrations).
+    pub shared_dimensions: Vec<usize>,
+}
+
+/// Detect niche conflicts among a set of agents.
+///
+/// Returns all pairs whose cosine similarity exceeds `threshold` (default 0.9).
+/// Each conflict includes the shared dimensions that should receive increased
+/// collective pheromone to trigger automatic separation via Gierer-Meinhardt
+/// inhibition.
+#[must_use]
+pub fn niche_conflicts(
+    agents: &[(AgentId, MorphogeneticState)],
+    threshold: f64,
+) -> Vec<NicheConflict> {
+    let mut conflicts = Vec::new();
+    for i in 0..agents.len() {
+        for j in (i + 1)..agents.len() {
+            let sim = cosine_similarity(&agents[i].1.strategy, &agents[j].1.strategy);
+            if sim > threshold {
+                // Find the top-3 shared dimensions (highest product).
+                let mut dim_products: Vec<(usize, f64)> = (0..STRATEGY_DIMS)
+                    .map(|d| (d, agents[i].1.strategy[d] * agents[j].1.strategy[d]))
+                    .collect();
+                dim_products.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let shared_dimensions: Vec<usize> =
+                    dim_products.iter().take(3).map(|(d, _)| *d).collect();
+
+                conflicts.push(NicheConflict {
+                    agent_a: agents[i].0.clone(),
+                    agent_b: agents[j].0.clone(),
+                    similarity: sim,
+                    shared_dimensions,
+                });
+            }
+        }
+    }
+    conflicts
+}
+
+/// Apply niche conflict resolution by boosting collective pheromone on shared
+/// dimensions for both agents. The Gierer-Meinhardt inhibition term then
+/// pushes them apart automatically.
+pub fn resolve_niche_conflicts(
+    agents: &mut [(AgentId, MorphogeneticState)],
+    conflicts: &[NicheConflict],
+    boost_amount: f64,
+) {
+    for conflict in conflicts {
+        for (id, state) in agents.iter_mut() {
+            if *id == conflict.agent_a || *id == conflict.agent_b {
+                for &dim in &conflict.shared_dimensions {
+                    if dim < STRATEGY_DIMS {
+                        state.collective_pheromone[dim] += boost_amount;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // COORD-08: Permissioned subnet enforcement
 // ---------------------------------------------------------------------------
 
@@ -1283,5 +1372,84 @@ mod tests {
         };
         assert!(!perms.accept_publication("agent-1", false));
         assert!(perms.accept_publication("agent-1", true));
+    }
+
+    // ----- COORD-06: Cosine similarity + niche conflicts -----
+
+    #[test]
+    fn cosine_similarity_identical_vectors() {
+        let a = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-10, "identical should be 1.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors() {
+        let a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let b = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim < 1e-10, "orthogonal should be 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_uniform_vectors_are_identical() {
+        let uniform = [1.0 / 8.0; STRATEGY_DIMS];
+        let sim = cosine_similarity(&uniform, &uniform);
+        assert!((sim - 1.0).abs() < 1e-10, "uniform vs uniform = 1.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector_returns_zero() {
+        let zero = [0.0; STRATEGY_DIMS];
+        let some = [0.5; STRATEGY_DIMS];
+        let sim = cosine_similarity(&zero, &some);
+        assert!((sim - 0.0).abs() < 1e-10, "zero vector should give 0.0, got {sim}");
+    }
+
+    #[test]
+    fn niche_conflicts_detects_overlap() {
+        let agents = vec![
+            ("agent-a".to_owned(), MorphogeneticState::default()),
+            ("agent-b".to_owned(), MorphogeneticState::default()),
+        ];
+        // Uniform strategies have cosine similarity 1.0 > 0.9 threshold.
+        let conflicts = niche_conflicts(&agents, 0.9);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].similarity > 0.9);
+        assert_eq!(conflicts[0].shared_dimensions.len(), 3);
+    }
+
+    #[test]
+    fn niche_conflicts_no_overlap_for_specialized_agents() {
+        let mut state_a = MorphogeneticState::default();
+        state_a.strategy = [0.7, 0.05, 0.05, 0.05, 0.05, 0.025, 0.025, 0.05];
+        let mut state_b = MorphogeneticState::default();
+        state_b.strategy = [0.05, 0.05, 0.7, 0.05, 0.05, 0.025, 0.025, 0.05];
+
+        let agents = vec![
+            ("agent-a".to_owned(), state_a),
+            ("agent-b".to_owned(), state_b),
+        ];
+        let conflicts = niche_conflicts(&agents, 0.9);
+        assert!(conflicts.is_empty(), "specialized agents should not conflict");
+    }
+
+    #[test]
+    fn resolve_niche_conflicts_boosts_shared_dims() {
+        let mut agents = vec![
+            ("agent-a".to_owned(), MorphogeneticState::default()),
+            ("agent-b".to_owned(), MorphogeneticState::default()),
+        ];
+        let conflicts = niche_conflicts(&agents, 0.9);
+        assert!(!conflicts.is_empty());
+
+        resolve_niche_conflicts(&mut agents, &conflicts, 0.5);
+
+        // Both agents should have boosted collective_pheromone on shared dims.
+        for (_id, state) in &agents {
+            let total_boost: f64 = state.collective_pheromone.iter().sum();
+            assert!(total_boost > 0.0, "collective pheromone should be boosted");
+        }
     }
 }

@@ -778,11 +778,19 @@ impl HeartbeatPolicy {
     }
 
     /// Run the three tick producers until cancellation.
+    ///
+    /// Gamma ticks fire at the adaptive gamma interval.
+    /// Theta ticks fire at the adaptive theta interval.
+    /// Delta ticks fire when the idle timeout is reached (configurable via
+    /// `delta_idle_timeout_secs` in `ClockConfig`).
     pub async fn run(&self) {
         let mut gamma = tokio::time::interval(self.gamma_interval());
         gamma.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut theta = tokio::time::interval(self.theta_interval());
         theta.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let delta_timeout = Duration::from_secs(self.config.delta_idle_timeout_secs);
+        let mut delta = tokio::time::interval(delta_timeout);
+        delta.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => break,
@@ -795,6 +803,12 @@ impl HeartbeatPolicy {
                     self.emit_tick(HeartbeatSpeed::Theta);
                     theta = tokio::time::interval(self.theta_interval());
                     theta.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                }
+                _ = delta.tick() => {
+                    self.emit_tick(HeartbeatSpeed::Delta);
+                    // Re-create with potentially adjusted interval.
+                    delta = tokio::time::interval(delta_timeout);
+                    delta.set_missed_tick_behavior(MissedTickBehavior::Delay);
                 }
             }
         }
@@ -865,6 +879,180 @@ pub fn should_enter_delta(
         || idle_duration > Duration::from_secs(config.delta_idle_timeout_secs)
         || episodes_since_last_delta >= config.delta_episode_threshold
         || scheduled_delta_time.is_some_and(|time| SystemTime::now() >= time)
+}
+
+// ---------------------------------------------------------------------------
+// BEAT-11: FrequencyScheduler coordinating Gamma/Theta/Delta loops
+// ---------------------------------------------------------------------------
+
+/// Coordinates Gamma, Theta, and Delta loops with health tracking.
+///
+/// The scheduler ensures:
+/// - Theta fires every N gamma ticks (configurable `theta_gamma_count`)
+/// - Delta fires on idle timeout, episode threshold, or schedule
+/// - Loop health metrics are tracked (ticks per loop, cost)
+/// - Loop starvation is prevented (Gamma cannot monopolize)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrequencyScheduler {
+    /// Configuration for interval computation.
+    pub config: ClockConfig,
+    /// Gamma ticks since the last theta tick.
+    pub gamma_since_theta: u32,
+    /// Episodes completed since the last delta tick.
+    pub episodes_since_delta: usize,
+    /// Total gamma ticks emitted.
+    pub total_gamma_ticks: u64,
+    /// Total theta ticks emitted.
+    pub total_theta_ticks: u64,
+    /// Total delta ticks emitted.
+    pub total_delta_ticks: u64,
+    /// Cumulative cost of gamma ticks.
+    pub gamma_total_cost: f64,
+    /// Cumulative cost of theta ticks.
+    pub theta_total_cost: f64,
+    /// Cumulative cost of delta ticks.
+    pub delta_total_cost: f64,
+    /// Current budget usage fraction in `[0.0, 1.0]`.
+    pub budget_usage_pct: f64,
+    /// Whether the scheduler is in throttle mode.
+    pub throttled: bool,
+    /// Whether T2 calls are hard-stopped.
+    pub t2_hard_stopped: bool,
+}
+
+impl FrequencyScheduler {
+    /// Create a new frequency scheduler from clock configuration.
+    #[must_use]
+    pub fn new(config: ClockConfig) -> Self {
+        Self {
+            config,
+            gamma_since_theta: 0,
+            episodes_since_delta: 0,
+            total_gamma_ticks: 0,
+            total_theta_ticks: 0,
+            total_delta_ticks: 0,
+            gamma_total_cost: 0.0,
+            theta_total_cost: 0.0,
+            delta_total_cost: 0.0,
+            budget_usage_pct: 0.0,
+            throttled: false,
+            t2_hard_stopped: false,
+        }
+    }
+
+    /// Record a gamma tick and check whether theta should fire.
+    ///
+    /// Returns `true` when theta should be triggered (gamma count exceeded).
+    pub fn record_gamma_tick(&mut self, cost: f64) -> bool {
+        self.total_gamma_ticks += 1;
+        self.gamma_since_theta += 1;
+        self.gamma_total_cost += cost;
+        self.gamma_since_theta >= self.config.theta_gamma_count
+    }
+
+    /// Record a theta tick and reset the gamma counter.
+    pub fn record_theta_tick(&mut self, cost: f64) {
+        self.total_theta_ticks += 1;
+        self.gamma_since_theta = 0;
+        self.theta_total_cost += cost;
+    }
+
+    /// Record a delta tick and reset the episode counter.
+    pub fn record_delta_tick(&mut self, cost: f64) {
+        self.total_delta_ticks += 1;
+        self.episodes_since_delta = 0;
+        self.delta_total_cost += cost;
+    }
+
+    /// Record an episode completion for delta triggering.
+    pub fn record_episode(&mut self) {
+        self.episodes_since_delta += 1;
+    }
+
+    /// Check whether delta should fire based on episode count.
+    #[must_use]
+    pub fn should_trigger_delta(&self) -> bool {
+        self.episodes_since_delta >= self.config.delta_episode_threshold
+    }
+
+    /// Update budget usage and apply throttling rules.
+    ///
+    /// At `throttle_at_percent`, T2 calls are throttled.
+    /// At `hard_stop_at_percent`, T2 calls are hard-stopped, T1 throttled.
+    pub fn update_budget(&mut self, usage_pct: f64) {
+        self.budget_usage_pct = usage_pct;
+        let throttle = f64::from(self.config.throttle_at_percent) / 100.0;
+        let hard_stop = f64::from(self.config.hard_stop_at_percent) / 100.0;
+        self.throttled = usage_pct >= throttle;
+        self.t2_hard_stopped = usage_pct >= hard_stop;
+    }
+
+    /// Whether T2 tier is currently allowed.
+    #[must_use]
+    pub fn t2_allowed(&self) -> bool {
+        !self.t2_hard_stopped
+    }
+
+    /// Whether T1 tier should be throttled (only at very high budget usage).
+    #[must_use]
+    pub fn t1_throttled(&self) -> bool {
+        self.t2_hard_stopped // T1 throttled when T2 is hard-stopped
+    }
+
+    /// Downgrade a tier based on current budget constraints.
+    #[must_use]
+    pub fn constrain_tier(&self, tier: InferenceTier) -> InferenceTier {
+        match tier {
+            InferenceTier::T2 if self.t2_hard_stopped => InferenceTier::T1,
+            InferenceTier::T1 if self.t1_throttled() => InferenceTier::T0,
+            other => other,
+        }
+    }
+
+    /// Total cost across all three loops.
+    #[must_use]
+    pub fn total_cost(&self) -> f64 {
+        self.gamma_total_cost + self.theta_total_cost + self.delta_total_cost
+    }
+
+    /// Loop health: ratio of theta to gamma ticks (expected ~1:N).
+    #[must_use]
+    pub fn theta_gamma_ratio(&self) -> f64 {
+        if self.total_gamma_ticks == 0 {
+            return 0.0;
+        }
+        self.total_theta_ticks as f64 / self.total_gamma_ticks as f64
+    }
+
+    /// Expected theta-to-gamma ratio from configuration.
+    #[must_use]
+    pub fn expected_theta_gamma_ratio(&self) -> f64 {
+        if self.config.theta_gamma_count == 0 {
+            return 0.0;
+        }
+        1.0 / f64::from(self.config.theta_gamma_count)
+    }
+
+    /// Whether loop health is within acceptable bounds.
+    ///
+    /// Returns `false` when theta is starved (firing much less than expected)
+    /// or when gamma is monopolizing resources.
+    #[must_use]
+    pub fn loop_health_ok(&self) -> bool {
+        if self.total_gamma_ticks < 10 {
+            return true; // Too early to judge.
+        }
+        let actual = self.theta_gamma_ratio();
+        let expected = self.expected_theta_gamma_ratio();
+        // Accept within 2x of expected ratio in either direction.
+        actual >= expected * 0.5 && actual <= expected * 2.0
+    }
+}
+
+impl Default for FrequencyScheduler {
+    fn default() -> Self {
+        Self::new(ClockConfig::default())
+    }
 }
 
 /// Prediction-state vector used to compute world-model drift.
@@ -1933,5 +2121,103 @@ mod tests {
             select_tier_from_probes(10, Regime::Normal, &config),
             InferenceTier::T2
         );
+    }
+
+    // ----- BEAT-11: FrequencyScheduler -----
+
+    #[test]
+    fn frequency_scheduler_tracks_gamma_and_triggers_theta() {
+        let config = ClockConfig {
+            theta_gamma_count: 3,
+            ..ClockConfig::default()
+        };
+        let mut sched = FrequencyScheduler::new(config);
+        assert!(!sched.record_gamma_tick(0.0));
+        assert!(!sched.record_gamma_tick(0.0));
+        // 3rd gamma tick should trigger theta.
+        assert!(sched.record_gamma_tick(0.0));
+        assert_eq!(sched.gamma_since_theta, 3);
+
+        sched.record_theta_tick(0.01);
+        assert_eq!(sched.gamma_since_theta, 0);
+        assert_eq!(sched.total_theta_ticks, 1);
+    }
+
+    #[test]
+    fn frequency_scheduler_tracks_delta_episodes() {
+        let config = ClockConfig {
+            delta_episode_threshold: 5,
+            ..ClockConfig::default()
+        };
+        let mut sched = FrequencyScheduler::new(config);
+        for _ in 0..4 {
+            sched.record_episode();
+        }
+        assert!(!sched.should_trigger_delta());
+        sched.record_episode();
+        assert!(sched.should_trigger_delta());
+
+        sched.record_delta_tick(0.0);
+        assert!(!sched.should_trigger_delta());
+        assert_eq!(sched.episodes_since_delta, 0);
+    }
+
+    #[test]
+    fn frequency_scheduler_budget_throttling() {
+        let mut sched = FrequencyScheduler::default();
+        sched.update_budget(0.50);
+        assert!(!sched.throttled);
+        assert!(sched.t2_allowed());
+
+        sched.update_budget(0.85);
+        assert!(sched.throttled);
+        assert!(sched.t2_allowed());
+
+        sched.update_budget(0.96);
+        assert!(!sched.t2_allowed());
+        assert!(sched.t1_throttled());
+    }
+
+    #[test]
+    fn frequency_scheduler_constrains_tier() {
+        let mut sched = FrequencyScheduler::default();
+        sched.update_budget(0.96);
+        assert_eq!(sched.constrain_tier(InferenceTier::T2), InferenceTier::T1);
+        assert_eq!(sched.constrain_tier(InferenceTier::T1), InferenceTier::T0);
+        assert_eq!(sched.constrain_tier(InferenceTier::T0), InferenceTier::T0);
+    }
+
+    #[test]
+    fn frequency_scheduler_loop_health() {
+        let config = ClockConfig {
+            theta_gamma_count: 5,
+            ..ClockConfig::default()
+        };
+        let mut sched = FrequencyScheduler::new(config.clone());
+        // Simulate healthy ratio: 1 theta per 5 gamma.
+        for _ in 0..50 {
+            sched.record_gamma_tick(0.0);
+        }
+        for _ in 0..10 {
+            sched.record_theta_tick(0.0);
+        }
+        assert!(sched.loop_health_ok());
+
+        // Simulate starved theta (50 gamma, 1 theta).
+        let mut starved = FrequencyScheduler::new(config);
+        for _ in 0..50 {
+            starved.record_gamma_tick(0.0);
+        }
+        starved.record_theta_tick(0.0);
+        assert!(!starved.loop_health_ok());
+    }
+
+    #[test]
+    fn frequency_scheduler_total_cost() {
+        let mut sched = FrequencyScheduler::default();
+        sched.record_gamma_tick(0.001);
+        sched.record_theta_tick(0.01);
+        sched.record_delta_tick(0.005);
+        assert!((sched.total_cost() - 0.016).abs() < 1e-10);
     }
 }

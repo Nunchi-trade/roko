@@ -570,10 +570,31 @@ impl SystemPromptBuilder {
             guidance.push("Keep the solution lean and avoid over-engineering.");
         }
 
-        if affect.dominance <= -0.20 {
-            guidance.push("Reduce scope until the next concrete checkpoint is clear.");
+        // Dominance modulates both prompt tone and retrieval bias (COMP-06).
+        // Low dominance: prefer diverse sources, seek guidance, reduce scope.
+        // High dominance: prefer authoritative sources, execute autonomously.
+        if affect.dominance <= -0.50 {
+            guidance.push(
+                "Low confidence detected. Reduce scope until the next concrete checkpoint is clear. \
+                 Prefer diverse sources and cross-reference multiple approaches before committing. \
+                 Seek corroboration from tests, docs, and prior episodes.",
+            );
+        } else if affect.dominance <= -0.20 {
+            guidance.push(
+                "Reduce scope until the next concrete checkpoint is clear. \
+                 Consider multiple sources before choosing an approach.",
+            );
+        } else if affect.dominance >= 0.60 {
+            guidance.push(
+                "High confidence. Execute decisively and prefer authoritative sources \
+                 (official docs, tested code paths) over exploratory alternatives. \
+                 Keep claims grounded in evidence.",
+            );
         } else if affect.dominance >= 0.30 {
-            guidance.push("Execute decisively, but keep claims grounded in evidence.");
+            guidance.push(
+                "Execute decisively, but keep claims grounded in evidence. \
+                 Prefer proven patterns over experimental approaches.",
+            );
         }
 
         if affect.somatic_intensity >= 0.25 {
@@ -1523,6 +1544,33 @@ mod tests {
 
         assert!(prompt.contains("prior failure territory"));
         assert!(prompt.contains("known-safe sequences"));
+    }
+
+    #[test]
+    fn affect_guidance_reflects_dominance_modulation() {
+        // High dominance: authoritative sources, decisive execution.
+        let high = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, 0.7)))
+            .build();
+        assert!(high.contains("authoritative sources"));
+        assert!(high.contains("decisively"));
+
+        // Low dominance: diverse sources, reduce scope.
+        let low = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, -0.6)))
+            .build();
+        assert!(low.contains("diverse sources"));
+        assert!(low.contains("cross-reference"));
+
+        // Very low dominance (below -0.50): even more cautious.
+        assert!(low.contains("Reduce scope"));
+
+        // Neutral dominance: no dominance guidance.
+        let neutral = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, 0.0)))
+            .build();
+        assert!(!neutral.contains("authoritative sources"));
+        assert!(!neutral.contains("diverse sources"));
     }
 
     #[test]

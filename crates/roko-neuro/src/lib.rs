@@ -55,6 +55,10 @@ const fn default_half_life_days() -> f64 {
     30.0
 }
 
+fn default_balance() -> f64 {
+    1.0
+}
+
 /// Default half-life for insights, in days.
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
 /// Default half-life for heuristics, in days.
@@ -282,6 +286,20 @@ pub struct KnowledgeEntry {
     /// Required for demoting Persistent entries.
     #[serde(default)]
     pub deprecated: bool,
+    /// NEURO-10: Freshness reserve balance for demurrage model.
+    ///
+    /// Balance represents the entry's freshness reserve. It decreases via
+    /// demurrage tax over time and increases via reinforcement signals
+    /// (Retrieved, Cited, Gated, Surprised, AgentQuoted). Initial value 1.0.
+    #[serde(default = "default_balance")]
+    pub balance: f64,
+    /// NEURO-11: Whether this entry has been frozen into cold storage.
+    ///
+    /// Frozen entries are excluded from hot query results but retain their
+    /// content address, lineage, and provenance. They can be thawed to
+    /// restore a starter balance.
+    #[serde(default)]
+    pub frozen: bool,
 }
 
 impl Default for KnowledgeEntry {
@@ -308,6 +326,8 @@ impl Default for KnowledgeEntry {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: default_balance(),
+            frozen: false,
         }
     }
 }
@@ -412,6 +432,119 @@ impl KnowledgeEntry {
     #[must_use]
     pub fn emotional_reliability_boost(&self) -> f64 {
         self.emotional_consolidation_boost()
+    }
+
+    /// NEURO-10: Apply a reinforcement signal to bump this entry's balance.
+    ///
+    /// The bump is `signal.base_value() * (1.0 + novelty)` where `novelty`
+    /// is typically `1.0 - max_hdc_similarity` against top-K neighbors.
+    /// Common entries get small bumps; rare-but-useful ones get larger bumps.
+    pub fn reinforce(&mut self, signal: ReinforcementSignal, novelty: f64) {
+        let bump = signal.base_value() * (1.0 + novelty.clamp(0.0, 1.0));
+        self.balance = (self.balance + bump).min(5.0);
+    }
+
+    /// NEURO-10: Apply demurrage tax, deducting balance proportionally to
+    /// elapsed time.
+    ///
+    /// The demurrage rate is `DEMURRAGE_RATE_PER_HOUR` (default 0.005).
+    pub fn apply_demurrage(&mut self, elapsed_hours: f64) {
+        if elapsed_hours <= 0.0 {
+            return;
+        }
+        let deduction = DEMURRAGE_RATE_PER_HOUR * elapsed_hours;
+        self.balance = (self.balance - deduction).max(0.0);
+    }
+
+    /// NEURO-10: Freshness score combining balance with Ebbinghaus decay.
+    ///
+    /// `freshness(t) = balance(t) * ebbinghaus_weight(age, type_half_life, tier_multiplier)`
+    #[must_use]
+    pub fn freshness(&self, now: DateTime<Utc>) -> f64 {
+        let age_hours = now
+            .signed_duration_since(self.created_at)
+            .num_seconds() as f64
+            / 3600.0;
+        if age_hours <= 0.0 {
+            return self.balance;
+        }
+        let half_life_hours = self.effective_half_life_days() * 24.0;
+        let ebbinghaus = if half_life_hours > 0.0 {
+            (-(age_hours * 2.0_f64.ln()) / half_life_hours).exp()
+        } else {
+            0.0
+        };
+        self.balance * ebbinghaus
+    }
+
+    /// NEURO-11: Freeze this entry into cold storage.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    /// NEURO-11: Thaw this entry from cold storage with a starter balance.
+    pub fn thaw(&mut self, starter_balance: f64) {
+        self.frozen = false;
+        self.balance = starter_balance.clamp(0.0, 5.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-10: Demurrage balance model and reinforcement signals.
+// ---------------------------------------------------------------------------
+
+/// Hourly demurrage rate deducted from knowledge entry balances.
+pub const DEMURRAGE_RATE_PER_HOUR: f64 = 0.005;
+
+/// Default balance floor below which entries are frozen by GC.
+pub const BALANCE_GC_FLOOR: f64 = 0.05;
+
+/// Default starter balance for thawed entries.
+pub const THAW_STARTER_BALANCE: f64 = 0.3;
+
+/// Reinforcement signal types that bump a knowledge entry's balance.
+///
+/// The 5 signals correspond to different ways knowledge proves its worth:
+/// being retrieved, being cited, surviving a gate check, explaining a novel
+/// outcome, or being explicitly reused by an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReinforcementSignal {
+    /// Entry was selected for use during context assembly.
+    Retrieved,
+    /// Another entry references this one.
+    Cited,
+    /// Entry survived a verification gate.
+    Gated,
+    /// Entry explained a novel or unexpected outcome.
+    Surprised,
+    /// Agent explicitly reused this entry's content.
+    AgentQuoted,
+}
+
+impl ReinforcementSignal {
+    /// Base balance bump for each signal type.
+    #[must_use]
+    pub const fn base_value(self) -> f64 {
+        match self {
+            Self::Retrieved => 0.05,
+            Self::Cited => 0.08,
+            Self::Gated => 0.10,
+            Self::Surprised => 0.15,
+            Self::AgentQuoted => 0.12,
+        }
+    }
+
+    /// Human-readable label for this signal type.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retrieved => "retrieved",
+            Self::Cited => "cited",
+            Self::Gated => "gated",
+            Self::Surprised => "surprised",
+            Self::AgentQuoted => "agent_quoted",
+        }
     }
 }
 
@@ -1094,6 +1227,8 @@ mod tests {
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         assert_eq!(entry.effective_half_life_days(), 100.0);

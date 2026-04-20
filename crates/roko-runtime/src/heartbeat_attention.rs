@@ -593,6 +593,323 @@ impl Default for ContextGovernor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BEAT-07: ContextBidder trait and subsystem implementations
+// ---------------------------------------------------------------------------
+
+/// Context state provided to bidders for candidate generation.
+///
+/// Each subsystem inspects its relevant fields to produce context candidates
+/// for the VCG auction.
+#[derive(Debug, Clone, Default)]
+pub struct BidderContext {
+    /// Current PAD affect vector.
+    pub pad: PadVector,
+    /// Current environmental regime.
+    pub regime: u8,
+    /// Whether a gate failure occurred in the recent tick.
+    pub recent_gate_failure: bool,
+    /// Number of consecutive failures on the current task.
+    pub consecutive_failures: u32,
+    /// Number of retry attempts on the current task.
+    pub retry_count: u32,
+    /// Deadline pressure in `[0.0, 1.0]` (higher = more urgent).
+    pub deadline_pressure: f64,
+    /// Task safety relevance in `[0.0, 1.0]`.
+    pub safety_relevance: f64,
+    /// Task description or summary.
+    pub task_summary: String,
+    /// Available knowledge entry count from neuro.
+    pub knowledge_entry_count: usize,
+    /// Available playbook rule count.
+    pub playbook_rule_count: usize,
+    /// Available research artifact count.
+    pub research_artifact_count: usize,
+    /// Current prediction accuracy.
+    pub prediction_accuracy: f32,
+    /// Number of code symbols available.
+    pub code_symbol_count: usize,
+}
+
+impl BidderContext {
+    /// Compute the urgency multiplier from context signals.
+    ///
+    /// Urgency is clamped to `[0.5, 2.0]` based on deadline pressure,
+    /// retry count, and safety relevance.
+    #[must_use]
+    pub fn urgency(&self) -> f64 {
+        let base = 1.0 + self.deadline_pressure * 0.5;
+        let retry_boost = (self.retry_count as f64 * 0.1).min(0.5);
+        let safety_boost = self.safety_relevance * 0.3;
+        (base + retry_boost + safety_boost).clamp(0.5, 2.0)
+    }
+}
+
+/// A subsystem that generates context candidates for the VCG attention auction.
+///
+/// Each of the 8 bidding subsystems implements this trait. On every T1/T2 tick
+/// during the COMPOSE step, the `ContextGovernor` invokes `generate_candidates`
+/// on all registered bidders and feeds the results into `run_attention_auction`.
+pub trait ContextBidder: Send + Sync {
+    /// Generate context candidates for this subsystem.
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate>;
+
+    /// The subsystem identifier for this bidder.
+    fn subsystem_id(&self) -> SubsystemId;
+}
+
+/// Neuro knowledge bidder: bids for durable knowledge entries.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NeuroBidder;
+
+impl ContextBidder for NeuroBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.knowledge_entry_count == 0 {
+            return Vec::new();
+        }
+        let expected_value = 0.6 + (ctx.knowledge_entry_count as f64 * 0.02).min(0.3);
+        vec![ContextCandidate::new(
+            SubsystemId::Neuro,
+            ContextCategory::Knowledge,
+            512.min(ctx.knowledge_entry_count * 64),
+            expected_value,
+            ctx.urgency(),
+            "neuro knowledge entries",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::Neuro
+    }
+}
+
+/// Daimon affect bidder: bids for affect and motivational state context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DaimonBidder;
+
+impl ContextBidder for DaimonBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        let pad_magnitude = (ctx.pad.pleasure.powi(2)
+            + ctx.pad.arousal.powi(2)
+            + ctx.pad.dominance.powi(2))
+        .sqrt();
+        // Only bid when affect state is noteworthy.
+        if pad_magnitude < 0.1 {
+            return Vec::new();
+        }
+        vec![ContextCandidate::new(
+            SubsystemId::Daimon,
+            ContextCategory::Affect,
+            128,
+            pad_magnitude.min(1.0),
+            ctx.urgency(),
+            "daimon affect state",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::Daimon
+    }
+}
+
+/// Iteration memory bidder: bids for past failure context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IterationMemoryBidder;
+
+impl ContextBidder for IterationMemoryBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.consecutive_failures == 0 && !ctx.recent_gate_failure {
+            return Vec::new();
+        }
+        let expected_value = (ctx.consecutive_failures as f64 * 0.2 + 0.4).min(1.0);
+        vec![ContextCandidate::new(
+            SubsystemId::IterationMemory,
+            ContextCategory::IterationMemory,
+            256.min(ctx.consecutive_failures as usize * 128 + 128),
+            expected_value,
+            ctx.urgency(),
+            "iteration memory (past failures)",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::IterationMemory
+    }
+}
+
+/// Code intelligence bidder: bids for symbol graph context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodeIntelligenceBidder;
+
+impl ContextBidder for CodeIntelligenceBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.code_symbol_count == 0 {
+            return Vec::new();
+        }
+        let expected_value = 0.5 + (ctx.code_symbol_count as f64 * 0.01).min(0.4);
+        vec![ContextCandidate::new(
+            SubsystemId::CodeIntelligence,
+            ContextCategory::CodeIntelligence,
+            512.min(ctx.code_symbol_count * 32),
+            expected_value,
+            ctx.urgency(),
+            "code intelligence symbols",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::CodeIntelligence
+    }
+}
+
+/// Playbook rules bidder: bids for learned heuristic context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaybookRulesBidder;
+
+impl ContextBidder for PlaybookRulesBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.playbook_rule_count == 0 {
+            return Vec::new();
+        }
+        let expected_value = 0.5 + (ctx.playbook_rule_count as f64 * 0.05).min(0.4);
+        vec![ContextCandidate::new(
+            SubsystemId::PlaybookRules,
+            ContextCategory::PlaybookRules,
+            256.min(ctx.playbook_rule_count * 64),
+            expected_value,
+            ctx.urgency(),
+            "playbook rules",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::PlaybookRules
+    }
+}
+
+/// Research artifacts bidder: bids for analysis and literature context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResearchArtifactsBidder;
+
+impl ContextBidder for ResearchArtifactsBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.research_artifact_count == 0 {
+            return Vec::new();
+        }
+        let expected_value = 0.4 + (ctx.research_artifact_count as f64 * 0.03).min(0.4);
+        vec![ContextCandidate::new(
+            SubsystemId::ResearchArtifacts,
+            ContextCategory::ResearchArtifacts,
+            384.min(ctx.research_artifact_count * 96),
+            expected_value,
+            ctx.urgency(),
+            "research artifacts",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::ResearchArtifacts
+    }
+}
+
+/// Task context bidder: bids for PRD/plan/task description context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskContextBidder;
+
+impl ContextBidder for TaskContextBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        if ctx.task_summary.is_empty() {
+            return Vec::new();
+        }
+        // Task context is always high-value.
+        vec![ContextCandidate::new(
+            SubsystemId::TaskContext,
+            ContextCategory::TaskContext,
+            512,
+            0.9,
+            ctx.urgency(),
+            "task context (PRD/plan)",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::TaskContext
+    }
+}
+
+/// Oracle predictions bidder: bids for calibration data context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OraclePredictionsBidder;
+
+impl ContextBidder for OraclePredictionsBidder {
+    fn generate_candidates(&self, ctx: &BidderContext) -> Vec<ContextCandidate> {
+        // Only bid when prediction accuracy is low enough to warrant inclusion.
+        if ctx.prediction_accuracy > 0.9 {
+            return Vec::new();
+        }
+        let expected_value = (1.0 - ctx.prediction_accuracy as f64).clamp(0.2, 0.8);
+        vec![ContextCandidate::new(
+            SubsystemId::OraclePredictions,
+            ContextCategory::OraclePredictions,
+            192,
+            expected_value,
+            ctx.urgency(),
+            "oracle prediction calibration",
+        )]
+    }
+
+    fn subsystem_id(&self) -> SubsystemId {
+        SubsystemId::OraclePredictions
+    }
+}
+
+/// Create the default set of all 8 context bidders.
+#[must_use]
+pub fn default_bidders() -> Vec<Box<dyn ContextBidder>> {
+    vec![
+        Box::new(NeuroBidder),
+        Box::new(DaimonBidder),
+        Box::new(IterationMemoryBidder),
+        Box::new(CodeIntelligenceBidder),
+        Box::new(PlaybookRulesBidder),
+        Box::new(ResearchArtifactsBidder),
+        Box::new(TaskContextBidder),
+        Box::new(OraclePredictionsBidder),
+    ]
+}
+
+impl ContextGovernor {
+    /// Run the full VCG auction pipeline: collect candidates from all bidders,
+    /// adjust budget for task complexity, and return allocations.
+    pub fn assemble(
+        &self,
+        bidders: &[Box<dyn ContextBidder>],
+        bidder_ctx: &BidderContext,
+        tier: InferenceTier,
+        complexity: f64,
+        attention_budget: &mut AttentionBudget,
+        tick_id: u64,
+    ) -> AuctionRound {
+        let budget_tokens = self.adjusted_budget(tier, complexity);
+        let pad = bidder_ctx.pad;
+
+        // Gather candidates from all bidders.
+        let candidates: Vec<ContextCandidate> = bidders
+            .iter()
+            .flat_map(|bidder| bidder.generate_candidates(bidder_ctx))
+            .collect();
+
+        run_attention_auction_with_budget(
+            &candidates,
+            budget_tokens,
+            &pad,
+            attention_budget,
+            tick_id,
+            tier,
+        )
+    }
+}
+
 /// Runs the VCG attention auction with carryover-budget modulation.
 ///
 /// This extends [`run_attention_auction`] by applying per-subsystem budget
@@ -827,6 +1144,432 @@ impl HeartbeatBelief {
         for prob in &mut self.state_probs {
             *prob = (*prob / total).clamp(0.0, 1.0);
         }
+    }
+}
+
+// ─── BEAT-08: Factorized discrete POMDP for tier selection ──────────────
+
+/// Task phase in the factorized POMDP (6 values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPhase {
+    /// Gathering requirements and planning approach.
+    Planning,
+    /// Writing code or producing artifacts.
+    Implementing,
+    /// Running tests and checks.
+    Testing,
+    /// Reviewing output quality.
+    Reviewing,
+    /// Diagnosing and fixing failures.
+    Debugging,
+    /// Finalizing and publishing.
+    Deploying,
+}
+
+impl TaskPhase {
+    /// All variants for iteration.
+    pub const ALL: [Self; 6] = [
+        Self::Planning,
+        Self::Implementing,
+        Self::Testing,
+        Self::Reviewing,
+        Self::Debugging,
+        Self::Deploying,
+    ];
+
+    /// Convert to index for matrix addressing.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Planning => 0,
+            Self::Implementing => 1,
+            Self::Testing => 2,
+            Self::Reviewing => 3,
+            Self::Debugging => 4,
+            Self::Deploying => 5,
+        }
+    }
+
+    /// Reconstruct from index.
+    pub const fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Self::Planning,
+            1 => Self::Implementing,
+            2 => Self::Testing,
+            3 => Self::Reviewing,
+            4 => Self::Debugging,
+            _ => Self::Deploying,
+        }
+    }
+}
+
+/// Context quality in the factorized POMDP (5 values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextQuality {
+    /// Insufficient context for the task.
+    Poor,
+    /// Marginal context coverage.
+    Fair,
+    /// Adequate context for standard execution.
+    Good,
+    /// Rich context enabling nuanced handling.
+    Excellent,
+    /// Comprehensive context with full coverage.
+    Perfect,
+}
+
+impl ContextQuality {
+    /// All variants for iteration.
+    pub const ALL: [Self; 5] = [
+        Self::Poor,
+        Self::Fair,
+        Self::Good,
+        Self::Excellent,
+        Self::Perfect,
+    ];
+
+    /// Convert to index.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Poor => 0,
+            Self::Fair => 1,
+            Self::Good => 2,
+            Self::Excellent => 3,
+            Self::Perfect => 4,
+        }
+    }
+
+    /// Reconstruct from index.
+    pub const fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Self::Poor,
+            1 => Self::Fair,
+            2 => Self::Good,
+            3 => Self::Excellent,
+            _ => Self::Perfect,
+        }
+    }
+}
+
+/// Uncertainty level in the factorized POMDP (3 values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Uncertainty {
+    /// Situation is well-understood.
+    Low,
+    /// Some unknowns remain.
+    Medium,
+    /// Significant unknowns requiring exploration.
+    High,
+}
+
+impl Uncertainty {
+    /// All variants for iteration.
+    pub const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+
+    /// Convert to index.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+
+    /// Reconstruct from index.
+    pub const fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => Self::Low,
+            1 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+}
+
+/// Total state count: 6 x 5 x 3 = 90.
+pub const POMDP_STATE_COUNT: usize = 6 * 5 * 3;
+
+/// Number of task phases.
+pub const PHASE_COUNT: usize = 6;
+/// Number of context quality levels.
+pub const QUALITY_COUNT: usize = 5;
+/// Number of uncertainty levels.
+pub const UNCERTAINTY_COUNT: usize = 3;
+/// Number of tiers (T0, T1, T2).
+pub const TIER_COUNT: usize = 3;
+
+/// Encode a factorized state triple to a flat index.
+#[must_use]
+pub const fn encode_state(phase: usize, quality: usize, uncertainty: usize) -> usize {
+    phase * QUALITY_COUNT * UNCERTAINTY_COUNT + quality * UNCERTAINTY_COUNT + uncertainty
+}
+
+/// Decode a flat index to a factorized state triple.
+#[must_use]
+pub const fn decode_pomdp_state(idx: usize) -> (usize, usize, usize) {
+    let phase = idx / (QUALITY_COUNT * UNCERTAINTY_COUNT);
+    let remainder = idx % (QUALITY_COUNT * UNCERTAINTY_COUNT);
+    let quality = remainder / UNCERTAINTY_COUNT;
+    let uncertainty = remainder % UNCERTAINTY_COUNT;
+    (phase, quality, uncertainty)
+}
+
+/// POMDP matrices for tier selection.
+///
+/// A: likelihood — P(observation | state) — how probe results map to states
+/// B: transition — P(state' | state, action) — how tier selection changes state
+/// C: preferences — desired observations (low error, low cost)
+/// D: prior — initial belief distribution
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PomdpMatrices {
+    /// Likelihood matrix: `A[state][obs_bin]` — P(obs_bin | state).
+    /// Obs bins: [low_error, mid_error, high_error].
+    pub a: Vec<[f64; 3]>,
+    /// Transition matrices per tier: `B[tier][from_state][to_state]`.
+    /// Simplified to self-transition with quality improvement for higher tiers.
+    pub b_quality_shift: [[f64; TIER_COUNT]; QUALITY_COUNT],
+    /// Preferred observation distribution (lower error is better).
+    pub c: [f64; 3],
+    /// Prior belief distribution.
+    pub d: Vec<f64>,
+}
+
+impl Default for PomdpMatrices {
+    fn default() -> Self {
+        // A: states with higher quality/lower uncertainty -> lower error observations.
+        let mut a = vec![[0.0; 3]; POMDP_STATE_COUNT];
+        for idx in 0..POMDP_STATE_COUNT {
+            let (_phase, quality, uncertainty) = decode_pomdp_state(idx);
+            // Quality 0..4 maps to error expectation, uncertainty 0..2 modulates.
+            let quality_score = quality as f64 / 4.0; // 0.0 = poor, 1.0 = perfect
+            let uncertainty_penalty = uncertainty as f64 * 0.15;
+            let p_low = (quality_score - uncertainty_penalty).clamp(0.1, 0.8);
+            let p_high = (1.0 - quality_score + uncertainty_penalty * 0.5).clamp(0.1, 0.6);
+            let p_mid = (1.0 - p_low - p_high).max(0.1);
+            let total = p_low + p_mid + p_high;
+            a[idx] = [p_low / total, p_mid / total, p_high / total];
+        }
+
+        // B: quality shift probability per tier — higher tiers are more likely to improve quality.
+        let b_quality_shift = [
+            // quality=Poor: P(improve by tier)
+            [0.1, 0.3, 0.6],  // T0 rarely improves, T2 often improves
+            // quality=Fair
+            [0.15, 0.35, 0.55],
+            // quality=Good
+            [0.2, 0.4, 0.5],
+            // quality=Excellent
+            [0.3, 0.45, 0.45],
+            // quality=Perfect (already best, less room to improve)
+            [0.5, 0.5, 0.5],
+        ];
+
+        // C: preference for low-error observations.
+        let c = [0.8, 0.15, 0.05]; // strongly prefer low error
+
+        // D: uniform prior.
+        let d = vec![1.0 / POMDP_STATE_COUNT as f64; POMDP_STATE_COUNT];
+
+        Self {
+            a,
+            b_quality_shift,
+            c,
+            d,
+        }
+    }
+}
+
+/// Factorized POMDP belief state over 90 states.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorizedBelief {
+    /// Probability distribution over the 90 states.
+    pub probabilities: Vec<f64>,
+    /// Number of updates applied.
+    pub updates: u64,
+}
+
+impl Default for FactorizedBelief {
+    fn default() -> Self {
+        Self {
+            probabilities: vec![1.0 / POMDP_STATE_COUNT as f64; POMDP_STATE_COUNT],
+            updates: 0,
+        }
+    }
+}
+
+impl FactorizedBelief {
+    /// Create a belief from a prior.
+    #[must_use]
+    pub fn from_prior(prior: &[f64]) -> Self {
+        let mut b = Self {
+            probabilities: prior.to_vec(),
+            updates: 0,
+        };
+        b.normalize();
+        b
+    }
+
+    /// Update belief from a prediction error observation.
+    ///
+    /// The observation is binned into [low, mid, high] error and used to
+    /// weight the likelihood of each state via the A matrix.
+    pub fn update_from_observation(
+        &mut self,
+        prediction_error: f32,
+        matrices: &PomdpMatrices,
+    ) {
+        let obs_bin = if prediction_error < 0.2 {
+            0 // low error
+        } else if prediction_error < 0.5 {
+            1 // mid error
+        } else {
+            2 // high error
+        };
+
+        for (idx, prob) in self.probabilities.iter_mut().enumerate() {
+            *prob *= matrices.a[idx][obs_bin];
+        }
+        self.normalize();
+        self.updates += 1;
+    }
+
+    /// Select the tier that minimizes expected free energy.
+    ///
+    /// EFE(tier) = pragmatic_value + epistemic_value
+    ///   pragmatic: KL divergence between predicted and preferred observations
+    ///   epistemic: expected information gain (uncertainty reduction)
+    #[must_use]
+    pub fn select_tier(&self, matrices: &PomdpMatrices) -> InferenceTier {
+        let tiers = [InferenceTier::T0, InferenceTier::T1, InferenceTier::T2];
+        tiers
+            .into_iter()
+            .min_by(|a, b| {
+                self.expected_free_energy(*a, matrices)
+                    .partial_cmp(&self.expected_free_energy(*b, matrices))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(InferenceTier::T1)
+    }
+
+    /// Compute the expected free energy for a given tier.
+    fn expected_free_energy(
+        &self,
+        tier: InferenceTier,
+        matrices: &PomdpMatrices,
+    ) -> f64 {
+        let tier_idx = match tier {
+            InferenceTier::T0 => 0,
+            InferenceTier::T1 => 1,
+            InferenceTier::T2 => 2,
+        };
+
+        let mut pragmatic = 0.0;
+        let mut epistemic = 0.0;
+
+        // For each state, weight by belief probability.
+        for (idx, &prob) in self.probabilities.iter().enumerate() {
+            if prob < 1e-12 {
+                continue;
+            }
+            let (_phase, quality, _uncertainty) = decode_pomdp_state(idx);
+
+            // Predicted observation distribution given this tier acts on this state.
+            let improvement_prob = matrices.b_quality_shift[quality][tier_idx];
+            // After tier action, predict observations.
+            let pred_obs = [
+                matrices.a[idx][0] * improvement_prob + matrices.a[idx][0] * (1.0 - improvement_prob),
+                matrices.a[idx][1],
+                matrices.a[idx][2] * (1.0 - improvement_prob * 0.3),
+            ];
+
+            // Pragmatic value: KL(preferred || predicted).
+            for (obs_bin, &c_pref) in matrices.c.iter().enumerate() {
+                if c_pref > 1e-12 && pred_obs[obs_bin] > 1e-12 {
+                    pragmatic += prob * c_pref * (c_pref / pred_obs[obs_bin]).ln();
+                }
+            }
+
+            // Epistemic value: expected entropy of posterior (higher tiers reduce uncertainty).
+            let entropy_reduction = match tier {
+                InferenceTier::T0 => 0.0,
+                InferenceTier::T1 => 0.1,
+                InferenceTier::T2 => 0.3,
+            };
+            epistemic -= prob * entropy_reduction;
+        }
+
+        // Cost penalty for higher tiers.
+        let cost = match tier {
+            InferenceTier::T0 => 0.0,
+            InferenceTier::T1 => 0.05,
+            InferenceTier::T2 => 0.2,
+        };
+
+        pragmatic + epistemic + cost
+    }
+
+    /// Normalize the belief distribution.
+    fn normalize(&mut self) {
+        let total: f64 = self.probabilities.iter().sum();
+        if total <= 0.0 || !total.is_finite() {
+            self.probabilities.fill(1.0 / POMDP_STATE_COUNT as f64);
+            return;
+        }
+        for p in &mut self.probabilities {
+            *p = (*p / total).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Get the most likely task phase.
+    #[must_use]
+    pub fn most_likely_phase(&self) -> TaskPhase {
+        let mut phase_probs = [0.0_f64; PHASE_COUNT];
+        for (idx, &prob) in self.probabilities.iter().enumerate() {
+            let (phase, _, _) = decode_pomdp_state(idx);
+            phase_probs[phase] += prob;
+        }
+        let best = phase_probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        TaskPhase::from_index(best)
+    }
+
+    /// Get the most likely context quality.
+    #[must_use]
+    pub fn most_likely_quality(&self) -> ContextQuality {
+        let mut quality_probs = [0.0_f64; QUALITY_COUNT];
+        for (idx, &prob) in self.probabilities.iter().enumerate() {
+            let (_, quality, _) = decode_pomdp_state(idx);
+            quality_probs[quality] += prob;
+        }
+        let best = quality_probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        ContextQuality::from_index(best)
+    }
+
+    /// Get the most likely uncertainty level.
+    #[must_use]
+    pub fn most_likely_uncertainty(&self) -> Uncertainty {
+        let mut uncertainty_probs = [0.0_f64; UNCERTAINTY_COUNT];
+        for (idx, &prob) in self.probabilities.iter().enumerate() {
+            let (_, _, uncertainty) = decode_pomdp_state(idx);
+            uncertainty_probs[uncertainty] += prob;
+        }
+        let best = uncertainty_probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        Uncertainty::from_index(best)
     }
 }
 
@@ -1065,5 +1808,276 @@ mod tests {
         assert_eq!(round.winners, 1);
         assert_eq!(round.tokens_used, 500);
         assert_eq!(round.tokens_remaining, 500);
+    }
+
+    // ----- BEAT-07: ContextBidder trait and subsystem implementations -----
+
+    #[test]
+    fn default_bidders_returns_eight_subsystems() {
+        let bidders = default_bidders();
+        assert_eq!(bidders.len(), 8);
+        let ids: Vec<SubsystemId> = bidders.iter().map(|b| b.subsystem_id()).collect();
+        assert!(ids.contains(&SubsystemId::Neuro));
+        assert!(ids.contains(&SubsystemId::Daimon));
+        assert!(ids.contains(&SubsystemId::IterationMemory));
+        assert!(ids.contains(&SubsystemId::CodeIntelligence));
+        assert!(ids.contains(&SubsystemId::PlaybookRules));
+        assert!(ids.contains(&SubsystemId::ResearchArtifacts));
+        assert!(ids.contains(&SubsystemId::TaskContext));
+        assert!(ids.contains(&SubsystemId::OraclePredictions));
+    }
+
+    #[test]
+    fn neuro_bidder_generates_candidates_when_entries_exist() {
+        let bidder = NeuroBidder;
+        let ctx = BidderContext {
+            knowledge_entry_count: 5,
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&ctx);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].subsystem_id, SubsystemId::Neuro);
+        assert!(candidates[0].expected_value > 0.0);
+    }
+
+    #[test]
+    fn neuro_bidder_empty_when_no_entries() {
+        let bidder = NeuroBidder;
+        let ctx = BidderContext::default();
+        let candidates = bidder.generate_candidates(&ctx);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn iteration_memory_bidder_activates_on_failures() {
+        let bidder = IterationMemoryBidder;
+        let ctx = BidderContext {
+            consecutive_failures: 3,
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&ctx);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].subsystem_id, SubsystemId::IterationMemory);
+    }
+
+    #[test]
+    fn iteration_memory_bidder_silent_when_no_failures() {
+        let bidder = IterationMemoryBidder;
+        let ctx = BidderContext::default();
+        let candidates = bidder.generate_candidates(&ctx);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn task_context_bidder_requires_task_summary() {
+        let bidder = TaskContextBidder;
+        let no_task = BidderContext::default();
+        assert!(bidder.generate_candidates(&no_task).is_empty());
+
+        let with_task = BidderContext {
+            task_summary: "implement feature X".into(),
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&with_task);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].subsystem_id, SubsystemId::TaskContext);
+    }
+
+    #[test]
+    fn oracle_bidder_bids_when_accuracy_low() {
+        let bidder = OraclePredictionsBidder;
+        let low_acc = BidderContext {
+            prediction_accuracy: 0.5,
+            ..Default::default()
+        };
+        let candidates = bidder.generate_candidates(&low_acc);
+        assert_eq!(candidates.len(), 1);
+
+        let high_acc = BidderContext {
+            prediction_accuracy: 0.95,
+            ..Default::default()
+        };
+        assert!(bidder.generate_candidates(&high_acc).is_empty());
+    }
+
+    #[test]
+    fn bidder_context_urgency_clamps_correctly() {
+        let low = BidderContext::default();
+        assert!(low.urgency() >= 0.5 && low.urgency() <= 2.0);
+
+        let high = BidderContext {
+            deadline_pressure: 1.0,
+            retry_count: 10,
+            safety_relevance: 1.0,
+            ..Default::default()
+        };
+        assert!((high.urgency() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn governor_assemble_runs_full_pipeline() {
+        let governor = ContextGovernor::default();
+        let bidders = default_bidders();
+        let ctx = BidderContext {
+            knowledge_entry_count: 5,
+            task_summary: "test task".into(),
+            prediction_accuracy: 0.6,
+            ..Default::default()
+        };
+        let subsystems: Vec<SubsystemId> = bidders.iter().map(|b| b.subsystem_id()).collect();
+        let budget = &mut AttentionBudget::new(&subsystems);
+
+        let round = governor.assemble(
+            &bidders,
+            &ctx,
+            InferenceTier::T1,
+            0.5,
+            budget,
+            1,
+        );
+
+        assert!(round.total_candidates > 0);
+        assert!(round.winners > 0);
+        assert!(round.budget_tokens > 0);
+    }
+
+    // ----- BEAT-08: Factorized POMDP state space -----
+
+    #[test]
+    fn pomdp_state_count_is_90() {
+        assert_eq!(POMDP_STATE_COUNT, 90);
+        assert_eq!(PHASE_COUNT * QUALITY_COUNT * UNCERTAINTY_COUNT, 90);
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        for phase in 0..PHASE_COUNT {
+            for quality in 0..QUALITY_COUNT {
+                for uncertainty in 0..UNCERTAINTY_COUNT {
+                    let idx = encode_state(phase, quality, uncertainty);
+                    assert!(idx < POMDP_STATE_COUNT);
+                    let (p, q, u) = decode_pomdp_state(idx);
+                    assert_eq!((p, q, u), (phase, quality, uncertainty));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn factorized_belief_initializes_uniform() {
+        let belief = FactorizedBelief::default();
+        assert_eq!(belief.probabilities.len(), POMDP_STATE_COUNT);
+        let sum: f64 = belief.probabilities.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "belief should sum to 1.0, got {sum}");
+    }
+
+    #[test]
+    fn factorized_belief_update_shifts_distribution() {
+        let mut belief = FactorizedBelief::default();
+        let matrices = PomdpMatrices::default();
+
+        let before = belief.probabilities.clone();
+        belief.update_from_observation(0.8, &matrices); // high error
+        assert_ne!(belief.probabilities, before);
+
+        let sum: f64 = belief.probabilities.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "belief should remain normalized, got {sum}");
+    }
+
+    #[test]
+    fn factorized_belief_high_error_shifts_toward_poor_quality() {
+        let mut belief = FactorizedBelief::default();
+        let matrices = PomdpMatrices::default();
+
+        // Push with many high-error observations.
+        for _ in 0..10 {
+            belief.update_from_observation(0.9, &matrices);
+        }
+
+        // Poor/Fair quality states should have more mass than Perfect.
+        let mut poor_mass = 0.0;
+        let mut perfect_mass = 0.0;
+        for (idx, &prob) in belief.probabilities.iter().enumerate() {
+            let (_, quality, _) = decode_pomdp_state(idx);
+            if quality == 0 {
+                poor_mass += prob;
+            }
+            if quality == 4 {
+                perfect_mass += prob;
+            }
+        }
+        assert!(
+            poor_mass > perfect_mass,
+            "poor quality should dominate after high errors: poor={poor_mass} > perfect={perfect_mass}"
+        );
+    }
+
+    #[test]
+    fn factorized_belief_selects_higher_tier_with_high_error() {
+        let mut belief = FactorizedBelief::default();
+        let matrices = PomdpMatrices::default();
+
+        for _ in 0..10 {
+            belief.update_from_observation(0.9, &matrices);
+        }
+
+        let tier = belief.select_tier(&matrices);
+        // With consistently high error, should escalate to T1 or T2.
+        assert!(
+            tier == InferenceTier::T1 || tier == InferenceTier::T2,
+            "expected T1 or T2 for high error, got {tier:?}"
+        );
+    }
+
+    #[test]
+    fn factorized_belief_prefers_lower_tier_with_low_error() {
+        let mut belief_low = FactorizedBelief::default();
+        let mut belief_high = FactorizedBelief::default();
+        let matrices = PomdpMatrices::default();
+
+        for _ in 0..10 {
+            belief_low.update_from_observation(0.05, &matrices);
+            belief_high.update_from_observation(0.9, &matrices);
+        }
+
+        let tier_low = belief_low.select_tier(&matrices);
+        let tier_high = belief_high.select_tier(&matrices);
+        // Low error should select a tier no higher than high error.
+        assert!(
+            u8::from(tier_low) <= u8::from(tier_high),
+            "low error tier {tier_low:?} should be <= high error tier {tier_high:?}"
+        );
+    }
+
+    #[test]
+    fn factorized_belief_marginal_queries_work() {
+        let belief = FactorizedBelief::default();
+        // With uniform prior, most likely should be deterministic.
+        let _phase = belief.most_likely_phase();
+        let _quality = belief.most_likely_quality();
+        let _uncertainty = belief.most_likely_uncertainty();
+        // Just check they don't panic.
+    }
+
+    #[test]
+    fn pomdp_matrices_a_rows_sum_to_one() {
+        let matrices = PomdpMatrices::default();
+        for (idx, row) in matrices.a.iter().enumerate() {
+            let sum: f64 = row.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "A matrix row {idx} should sum to 1.0, got {sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn pomdp_matrices_c_sums_to_one() {
+        let matrices = PomdpMatrices::default();
+        let sum: f64 = matrices.c.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "C preferences should sum to 1.0, got {sum}"
+        );
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use roko_core::{Body, EmotionalTag, Engram, PadVector};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{KnowledgeEntry, KnowledgeStore};
 
@@ -151,19 +151,31 @@ pub enum ContextSource {
 }
 
 /// Normalized PAD state used to bias retrieval when Daimon is available.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// Supports time-based exponential decay toward neutral (COMP-07) and
+/// serde-based disk persistence to `.roko/daimon/pad-state.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PadState {
     /// Pleasure dimension. Lower values favor cautionary / anti-knowledge.
     pub pleasure: f64,
     /// Arousal dimension. Higher values favor recent and action-oriented knowledge.
     pub arousal: f64,
-    /// Dominance dimension. Reserved for future modulation.
+    /// Dominance dimension. Modulates retrieval bias (COMP-06).
     pub dominance: f64,
     /// Situation-specific somatic valence in `[-1.0, 1.0]`.
     pub somatic_valence: f64,
     /// Strength of the somatic signal in `[0.0, 1.0]`.
     pub somatic_intensity: f64,
 }
+
+/// Default half-life for PAD state decay: 30 minutes in milliseconds.
+pub const DEFAULT_PAD_HALF_LIFE_MS: u64 = 30 * 60 * 1000;
+
+/// Minimum absolute value below which a PAD axis is snapped to zero.
+const PAD_SNAP_TO_ZERO: f64 = 0.01;
+
+/// Persistence filename within `.roko/daimon/`.
+const PAD_STATE_FILENAME: &str = "pad-state.json";
 
 impl PadState {
     /// Construct a normalized PAD state.
@@ -185,12 +197,215 @@ impl PadState {
         self.somatic_intensity = somatic_intensity.clamp(0.0, 1.0);
         self
     }
+
+    /// Exponentially decay all axes toward zero (neutral) over time.
+    ///
+    /// Uses the formula `x * 2^(-elapsed / half_life)` for each axis.
+    /// After decay, values below [`PAD_SNAP_TO_ZERO`] are snapped to 0.0
+    /// to prevent asymptotic drift.
+    ///
+    /// # Arguments
+    ///
+    /// * `elapsed_ms` -- milliseconds since the last decay/update.
+    /// * `half_life_ms` -- half-life in milliseconds (use [`DEFAULT_PAD_HALF_LIFE_MS`]
+    ///   for the default 30-minute half-life).
+    pub fn decay(&mut self, elapsed_ms: u64, half_life_ms: u64) {
+        if half_life_ms == 0 || elapsed_ms == 0 {
+            return;
+        }
+        let factor = 0.5_f64.powf(elapsed_ms as f64 / half_life_ms as f64);
+        self.pleasure *= factor;
+        self.arousal *= factor;
+        self.dominance *= factor;
+        self.somatic_valence *= factor;
+        self.somatic_intensity *= factor;
+
+        // Snap small values to zero.
+        snap_to_zero(&mut self.pleasure);
+        snap_to_zero(&mut self.arousal);
+        snap_to_zero(&mut self.dominance);
+        snap_to_zero(&mut self.somatic_valence);
+        snap_to_zero(&mut self.somatic_intensity);
+    }
+
+    /// Whether this state is effectively neutral (all axes near zero).
+    #[must_use]
+    pub fn is_neutral(&self) -> bool {
+        self.pleasure.abs() < PAD_SNAP_TO_ZERO
+            && self.arousal.abs() < PAD_SNAP_TO_ZERO
+            && self.dominance.abs() < PAD_SNAP_TO_ZERO
+    }
+
+    /// Persist the PAD state to `.roko/daimon/pad-state.json`.
+    ///
+    /// Creates the directory if it does not exist. Returns an error if
+    /// serialization or file I/O fails.
+    pub fn persist(&self, roko_dir: &std::path::Path) -> std::io::Result<()> {
+        let dir = roko_dir.join("daimon");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(PAD_STATE_FILENAME);
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Load the PAD state from `.roko/daimon/pad-state.json`.
+    ///
+    /// Returns `Ok(None)` if the file does not exist. Returns an error if
+    /// the file exists but cannot be parsed.
+    pub fn load(roko_dir: &std::path::Path) -> std::io::Result<Option<Self>> {
+        let path = roko_dir.join("daimon").join(PAD_STATE_FILENAME);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&path)?;
+        let state: Self = serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(Some(state))
+    }
+}
+
+/// Snap a value to zero if its absolute value is below the threshold.
+fn snap_to_zero(v: &mut f64) {
+    if v.abs() < PAD_SNAP_TO_ZERO {
+        *v = 0.0;
+    }
 }
 
 impl From<PadVector> for PadState {
     fn from(value: PadVector) -> Self {
         Self::new(value.pleasure, value.arousal, value.dominance)
     }
+}
+
+// ---------------------------------------------------------------------------
+// DAIM-06: Mood-congruent memory four-factor retrieval scoring.
+// ---------------------------------------------------------------------------
+
+/// Configurable weights for the four retrieval factors.
+///
+/// Per Bower (1981) and Emotional RAG (2024), knowledge retrieval is
+/// scored by four weighted factors: recency, importance, relevance, and
+/// emotional congruence.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FourFactorWeights {
+    /// How recently the entry was created or last accessed.
+    pub recency: f64,
+    /// Entry's confidence times tier multiplier.
+    pub importance: f64,
+    /// HDC or keyword similarity to the query.
+    pub relevance: f64,
+    /// PAD cosine similarity between agent state and entry tag.
+    pub congruence: f64,
+}
+
+impl Default for FourFactorWeights {
+    fn default() -> Self {
+        Self {
+            recency: 0.20,
+            importance: 0.25,
+            relevance: 0.35,
+            congruence: 0.20,
+        }
+    }
+}
+
+impl FourFactorWeights {
+    /// Normalize weights so they sum to 1.0.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        let total = self.recency + self.importance + self.relevance + self.congruence;
+        if total <= 0.0 {
+            return Self::default();
+        }
+        Self {
+            recency: self.recency / total,
+            importance: self.importance / total,
+            relevance: self.relevance / total,
+            congruence: self.congruence / total,
+        }
+    }
+}
+
+/// Four-factor retrieval scorer for knowledge entries.
+///
+/// Combines recency, importance (confidence * tier), relevance (keyword/HDC
+/// similarity), and emotional congruence (PAD cosine similarity) into a
+/// single retrieval score.
+#[derive(Clone, Debug)]
+pub struct FourFactorScorer {
+    /// Scoring weights.
+    pub weights: FourFactorWeights,
+}
+
+impl Default for FourFactorScorer {
+    fn default() -> Self {
+        Self {
+            weights: FourFactorWeights::default(),
+        }
+    }
+}
+
+impl FourFactorScorer {
+    /// Construct a scorer with custom weights.
+    #[must_use]
+    pub fn new(weights: FourFactorWeights) -> Self {
+        Self {
+            weights: weights.normalized(),
+        }
+    }
+
+    /// Score a single knowledge entry against a query context.
+    ///
+    /// - `recency_raw`: exponential decay factor based on entry age (0..1)
+    /// - `keyword_relevance`: keyword/HDC similarity score (0..1)
+    /// - `current_pad`: agent's current PAD state
+    #[must_use]
+    pub fn score(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        recency_raw: f64,
+        keyword_relevance: f64,
+        current_pad: &PadVector,
+    ) -> f64 {
+        let w = &self.weights;
+
+        // Factor 1: Recency
+        let recency = recency_raw.clamp(0.0, 1.0);
+
+        // Factor 2: Importance = confidence * tier multiplier
+        let importance =
+            (entry.confidence * entry.tier.multiplier() as f64).clamp(0.0, 1.0);
+
+        // Factor 3: Relevance
+        let relevance = keyword_relevance.clamp(0.0, 1.0);
+
+        // Factor 4: Emotional congruence via PAD cosine similarity
+        let congruence = entry
+            .emotional_tag
+            .as_ref()
+            .map(|tag| pad_cosine_similarity(current_pad, &tag.mood_snapshot))
+            .unwrap_or(0.5); // neutral if no emotional tag
+
+        w.recency * recency
+            + w.importance * importance
+            + w.relevance * relevance
+            + w.congruence * congruence
+    }
+}
+
+/// Cosine similarity between two PAD vectors.
+///
+/// Returns a value in `[-1.0, 1.0]`, mapped to `[0.0, 1.0]` for scoring.
+fn pad_cosine_similarity(a: &PadVector, b: &PadVector) -> f64 {
+    let dot = a.pleasure * b.pleasure + a.arousal * b.arousal + a.dominance * b.dominance;
+    let mag_a = (a.pleasure.powi(2) + a.arousal.powi(2) + a.dominance.powi(2)).sqrt();
+    let mag_b = (b.pleasure.powi(2) + b.arousal.powi(2) + b.dominance.powi(2)).sqrt();
+    if mag_a < f64::EPSILON || mag_b < f64::EPSILON {
+        return 0.5; // both near zero = neutral
+    }
+    // Map cosine from [-1, 1] to [0, 1].
+    ((dot / (mag_a * mag_b)) + 1.0) / 2.0
 }
 
 /// A single gathered context candidate.
@@ -1779,6 +1994,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add knowledge");
 
@@ -1881,6 +2098,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add knowledge");
 
@@ -1938,6 +2157,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add strategy fragment");
         knowledge_store
@@ -1966,6 +2187,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add anti-knowledge");
         knowledge_store
@@ -1994,6 +2217,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add insight");
 
@@ -2202,6 +2427,8 @@ mod tests {
                     distinct_contexts: Vec::new(),
 
                     deprecated: false,
+                balance: 1.0,
+                frozen: false,
                 })
                 .expect("add anti-knowledge");
         }
@@ -2232,6 +2459,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add strategy");
 
@@ -2309,6 +2538,8 @@ mod tests {
                     distinct_contexts: Vec::new(),
 
                     deprecated: false,
+                balance: 1.0,
+                frozen: false,
                 })
                 .expect("add heuristic");
         }
@@ -2339,6 +2570,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add warning");
 
@@ -2489,5 +2722,196 @@ mod tests {
                 .sum::<usize>()
                 <= 12
         );
+    }
+
+    // ── PAD state decay and persistence tests (COMP-07) ──��──────────
+
+    #[test]
+    fn pad_decay_halves_after_one_half_life() {
+        let mut state = PadState::new(0.8, -0.6, 0.4);
+        state.decay(30 * 60 * 1000, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!((state.pleasure - 0.4).abs() < 0.01);
+        assert!((state.arousal - (-0.3)).abs() < 0.01);
+        assert!((state.dominance - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn pad_decay_zero_elapsed_is_noop() {
+        let mut state = PadState::new(0.8, -0.6, 0.4);
+        state.decay(0, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!((state.pleasure - 0.8).abs() < f64::EPSILON);
+        assert!((state.arousal - (-0.6)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pad_decay_long_elapsed_approaches_zero() {
+        let mut state = PadState::new(1.0, -1.0, 0.5);
+        // 10 half-lives = 2^(-10) ~ 0.001
+        state.decay(10 * DEFAULT_PAD_HALF_LIFE_MS, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!(state.is_neutral());
+    }
+
+    #[test]
+    fn pad_decay_snaps_small_values_to_zero() {
+        let mut state = PadState::new(0.005, -0.003, 0.001);
+        state.decay(1000, DEFAULT_PAD_HALF_LIFE_MS);
+        assert_eq!(state.pleasure, 0.0);
+        assert_eq!(state.arousal, 0.0);
+        assert_eq!(state.dominance, 0.0);
+    }
+
+    #[test]
+    fn pad_persist_and_load_round_trips() {
+        let dir = TempDir::new().expect("tempdir");
+        let roko_dir = dir.path().join(".roko");
+        std::fs::create_dir_all(&roko_dir).expect("create roko dir");
+
+        let state = PadState::new(0.7, -0.3, 0.5).with_somatic_hint(-0.6, 0.8);
+        state.persist(&roko_dir).expect("persist");
+
+        let loaded = PadState::load(&roko_dir).expect("load").expect("Some");
+        assert!((loaded.pleasure - 0.7).abs() < f64::EPSILON);
+        assert!((loaded.arousal - (-0.3)).abs() < f64::EPSILON);
+        assert!((loaded.dominance - 0.5).abs() < f64::EPSILON);
+        assert!((loaded.somatic_valence - (-0.6)).abs() < f64::EPSILON);
+        assert!((loaded.somatic_intensity - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pad_load_returns_none_when_file_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        let roko_dir = dir.path().join(".roko");
+        let loaded = PadState::load(&roko_dir).expect("load");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn pad_is_neutral_for_default() {
+        assert!(PadState::default().is_neutral());
+    }
+
+    #[test]
+    fn pad_serde_round_trip() {
+        let state = PadState::new(0.3, -0.7, 0.1).with_somatic_hint(0.5, 0.9);
+        let json = serde_json::to_string(&state).expect("serialize");
+        let deserialized: PadState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(state, deserialized);
+    }
+
+    // -------------------------------------------------------------------
+    // DAIM-06: Four-factor retrieval scoring tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn four_factor_weights_default_sum_to_one() {
+        let w = FourFactorWeights::default();
+        let sum = w.recency + w.importance + w.relevance + w.congruence;
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn four_factor_weights_normalize() {
+        let w = FourFactorWeights {
+            recency: 2.0,
+            importance: 2.0,
+            relevance: 4.0,
+            congruence: 2.0,
+        };
+        let n = w.normalized();
+        let sum = n.recency + n.importance + n.relevance + n.congruence;
+        assert!((sum - 1.0).abs() < 1e-10);
+        assert!((n.relevance - 0.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn four_factor_scorer_relevance_dominates() {
+        let scorer = FourFactorScorer::default();
+        let pad = PadVector::neutral();
+
+        let mut high_relevance = KnowledgeEntry::default();
+        high_relevance.confidence = 0.5;
+        let mut low_relevance = KnowledgeEntry::default();
+        low_relevance.confidence = 0.5;
+
+        let score_high = scorer.score(&high_relevance, 0.5, 0.9, &pad);
+        let score_low = scorer.score(&low_relevance, 0.5, 0.1, &pad);
+        assert!(score_high > score_low, "higher relevance should produce higher score");
+    }
+
+    #[test]
+    fn four_factor_scorer_congruent_mood_boosts() {
+        let scorer = FourFactorScorer::default();
+        let happy_pad = PadVector::new(0.8, 0.3, 0.5);
+
+        let mut happy_entry = KnowledgeEntry::default();
+        happy_entry.confidence = 0.5;
+        happy_entry.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(0.9, 0.3, 0.5),
+            0.5,
+            "happy",
+            PadVector::new(0.9, 0.3, 0.5),
+        ));
+
+        let mut sad_entry = KnowledgeEntry::default();
+        sad_entry.confidence = 0.5;
+        sad_entry.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(-0.9, -0.3, -0.5),
+            0.5,
+            "sad",
+            PadVector::new(-0.9, -0.3, -0.5),
+        ));
+
+        let score_congruent = scorer.score(&happy_entry, 0.5, 0.5, &happy_pad);
+        let score_incongruent = scorer.score(&sad_entry, 0.5, 0.5, &happy_pad);
+        assert!(
+            score_congruent > score_incongruent,
+            "mood-congruent entries should score higher"
+        );
+    }
+
+    #[test]
+    fn four_factor_scorer_importance_favors_high_tier() {
+        let scorer = FourFactorScorer::default();
+        let pad = PadVector::neutral();
+
+        let mut consolidated = KnowledgeEntry::default();
+        consolidated.confidence = 0.8;
+        consolidated.tier = crate::KnowledgeTier::Consolidated; // multiplier = 1.0
+
+        let mut transient = KnowledgeEntry::default();
+        transient.confidence = 0.8;
+        transient.tier = crate::KnowledgeTier::Transient; // multiplier = 0.1
+
+        let score_consolidated = scorer.score(&consolidated, 0.5, 0.5, &pad);
+        let score_transient = scorer.score(&transient, 0.5, 0.5, &pad);
+        assert!(
+            score_consolidated > score_transient,
+            "higher-tier entries should have higher importance"
+        );
+    }
+
+    #[test]
+    fn pad_cosine_similarity_identical_vectors() {
+        let pad = PadVector::new(0.5, 0.3, 0.8);
+        let sim = super::pad_cosine_similarity(&pad, &pad);
+        // Identical vectors = cosine 1.0 => mapped to 1.0.
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pad_cosine_similarity_opposite_vectors() {
+        let a = PadVector::new(0.5, 0.3, 0.8);
+        let b = PadVector::new(-0.5, -0.3, -0.8);
+        let sim = super::pad_cosine_similarity(&a, &b);
+        // Opposite vectors = cosine -1.0 => mapped to 0.0.
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn pad_cosine_similarity_neutral_returns_half() {
+        let a = PadVector::neutral();
+        let b = PadVector::new(0.5, 0.3, 0.8);
+        let sim = super::pad_cosine_similarity(&a, &b);
+        assert!((sim - 0.5).abs() < 1e-6, "neutral vector should yield 0.5");
     }
 }

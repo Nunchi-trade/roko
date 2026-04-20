@@ -2967,6 +2967,12 @@ impl CascadeRouter {
                             } else {
                                 pareto_latency_proxy(slug)
                             },
+                            reliability: if model_stats.trials > 0 {
+                                // Non-error responses: successes + tolerable failures (not errors).
+                                model_stats.pass_rate().max(0.5)
+                            } else {
+                                0.5
+                            },
                             observations: model_stats.trials,
                         },
                     );

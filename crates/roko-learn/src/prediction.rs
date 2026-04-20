@@ -9,6 +9,21 @@ use std::path::Path;
 
 use crate::routing_log::{RoutingDecisionLog, RoutingDecisionLogStore};
 
+/// A single bin in a reliability diagram.
+///
+/// For calibration visualization: x-axis = absolute residual magnitude,
+/// y-axis = mean residual. Bins near zero with near-zero mean residual
+/// indicate good calibration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReliabilityBin {
+    /// Center of the residual magnitude bin (e.g. 0.05, 0.15, ...).
+    pub bin_center: f64,
+    /// Mean residual in this bin (signed, shows direction of miscalibration).
+    pub mean_residual: f64,
+    /// Number of observations in this bin.
+    pub count: usize,
+}
+
 /// Prediction captured before task execution and resolved after completion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictionRecord {
@@ -273,6 +288,82 @@ impl CalibrationTracker {
     #[must_use]
     pub fn adjust_prediction(&self, model: &str, category: &str, raw_pred: f64) -> f64 {
         (raw_pred - self.mean_bias(model, category)).clamp(0.0, 1.0)
+    }
+
+    /// Brier score: mean squared error of probabilistic predictions.
+    ///
+    /// Lower is better. Perfect calibration = 0.0, random = 0.25.
+    /// Residuals are (predicted - actual), so Brier = mean(residual^2).
+    #[must_use]
+    pub fn brier_score(&self, model: &str, category: &str) -> Option<f64> {
+        let residuals = self
+            .residuals
+            .get(&(model.to_string(), category.to_string()))?;
+        if residuals.is_empty() {
+            return None;
+        }
+        Some(residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64)
+    }
+
+    /// Bin residuals into 10 equally-spaced buckets for reliability diagrams.
+    ///
+    /// Each bucket covers a 0.2-wide band of absolute residual magnitude
+    /// (since residuals are already in [-1, 1]). Returns tuples of
+    /// `(bin_center, mean_residual, count)` for non-empty bins.
+    ///
+    /// For a reliability diagram: x-axis = predicted, y-axis = observed.
+    /// Diagonal means perfectly calibrated.
+    #[must_use]
+    pub fn reliability_bins(
+        &self,
+        model: &str,
+        category: &str,
+    ) -> Vec<ReliabilityBin> {
+        let Some(residuals) = self
+            .residuals
+            .get(&(model.to_string(), category.to_string()))
+        else {
+            return Vec::new();
+        };
+        if residuals.is_empty() {
+            return Vec::new();
+        }
+
+        // We work with absolute residuals binned into 10 buckets of width 0.1
+        // across [0.0, 1.0].
+        let num_bins = 10;
+        let bin_width = 1.0 / num_bins as f64;
+        let mut sums = vec![0.0_f64; num_bins];
+        let mut counts = vec![0_usize; num_bins];
+
+        for &r in residuals {
+            let abs_r = r.abs().min(0.9999);
+            let idx = (abs_r / bin_width) as usize;
+            let idx = idx.min(num_bins - 1);
+            sums[idx] += r;
+            counts[idx] += 1;
+        }
+
+        let mut bins = Vec::new();
+        for i in 0..num_bins {
+            if counts[i] > 0 {
+                bins.push(ReliabilityBin {
+                    bin_center: (i as f64 + 0.5) * bin_width,
+                    mean_residual: sums[i] / counts[i] as f64,
+                    count: counts[i],
+                });
+            }
+        }
+        bins
+    }
+
+    /// Arithmetic corrector: returns the mean bias for a model/category pair.
+    ///
+    /// Subtract this value from raw predictions to correct systematic
+    /// over- or under-confidence. ~50ns per correction (pure arithmetic).
+    #[must_use]
+    pub fn arithmetic_corrector(&self, model: &str, category: &str) -> f64 {
+        self.mean_bias(model, category)
     }
 
     /// Build a calibration summary for the predictive scorer/policy layer.
@@ -551,5 +642,69 @@ mod tests {
 
         assert_eq!(summary.sample_count, 1);
         assert!(summary.recent_accuracy > 0.0);
+    }
+
+    #[test]
+    fn brier_score_computes_mean_squared_residual() {
+        let mut tracker = CalibrationTracker::default();
+        // Record residuals of 0.2 and -0.4 => Brier = (0.04 + 0.16) / 2 = 0.10
+        tracker.record_residual("model-a", "impl", 0.2);
+        tracker.record_residual("model-a", "impl", -0.4);
+
+        let brier = tracker.brier_score("model-a", "impl").unwrap();
+        assert!((brier - 0.10).abs() < 1e-10);
+    }
+
+    #[test]
+    fn brier_score_returns_none_for_unknown_pair() {
+        let tracker = CalibrationTracker::default();
+        assert!(tracker.brier_score("unknown", "unknown").is_none());
+    }
+
+    #[test]
+    fn brier_score_perfect_predictions_are_zero() {
+        let mut tracker = CalibrationTracker::default();
+        for _ in 0..10 {
+            tracker.record_residual("model-a", "impl", 0.0);
+        }
+        let brier = tracker.brier_score("model-a", "impl").unwrap();
+        assert!(brier.abs() < 1e-10);
+    }
+
+    #[test]
+    fn reliability_bins_returns_non_empty_for_data() {
+        let mut tracker = CalibrationTracker::default();
+        // Small residuals should land in the first bin.
+        for _ in 0..10 {
+            tracker.record_residual("model-a", "impl", 0.05);
+        }
+        // Larger residuals go to later bins.
+        for _ in 0..5 {
+            tracker.record_residual("model-a", "impl", 0.3);
+        }
+
+        let bins = tracker.reliability_bins("model-a", "impl");
+        assert!(!bins.is_empty());
+        // Should have at least 2 bins populated.
+        assert!(bins.len() >= 2);
+        // All counts should be > 0.
+        assert!(bins.iter().all(|b| b.count > 0));
+    }
+
+    #[test]
+    fn reliability_bins_empty_for_unknown_pair() {
+        let tracker = CalibrationTracker::default();
+        assert!(tracker.reliability_bins("unknown", "unknown").is_empty());
+    }
+
+    #[test]
+    fn arithmetic_corrector_equals_mean_bias() {
+        let mut tracker = CalibrationTracker::default();
+        for _ in 0..50 {
+            tracker.record_residual("model-a", "impl", 0.15);
+        }
+        assert!(
+            (tracker.arithmetic_corrector("model-a", "impl") - 0.15).abs() < 1e-10
+        );
     }
 }

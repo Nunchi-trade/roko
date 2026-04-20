@@ -1437,6 +1437,8 @@ impl DreamDistillationCandidate {
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         })
     }
 }
@@ -1589,6 +1591,8 @@ fn playbook_knowledge_entry(
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -1660,6 +1664,8 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -1802,6 +1808,8 @@ fn generate_cross_domain_strategy_hypotheses(
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         });
     }
 
@@ -2094,6 +2102,8 @@ fn build_mistake_insight_entry(
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -2149,6 +2159,8 @@ fn review_insights_from_heuristics(
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
             }
         })
         .collect()
@@ -2987,6 +2999,9 @@ mod tests {
                     source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
                     source_model: None,
                     model_generality: 1.0,
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
                 roko_neuro::tier_progression::HeuristicRule {
                     id: "heuristic-2".to_string(),
@@ -3001,12 +3016,16 @@ mod tests {
                     source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
                     source_model: None,
                     model_generality: 1.0,
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
             ],
             playbook: roko_neuro::tier_progression::PlaybookCompilation {
                 markdown: String::new(),
                 rules: Vec::new(),
             },
+            falsifiers: Vec::new(),
         };
 
         let entries = review_insights_from_heuristics(&analysis, Utc::now());

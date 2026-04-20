@@ -43,7 +43,9 @@ pub mod alert;
 pub mod cancel;
 pub mod emit_metric;
 pub mod parallel;
+pub mod result_cache;
 pub mod timeout;
+pub mod tool_selector;
 pub mod truncate;
 pub mod validate;
 
@@ -82,6 +84,8 @@ pub struct ToolDispatcher {
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
     safety: Option<SafetyLayer>,
+    /// Optional tool result cache for deterministic tools (AGT-10).
+    tool_cache: Option<std::sync::Mutex<result_cache::ToolResultCache>>,
 }
 
 impl ToolDispatcher {
@@ -94,6 +98,7 @@ impl ToolDispatcher {
             resolver,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             safety: None,
+            tool_cache: None,
         }
     }
 
@@ -116,6 +121,23 @@ impl ToolDispatcher {
     #[must_use]
     pub const fn safety(&self) -> Option<&SafetyLayer> {
         self.safety.as_ref()
+    }
+
+    /// Enable cross-turn tool result caching for deterministic tools (AGT-10).
+    ///
+    /// When enabled, results from deterministic tools (Read, Glob, Grep) are
+    /// cached by argument hash. Write/Edit calls invalidate affected entries.
+    #[must_use]
+    pub fn with_tool_cache(mut self, cache: result_cache::ToolResultCache) -> Self {
+        self.tool_cache = Some(std::sync::Mutex::new(cache));
+        self
+    }
+
+    /// Returns tool cache statistics, if caching is enabled.
+    #[must_use]
+    pub fn cache_stats(&self) -> Option<(u64, u64, f64)> {
+        let cache = self.tool_cache.as_ref()?.lock().ok()?;
+        Some((cache.hits(), cache.misses(), cache.hit_rate()))
     }
 
     /// Configured cap on content bytes for a single `Ok` result.

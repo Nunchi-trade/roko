@@ -601,6 +601,10 @@ impl KnowledgeStore {
         let mut scored: Vec<KnowledgeQueryHit> = entries
             .into_iter()
             .filter_map(|entry| {
+                // NEURO-11: Frozen entries are excluded from hot queries.
+                if entry.frozen {
+                    return None;
+                }
                 if !include(&entry) {
                     return None;
                 }
@@ -834,6 +838,11 @@ impl KnowledgeStore {
 
     /// Garbage-collect entries whose confidence falls below `min_confidence`.
     ///
+    /// NEURO-11: Entries below the balance floor are frozen instead of
+    /// deleted, preserving them for potential thawing later. Entries that
+    /// are *both* below the confidence threshold *and* already frozen are
+    /// permanently removed.
+    ///
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
@@ -852,6 +861,142 @@ impl KnowledgeStore {
         let removed = before_len.saturating_sub(entries.len());
         self.rewrite_all(&entries)?;
         Ok(removed)
+    }
+
+    /// NEURO-11: Garbage-collect entries with freeze-before-delete semantics.
+    ///
+    /// Entries below the confidence threshold are frozen into cold storage
+    /// instead of permanently deleted, provided they haven't been frozen
+    /// already. Entries that are *already frozen* and still below the
+    /// threshold are permanently removed. AntiKnowledge entries are always
+    /// preserved.
+    ///
+    /// Returns the number of entries permanently removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn gc_with_freeze(&self, min_confidence: f64) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let threshold = min_confidence.max(0.0);
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let mut entries = Vec::with_capacity(before_len);
+        for mut entry in before {
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                entries.push(entry);
+                continue;
+            }
+            let eff = effective_confidence(&entry);
+            if eff >= threshold {
+                entries.push(entry);
+                continue;
+            }
+            // Below threshold: freeze or remove.
+            if entry.frozen {
+                // Already frozen and still below threshold: permanently remove.
+                continue;
+            }
+            // First time below threshold: freeze into cold storage.
+            entry.frozen = true;
+            entries.push(entry);
+        }
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
+    /// NEURO-10: Apply demurrage tax to all entries based on elapsed time
+    /// since their creation.
+    ///
+    /// Returns the number of entries that were taxed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn apply_demurrage(&self) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let now = Utc::now();
+        let mut entries = self.read_all()?;
+        let mut taxed = 0usize;
+        for entry in &mut entries {
+            let elapsed_hours = now
+                .signed_duration_since(entry.created_at)
+                .num_seconds() as f64
+                / 3600.0;
+            if elapsed_hours > 0.0 && entry.balance > 0.0 {
+                entry.apply_demurrage(elapsed_hours);
+                taxed += 1;
+            }
+        }
+        if taxed > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(taxed)
+    }
+
+    /// NEURO-10: Reinforce a specific entry by ID with the given signal.
+    ///
+    /// Returns `true` if the entry was found and reinforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn reinforce_entry(
+        &self,
+        entry_id: &str,
+        signal: crate::ReinforcementSignal,
+        novelty: f64,
+    ) -> Result<bool> {
+        let mut found = false;
+        self.update_entries(|entry| {
+            if entry.id == entry_id {
+                entry.reinforce(signal, novelty);
+                found = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// NEURO-11: Thaw a frozen entry, restoring a starter balance.
+    ///
+    /// Returns `true` if the entry was found, was frozen, and was thawed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn thaw_entry(&self, entry_id: &str, starter_balance: f64) -> Result<bool> {
+        let mut thawed = false;
+        self.update_entries(|entry| {
+            if entry.id == entry_id && entry.frozen {
+                entry.thaw(starter_balance);
+                thawed = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(thawed)
+    }
+
+    /// NEURO-11: Query frozen (cold-tier) entries, optionally filtered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_cold(&self, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        let entries = self.read_all()?;
+        let mut cold: Vec<_> = entries.into_iter().filter(|e| e.frozen).collect();
+        cold.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        cold.truncate(limit);
+        Ok(cold)
     }
 
     /// NEURO-08: Garbage-collect entries while preserving the last
@@ -1675,6 +1820,8 @@ mod tests {
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         }
     }
 
@@ -2083,6 +2230,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add anti knowledge");
 
@@ -2250,6 +2399,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add anti knowledge");
 
@@ -2306,6 +2457,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add anti knowledge");
 
@@ -2352,6 +2505,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add oldest");
         store
@@ -2380,6 +2535,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add middle");
         store
@@ -2408,6 +2565,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add newest");
 
@@ -2660,6 +2819,8 @@ mod tests {
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         assert!(!entries_are_similar(&existing, &anti));
@@ -2849,6 +3010,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add tiered");
 
@@ -2889,6 +3052,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .expect("add persistent");
 
@@ -3076,6 +3241,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         // A near-identical entry that should be rejected.
@@ -3101,6 +3268,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         // An unrelated entry that should pass through.
@@ -3126,6 +3295,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         let existing = vec![anti];
@@ -3164,6 +3335,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         let new_anti = KnowledgeEntry {
@@ -3188,6 +3361,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         };
 
         let existing = vec![existing_anti];
@@ -3195,5 +3370,252 @@ mod tests {
         let result = check_against_anti_knowledge(new_entries, &existing);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "anti-2");
+    }
+
+    // -----------------------------------------------------------------------
+    // NEURO-10: Demurrage balance model and reinforcement signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reinforcement_bumps_balance() {
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            ..KnowledgeEntry::default()
+        };
+        let before = e.balance;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 0.0);
+        assert!(e.balance > before, "balance should increase after reinforcement");
+
+        // Novelty amplifies the bump.
+        let mid = e.balance;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 1.0);
+        let bump_with_novelty = e.balance - mid;
+        // Reset and do without novelty.
+        e.balance = mid;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 0.0);
+        let bump_without_novelty = e.balance - mid;
+        assert!(bump_with_novelty > bump_without_novelty);
+    }
+
+    #[test]
+    fn balance_capped_at_five() {
+        let mut e = KnowledgeEntry {
+            balance: 4.95,
+            ..KnowledgeEntry::default()
+        };
+        e.reinforce(crate::ReinforcementSignal::Surprised, 1.0);
+        assert!(e.balance <= 5.0, "balance must not exceed 5.0");
+    }
+
+    #[test]
+    fn demurrage_reduces_balance() {
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            ..KnowledgeEntry::default()
+        };
+        e.apply_demurrage(100.0);
+        assert!(e.balance < 1.0, "demurrage should reduce balance");
+        assert!(e.balance >= 0.0, "balance must not go negative");
+    }
+
+    #[test]
+    fn demurrage_does_not_go_negative() {
+        let mut e = KnowledgeEntry {
+            balance: 0.01,
+            ..KnowledgeEntry::default()
+        };
+        e.apply_demurrage(1_000_000.0);
+        assert_eq!(e.balance, 0.0);
+    }
+
+    #[test]
+    fn freshness_combines_balance_and_decay() {
+        let now = Utc::now();
+        let old = now - Duration::hours(24 * 30); // 30 days
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            half_life_days: 30.0,
+            created_at: old,
+            ..KnowledgeEntry::default()
+        };
+        let fresh_high = e.freshness(now);
+        e.balance = 0.1;
+        let fresh_low = e.freshness(now);
+        assert!(fresh_high > fresh_low, "higher balance => higher freshness");
+    }
+
+    #[test]
+    fn reinforcement_signal_base_values_positive() {
+        for signal in &[
+            crate::ReinforcementSignal::Retrieved,
+            crate::ReinforcementSignal::Cited,
+            crate::ReinforcementSignal::Gated,
+            crate::ReinforcementSignal::Surprised,
+            crate::ReinforcementSignal::AgentQuoted,
+        ] {
+            assert!(signal.base_value() > 0.0, "{:?} must have positive base_value", signal);
+        }
+    }
+
+    #[test]
+    fn store_reinforce_entry() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "reinforce-me",
+            "test entry",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.balance = 0.5;
+        store.add(e).unwrap();
+
+        let found = store.reinforce_entry("reinforce-me", crate::ReinforcementSignal::Gated, 0.2).unwrap();
+        assert!(found);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "reinforce-me").unwrap();
+        assert!(updated.balance > 0.5, "balance should have been bumped");
+    }
+
+    #[test]
+    fn store_apply_demurrage() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "demurrage-test",
+            "test entry",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now() - Duration::hours(100),
+        );
+        e.balance = 1.0;
+        store.add(e).unwrap();
+
+        let taxed = store.apply_demurrage().unwrap();
+        assert_eq!(taxed, 1);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "demurrage-test").unwrap();
+        assert!(updated.balance < 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // NEURO-11: Cold-tier freeze/thaw
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn freeze_and_thaw_entry() {
+        let mut e = KnowledgeEntry {
+            balance: 0.01,
+            ..KnowledgeEntry::default()
+        };
+        assert!(!e.frozen);
+        e.freeze();
+        assert!(e.frozen);
+        e.thaw(0.3);
+        assert!(!e.frozen);
+        assert!((e.balance - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn frozen_entries_excluded_from_hot_queries() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "frozen-entry",
+            "important knowledge about testing",
+            &["testing"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.frozen = true;
+        store.add(e).unwrap();
+
+        let results = store.query("testing", 10).unwrap();
+        assert!(results.is_empty(), "frozen entries should not appear in hot queries");
+
+        let cold = store.query_cold(10).unwrap();
+        assert_eq!(cold.len(), 1, "frozen entries should appear in cold queries");
+        assert_eq!(cold[0].id, "frozen-entry");
+    }
+
+    #[test]
+    fn gc_with_freeze_freezes_low_confidence_entries() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+
+        let low = entry(
+            KnowledgeKind::Insight,
+            "low-conf",
+            "fading knowledge",
+            &["test"],
+            0.01,
+            &["ep1"],
+            Utc::now(),
+        );
+        store.add(low).unwrap();
+
+        let removed = store.gc_with_freeze(0.05).unwrap();
+        assert_eq!(removed, 0, "entry should be frozen, not removed");
+
+        let entries = store.read_all().unwrap();
+        let frozen_entry = entries.iter().find(|e| e.id == "low-conf").unwrap();
+        assert!(frozen_entry.frozen, "entry should have been frozen");
+    }
+
+    #[test]
+    fn gc_with_freeze_removes_already_frozen_below_threshold() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+
+        // Already frozen entry below confidence threshold.
+        let mut frozen = entry(
+            KnowledgeKind::Insight,
+            "already-frozen",
+            "old frozen knowledge",
+            &["test"],
+            0.01,
+            &["ep1"],
+            Utc::now(),
+        );
+        frozen.frozen = true;
+        store.add(frozen).unwrap();
+
+        let removed = store.gc_with_freeze(0.05).unwrap();
+        assert_eq!(removed, 1, "already-frozen entry below threshold should be permanently removed");
+    }
+
+    #[test]
+    fn store_thaw_entry() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "thaw-me",
+            "frozen knowledge",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.frozen = true;
+        e.balance = 0.0;
+        store.add(e).unwrap();
+
+        let thawed = store.thaw_entry("thaw-me", 0.3).unwrap();
+        assert!(thawed);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "thaw-me").unwrap();
+        assert!(!updated.frozen);
+        assert!((updated.balance - 0.3).abs() < f64::EPSILON);
     }
 }

@@ -337,6 +337,8 @@ fn loosened_association(
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -389,6 +391,8 @@ fn interrupt_to_insight(
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -434,6 +438,8 @@ fn dali_insight(episode: &Episode, created_at: DateTime<Utc>) -> KnowledgeEntry 
         distinct_contexts: Vec::new(),
 
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -530,6 +536,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             },
             KnowledgeEntry {
                 id: "sig-2".to_string(),
@@ -556,6 +564,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             },
             KnowledgeEntry {
                 id: "sig-3".to_string(),
@@ -582,6 +592,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             },
             KnowledgeEntry {
                 id: "sig-4".to_string(),
@@ -608,6 +620,8 @@ mod tests {
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             },
         ];
         let output = engine.run(&signals, &[], Utc::now());

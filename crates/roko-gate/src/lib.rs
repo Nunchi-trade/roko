@@ -65,6 +65,8 @@ pub mod ratchet;
 pub mod rung_dispatch;
 pub mod rung_selector;
 pub mod shell;
+/// Statistical Process Control extensions: CUSUM, EWMA Control Chart, BOCPD (GATE-01).
+pub mod spc;
 pub mod symbol_gate;
 pub mod test_gate;
 pub mod verdict_publisher;
@@ -90,6 +92,10 @@ pub use process_reward::{
     AggregateMethod, ProcessRewardModel, ReasoningStep, StepVerdict, TurnSnapshot,
 };
 pub use ratchet::GateRatchet;
+pub use spc::{
+    BocpdDetector, ChangePoint, ControlStatus, CusumDetector, CusumShift,
+    EwmaControlChart, SpcAlert, SpcDetector,
+};
 pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung};
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;

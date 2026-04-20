@@ -7566,6 +7566,8 @@ impl PlanRunner {
                                 confirmation_count: 0,
                                 distinct_contexts: Vec::new(),
                                 deprecated: false,
+                                balance: 1.0,
+                                frozen: false,
                             };
                             if let Err(e) = self.knowledge_store.add(anti_entry) {
                                 tracing::warn!(
@@ -15710,6 +15712,8 @@ fn build_success_knowledge_entry(
         confirmation_count: 0,
         distinct_contexts: Vec::new(),
         deprecated: false,
+        balance: 1.0,
+        frozen: false,
     }
 }
 
@@ -19215,6 +19219,8 @@ verify = []
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .unwrap();
 
@@ -19248,6 +19254,8 @@ verify = []
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .unwrap();
 
@@ -19311,6 +19319,8 @@ files = ["crates/roko-cli/src/orchestrate.rs"]
                 distinct_contexts: Vec::new(),
 
                 deprecated: false,
+                balance: 1.0,
+                frozen: false,
             })
             .unwrap();
 

@@ -135,6 +135,8 @@ pub fn threat_warning_entries_with_floor(
             distinct_contexts: Vec::new(),
 
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         });
     }
     out

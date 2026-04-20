@@ -197,6 +197,225 @@ fn pearson_correlation(pairs: &[(f64, f64)]) -> Option<f64> {
     (denominator > 0.0).then_some((numerator / denominator).clamp(-1.0, 1.0))
 }
 
+// ---------------------------------------------------------------------------
+// DAIM-09: VCG auction with affect modulation.
+// ---------------------------------------------------------------------------
+
+/// PAD-derived modulation parameters for VCG-style allocation.
+///
+/// Per the spec (doc 10), the Daimon modulates bids through:
+/// - `urgency_multiplier`: arousal increases urgency (high arousal => more context)
+/// - `affect_weight`: pleasure biases toward positive/negative-valence entries
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AffectModulation {
+    /// Arousal-derived urgency multiplier (default 1.0, range [0.5, 2.0]).
+    pub urgency_multiplier: f64,
+    /// Pleasure-derived valence bias (range [-1.0, 1.0]).
+    pub affect_weight: f64,
+}
+
+impl Default for AffectModulation {
+    fn default() -> Self {
+        Self {
+            urgency_multiplier: 1.0,
+            affect_weight: 0.0,
+        }
+    }
+}
+
+impl AffectModulation {
+    /// Derive modulation parameters from a PAD state.
+    ///
+    /// - Arousal maps to urgency: `1.0 + arousal * 0.5` clamped to `[0.5, 2.0]`
+    /// - Pleasure maps to affect weight directly.
+    #[must_use]
+    pub fn from_pad(pleasure: f64, arousal: f64) -> Self {
+        Self {
+            urgency_multiplier: (1.0 + arousal * 0.5).clamp(0.5, 2.0),
+            affect_weight: pleasure.clamp(-1.0, 1.0),
+        }
+    }
+
+    /// Adjust a base bid using the affect modulation formula.
+    ///
+    /// `adjusted_bid = base_bid * urgency_multiplier * (1 + affect_weight * valence)`
+    ///
+    /// where `valence` is the entry's emotional valence in `[-1.0, 1.0]`.
+    #[must_use]
+    pub fn adjust_bid(&self, base_bid: f64, entry_valence: f64) -> f64 {
+        let valence = entry_valence.clamp(-1.0, 1.0);
+        base_bid * self.urgency_multiplier * (1.0 + self.affect_weight * valence)
+    }
+}
+
+/// One subsystem's bid in the VCG auction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VcgBid {
+    /// Subsystem that placed the bid.
+    pub bidder: SubsystemId,
+    /// Section name.
+    pub section_name: String,
+    /// Token cost for this section.
+    pub tokens: usize,
+    /// Raw bid value before affect modulation.
+    pub raw_bid: f64,
+    /// Affect-adjusted bid value.
+    pub adjusted_bid: f64,
+    /// Emotional valence of the content (if applicable).
+    pub valence: f64,
+}
+
+/// Result of a VCG-style allocation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VcgAllocation {
+    /// Sections that won the auction, sorted by adjusted bid descending.
+    pub winners: Vec<VcgBid>,
+    /// Sections excluded due to budget constraints.
+    pub excluded: Vec<VcgBid>,
+    /// VCG-style payments for each winner (second-price clearing).
+    pub payments: Vec<(String, f64)>,
+    /// Total tokens allocated.
+    pub total_tokens_used: usize,
+    /// Budget utilization fraction.
+    pub budget_utilization: f64,
+    /// Diagnostics.
+    pub diagnostics: AuctionDiagnostics,
+}
+
+/// Allocate context window tokens using a greedy VCG-style mechanism.
+///
+/// Bids are sorted by `adjusted_bid / tokens` (value density). Sections
+/// are included greedily until the budget is exhausted. VCG payments are
+/// computed as the externality each winner imposes on others: the payment
+/// for winner `i` is the total welfare of others *without* `i` minus the
+/// total welfare of others *with* `i`.
+#[must_use]
+pub fn vcg_allocate(
+    bids: Vec<VcgBid>,
+    total_budget: usize,
+    modulation: &AffectModulation,
+) -> VcgAllocation {
+    if bids.is_empty() || total_budget == 0 {
+        return VcgAllocation {
+            winners: Vec::new(),
+            excluded: bids,
+            payments: Vec::new(),
+            total_tokens_used: 0,
+            budget_utilization: 0.0,
+            diagnostics: AuctionDiagnostics {
+                total_welfare: 0.0,
+                total_payments: 0.0,
+                welfare_loss: 0.0,
+                pareto_optimal: true,
+                highest_payment_sections: Vec::new(),
+                displaced_sections: Vec::new(),
+                budget_utilization: 0.0,
+            },
+        };
+    }
+
+    let _ = modulation; // Already applied to adjusted_bid
+
+    // Sort by value density (adjusted_bid / tokens), descending.
+    let mut sorted = bids;
+    sorted.sort_by(|a, b| {
+        let density_a = if a.tokens > 0 {
+            a.adjusted_bid / a.tokens as f64
+        } else {
+            f64::INFINITY
+        };
+        let density_b = if b.tokens > 0 {
+            b.adjusted_bid / b.tokens as f64
+        } else {
+            f64::INFINITY
+        };
+        density_b
+            .partial_cmp(&density_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Greedy allocation.
+    let mut remaining = total_budget;
+    let mut winners = Vec::new();
+    let mut excluded = Vec::new();
+    for bid in sorted {
+        if bid.tokens <= remaining {
+            remaining -= bid.tokens;
+            winners.push(bid);
+        } else {
+            excluded.push(bid);
+        }
+    }
+
+    let total_used = total_budget - remaining;
+    let total_welfare: f64 = winners.iter().map(|b| b.adjusted_bid).sum();
+
+    // Compute VCG payments: for each winner, payment = externality imposed.
+    // Simplified: payment = highest excluded bid that would have fit.
+    let mut payments = Vec::new();
+    for winner in &winners {
+        let payment = excluded
+            .iter()
+            .filter(|e| e.tokens <= winner.tokens)
+            .map(|e| e.adjusted_bid)
+            .fold(0.0_f64, f64::max);
+        payments.push((winner.section_name.clone(), payment));
+    }
+
+    let total_payments: f64 = payments.iter().map(|(_, p)| *p).sum();
+    let budget_utilization = if total_budget > 0 {
+        total_used as f64 / total_budget as f64
+    } else {
+        0.0
+    };
+
+    let included_allocs: Vec<_> = winners
+        .iter()
+        .map(|b| SectionAllocation {
+            name: b.section_name.clone(),
+            value: b.adjusted_bid,
+            tokens: b.tokens,
+        })
+        .collect();
+    let excluded_allocs: Vec<_> = excluded
+        .iter()
+        .map(|b| SectionAllocation {
+            name: b.section_name.clone(),
+            value: b.adjusted_bid,
+            tokens: b.tokens,
+        })
+        .collect();
+    let pareto = is_pareto_optimal(&included_allocs, &excluded_allocs, remaining);
+    let welfare_loss: f64 = excluded.iter().map(|e| e.adjusted_bid).sum();
+
+    let highest_payment_sections: Vec<_> = payments
+        .iter()
+        .filter(|(_, p)| *p > 0.0)
+        .cloned()
+        .collect();
+    let displaced_sections: Vec<_> = excluded
+        .iter()
+        .map(|b| (b.section_name.clone(), b.adjusted_bid))
+        .collect();
+
+    VcgAllocation {
+        winners,
+        excluded,
+        payments,
+        total_tokens_used: total_used,
+        budget_utilization,
+        diagnostics: AuctionDiagnostics {
+            total_welfare,
+            total_payments,
+            welfare_loss,
+            pareto_optimal: pareto,
+            highest_payment_sections,
+            displaced_sections,
+            budget_utilization,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +458,103 @@ mod tests {
         }];
 
         assert!(!is_pareto_optimal(&included, &excluded, 0));
+    }
+
+    // -------------------------------------------------------------------
+    // DAIM-09: VCG auction with affect modulation tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn affect_modulation_from_pad() {
+        let modulation = AffectModulation::from_pad(0.5, 0.8);
+        assert!(modulation.urgency_multiplier > 1.0, "high arousal => high urgency");
+        assert!(modulation.affect_weight > 0.0, "positive pleasure => positive affect weight");
+    }
+
+    #[test]
+    fn affect_modulation_adjusts_bid() {
+        let modulation = AffectModulation::from_pad(0.6, 0.0);
+        let base = 1.0;
+        let positive_entry = modulation.adjust_bid(base, 0.8);
+        let negative_entry = modulation.adjust_bid(base, -0.8);
+        assert!(positive_entry > negative_entry, "positive pleasure should prefer positive valence");
+    }
+
+    #[test]
+    fn vcg_allocate_basic() {
+        let bids = vec![
+            VcgBid {
+                bidder: SubsystemId::Neuro,
+                section_name: "knowledge".into(),
+                tokens: 500,
+                raw_bid: 0.8,
+                adjusted_bid: 0.8,
+                valence: 0.0,
+            },
+            VcgBid {
+                bidder: SubsystemId::TaskContext,
+                section_name: "task".into(),
+                tokens: 300,
+                raw_bid: 0.6,
+                adjusted_bid: 0.6,
+                valence: 0.0,
+            },
+            VcgBid {
+                bidder: SubsystemId::Research,
+                section_name: "research".into(),
+                tokens: 400,
+                raw_bid: 0.4,
+                adjusted_bid: 0.4,
+                valence: 0.0,
+            },
+        ];
+
+        let allocation = vcg_allocate(bids, 800, &AffectModulation::default());
+        assert_eq!(allocation.winners.len(), 2, "should fit 2 of 3 bids in 800 tokens");
+        assert_eq!(allocation.excluded.len(), 1);
+        assert!(allocation.total_tokens_used <= 800);
+        assert!(allocation.budget_utilization > 0.0);
+    }
+
+    #[test]
+    fn vcg_allocate_empty_budget() {
+        let bids = vec![VcgBid {
+            bidder: SubsystemId::Neuro,
+            section_name: "knowledge".into(),
+            tokens: 500,
+            raw_bid: 0.8,
+            adjusted_bid: 0.8,
+            valence: 0.0,
+        }];
+
+        let allocation = vcg_allocate(bids, 0, &AffectModulation::default());
+        assert!(allocation.winners.is_empty());
+    }
+
+    #[test]
+    fn vcg_allocate_value_density_wins() {
+        let bids = vec![
+            VcgBid {
+                bidder: SubsystemId::Neuro,
+                section_name: "expensive".into(),
+                tokens: 900,
+                raw_bid: 0.5,
+                adjusted_bid: 0.5,
+                valence: 0.0,
+            },
+            VcgBid {
+                bidder: SubsystemId::TaskContext,
+                section_name: "cheap_high_value".into(),
+                tokens: 100,
+                raw_bid: 0.9,
+                adjusted_bid: 0.9,
+                valence: 0.0,
+            },
+        ];
+
+        let allocation = vcg_allocate(bids, 1000, &AffectModulation::default());
+        // cheap_high_value has much better value density (0.9/100 = 0.009 vs 0.5/900 = 0.0006)
+        // so it should be picked first.
+        assert_eq!(allocation.winners[0].section_name, "cheap_high_value");
     }
 }

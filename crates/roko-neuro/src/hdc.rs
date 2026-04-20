@@ -466,6 +466,8 @@ mod tests {
             confirmation_count: 0,
             distinct_contexts: Vec::new(),
             deprecated: false,
+            balance: 1.0,
+            frozen: false,
         }
     }
 
