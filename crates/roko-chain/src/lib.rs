@@ -47,6 +47,8 @@ pub mod agent_registry;
 #[cfg(feature = "alloy-backend")]
 pub mod alloy_impl;
 pub mod client;
+/// Collusion ring detection via assignment graph clique analysis (P2-11).
+pub mod collusion;
 pub mod futures_market;
 pub mod gate;
 pub mod heartbeat_ext;

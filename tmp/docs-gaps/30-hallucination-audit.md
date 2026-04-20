@@ -537,9 +537,14 @@ needed for the full vision.
 
 ### P2-11: Collusion ring detection (EigenTrust)
 
-- [ ] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 250-302): `CollusionDetector` with assignment graph, mutual assignment thresholds, clique detection via DFS, feedback weight dilution for 30 days.
-- **Code**: No `CollusionDetector` implementation in `crates/roko-chain/`. The `ReputationViolation::Collusion` variant exists but only as a flat slash, not a graph-based detection system.
-- **Fix**: Implement `CollusionDetector` with assignment graph and clique detection.
+- [x] **Spec** (`docs/08-chain/14-reputation-system-7-domain.md` lines 250-302): Collusion ring detection.
+- **FIXED**: Implemented `roko_chain::collusion::CollusionDetector` with:
+  - Assignment graph from job marketplace edges
+  - Mutual assignment ratio analysis (min/max count per pair)
+  - Bron-Kerbosch algorithm with pivoting for maximal clique enumeration
+  - Configurable thresholds: mutual_ratio, min_assignments, min_clique_size, lookback
+  - CollusionReport with rings, suspicious pairs, agent/assignment counts
+  - 6 tests: empty graph, 3-agent ring, low-volume filtering, directional filtering, clique size, lookback
 
 ### P2-12: Reputation recovery mechanisms
 
