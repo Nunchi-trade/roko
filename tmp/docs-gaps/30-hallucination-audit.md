@@ -446,12 +446,8 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-10: Dream phase naming alignment
 
-- [ ] **Spec** (`docs/10-dreams/01-three-phase-cycle.md` lines 20-23): Three phases:
-  1. `NREM Replay` -- replaying past experiences with mutations
-  2. `REM Imagination` -- generating counterfactual scenarios
-  3. `Integration` -- evaluating outputs, promoting validated hypotheses
-- **Code** (`crates/roko-dreams/src/lib.rs`): Has `DreamsEngine` and `HypnagogiaEngine` as subsystem IDs. The `DreamRunner` in `runner.rs` has replay and review phases, but does not use the spec's three-phase naming (NREM/REM/Integration). `Hypnagogia` is a separate engine rather than a dream phase.
-- **Fix**: Add explicit `DreamPhase` enum matching spec: `NremReplay`, `RemImagination`, `Integration`. Wire phase transitions in `DreamRunner`.
+- [x] **Spec** (`docs/10-dreams/01-three-phase-cycle.md` lines 20-23): Three phases.
+- **VERIFIED**: `DreamPhase` enum in `phase2/cycle.rs:11` has `NremReplay`, `RemImagination`, `Integration` matching spec. `DreamPhaseKind` enum extends with `Hypnagogia` and `Evolution`. Budget tracking, model tier mapping, and phase transitions all wired in `cycle.rs`.
 
 ### P1-11: Adaptive alpha for reputation EMA
 
