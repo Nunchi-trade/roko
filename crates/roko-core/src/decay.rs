@@ -39,8 +39,20 @@ pub enum Decay {
 
     /// Hard cutoff: full weight until `ttl_ms`, then zero.
     /// Useful for signals with strict time windows (offers, bounties).
+    ///
+    /// # Design note — relative vs absolute
+    ///
+    /// The doc spec (04-decay-variants.md) specifies `expires_at_ms: i64` (absolute
+    /// timestamp), but `Decay::apply()` takes a **relative age** (`age_ms` since
+    /// emission), making a relative duration the correct semantic here.  Absolute
+    /// deadlines are handled at a higher layer: the emitter computes
+    /// `ttl_ms = deadline - now` at construction time, or uses
+    /// `roko_agent::lifecycle::DecayModel::Ttl { expires_at }` for storage formats
+    /// that need absolute timestamps.
     Ttl {
-        /// Milliseconds of full validity before weight drops to zero.
+        /// Relative duration in milliseconds of full validity before weight drops
+        /// to zero.  This is **not** an absolute timestamp — see the design note
+        /// above.
         ttl_ms: u64,
     },
 

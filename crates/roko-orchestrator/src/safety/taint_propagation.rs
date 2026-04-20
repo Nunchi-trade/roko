@@ -1,8 +1,8 @@
 //! Taint propagation for Roko safety (MORI-PARITY-CHECKLIST §28.9).
 //!
 //! `TaintTracker` records how tainted information flows through signal
-//! lineage. When a signal with `Provenance::tainted == true` is used as an
-//! input, any derived signal becomes tainted too. Sinks that need to refuse
+//! lineage. When a signal with `Provenance::is_tainted() == true` is used as
+//! an input, any derived signal becomes tainted too. Sinks that need to refuse
 //! tainted data (git commits, network egress, signal emits) consult
 //! [`TaintTracker::is_tainted`] before proceeding.
 //!
@@ -178,14 +178,29 @@ impl TaintTracker {
     }
 
     /// Inspect a [`Engram`] and, if its provenance is tainted, mark it in
-    /// the tracker with an `"external"` reason naming the signal's author.
+    /// the tracker with a reason derived from the provenance's [`Taint`] variant.
     ///
     /// Returns `true` if the signal was (or already was) tainted, `false`
     /// if the signal's provenance is clean.
     pub fn observe_signal(&self, signal: &Engram) -> bool {
-        if signal.provenance.tainted {
+        if signal.provenance.is_tainted() {
+            // Prefer the legacy taint_info if present (for old serialized data),
+            // otherwise derive from the typed Taint enum.
             let reason = signal.provenance.taint_info.as_ref().map_or_else(
-                || TaintReason::external(format!("signal author {}", signal.provenance.author)),
+                || {
+                    TaintReason::new(
+                        signal.provenance.taint.category(),
+                        signal
+                            .provenance
+                            .taint
+                            .detail()
+                            .unwrap_or(&format!(
+                                "signal author {}",
+                                signal.provenance.author
+                            ))
+                            .to_string(),
+                    )
+                },
                 TaintReason::from_taint_info,
             );
             self.mark_tainted(signal.id, reason);
@@ -419,7 +434,7 @@ mod tests {
         assert!(tracker.is_tainted(&tainted_signal.id));
         assert!(!tracker.is_tainted(&clean_signal.id));
         let reason = tracker.reason(&tainted_signal.id).expect("has reason");
-        assert_eq!(reason.category, "external");
+        assert_eq!(reason.category, "unverified_source");
     }
 
     #[test]

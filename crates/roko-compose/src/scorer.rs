@@ -75,7 +75,7 @@ impl Scorer for SectionScorer {
         let utility = (1000.0 / len).min(10.0);
 
         // Reputation ← signal trust
-        let reputation = if signal.provenance.tainted {
+        let reputation = if signal.provenance.is_tainted() {
             0.1
         } else {
             signal.provenance.trust

@@ -437,6 +437,101 @@ impl SafetyLayer {
         scrub::scrub_secrets(content, &self.scrub_policy)
     }
 
+    /// Summarize the active safety constraints as anti-pattern strings suitable
+    /// for injection into prompt layer 7 (INT-14: Safety -> Composition).
+    ///
+    /// The returned strings describe what the agent must NOT do, derived from
+    /// the concrete bash deny-patterns, git protections, network restrictions,
+    /// and governance rules currently loaded in this `SafetyLayer`.
+    #[must_use]
+    pub fn constraints_as_anti_patterns(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+
+        // Bash deny-patterns → anti-patterns.
+        if !self.bash_policy.deny_patterns.is_empty() {
+            patterns.push(
+                "Never run dangerous shell commands: rm -rf /, sudo, curl|sh pipes, \
+                 fork bombs, mkfs, or raw-device I/O."
+                    .to_string(),
+            );
+        }
+
+        // Git protections → anti-patterns.
+        if !self.git_policy.protected_branches.is_empty() {
+            let branches = self
+                .git_policy
+                .protected_branches
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            patterns.push(format!(
+                "Never force-push or delete protected branches: {branches}."
+            ));
+        }
+
+        // Network restrictions → anti-patterns.
+        if !self.network_policy.allow_hosts.is_empty() {
+            patterns.push(
+                "Network access is restricted to an allowlist of hosts; do not fetch \
+                 from arbitrary URLs."
+                    .to_string(),
+            );
+        }
+        if !self.network_policy.deny_hosts.is_empty() {
+            patterns.push(
+                "Certain network hosts are blocked by policy; avoid requests to internal \
+                 or denied destinations."
+                    .to_string(),
+            );
+        }
+
+        // Contract governance rules → anti-patterns.
+        for rule in &self.contract.governance {
+            match rule {
+                GovernanceRule::ForbiddenTools(tools) if !tools.is_empty() => {
+                    patterns.push(format!(
+                        "Never use these forbidden tools: {}.",
+                        tools.join(", ")
+                    ));
+                }
+                GovernanceRule::MaxToolCallsPerTurn(max) => {
+                    patterns.push(format!(
+                        "Limit tool calls to {max} per turn to stay within governance bounds."
+                    ));
+                }
+                GovernanceRule::MaxConsecutiveFailures(max) => {
+                    patterns.push(format!(
+                        "After {max} consecutive failures, stop and report rather than retrying."
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Contract invariants → anti-patterns.
+        for inv in &self.contract.invariants {
+            match inv {
+                Invariant::NoNetworkAccess => {
+                    patterns
+                        .push("This role has no network access; never call network tools.".into());
+                }
+                Invariant::RequireGateBeforeCommit => {
+                    patterns.push("Never commit without a passing gate verification first.".into());
+                }
+                _ => {}
+            }
+        }
+
+        // Path policy → anti-patterns.
+        if self.path_policy.prevent_escapes {
+            patterns
+                .push("Never read or write files outside the designated worktree root.".into());
+        }
+
+        patterns
+    }
+
     fn contract_for_role(&self, role: &str) -> AgentContract {
         let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
             tracing::warn!(

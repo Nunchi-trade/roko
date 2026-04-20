@@ -35,6 +35,10 @@ pub struct RungExecutionInputs {
     pub fact_check_signal: Option<Engram>,
     /// `LlmJudgeGate` expects a `JudgePayload` or text diff.
     pub llm_judge_signal: Option<Engram>,
+    /// INT-16: Code-intelligence context from `roko-index` used to enrich
+    /// verification decisions.  Symbol and LLM-judge gates may use these
+    /// hints to focus checks on relevant symbols / files.
+    pub code_intel_hints: Vec<String>,
 }
 
 /// Configuration knobs for executing the 7-rung runtime gate mapping.
@@ -144,7 +148,20 @@ async fn run_symbol_gate(
     let Some(source_roots) = config.source_roots.clone() else {
         return stub_verdict("symbol", "no source roots configured for rung 3");
     };
-    SymbolGate::new(source_roots).verify(signal, ctx).await
+    // INT-16: When code-intel hints are available, tag the signal so the
+    // symbol gate can focus on the most relevant files/symbols.
+    let signal = if inputs.code_intel_hints.is_empty() {
+        signal.clone()
+    } else {
+        let mut enriched = signal.clone();
+        for (i, hint) in inputs.code_intel_hints.iter().enumerate().take(10) {
+            enriched
+                .tags
+                .insert(format!("code_intel_hint_{i}"), hint.clone());
+        }
+        enriched
+    };
+    SymbolGate::new(source_roots).verify(&signal, ctx).await
 }
 
 async fn run_generated_test_gate(

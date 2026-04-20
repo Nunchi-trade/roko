@@ -115,7 +115,7 @@ impl Engram {
         hasher.update(b"|");
         hasher.update(self.provenance.author.as_bytes());
         hasher.update(b"|");
-        hasher.update(&[u8::from(self.provenance.tainted)]);
+        hasher.update(&[u8::from(self.provenance.is_tainted())]);
         hasher.update(b"|");
         for h in &self.lineage {
             hasher.update(&h.0);

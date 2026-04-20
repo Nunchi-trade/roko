@@ -91,30 +91,13 @@ impl From<Regime> for u8 {
     }
 }
 
-/// PAD affect vector used by tier gating and attention allocation.
+/// Re-export the canonical PAD vector from [`roko_primitives`].
 ///
-/// This is an `f32` variant distinct from [`roko_core::affect::PadVector`] (`f64`).
-/// The heartbeat module uses `f32` for compact atomic storage in the cognitive clock.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PadVector {
-    /// Pleasure axis in `[-1.0, 1.0]`.
-    pub pleasure: f32,
-    /// Arousal axis in `[-1.0, 1.0]`.
-    pub arousal: f32,
-    /// Dominance axis in `[-1.0, 1.0]`.
-    pub dominance: f32,
-}
-
-impl PadVector {
-    /// Neutral PAD vector.
-    pub const fn neutral() -> Self {
-        Self {
-            pleasure: 0.0,
-            arousal: 0.0,
-            dominance: 0.0,
-        }
-    }
-}
+/// Previously the heartbeat module defined a local `f32` variant; the
+/// canonical `f64` definition now lives in `roko_primitives::pad` and is
+/// shared across the entire workspace.  The `CorticalState` atomic storage
+/// narrows to `f32` at the read/write boundary (see `pad()` / `set_pad()`).
+pub use roko_primitives::PadVector;
 
 /// Personality preset used to initialize [`CorticalState`] affect signals.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -134,17 +117,9 @@ impl PersonalityPreset {
     /// Return the initial PAD vector for this preset.
     pub const fn pad(self) -> PadVector {
         match self {
-            Self::Cautious => PadVector {
-                pleasure: -0.1,
-                arousal: 0.1,
-                dominance: -0.2,
-            },
+            Self::Cautious => PadVector::new(-0.1, 0.1, -0.2),
             Self::Balanced => PadVector::neutral(),
-            Self::Aggressive => PadVector {
-                pleasure: 0.1,
-                arousal: 0.3,
-                dominance: 0.2,
-            },
+            Self::Aggressive => PadVector::new(0.1, 0.3, 0.2),
             Self::Custom(pad) => pad,
         }
     }
@@ -276,12 +251,13 @@ pub struct CorticalState {
 
 impl CorticalState {
     /// Initialize all signals to neutral defaults for a personality preset.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn new(personality: PersonalityPreset) -> Self {
         let pad = personality.pad();
         Self {
-            pleasure: AtomicU32::new(pad.pleasure.to_bits()),
-            arousal: AtomicU32::new(pad.arousal.to_bits()),
-            dominance: AtomicU32::new(pad.dominance.to_bits()),
+            pleasure: AtomicU32::new((pad.pleasure as f32).to_bits()),
+            arousal: AtomicU32::new((pad.arousal as f32).to_bits()),
+            dominance: AtomicU32::new((pad.dominance as f32).to_bits()),
             primary_emotion: AtomicU8::new(u8::from(PlutchikLabel::Joy)),
             aggregate_accuracy: AtomicU32::new(0.5f32.to_bits()),
             accuracy_trend: AtomicI8::new(0),
@@ -304,19 +280,26 @@ impl CorticalState {
     }
 
     /// Read the current PAD vector.
+    ///
+    /// Widens f32 atomic storage to the canonical f64 representation.
     pub fn pad(&self) -> PadVector {
-        PadVector {
-            pleasure: load_f32(&self.pleasure),
-            arousal: load_f32(&self.arousal),
-            dominance: load_f32(&self.dominance),
-        }
+        PadVector::new(
+            f64::from(load_f32(&self.pleasure)),
+            f64::from(load_f32(&self.arousal)),
+            f64::from(load_f32(&self.dominance)),
+        )
     }
 
     /// Write the current PAD vector.
+    ///
+    /// Narrows f64 to f32 for compact atomic storage. Values in `[-1.0, 1.0]`
+    /// are representable exactly in f32, so this is lossless for clamped PAD
+    /// vectors.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn set_pad(&self, pad: PadVector) {
-        store_f32(&self.pleasure, pad.pleasure);
-        store_f32(&self.arousal, pad.arousal);
-        store_f32(&self.dominance, pad.dominance);
+        store_f32(&self.pleasure, pad.pleasure as f32);
+        store_f32(&self.arousal, pad.arousal as f32);
+        store_f32(&self.dominance, pad.dominance as f32);
     }
 
     /// Read current prediction accuracy.
@@ -1021,19 +1004,19 @@ pub struct AdaptiveThresholdInputs {
 
 /// Compute adaptive threshold from affect, resources, and confidence.
 pub fn compute_adaptive_threshold(input: AdaptiveThresholdInputs, config: GatingConfig) -> f32 {
-    let affect_adj = if input.pad.dominance < -0.2 {
+    let affect_adj: f32 = if input.pad.dominance < -0.2 {
         -0.05
     } else if input.pad.dominance > 0.3 {
         0.05
     } else {
         0.0
     };
-    let resource_adj = if input.budget_usage_pct > 0.80 {
+    let resource_adj: f32 = if input.budget_usage_pct > 0.80 {
         0.10
     } else {
         0.0
     };
-    let arousal_adj = if input.pad.arousal > 0.5 { -0.05 } else { 0.0 };
+    let arousal_adj: f32 = if input.pad.arousal > 0.5 { -0.05 } else { 0.0 };
     let confidence_adj = input.strategy_confidence.clamp(0.0, 1.0) * 0.05;
     (config.base_threshold + affect_adj + resource_adj + arousal_adj + confidence_adj)
         .clamp(config.threshold_min, config.threshold_max)
@@ -1505,7 +1488,7 @@ pub fn meta_cognize(
     if snapshot.aggregate_accuracy > 0.8 && snapshot.pad.arousal < -0.2 {
         issues.push(MetaIssue::Complacency {
             accuracy: snapshot.aggregate_accuracy,
-            arousal: snapshot.pad.arousal,
+            arousal: snapshot.pad.arousal as f32,
             suggestion: "Seek novel challenges or increase exploration rate".into(),
         });
     }
@@ -1852,13 +1835,14 @@ mod tests {
     #[test]
     fn cortical_pad_round_trips() {
         let state = CorticalState::default();
-        let pad = PadVector {
-            pleasure: -0.2,
-            arousal: 0.7,
-            dominance: 0.3,
-        };
+        let pad = PadVector::new(-0.2, 0.7, 0.3);
         state.set_pad(pad);
-        assert_eq!(state.pad(), pad);
+        let got = state.pad();
+        // Round-trip through f32 atomic storage loses a tiny amount of precision;
+        // check within a small epsilon rather than exact equality.
+        assert!((got.pleasure - pad.pleasure).abs() < 1e-6);
+        assert!((got.arousal - pad.arousal).abs() < 1e-6);
+        assert!((got.dominance - pad.dominance).abs() < 1e-6);
     }
 
     #[test]

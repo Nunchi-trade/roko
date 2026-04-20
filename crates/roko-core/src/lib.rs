@@ -136,7 +136,9 @@ pub use project::{
     DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
     detect_from_files_with_cargo_toml,
 };
-pub use provenance::{Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, TaintInfo};
+pub use provenance::{
+    Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
+};
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
 pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};

@@ -235,17 +235,17 @@ impl ThetaConsumer {
         let pad_before = cortical.pad();
 
         // Reactive layer: respond to success rate
-        let pleasure_delta = (summary.success_rate - 0.5) * 0.2;
+        let pleasure_delta = (f64::from(summary.success_rate) - 0.5) * 0.2;
         // Arousal tracks anomaly density
-        let anomaly_density = summary.recurring_anomalies.len() as f32 / (summary.tick_count.max(1) as f32);
+        let anomaly_density = summary.recurring_anomalies.len() as f64 / f64::from(summary.tick_count.max(1));
         let arousal_delta = (anomaly_density - 0.1) * 0.3;
         // Dominance tracks cost efficiency
         let cost_per_tick = if summary.tick_count > 0 {
-            summary.total_cost as f32 / summary.tick_count as f32
+            summary.total_cost / f64::from(summary.tick_count)
         } else {
             0.0
         };
-        let dominance_delta = if cost_per_tick < 0.01 { 0.05 } else { -0.05 };
+        let dominance_delta: f64 = if cost_per_tick < 0.01 { 0.05 } else { -0.05 };
 
         let pad_after = PadVector {
             pleasure: (pad_before.pleasure + pleasure_delta).clamp(-1.0, 1.0),

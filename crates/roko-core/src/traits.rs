@@ -8,8 +8,8 @@
 //! See [crate docs](crate) for the universal loop that composes them.
 
 use crate::{
-    Budget, ContentHash, Context, Datum, Engram, Outcome, Pulse, Query, Score, Selection,
-    TopicFilter, Verdict, error::Result,
+    Budget, ContentHash, Context, Datum, Engram, Outcome, PolicyOutputs, Pulse, Query, Score,
+    Selection, TopicFilter, Verdict, error::Result,
 };
 use async_trait::async_trait;
 use roko_primitives::HdcVector;
@@ -201,6 +201,14 @@ pub trait Router: Send + Sync {
 /// from fragments, transactions from operations, plans from tasks, bounties
 /// from sub-bounties. Output respects budget constraints (tokens, bytes,
 /// engram count, wall time).
+///
+/// # Datum-polymorphic input (TM-05)
+///
+/// The [`compose_datums`](Self::compose_datums) method accepts `&[Datum<'_>]`
+/// so callers can mix persisted engrams and ephemeral pulses in a single
+/// compose call.  The default implementation filters for engrams and
+/// delegates to [`compose`](Self::compose), so existing implementations
+/// get the new entry point for free.
 pub trait Composer: Send + Sync {
     /// Combine input engrams into a new composed engram.
     /// The composer may use the scorer to rank/select inputs under budget.
@@ -211,6 +219,28 @@ pub trait Composer: Send + Sync {
         scorer: &dyn Scorer,
         ctx: &Context,
     ) -> Result<Engram>;
+
+    /// Compose from a polymorphic mix of engrams and pulses.
+    ///
+    /// The default implementation extracts engrams (converting pulses via
+    /// [`Engram::from_pulse_synthetic`]) and delegates to [`compose`](Self::compose).
+    /// Override for pulse-aware composition that treats the two media differently.
+    fn compose_datums(
+        &self,
+        datums: &[Datum<'_>],
+        budget: &Budget,
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<Engram> {
+        let engrams: Vec<Engram> = datums
+            .iter()
+            .map(|d| match d {
+                Datum::Engram(e) => (*e).clone(),
+                Datum::Pulse(p) => Engram::from_pulse_synthetic(p),
+            })
+            .collect();
+        self.compose(&engrams, budget, scorer, ctx)
+    }
 
     /// Human-readable name.
     fn name(&self) -> &str;
@@ -224,9 +254,38 @@ pub trait Composer: Send + Sync {
 /// breakers, episode logging, pheromone reactions, heartbeat emission,
 /// promotion to chain, sentinel detection. They run continuously over the
 /// engram stream and may produce zero, one, or many output engrams per tick.
+///
+/// # Pulse-aware decisions (TM-06)
+///
+/// The [`decide_with_pulses`](Self::decide_with_pulses) method accepts both
+/// the persisted engram stream **and** the ephemeral pulse stream, returning
+/// a [`PolicyOutputs`] that can contain both engrams (to persist) and pulses
+/// (to publish on the Bus).  The default implementation ignores pulses and
+/// wraps the existing [`decide`](Self::decide) output in `PolicyOutputs`,
+/// so existing implementations get the new entry point for free.
 pub trait Policy: Send + Sync {
     /// Examine the recent engram stream and produce new engrams (interventions).
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
+
+    /// Examine both persisted engrams and ephemeral pulses, returning
+    /// [`PolicyOutputs`] that may contain both engrams and pulses.
+    ///
+    /// The default implementation ignores `pulses`, delegates to
+    /// [`decide`](Self::decide), and wraps the resulting engrams in
+    /// `PolicyOutputs` (with an empty pulse list).  Override to produce
+    /// pulses or to incorporate the pulse stream into the decision.
+    fn decide_with_pulses(
+        &self,
+        engrams: &[Engram],
+        _pulses: &[Pulse],
+        ctx: &Context,
+    ) -> PolicyOutputs {
+        let out_engrams = self.decide(engrams, ctx);
+        PolicyOutputs {
+            engrams: out_engrams,
+            pulses: Vec::new(),
+        }
+    }
 
     /// Human-readable name.
     fn name(&self) -> &str;

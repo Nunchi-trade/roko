@@ -93,11 +93,11 @@ impl ContextCategory {
 
     fn affect_multiplier(self, pad: &PadVector) -> f64 {
         match self {
-            Self::Safety => 1.0 + f64::from(pad.arousal).abs() * 0.5,
+            Self::Safety => 1.0 + pad.arousal.abs() * 0.5,
             Self::Exploration | Self::ResearchArtifacts => {
-                1.0 + (1.0 - f64::from(pad.dominance)) * 0.3
+                1.0 + (1.0 - pad.dominance) * 0.3
             }
-            Self::IterationMemory => 1.0 + f64::from(-pad.pleasure).max(0.0) * 0.4,
+            Self::IterationMemory => 1.0 + (-pad.pleasure).max(0.0) * 0.4,
             _ => 1.0,
         }
     }

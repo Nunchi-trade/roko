@@ -300,6 +300,46 @@ impl AdaptiveThresholds {
             .map(|s| (s.cusum_high, s.cusum_low))
             .unwrap_or((0.0, 0.0))
     }
+
+    /// Incorporate neuro-derived knowledge hints into threshold tuning
+    /// (INT-15: Neuro -> Gate Thresholds).
+    ///
+    /// `known_failure_rungs` lists rung indices where neuro's knowledge store
+    /// has recorded persistent failure patterns.  For those rungs, the
+    /// thresholds are nudged toward caution: the CUSUM sensitivity is tightened
+    /// so that quality regressions are detected sooner, and the EMA is biased
+    /// slightly downward when few observations exist (less than 10). This
+    /// prevents the adaptive system from being overly optimistic about rungs
+    /// that neuro already knows are problematic.
+    ///
+    /// `known_stable_rungs` lists rungs where neuro knowledge confirms
+    /// consistent passing.  For those, the CUSUM sensitivity is relaxed
+    /// slightly to avoid false alarms.
+    pub fn apply_neuro_hints(
+        &mut self,
+        known_failure_rungs: &[u32],
+        known_stable_rungs: &[u32],
+    ) {
+        for &rung in known_failure_rungs {
+            let stats = self.rungs.entry(rung).or_default();
+            // For rungs with known failure patterns, bias the EMA toward caution
+            // when we have limited empirical data.
+            if stats.total_observations < 10 {
+                stats.ema_pass_rate = (stats.ema_pass_rate * 0.7).min(0.5);
+            }
+        }
+        // Tighten CUSUM sensitivity for failure-prone rungs by lowering the
+        // global sensitivity parameter (detects smaller shifts sooner).
+        if !known_failure_rungs.is_empty() {
+            let tighter = (self.cusum_sensitivity * 0.7).max(0.01);
+            self.cusum_sensitivity = tighter;
+        }
+        // Relax CUSUM sensitivity for stable rungs (avoids false alarms).
+        if !known_stable_rungs.is_empty() && known_failure_rungs.is_empty() {
+            let relaxed = (self.cusum_sensitivity * 1.3).min(0.15);
+            self.cusum_sensitivity = relaxed;
+        }
+    }
 }
 
 impl Default for AdaptiveThresholds {

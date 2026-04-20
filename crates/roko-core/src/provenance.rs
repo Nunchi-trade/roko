@@ -13,7 +13,119 @@
 use crate::ContentHash;
 use serde::{Deserialize, Serialize};
 
+/// Typed taint classification for provenance records.
+///
+/// Replaces the former `tainted: bool` + `TaintInfo { category, detail }` pair
+/// with compile-time checked variants. Marked `#[non_exhaustive]` so new taint
+/// reasons can be added without breaking downstream matches.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Taint {
+    /// No taint — data is from a trusted, verified source.
+    Clean,
+    /// LLM-generated content that may contain hallucinated facts.
+    LlmHallucination {
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// A tool call failed or returned suspect data.
+    ToolFailure {
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// A human operator explicitly flagged this data.
+    UserFlagged {
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// Data has exceeded its freshness window.
+    StaleData {
+        /// Staleness threshold in milliseconds.
+        threshold_ms: i64,
+    },
+    /// Data came from an unverified external source (API, webhook, chain).
+    UnverifiedSource {
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// Taint was inherited from an upstream tainted signal.
+    Propagated {
+        /// Human-readable explanation.
+        detail: String,
+        /// The upstream tainted signal hash, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inherited_from: Option<ContentHash>,
+    },
+    /// User-provided input (higher trust than external, but still tainted for safety).
+    UserInput {
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// Application-specific taint reason not covered by other variants.
+    Custom(String),
+}
+
+impl Default for Taint {
+    fn default() -> Self {
+        Self::Clean
+    }
+}
+
+impl Taint {
+    /// Returns `true` when the data is tainted (any variant except `Clean`).
+    #[must_use]
+    pub const fn is_tainted(&self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+
+    /// Short machine-readable category string for logging and audit trails.
+    #[must_use]
+    pub fn category(&self) -> &str {
+        match self {
+            Self::Clean => "clean",
+            Self::LlmHallucination { .. } => "llm_hallucination",
+            Self::ToolFailure { .. } => "tool_failure",
+            Self::UserFlagged { .. } => "user_flagged",
+            Self::StaleData { .. } => "stale_data",
+            Self::UnverifiedSource { .. } => "unverified_source",
+            Self::Propagated { .. } => "propagated",
+            Self::UserInput { .. } => "user_input",
+            Self::Custom(_) => "custom",
+        }
+    }
+
+    /// Human-readable detail string, if the variant carries one.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Clean => None,
+            Self::LlmHallucination { detail }
+            | Self::ToolFailure { detail }
+            | Self::UserFlagged { detail }
+            | Self::UnverifiedSource { detail }
+            | Self::Propagated { detail, .. }
+            | Self::UserInput { detail } => Some(detail),
+            Self::StaleData { threshold_ms: _ } => None,
+            Self::Custom(detail) => Some(detail),
+        }
+    }
+
+    /// Upstream inherited-from hash, if this is a propagated taint.
+    #[must_use]
+    pub fn inherited_from(&self) -> Option<&ContentHash> {
+        match self {
+            Self::Propagated { inherited_from, .. } => inherited_from.as_ref(),
+            _ => None,
+        }
+    }
+}
+
 /// Structured taint metadata attached to a tainted provenance record.
+///
+/// **Deprecated**: Use [`Taint`] enum directly. This struct is retained for
+/// backward compatibility with existing serialized data and the
+/// `TaintTracker` in roko-orchestrator. New code should use `Taint` variants.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaintInfo {
     /// Short machine-readable category such as `"external"` or `"propagated"`.
@@ -60,6 +172,58 @@ impl TaintInfo {
         self.inherited_from = Some(inherited_from);
         self
     }
+
+    /// Convert this legacy `TaintInfo` into the typed [`Taint`] enum.
+    #[must_use]
+    pub fn to_taint(&self) -> Taint {
+        match self.category.as_str() {
+            "external" => Taint::UnverifiedSource {
+                detail: self.detail.clone(),
+            },
+            "user_input" => Taint::UserInput {
+                detail: self.detail.clone(),
+            },
+            "propagated" => Taint::Propagated {
+                detail: self.detail.clone(),
+                inherited_from: self.inherited_from,
+            },
+            other => Taint::Custom(format!("{}: {}", other, self.detail)),
+        }
+    }
+}
+
+impl From<&TaintInfo> for Taint {
+    fn from(info: &TaintInfo) -> Self {
+        info.to_taint()
+    }
+}
+
+impl From<&Taint> for Option<TaintInfo> {
+    fn from(taint: &Taint) -> Self {
+        match taint {
+            Taint::Clean => None,
+            Taint::LlmHallucination { detail } => {
+                Some(TaintInfo::new("llm_hallucination", detail.clone()))
+            }
+            Taint::ToolFailure { detail } => Some(TaintInfo::new("tool_failure", detail.clone())),
+            Taint::UserFlagged { detail } => Some(TaintInfo::new("user_flagged", detail.clone())),
+            Taint::StaleData { threshold_ms } => Some(TaintInfo::new(
+                "stale_data",
+                format!("threshold {}ms", threshold_ms),
+            )),
+            Taint::UnverifiedSource { detail } => Some(TaintInfo::new("external", detail.clone())),
+            Taint::Propagated {
+                detail,
+                inherited_from,
+            } => {
+                let mut info = TaintInfo::new("propagated", detail.clone());
+                info.inherited_from = *inherited_from;
+                Some(info)
+            }
+            Taint::UserInput { detail } => Some(TaintInfo::new("user_input", detail.clone())),
+            Taint::Custom(detail) => Some(TaintInfo::new("custom", detail.clone())),
+        }
+    }
 }
 
 /// Cohesion check for a provenance record's internal metadata.
@@ -88,10 +252,6 @@ impl ProvenanceCoherenceCheck {
 pub enum ProvenanceCoherenceIssue {
     /// The author field was blank.
     MissingAuthor,
-    /// `tainted` was set without corresponding explanatory metadata.
-    MissingTaintInfo,
-    /// Taint metadata was attached while the provenance was marked clean.
-    UnexpectedTaintInfo,
 }
 
 /// Who produced a signal and how trustworthy they are.
@@ -111,11 +271,18 @@ pub struct Provenance {
     /// 0.0 = untrusted (user input, external APIs, chain pulls)
     pub trust: f32,
 
-    /// Whether this signal contains data from an untrusted source.
+    /// Typed taint classification. `Taint::Clean` means untainted.
+    ///
     /// Tainted signals must be sanitized before they enter prompts or gates.
-    pub tainted: bool,
+    /// Use [`Provenance::is_tainted()`] for boolean checks.
+    #[serde(default)]
+    pub taint: Taint,
 
-    /// Structured taint metadata for audits and propagation.
+    /// **Deprecated** — legacy structured taint metadata.
+    ///
+    /// Retained for backward-compatible deserialization of old JSONL logs.
+    /// New code should read [`taint`](Self::taint) directly. When both fields
+    /// are present during deserialization, `taint` takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint_info: Option<TaintInfo>,
 
@@ -131,7 +298,7 @@ impl Provenance {
         Self {
             author: author.into(),
             trust: 1.0,
-            tainted: false,
+            taint: Taint::Clean,
             taint_info: None,
             session: None,
         }
@@ -143,7 +310,7 @@ impl Provenance {
         Self {
             author: author.into(),
             trust: 0.75,
-            tainted: false,
+            taint: Taint::Clean,
             taint_info: None,
             session: None,
         }
@@ -154,10 +321,12 @@ impl Provenance {
     pub fn external(author: impl Into<String>) -> Self {
         let author = author.into();
         Self {
-            taint_info: Some(TaintInfo::external(format!("source {}", author))),
+            taint: Taint::UnverifiedSource {
+                detail: format!("source {}", author),
+            },
+            taint_info: None,
             author,
             trust: 0.1,
-            tainted: true,
             session: None,
         }
     }
@@ -167,10 +336,12 @@ impl Provenance {
     pub fn user(author: impl Into<String>) -> Self {
         let author = author.into();
         Self {
-            taint_info: Some(TaintInfo::user_input(format!("source {}", author))),
+            taint: Taint::UserInput {
+                detail: format!("source {}", author),
+            },
+            taint_info: None,
             author,
             trust: 0.5,
-            tainted: true,
             session: None,
         }
     }
@@ -189,22 +360,25 @@ impl Provenance {
         self
     }
 
-    /// Mark as tainted regardless of author.
+    /// Set the typed taint classification.
     #[must_use]
-    pub fn with_taint(mut self, tainted: bool) -> Self {
-        self.tainted = tainted;
-        if !tainted {
-            self.taint_info = None;
-        }
+    pub fn with_taint(mut self, taint: Taint) -> Self {
+        self.taint = taint;
         self
     }
 
-    /// Attach structured taint metadata and mark the provenance tainted.
+    /// Attach structured taint metadata (legacy API) and set the typed taint field.
     #[must_use]
     pub fn with_taint_info(mut self, taint_info: TaintInfo) -> Self {
-        self.tainted = true;
+        self.taint = taint_info.to_taint();
         self.taint_info = Some(taint_info);
         self
+    }
+
+    /// Returns `true` when this provenance carries active taint.
+    #[must_use]
+    pub fn is_tainted(&self) -> bool {
+        self.taint.is_tainted()
     }
 
     /// Run a conservative consistency check over the provenance metadata.
@@ -214,12 +388,6 @@ impl Provenance {
 
         if self.author.trim().is_empty() {
             issues.push(ProvenanceCoherenceIssue::MissingAuthor);
-        }
-        if self.tainted && self.taint_info.is_none() {
-            issues.push(ProvenanceCoherenceIssue::MissingTaintInfo);
-        }
-        if !self.tainted && self.taint_info.is_some() {
-            issues.push(ProvenanceCoherenceIssue::UnexpectedTaintInfo);
         }
 
         ProvenanceCoherenceCheck { issues }
@@ -240,7 +408,7 @@ impl Provenance {
     /// Is this provenance trusted enough to include in `min_trust` contexts?
     #[must_use]
     pub fn is_trusted(&self, min_trust: f32) -> bool {
-        self.trust >= min_trust && !self.tainted
+        self.trust >= min_trust && !self.is_tainted()
     }
 }
 
@@ -258,20 +426,20 @@ mod tests {
     fn trusted_has_full_trust_no_taint() {
         let p = Provenance::trusted("gate:compile");
         assert_eq!(p.trust, 1.0);
-        assert!(!p.tainted);
+        assert!(!p.is_tainted());
     }
 
     #[test]
     fn external_is_tainted_low_trust() {
         let p = Provenance::external("webhook");
         assert!(p.trust < 0.5);
-        assert!(p.tainted);
+        assert!(p.is_tainted());
     }
 
     #[test]
     fn user_is_tainted_medium_trust() {
         let p = Provenance::user("user:alice");
-        assert!(p.tainted);
+        assert!(p.is_tainted());
         assert!(p.trust > 0.0);
     }
 
@@ -282,12 +450,9 @@ mod tests {
     }
 
     #[test]
-    fn external_sets_taint_info() {
+    fn external_sets_taint_variant() {
         let p = Provenance::external("webhook");
-        assert_eq!(
-            p.taint_info.as_ref().map(|info| info.category.as_str()),
-            Some("external")
-        );
+        assert_eq!(p.taint.category(), "unverified_source");
     }
 
     #[test]
@@ -313,33 +478,52 @@ mod tests {
     }
 
     #[test]
-    fn coherence_check_flags_missing_taint_info() {
-        let p = Provenance::trusted("roko").with_taint(true);
-        let check = p.coherence_check();
-        assert!(!check.is_coherent());
-        assert!(
-            check
-                .issues
-                .contains(&ProvenanceCoherenceIssue::MissingTaintInfo)
+    fn taint_enum_variants_have_correct_categories() {
+        assert_eq!(Taint::Clean.category(), "clean");
+        assert_eq!(
+            Taint::LlmHallucination {
+                detail: "x".into()
+            }
+            .category(),
+            "llm_hallucination"
+        );
+        assert_eq!(
+            Taint::ToolFailure {
+                detail: "x".into()
+            }
+            .category(),
+            "tool_failure"
+        );
+        assert_eq!(
+            Taint::UserFlagged {
+                detail: "x".into()
+            }
+            .category(),
+            "user_flagged"
+        );
+        assert_eq!(
+            Taint::StaleData { threshold_ms: 100 }.category(),
+            "stale_data"
+        );
+        assert_eq!(
+            Taint::UnverifiedSource {
+                detail: "x".into()
+            }
+            .category(),
+            "unverified_source"
+        );
+        assert_eq!(
+            Taint::Custom("x".into()).category(),
+            "custom"
         );
     }
 
     #[test]
-    fn coherence_check_flags_unexpected_taint_info() {
-        let p = Provenance {
-            author: "roko".to_string(),
-            trust: 1.0,
-            tainted: false,
-            taint_info: Some(TaintInfo::external("api")),
-            session: None,
-        };
-        let check = p.coherence_check();
-        assert!(!check.is_coherent());
-        assert!(
-            check
-                .issues
-                .contains(&ProvenanceCoherenceIssue::UnexpectedTaintInfo)
-        );
+    fn taint_info_converts_to_taint_enum() {
+        let info = TaintInfo::external("webhook payload");
+        let taint = info.to_taint();
+        assert!(matches!(taint, Taint::UnverifiedSource { .. }));
+        assert_eq!(taint.detail(), Some("webhook payload"));
     }
 
     #[test]
@@ -353,5 +537,14 @@ mod tests {
                 .contains(&ProvenanceCoherenceIssue::MissingAuthor)
         );
         assert!(check.score() < 1.0);
+    }
+
+    #[test]
+    fn with_taint_info_sets_both_fields() {
+        let p = Provenance::trusted("gateway")
+            .with_taint_info(TaintInfo::external("webhook payload"));
+        assert!(p.is_tainted());
+        assert!(matches!(p.taint, Taint::UnverifiedSource { .. }));
+        assert!(p.taint_info.is_some());
     }
 }

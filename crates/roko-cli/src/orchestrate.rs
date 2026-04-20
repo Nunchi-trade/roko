@@ -140,6 +140,9 @@ use roko_runtime::event_bus::{
     Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
     PlanRevisionReason, RokoEvent,
 };
+use roko_runtime::lifecycle::{
+    AgentLifecycleState, LifecycleTransition, LifecycleTransitionReason,
+};
 use roko_runtime::process::ProcessSupervisor;
 use roko_std::StaticToolRegistry;
 use roko_std::SumScorer;
@@ -2574,6 +2577,142 @@ fn query_anti_knowledge_patterns(
     }
 }
 
+/// INT-20: Record significant lifecycle transitions as knowledge entries in the
+/// neuro store.
+///
+/// Restores, degradation events, and metamorphosis are operationally significant
+/// -- they capture when and why agents changed state.  Recording them as
+/// knowledge enables future sessions to learn from operational history (e.g.
+/// "agent X was degraded due to budget constraints 5 times last week").
+fn record_lifecycle_knowledge(
+    knowledge_store: &KnowledgeStore,
+    transition: &LifecycleTransition,
+) {
+    // Only record significant transitions -- skip routine Active/Waiting/Initiated.
+    let is_significant = matches!(
+        &transition.to,
+        AgentLifecycleState::Hibernated
+            | AgentLifecycleState::Metamorphosing
+            | AgentLifecycleState::Degraded { .. }
+            | AgentLifecycleState::Deleted
+    ) || matches!(
+        &transition.reason,
+        LifecycleTransitionReason::OperatorResume
+            | LifecycleTransitionReason::BudgetConstrained
+            | LifecycleTransitionReason::BudgetRestored
+            | LifecycleTransitionReason::MetamorphosisFinished
+    );
+
+    if !is_significant {
+        return;
+    }
+
+    let content = format!(
+        "Agent '{}' transitioned from {:?} to {:?} (reason: {:?}) at {}",
+        transition.agent_id,
+        transition.from,
+        transition.to,
+        transition.reason,
+        transition.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
+    );
+
+    let kind = if matches!(
+        &transition.to,
+        AgentLifecycleState::Degraded { .. } | AgentLifecycleState::Deleted
+    ) {
+        KnowledgeKind::AntiKnowledge
+    } else {
+        KnowledgeKind::Heuristic
+    };
+
+    let mut entry = KnowledgeEntry {
+        id: format!(
+            "lifecycle-{}-{}",
+            transition.agent_id,
+            transition.occurred_at.timestamp_millis()
+        ),
+        kind,
+        content,
+        tags: vec![
+            "lifecycle".to_string(),
+            format!("agent:{}", transition.agent_id),
+            format!("state:{:?}", transition.to),
+        ],
+        confidence: 1.0,
+        source_episodes: Vec::new(),
+        tier: roko_neuro::KnowledgeTier::Transient,
+        half_life_days: 30.0,
+        created_at: transition.occurred_at,
+        ..KnowledgeEntry::default()
+    };
+    entry.source = Some("lifecycle-monitor".to_string());
+
+    if let Err(err) = knowledge_store.add(entry) {
+        tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
+    }
+}
+
+/// INT-15: Query neuro knowledge for gate-related failure and stability
+/// patterns and apply them as hints to the adaptive gate thresholds.
+///
+/// This bridges neuro (durable knowledge) with the gate verification pipeline,
+/// so that known problematic or reliably stable rungs are tuned accordingly
+/// before the plan run begins.
+fn apply_neuro_gate_hints(
+    knowledge_store: &KnowledgeStore,
+    thresholds: &mut AdaptiveThresholds,
+) {
+    let failure_rungs = match knowledge_store.query("gate failure compile lint test", 10) {
+        Ok(entries) => entries
+            .into_iter()
+            .filter_map(|entry| {
+                let content_lower = entry.content.to_lowercase();
+                if content_lower.contains("compile") || content_lower.contains("rung 0") {
+                    Some(0u32)
+                } else if content_lower.contains("lint") || content_lower.contains("clippy") || content_lower.contains("rung 1") {
+                    Some(1)
+                } else if content_lower.contains("test fail") || content_lower.contains("rung 2") {
+                    Some(2)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::debug!(error = %err, "INT-15: skipping neuro gate hints (query failed)");
+            return;
+        }
+    };
+
+    let stable_rungs = match knowledge_store.query("gate stable passing consistently", 10) {
+        Ok(entries) => entries
+            .into_iter()
+            .filter_map(|entry| {
+                let content_lower = entry.content.to_lowercase();
+                if content_lower.contains("compile") || content_lower.contains("rung 0") {
+                    Some(0u32)
+                } else if content_lower.contains("lint") || content_lower.contains("rung 1") {
+                    Some(1)
+                } else if content_lower.contains("test") || content_lower.contains("rung 2") {
+                    Some(2)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    if !failure_rungs.is_empty() || !stable_rungs.is_empty() {
+        tracing::info!(
+            failure_rungs = ?failure_rungs,
+            stable_rungs = ?stable_rungs,
+            "INT-15: applying neuro knowledge hints to adaptive gate thresholds"
+        );
+        thresholds.apply_neuro_hints(&failure_rungs, &stable_rungs);
+    }
+}
+
 fn build_strategy_fragment_context(
     knowledge_store: &KnowledgeStore,
     role: AgentRole,
@@ -4898,10 +5037,17 @@ impl PlanRunner {
                     .await
             }
             RokoEvent::PrdPublished { .. } => false,
+            // INT-20: Lifecycle transitions → neuro knowledge store.
+            // Record significant lifecycle events (restores, metamorphosis,
+            // degradation) as knowledge entries so that future sessions can
+            // learn from operational history.
+            RokoEvent::AgentLifecycleTransition(ref transition) => {
+                record_lifecycle_knowledge(&self.knowledge_store, transition);
+                false
+            }
             RokoEvent::HeartbeatTick(_)
             | RokoEvent::HeartbeatWakeup { .. }
-            | RokoEvent::CognitiveSignal { .. }
-            | RokoEvent::AgentLifecycleTransition(_) => false,
+            | RokoEvent::CognitiveSignal { .. } => false,
         }
     }
 
@@ -5855,6 +6001,24 @@ impl PlanRunner {
                 HealthStatus::Critical => "critical",
             };
             let check_name = result.name.clone();
+
+            // INT-13: Conductor health signals → pheromone deposits.
+            // Degraded/Critical health checks become Threat pheromones so that
+            // downstream orchestration decisions (task dispatch, model routing)
+            // can observe and react to system health issues.
+            let (pheromone_kind, pheromone_intensity) = match result.status {
+                HealthStatus::Degraded => (PheromoneKind::Anomaly, 0.5),
+                HealthStatus::Critical => (PheromoneKind::Threat, 0.9),
+                HealthStatus::Healthy => unreachable!(),
+            };
+            self.pheromone_field.push(Pheromone::new(
+                pheromone_kind.clone(),
+                pheromone_intensity,
+                pheromone_kind.default_half_life(),
+                format!("health:{}", check_name),
+                PheromoneScope::Global,
+            ));
+
             let payload = serde_json::json!({
                 "check": check_name,
                 "checked_at_ms": result.checked_at_ms,
@@ -6733,6 +6897,27 @@ impl PlanRunner {
                 );
             }
 
+            // INT-11: Feed plan-level completion events into the daimon so
+            // that plan success/failure influences affect state and somatic
+            // markers. This closes the orchestration -> daimon feedback loop
+            // for plan-level outcomes (task-level was already wired).
+            for p in &plans {
+                let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
+                    task_id: format!("plan:{}", p.plan_id),
+                    succeeded: p.succeeded,
+                });
+                let outcome_label = if p.succeeded { "success" } else { "failure" };
+                self.daimon.record_somatic_outcome(
+                    StrategyCoordinates::default(),
+                    somatic_episode_hash(
+                        &p.plan_id,
+                        "plan-completion",
+                        outcome_label,
+                        &format!("agents:{}", p.agent_calls),
+                    ),
+                );
+            }
+
             // Increment plan completion metrics and log cost summaries.
             for p in &plans {
                 let status = if p.succeeded { "succeeded" } else { "failed" };
@@ -7087,6 +7272,10 @@ impl PlanRunner {
                     }
                 }
             }
+
+            // INT-15: Apply neuro knowledge hints to adaptive gate thresholds
+            // before the main run loop begins.
+            apply_neuro_gate_hints(&self.knowledge_store, &mut self.adaptive_thresholds);
 
             self.run_all(&watcher_cancel).await
         }
@@ -12907,8 +13096,10 @@ impl PlanRunner {
             let relevant_context = build_relevant_context_layer(&context_sections);
             let context_window_tokens = effective_context_window_tokens(&self.config);
             let pheromone_chunks = self.active_pheromone_chunks();
-            let neuro_anti_patterns =
+            let mut combined_anti_patterns =
                 query_anti_knowledge_patterns(&self.knowledge_store, task, 5);
+            // INT-14: Safety constraints → composition anti-patterns.
+            combined_anti_patterns.extend(self.safety_layer.constraints_as_anti_patterns());
             build_system_prompt_with_context_validated(
                 role,
                 plan_id,
@@ -12923,7 +13114,7 @@ impl PlanRunner {
                 Some(&section_effectiveness),
                 code_ctx,
                 pheromone_chunks,
-                neuro_anti_patterns,
+                combined_anti_patterns,
             )?
         };
         let role_section = PromptSection::new("role", &role_instruction)
@@ -14557,7 +14748,25 @@ impl PlanRunner {
         rung: u32,
     ) -> Vec<Verdict> {
         let ctx = Context::now();
-        let inputs = RungExecutionInputs::default();
+        // INT-16: Inject code-intelligence hints into gate inputs so that
+        // symbol and LLM-judge rungs can focus on relevant symbols/files.
+        let code_intel_hints = plan_id
+            .and_then(|pid| self.task_trackers.get(pid))
+            .and_then(|tracker| {
+                let task_id = tracker.last_impl_task_id.as_deref()?;
+                tracker
+                    .tasks_file
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .and_then(|task| task.description.as_deref())
+            })
+            .map(|desc| code_context_for_task(&self.workdir, desc))
+            .unwrap_or_default();
+        let inputs = RungExecutionInputs {
+            code_intel_hints,
+            ..RungExecutionInputs::default()
+        };
         if rung > 6 {
             let mut verdicts = Vec::new();
             for current_rung in 0..=6 {

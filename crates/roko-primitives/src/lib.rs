@@ -15,9 +15,11 @@
 #![warn(missing_docs)]
 
 pub mod hdc;
+pub mod pad;
 pub mod tier;
 
 pub use hdc::{
     BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,
 };
+pub use pad::PadVector;
 pub use tier::{InferenceTier, T2_VITALITY_THRESHOLD, TierError, TierRouter};
