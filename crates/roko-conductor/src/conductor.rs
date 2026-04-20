@@ -10,7 +10,7 @@ use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState, ProactiveTripS
 use crate::interventions::{
     InterventionPolicy, Severity, WatcherOutput, WorstSeverityPolicy, outputs_to_signals,
 };
-use crate::pattern_detector::PatternDetector;
+use crate::pattern_detector::{CompoundPattern, PatternDetector};
 use crate::threshold_learner::{InterventionOutcome, ThresholdLearner};
 use crate::watchers::{
     CompileFailRepeatWatcher, ContextWindowPressureWatcher, CostOverrunWatcher, GhostTurnWatcher,
@@ -71,6 +71,9 @@ pub struct Conductor {
     threshold_learner: Mutex<ThresholdLearner>,
     /// CEP-inspired compound pattern detector (COND-07).
     pattern_detector: Mutex<PatternDetector>,
+    /// INT-19: Most recently detected compound patterns from the last evaluate() call.
+    /// Callers can retrieve these to trigger coordination-driven dreams.
+    last_compound_patterns: Mutex<Vec<CompoundPattern>>,
 }
 
 impl std::fmt::Debug for Conductor {
@@ -113,6 +116,7 @@ impl Conductor {
             provider_health: None,
             threshold_learner: Mutex::new(ThresholdLearner::new()),
             pattern_detector: Mutex::new(PatternDetector::default()),
+            last_compound_patterns: Mutex::new(Vec::new()),
         }
     }
 
@@ -136,6 +140,7 @@ impl Conductor {
             provider_health: None,
             threshold_learner: Mutex::new(ThresholdLearner::new()),
             pattern_detector: Mutex::new(PatternDetector::default()),
+            last_compound_patterns: Mutex::new(Vec::new()),
         }
     }
 
@@ -244,6 +249,8 @@ impl Conductor {
 
         // COND-07: Feed watcher outputs to pattern detector for compound patterns.
         let compound_patterns = self.pattern_detector.lock().record(&watcher_outputs);
+        // INT-19: Store patterns for retrieval by callers (e.g., dream triggering).
+        *self.last_compound_patterns.lock() = compound_patterns.clone();
         for pattern in &compound_patterns {
             tracing::info!(
                 pattern = %pattern.pattern_name,
@@ -350,6 +357,13 @@ impl Conductor {
         F: FnOnce(&mut PatternDetector) -> R,
     {
         f(&mut self.pattern_detector.lock())
+    }
+
+    /// INT-19: Return and drain compound patterns detected during the most
+    /// recent `evaluate()` call. Callers can use these to trigger coordination-
+    /// driven dream consolidation.
+    pub fn take_compound_patterns(&self) -> Vec<CompoundPattern> {
+        std::mem::take(&mut *self.last_compound_patterns.lock())
     }
 }
 

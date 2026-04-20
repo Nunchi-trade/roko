@@ -23,6 +23,7 @@ pub mod auction;
 pub mod budget;
 pub mod compaction;
 pub mod context_assembler;
+pub mod context_mesh;
 pub mod context_provider;
 pub mod conventions;
 pub mod enrichment;
@@ -42,12 +43,13 @@ pub use attention::{
     ModelAttentionCurves, PositionAttentionModel, dynamic_placement, placement_adjusted_score,
 };
 pub use auction::{
-    AuctionDiagnostics, FairnessConfig, LearningBidder, SectionAllocation, SubsystemId,
-    detect_bid_correlation, is_pareto_optimal,
+    AffectModulation, AuctionDiagnostics, FairnessConfig, LearningBidder, SectionAllocation,
+    SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation, is_pareto_optimal, vcg_allocate,
 };
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
 pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
+pub use context_mesh::{ContextMesh, SharedContextEntry};
 pub use context_provider::{
     ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
     PriorTaskOutput, ReadFileSpec, ResolvedContext, SiblingTask, TaskInput, VerifySpec,

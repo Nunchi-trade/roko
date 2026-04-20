@@ -3687,6 +3687,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     system_prompt: Some(&system),
                     resume_session: None,
                     env_vars: &gw.vars,
+                    role: Some("strategist"),
                 },
                 AgentExecEpisode {
                     task_kind: "plan-generate",
@@ -3768,6 +3769,7 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     system_prompt: Some(&system),
                     resume_session: None,
                     env_vars: &gw.vars,
+                    role: Some("strategist"),
                 },
                 AgentExecEpisode {
                     task_kind: "plan-regenerate",
@@ -4427,6 +4429,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("researcher"),
             })
             .await?;
             if !output.is_empty() {
@@ -4471,6 +4474,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("researcher"),
             })
             .await?;
             if !output.is_empty() {
@@ -4525,6 +4529,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("researcher"),
             })
             .await?;
             if !output.is_empty() {
@@ -4574,6 +4579,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("researcher"),
             })
             .await?;
             if !output.is_empty() {
@@ -4624,6 +4630,7 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("researcher"),
             })
             .await?;
             if !output.is_empty() {
@@ -5523,6 +5530,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     system_prompt: Some(&system),
                     resume_session,
                     env_vars: &gw.vars,
+                    role: Some("scribe"),
                 })
                 .await?;
 
@@ -5617,6 +5625,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                     system_prompt: Some(&system),
                     resume_session,
                     env_vars: &gw.vars,
+                    role: Some("scribe"),
                 })
                 .await?;
                 let mtime_after = std::fs::metadata(&draft).and_then(|m| m.modified()).ok();
@@ -5722,6 +5731,7 @@ async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
                 system_prompt: Some(&system),
                 resume_session,
                 env_vars: &gw.vars,
+                role: Some("strategist"),
             })
             .await?;
             if !output.is_empty() {

@@ -48,6 +48,8 @@
 
 pub mod affect;
 pub mod agent;
+/// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
+pub mod arbitration;
 pub mod attestation;
 pub mod body;
 pub mod build;
@@ -61,6 +63,8 @@ pub mod context;
 pub mod dashboard_snapshot;
 pub mod datum;
 pub mod decay;
+/// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
+pub mod domain_profile;
 pub mod demurrage;
 pub mod engram;
 pub mod error;
@@ -92,6 +96,9 @@ pub mod traits;
 pub mod verdict;
 
 pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
+pub use arbitration::{
+    ArbitrationConfig, ArbitrationOutcome, Arbitrator, Subsystem, SubsystemGuidance,
+};
 pub use agent::{
     AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, TaskRequirements,
     ToolPermissions, TurnBudget, score_model_for_task, select_model_for_task,
@@ -103,14 +110,16 @@ pub use build::{BuildCommand, BuildSystem};
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
-    ChatMessage, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
-    ResponseMetadata, SessionState, ToolCallFunction, ToolCallMessage, Usage,
+    ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
+    RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
+    ToolCallMessage, ToolChoice, Usage,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use context::Context;
 pub use datum::Datum;
 pub use decay::Decay;
 pub use demurrage::Demurrage;
+pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
 pub use hash::ContentHash;

@@ -75,6 +75,8 @@ pub mod anomaly;
 pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
+/// Bayesian confidence updating using Beta-Binomial conjugate model (AS-07).
+pub mod bayesian_confidence;
 /// Budget tracking and enforcement guardrails for routing decisions.
 pub mod budget;
 pub mod cascade_router;
@@ -121,6 +123,8 @@ pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
+/// Typed reinforcement signal categories for the learning pipeline (AS-11).
+pub mod reinforce_kind;
 /// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
 pub mod research_pipeline;
 /// Lookahead and calibration shells around the shipped cascade router.

@@ -1,9 +1,11 @@
 //! Canonical chat message and response types shared across prompt assembly,
 //! tool loops, and provider adapters.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::tool::ToolCall;
+use crate::tool::{ToolCall, ToolDef};
 use crate::{Body, Engram, Kind};
 
 /// Canonical chat message format shared across prompt assembly, tool loops,
@@ -241,4 +243,114 @@ impl ChatResponse {
             .tag("finish_reason", format!("{:?}", self.finish_reason))
             .build()
     }
+}
+
+// ─── Request-side types ──────────────────────────────────────────────────
+//
+// Canonical request shape shared by provider adapters.  Previously lived in
+// `roko-agent/src/chat_types.rs`; moved here so downstream crates
+// (roko-compose, roko-learn) can construct or inspect request objects
+// without depending on roko-agent.
+
+/// Canonical request shape shared by provider adapters.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    /// Message history for the conversation turn.
+    pub messages: Vec<ChatMessage>,
+    /// Model slug to dispatch to.
+    pub model_slug: String,
+    /// Tool definitions available for the turn.
+    pub tools: Vec<ToolDef>,
+    /// How the model may call tools.
+    pub tool_choice: ToolChoice,
+    /// Maximum tokens for the completion.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature.
+    pub temperature: Option<f64>,
+    /// Top-p (nucleus) sampling.
+    pub top_p: Option<f64>,
+    /// Stop sequences.
+    pub stop: Option<Vec<String>>,
+    /// Whether to stream the response.
+    pub stream: bool,
+    /// Additional per-request options.
+    pub options: RequestOptions,
+}
+
+impl ChatRequest {
+    /// Build a canonical chat request from the orchestrator's signal format.
+    #[must_use]
+    pub fn from_signal(
+        signal: &Engram,
+        model_slug: &str,
+        system_prompt: Option<&str>,
+        tools: Vec<ToolDef>,
+        options: RequestOptions,
+    ) -> Self {
+        let mut messages = Vec::new();
+        if let Some(system_prompt) = system_prompt {
+            messages.push(ChatMessage::System {
+                content: system_prompt.to_string(),
+            });
+        }
+
+        messages.push(ChatMessage::User {
+            content: MessageContent::Text(signal.body.as_text().unwrap_or_default().to_string()),
+        });
+
+        Self {
+            messages,
+            model_slug: model_slug.to_string(),
+            tools,
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            stream: false,
+            options,
+        }
+    }
+}
+
+/// Provider-agnostic options plus adapter-specific passthrough fields.
+#[derive(Debug, Clone, Default)]
+pub struct RequestOptions {
+    /// Enable extended thinking / chain-of-thought mode.
+    pub enable_thinking: Option<bool>,
+    /// Preserve thinking tokens in the response.
+    pub preserve_thinking: Option<bool>,
+    /// Enable streaming of tool call deltas.
+    pub enable_tool_streaming: Option<bool>,
+    /// Cache key hint for prompt caching.
+    pub cache_key: Option<String>,
+    /// Response format hint for structured output.
+    pub response_format: Option<ResponseFormat>,
+    /// Adapter-specific passthrough fields.
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Canonical policy for how the model may call tools.
+#[derive(Debug, Clone)]
+pub enum ToolChoice {
+    /// Model decides whether and which tools to call.
+    Auto,
+    /// Model must not call any tools.
+    None,
+    /// Model must call at least one tool.
+    Required,
+    /// Model must call the named tool.
+    Specific {
+        /// Name of the required tool.
+        name: String,
+    },
+}
+
+/// Canonical response formatting hint for adapters that support it.
+#[derive(Debug, Clone)]
+pub enum ResponseFormat {
+    /// Free-form text.
+    Text,
+    /// Structured JSON object.
+    JsonObject,
 }

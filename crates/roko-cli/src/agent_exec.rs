@@ -32,6 +32,11 @@ pub struct AgentExecOpts<'a> {
     pub resume_session: Option<&'a str>,
     /// Extra env vars for the child process (gateway config, etc).
     pub env_vars: &'a [(String, String)],
+    /// Logical role used to scope safety policies and model routing.
+    ///
+    /// When set, the safety layer applies role-specific policies and the
+    /// CascadeRouter can make role-aware model selection decisions.
+    pub role: Option<&'a str>,
 }
 
 /// Episode metadata for agent execution paths that should persist learning data.
@@ -139,7 +144,7 @@ async fn run_agent_capture_impl(
             bare_mode: true,
             dangerously_skip_permissions: true,
             name: format!("{}:{model}", resolved.provider_kind.label()),
-            role: None,
+            role: opts.role.map(str::to_string),
         },
         format!("create agent for model {model}"),
     )?;

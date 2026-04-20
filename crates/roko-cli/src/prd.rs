@@ -232,6 +232,7 @@ async fn regenerate_old_format_plan(
             system_prompt: Some(&system),
             resume_session: None,
             env_vars,
+            role: Some("strategist"),
         },
         AgentExecEpisode {
             task_kind: "plan-regenerate",
@@ -820,6 +821,7 @@ pub async fn generate_plan_from_prd_with_failure_context(
                 system_prompt: Some(&system),
                 resume_session: None,
                 env_vars: &resolved.config.agent.env,
+                role: Some("strategist"),
             },
             AgentExecEpisode {
                 task_kind: "prd-plan-generate",

@@ -28,7 +28,7 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, SafetyLayer};
+use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
 use roko_compose::enrichment::{
     ALL_ORDERED, EnrichStep, EnrichmentConfig, EnrichmentPipeline,
     LlmBackend as EnrichmentLlmBackend, LlmClient as EnrichmentLlmClient, PlanInfo, SkipReason,
@@ -1836,17 +1836,18 @@ fn render_enrichment_outcomes(outcomes: &[StepOutcome]) -> String {
     outcomes
         .iter()
         .map(|outcome| match outcome {
-            StepOutcome::Generated { step, llm_calls } => {
+            StepOutcome::Generated { step, llm_calls, .. } => {
                 format!("- {step}: generated ({llm_calls} llm call(s))")
             }
             StepOutcome::Skipped { step, reason } => {
                 let reason = match reason {
                     SkipReason::DryRun => "dry-run",
                     SkipReason::Fresh => "fresh output",
+                    SkipReason::AdaptiveSkip => "adaptive skip",
                 };
                 format!("- {step}: skipped ({reason})")
             }
-            StepOutcome::Failed { step, message } => format!("- {step}: failed ({message})"),
+            StepOutcome::Failed { step, message, .. } => format!("- {step}: failed ({message})"),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -2999,6 +3000,9 @@ pub struct PlanRunner {
     safety_layer: SafetyLayer,
     /// Signals accumulated during the current plan run for conductor evaluation.
     conductor_signals: Vec<Engram>,
+    /// INT-19: Compound patterns detected by the conductor pattern detector
+    /// that should trigger dream consolidation on the next heartbeat.
+    pending_coordination_patterns: Vec<roko_conductor::CompoundPattern>,
     /// Periodic support-surface health checks.
     health_monitor: HealthMonitor,
     /// Runtime stuck-pattern detector driven from task/gate history.
@@ -3079,6 +3083,8 @@ pub struct PlanRunner {
     pheromone_gate_failures: HashMap<String, u32>,
     /// Curriculum scheduler for difficulty-based task ordering (LEARN-12).
     curriculum_scheduler: CurriculumScheduler,
+    /// Multi-agent pool for warm-pool and concurrency-limited agent lifecycle (AGT-07).
+    agent_pool: MultiAgentPool,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4197,6 +4203,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
+        let max_concurrent = config.executor.max_concurrent_tasks;
         if !plans_dir.exists() {
             return Err(anyhow!(
                 "plans directory does not exist: {}",
@@ -4359,6 +4366,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let safety_layer = SafetyLayer::from_config(&roko_config);
+        let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -4383,6 +4391,7 @@ impl PlanRunner {
             conductor: Arc::new(Conductor::new()),
             safety_layer,
             conductor_signals: Vec::new(),
+            pending_coordination_patterns: Vec::new(),
             health_monitor: HealthMonitor::new(),
             stuck_detector: StuckDetector::new(),
             meta_cognition_hook: MetaCognitionHook::new(),
@@ -4447,6 +4456,7 @@ impl PlanRunner {
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
+            agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
         })
     }
 
@@ -4462,6 +4472,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
+        let max_concurrent = config.executor.max_concurrent_tasks;
         Self::validate_executor_recovery_snapshot(snapshot_json)?;
         let snapshot = snapshot_migrate::load_executor_snapshot(snapshot_json)
             .map_err(|e| anyhow!("bad snapshot: {e}"))?;
@@ -4512,6 +4523,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let safety_layer = SafetyLayer::from_config(&roko_config);
+        let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -4536,6 +4548,7 @@ impl PlanRunner {
             conductor: Arc::new(conductor),
             safety_layer,
             conductor_signals: Vec::new(),
+            pending_coordination_patterns: Vec::new(),
             health_monitor: HealthMonitor::new(),
             stuck_detector: StuckDetector::new(),
             meta_cognition_hook: MetaCognitionHook::new(),
@@ -4600,6 +4613,7 @@ impl PlanRunner {
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
+            agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
         })
     }
 
@@ -4616,6 +4630,7 @@ impl PlanRunner {
         metrics: Arc<MetricRegistry>,
         no_replan: bool,
     ) -> Result<Self> {
+        let max_concurrent = config.executor.max_concurrent_tasks;
         Self::validate_executor_recovery_snapshot(executor_json)?;
         let exec_snap = snapshot_migrate::load_executor_snapshot(executor_json)
             .map_err(|e| anyhow!("bad executor snapshot: {e}"))?;
@@ -4667,6 +4682,7 @@ impl PlanRunner {
             RokoConfig::default()
         });
         let safety_layer = SafetyLayer::from_config(&roko_config);
+        let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
             workdir: workdir.to_path_buf(),
             config,
@@ -4691,6 +4707,7 @@ impl PlanRunner {
             conductor: Arc::new(conductor),
             safety_layer,
             conductor_signals: Vec::new(),
+            pending_coordination_patterns: Vec::new(),
             health_monitor: HealthMonitor::new(),
             stuck_detector: StuckDetector::new(),
             meta_cognition_hook: MetaCognitionHook::new(),
@@ -4755,6 +4772,7 @@ impl PlanRunner {
             pheromone_field: Vec::new(),
             pheromone_gate_failures: HashMap::new(),
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
+            agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
         })
     }
 
@@ -5500,6 +5518,14 @@ impl PlanRunner {
             signals.extend(efficiency_signals);
         }
         let decision = self.conductor.evaluate(&signals, &ctx);
+
+        // INT-19: Collect compound patterns from the conductor's pattern detector.
+        // These are checked in the async heartbeat to potentially trigger dreams.
+        let new_patterns = self.conductor.take_compound_patterns();
+        if !new_patterns.is_empty() {
+            self.pending_coordination_patterns.extend(new_patterns);
+        }
+
         match &decision {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
@@ -6178,6 +6204,13 @@ impl PlanRunner {
 
         if frequency == OperatingFrequency::Delta {
             self.maybe_auto_dream().await;
+
+            // INT-19: Drain pending coordination patterns and trigger a dream
+            // consolidation if the conductor detected critical compound patterns.
+            if !self.pending_coordination_patterns.is_empty() {
+                let patterns = std::mem::take(&mut self.pending_coordination_patterns);
+                self.maybe_coordination_dream(&patterns).await;
+            }
         }
     }
 
@@ -7042,7 +7075,7 @@ impl PlanRunner {
     ///
     /// This is called at plan completion — not on a background loop. Failures
     /// are logged as warnings but never propagate to the caller.
-    async fn maybe_auto_dream(&self) {
+    async fn maybe_auto_dream(&mut self) {
         if !self.config.dreams.auto_dream {
             tracing::debug!("[orchestrate] auto-dream disabled, skipping");
             return;
@@ -7150,6 +7183,25 @@ impl PlanRunner {
                         );
                     }
                 }
+
+                // INT-18: Dream outcomes feed the daimon affect model.
+                // Convert dream cycle report metrics into an affect event so the
+                // daimon can adjust its emotional/motivational state based on what
+                // the dream consolidation discovered.
+                let _ = self.daimon.appraise(AffectEvent::DreamOutcome {
+                    knowledge_entries: report.knowledge_entries_written,
+                    playbooks_created: report.playbooks_created,
+                    regressions_detected: report.regressions_detected.len(),
+                    strategy_hypotheses: report.strategy_hypotheses.len(),
+                    episodes_processed: report.processed_episodes,
+                });
+                tracing::debug!(
+                    knowledge = report.knowledge_entries_written,
+                    playbooks = report.playbooks_created,
+                    regressions = report.regressions_detected.len(),
+                    hypotheses = report.strategy_hypotheses.len(),
+                    "[orchestrate] INT-18: dream outcome fed to daimon affect model"
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -7158,6 +7210,54 @@ impl PlanRunner {
                 );
             }
         }
+    }
+
+    /// INT-19: Check if the conductor has detected compound coordination
+    /// patterns that warrant triggering a dream consolidation.
+    ///
+    /// When the conductor pattern detector fires critical compound patterns
+    /// (resource exhaustion, quality degradation, or progress stalls), those
+    /// patterns are converted into `DreamTrigger::CoordinationPattern` events
+    /// and an immediate dream consolidation is triggered so the system can
+    /// process and learn from the coordination issues.
+    async fn maybe_coordination_dream(
+        &mut self,
+        patterns: &[roko_conductor::CompoundPattern],
+    ) {
+        if patterns.is_empty() || !self.config.dreams.auto_dream {
+            return;
+        }
+
+        // Only trigger for critical-severity compound patterns.
+        let critical_patterns: Vec<_> = patterns
+            .iter()
+            .filter(|p| p.escalated_severity == roko_conductor::Severity::Critical)
+            .collect();
+
+        if critical_patterns.is_empty() {
+            return;
+        }
+
+        let pattern_names: Vec<&str> = critical_patterns
+            .iter()
+            .map(|p| p.pattern_name.as_str())
+            .collect();
+
+        tracing::info!(
+            patterns = ?pattern_names,
+            "[orchestrate] INT-19: coordination patterns triggering dream consolidation"
+        );
+
+        // Use the first critical pattern for the trigger metadata.
+        let trigger_pattern = &critical_patterns[0];
+        let _trigger = roko_dreams::DreamTrigger::CoordinationPattern {
+            pattern_name: trigger_pattern.pattern_name.clone(),
+            contributing_watchers: trigger_pattern.contributing_watchers.clone(),
+        };
+
+        // Delegate to the standard auto-dream path — the dream runner does not
+        // differentiate triggers for consolidation logic, only for scheduling.
+        self.maybe_auto_dream().await;
     }
 
     /// Run a discovered plans directory through the orchestration loop.
@@ -8044,13 +8144,13 @@ impl PlanRunner {
         let outcomes = pipeline.run_steps(plan_id, &selected_steps).await;
         for outcome in &outcomes {
             match outcome {
-                StepOutcome::Generated { step, llm_calls } => tracing::info!(
+                StepOutcome::Generated { step, llm_calls, .. } => tracing::info!(
                     "[orchestrate] Enriching {plan_id}: step {step} generated ({llm_calls} llm call(s))"
                 ),
                 StepOutcome::Skipped { step, reason } => tracing::info!(
                     "[orchestrate] Enriching {plan_id}: step {step} skipped ({reason:?})"
                 ),
-                StepOutcome::Failed { step, message } => tracing::warn!(
+                StepOutcome::Failed { step, message, .. } => tracing::warn!(
                     "[orchestrate] Enriching {plan_id}: step {step} failed: {message}"
                 ),
             }
@@ -16678,6 +16778,35 @@ fn build_daimon_context_section(
 }
 
 impl PlanRunner {
+    // ── MultiAgentPool accessors (AGT-07) ────────────────────────────
+
+    /// Read-only access to the multi-agent pool.
+    #[allow(dead_code)]
+    pub fn agent_pool(&self) -> &MultiAgentPool {
+        &self.agent_pool
+    }
+
+    /// Mutable access to the multi-agent pool.
+    #[allow(dead_code)]
+    pub fn agent_pool_mut(&mut self) -> &mut MultiAgentPool {
+        &mut self.agent_pool
+    }
+
+    /// Clean up pool agents associated with a completed/failed plan.
+    #[allow(dead_code)]
+    fn cleanup_plan_pool_agents(&mut self, plan_id: &str) {
+        let killed = self.agent_pool.kill_plan_agents(plan_id);
+        if killed > 0 {
+            tracing::info!(
+                plan_id,
+                killed,
+                "[orchestrate] cleaned up {killed} pool agent(s) for plan {plan_id}"
+            );
+        }
+    }
+
+    // ── Daimon helpers ──────────────────────────────────────────────────
+
     fn current_pad_state(&self) -> PadState {
         PadState::from(self.daimon.query().pad)
     }

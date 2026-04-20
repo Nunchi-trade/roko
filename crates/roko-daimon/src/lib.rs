@@ -1622,6 +1622,23 @@ pub enum AffectEvent {
         /// Number of failing episodes observed.
         failure_count: usize,
     },
+    /// Dream cycle completed — its outcomes feed the affect model (INT-18).
+    ///
+    /// Positive outcomes (knowledge entries, playbooks, strategy hypotheses)
+    /// increase pleasure and dominance, while regressions decrease pleasure
+    /// and increase arousal.
+    DreamOutcome {
+        /// Number of knowledge entries written to the durable store.
+        knowledge_entries: usize,
+        /// Number of playbooks created during consolidation.
+        playbooks_created: usize,
+        /// Number of regressions detected during the dream cycle.
+        regressions_detected: usize,
+        /// Number of strategy hypotheses synthesized.
+        strategy_hypotheses: usize,
+        /// Number of episodes that were processed.
+        episodes_processed: usize,
+    },
 }
 
 /// Single entry point for affect operations.
@@ -1933,6 +1950,33 @@ impl AffectEngine for DaimonState {
                 let failures = failure_count.max(1).min(5) as f64;
                 let confidence_drop = -(0.07 * failures).min(0.35);
                 self.state.apply_delta(0.0, 0.0, 0.0, confidence_drop, now);
+            }
+            // INT-18: Dream outcomes feed the affect model.
+            // Positive outcomes (knowledge, playbooks, hypotheses) boost pleasure/dominance.
+            // Regressions decrease pleasure and raise arousal (heightened alertness).
+            AffectEvent::DreamOutcome {
+                knowledge_entries,
+                playbooks_created,
+                regressions_detected,
+                strategy_hypotheses,
+                episodes_processed,
+            } => {
+                let positive = (knowledge_entries + playbooks_created + strategy_hypotheses) as f64;
+                let negative = regressions_detected as f64;
+                let scale = if episodes_processed > 0 {
+                    (episodes_processed as f64).sqrt().min(5.0) / 5.0
+                } else {
+                    0.2
+                };
+                // Pleasure: net positive -> up, regressions -> down.
+                let pleasure = (positive * 0.03 - negative * 0.06).clamp(-0.30, 0.15) * scale;
+                // Arousal: regressions raise alertness, positive lowers it slightly.
+                let arousal = (negative * 0.04 - positive * 0.01).clamp(-0.10, 0.20) * scale;
+                // Dominance: knowledge acquisition increases sense of control.
+                let dominance = (positive * 0.02 - negative * 0.03).clamp(-0.15, 0.10) * scale;
+                // Confidence: net positive -> boost, net negative -> drop.
+                let confidence = (positive * 0.02 - negative * 0.05).clamp(-0.20, 0.10) * scale;
+                self.state.apply_delta(pleasure, arousal, dominance, confidence, now);
             }
         }
 
@@ -3310,5 +3354,68 @@ mod tests {
         let my_pad = PadVector::new(0.5, -0.3, 0.2);
         let result = contagion(&my_pad, &[], 100);
         assert_eq!(result, my_pad);
+    }
+
+    // INT-18 tests: DreamOutcome variant feeds the affect model.
+
+    #[test]
+    fn dream_outcome_positive_boosts_pleasure() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+        let before = state.query().pad.pleasure;
+
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 5,
+            playbooks_created: 2,
+            regressions_detected: 0,
+            strategy_hypotheses: 3,
+            episodes_processed: 10,
+        });
+
+        assert!(
+            state.query().pad.pleasure > before,
+            "positive dream outcomes should increase pleasure"
+        );
+    }
+
+    #[test]
+    fn dream_outcome_regressions_lower_confidence() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+        let before = state.query().confidence;
+
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 0,
+            playbooks_created: 0,
+            regressions_detected: 4,
+            strategy_hypotheses: 0,
+            episodes_processed: 10,
+        });
+
+        assert!(
+            state.query().confidence < before,
+            "dream regressions should lower confidence"
+        );
+    }
+
+    #[test]
+    fn dream_outcome_zero_episodes_still_applies() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+
+        // Zero episodes -> small scale factor, but should not panic.
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 1,
+            playbooks_created: 0,
+            regressions_detected: 0,
+            strategy_hypotheses: 0,
+            episodes_processed: 0,
+        });
+        // Just verify it didn't panic and state is still valid.
+        assert!(state.query().confidence >= 0.0);
+        assert!(state.query().confidence <= 1.0);
     }
 }

@@ -234,6 +234,17 @@ pub enum DreamTrigger {
         #[serde(default)]
         engram_hash: String,
     },
+    /// Coordination pattern trigger (INT-19): conductor compound patterns
+    /// trigger dream consolidation so the system can process and learn from
+    /// the detected coordination issues.
+    CoordinationPattern {
+        /// Name of the compound pattern that triggered the dream.
+        #[serde(default)]
+        pattern_name: String,
+        /// Watchers that contributed to the pattern detection.
+        #[serde(default)]
+        contributing_watchers: Vec<String>,
+    },
 }
 
 impl DreamTrigger {
@@ -246,6 +257,7 @@ impl DreamTrigger {
             Self::Manual => "manual",
             Self::EpisodeCount => "episode_count",
             Self::BusPulse { .. } => "bus_pulse",
+            Self::CoordinationPattern { .. } => "coordination_pattern",
         }
     }
 }
@@ -376,6 +388,8 @@ impl DreamSchedulePolicy {
             DreamTrigger::Manual => self.manual_enabled,
             DreamTrigger::EpisodeCount => self.enabled && self.episode_count_trigger > 0,
             DreamTrigger::BusPulse { .. } => self.enabled,
+            // INT-19: coordination patterns always allowed when dreams are enabled.
+            DreamTrigger::CoordinationPattern { .. } => self.enabled,
         }
     }
 
@@ -397,6 +411,8 @@ impl DreamSchedulePolicy {
             DreamTrigger::Manual => Some(Duration::ZERO),
             DreamTrigger::EpisodeCount => Some(Duration::ZERO),
             DreamTrigger::BusPulse { .. } => Some(Duration::ZERO),
+            // INT-19: coordination pattern triggers fire immediately.
+            DreamTrigger::CoordinationPattern { .. } => Some(Duration::ZERO),
         }
     }
 }
@@ -1211,6 +1227,38 @@ mod tests {
     fn schedule_manual_trigger_is_allowed() {
         let policy = DreamSchedulePolicy::default();
         let delay = policy.trigger_delay(&DreamTrigger::Manual, None, None, Utc::now());
+        assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    // INT-19: Coordination pattern trigger tests.
+
+    #[test]
+    fn coordination_pattern_trigger_label() {
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "resource_exhaustion".to_string(),
+            contributing_watchers: vec!["cost-overrun".to_string(), "time-overrun".to_string()],
+        };
+        assert_eq!(trigger.label(), "coordination_pattern");
+    }
+
+    #[test]
+    fn coordination_pattern_trigger_is_allowed() {
+        let policy = DreamSchedulePolicy::default();
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "quality_degradation".to_string(),
+            contributing_watchers: vec!["compile-fail-repeat".to_string()],
+        };
+        assert!(policy.allows(&trigger));
+    }
+
+    #[test]
+    fn coordination_pattern_trigger_immediate_delay() {
+        let policy = DreamSchedulePolicy::default();
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "progress_stall".to_string(),
+            contributing_watchers: vec![],
+        };
+        let delay = policy.trigger_delay(&trigger, None, None, Utc::now());
         assert_eq!(delay, Some(Duration::ZERO));
     }
 

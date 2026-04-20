@@ -73,3 +73,4 @@ pub use stuck_detection::{
 pub use threshold_learner::{AdaptiveThreshold, InterventionOutcome, ThresholdLearner};
 pub use yerkes_dodson::YerkesDodson;
 pub use self_healing::{HealingAction, SelfHealingPolicy, SelfHealingState};
+pub use pattern_detector::{CompoundPattern, PatternDetector, WatcherFamily};

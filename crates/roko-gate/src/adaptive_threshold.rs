@@ -3,6 +3,8 @@
 //! Uses exponential moving averages (EMA) per gate rung to track pass rates
 //! and suggest retry budgets and skip decisions.
 
+use crate::hotelling::HotellingDetector;
+use crate::spc::{SpcAlert, SpcDetector};
 use roko_core::Temperament;
 use roko_core::config::AgentThresholds;
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,22 @@ pub struct AdaptiveThresholds {
     /// CUSUM decision threshold (configurable, default 4.0).
     #[serde(default = "default_cusum_threshold")]
     cusum_threshold: f64,
+    /// Per-rung SPC detectors (CUSUM + EWMA Control Chart + BOCPD).
+    /// Wired in GATE-01: each `observe()` call feeds through all three
+    /// detectors and collects any alerts.
+    #[serde(default)]
+    spc_detectors: HashMap<u32, SpcDetector>,
+    /// Multi-gate joint anomaly detector (GATE-08).
+    /// Tracks the full pass-rate vector across rungs and detects systemic
+    /// shifts via Hotelling's T-squared statistic.
+    #[serde(skip)]
+    hotelling: Option<HotellingDetector>,
+    /// SPC alerts accumulated since last drain.
+    #[serde(skip)]
+    pending_spc_alerts: Vec<(u32, SpcAlert)>,
+    /// Whether the last full-pipeline observation triggered a joint anomaly.
+    #[serde(skip)]
+    joint_anomaly_detected: bool,
 }
 
 fn default_cusum_sensitivity() -> f64 {
@@ -89,6 +107,10 @@ impl AdaptiveThresholds {
             rungs: HashMap::new(),
             cusum_sensitivity: DEFAULT_CUSUM_SENSITIVITY,
             cusum_threshold: DEFAULT_CUSUM_THRESHOLD,
+            spc_detectors: HashMap::new(),
+            hotelling: None,
+            pending_spc_alerts: Vec::new(),
+            joint_anomaly_detected: false,
         }
     }
 
@@ -191,9 +213,10 @@ impl AdaptiveThresholds {
 
     /// Update statistics for a rung after a gate run.
     ///
-    /// Updates EMA pass rate, consecutive pass streak, and CUSUM accumulators.
-    /// When CUSUM detects a shift, the EMA is reset to the current observation
-    /// and the shift flag is set.
+    /// Updates EMA pass rate, consecutive pass streak, CUSUM accumulators,
+    /// and feeds the observation to the per-rung SPC detector ensemble
+    /// (CUSUM + EWMA Control Chart + BOCPD). When any detector fires, the
+    /// alert is collected and can be drained via [`Self::drain_spc_alerts`].
     pub fn observe(&mut self, rung: u32, passed: bool) {
         let stats = self.rungs.entry(rung).or_default();
         let value = if passed { 1.0 } else { 0.0 };
@@ -231,6 +254,19 @@ impl AdaptiveThresholds {
             stats.cusum_low = 0.0;
         } else {
             stats.cusum_shift_detected = false;
+        }
+
+        // ── SPC detector ensemble (GATE-01 wiring) ──────────────────────
+        // Feed the pass/fail observation to the per-rung SPC detector.
+        // Lazily initialize with the current EMA as the target.
+        let target = stats.ema_pass_rate;
+        let spc = self
+            .spc_detectors
+            .entry(rung)
+            .or_insert_with(|| SpcDetector::new(target, 0.1));
+        let alerts = spc.update(value);
+        for alert in alerts {
+            self.pending_spc_alerts.push((rung, alert));
         }
     }
 
@@ -300,6 +336,85 @@ impl AdaptiveThresholds {
             .get(&rung)
             .map(|s| (s.cusum_high, s.cusum_low))
             .unwrap_or((0.0, 0.0))
+    }
+
+    /// Drain all pending SPC alerts accumulated since the last drain.
+    ///
+    /// Each alert is a `(rung, SpcAlert)` pair. The caller (typically the
+    /// conductor or orchestrator) should log or react to these alerts.
+    pub fn drain_spc_alerts(&mut self) -> Vec<(u32, SpcAlert)> {
+        std::mem::take(&mut self.pending_spc_alerts)
+    }
+
+    /// Whether any SPC alerts are pending.
+    #[must_use]
+    pub fn has_spc_alerts(&self) -> bool {
+        !self.pending_spc_alerts.is_empty()
+    }
+
+    /// Return a reference to the per-rung SPC detector, if initialized.
+    #[must_use]
+    pub fn spc_detector(&self, rung: u32) -> Option<&SpcDetector> {
+        self.spc_detectors.get(&rung)
+    }
+
+    /// Record a complete pipeline run for joint anomaly detection (GATE-08).
+    ///
+    /// `pass_rates` is a vector of pass/fail values (0.0 or 1.0) for each
+    /// gate in the pipeline, in a stable order. The Hotelling detector is
+    /// lazily initialized on the first call. When the T-squared statistic
+    /// exceeds the chi-squared threshold, `joint_anomaly_detected` is set.
+    pub fn observe_pipeline(&mut self, pass_rates: &[f64]) {
+        if pass_rates.is_empty() {
+            return;
+        }
+
+        let det = self
+            .hotelling
+            .get_or_insert_with(|| HotellingDetector::new(pass_rates.len(), 0.05));
+
+        // Dimension mismatch: skip if the pipeline size changed.
+        if pass_rates.len() != det.mean().len() {
+            return;
+        }
+
+        det.update(pass_rates);
+        self.joint_anomaly_detected = det.is_anomalous(pass_rates);
+    }
+
+    /// Whether the last `observe_pipeline()` call detected a joint anomaly.
+    #[must_use]
+    pub fn joint_anomaly_detected(&self) -> bool {
+        self.joint_anomaly_detected
+    }
+
+    /// Return the Hotelling detector, if initialized.
+    #[must_use]
+    pub fn hotelling_detector(&self) -> Option<&HotellingDetector> {
+        self.hotelling.as_ref()
+    }
+
+    /// Update the adaptive threshold for a rung based on a prediction
+    /// residual (TA-15: gate threshold EMA from prediction residuals).
+    ///
+    /// When oracles systematically overestimate task success, the absolute
+    /// residual tightens the gate threshold for the corresponding rung.
+    /// This creates automatic gate tightening without manual tuning.
+    pub fn observe_residual(&mut self, rung: u32, residual: f64) {
+        let stats = self.rungs.entry(rung).or_default();
+        let abs_residual = residual.abs().clamp(0.0, 1.0);
+
+        // Nudge the EMA toward caution when the residual indicates
+        // over-prediction (positive residual = predicted success but
+        // actually failed). We use a softer alpha (0.05) to avoid
+        // over-reacting to single observations.
+        const RESIDUAL_ALPHA: f64 = 0.05;
+        if stats.total_observations > 0 {
+            // Tighten: reduce the pass-rate expectation proportionally
+            // to the absolute residual magnitude.
+            let adjustment = RESIDUAL_ALPHA * abs_residual;
+            stats.ema_pass_rate = (stats.ema_pass_rate - adjustment).clamp(0.0, 1.0);
+        }
     }
 
     /// Incorporate neuro-derived knowledge hints into threshold tuning
@@ -409,6 +524,10 @@ impl Default for AdaptiveThresholds {
             rungs: HashMap::new(),
             cusum_sensitivity: DEFAULT_CUSUM_SENSITIVITY,
             cusum_threshold: DEFAULT_CUSUM_THRESHOLD,
+            spc_detectors: HashMap::new(),
+            hotelling: None,
+            pending_spc_alerts: Vec::new(),
+            joint_anomaly_detected: false,
         }
     }
 }
@@ -625,5 +744,106 @@ mod tests {
             !at.should_skip_rung_for_temperament(1, Temperament::Conservative),
             "conservative should never skip"
         );
+    }
+
+    // ─── SPC wiring tests (GATE-01) ──────��─────────────────────────
+
+    #[test]
+    fn spc_detector_initialized_on_first_observe() {
+        let mut at = AdaptiveThresholds::new();
+        assert!(at.spc_detector(0).is_none());
+        at.observe(0, true);
+        assert!(at.spc_detector(0).is_some());
+    }
+
+    #[test]
+    fn spc_alerts_accumulate_on_major_shift() {
+        let mut at = AdaptiveThresholds::new();
+        // Establish a stable baseline.
+        for _ in 0..30 {
+            at.observe(0, true);
+        }
+        assert!(!at.has_spc_alerts());
+
+        // Inject a major shift — should trigger at least one SPC alert.
+        for _ in 0..50 {
+            at.observe(0, false);
+        }
+
+        // At least one of the three SPC detectors should have fired.
+        let alerts = at.drain_spc_alerts();
+        assert!(!alerts.is_empty(), "SPC should detect major shift after 50 failures");
+        assert!(alerts.iter().all(|(rung, _)| *rung == 0));
+    }
+
+    #[test]
+    fn spc_alerts_drain_empties_pending() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..30 {
+            at.observe(0, true);
+        }
+        for _ in 0..30 {
+            at.observe(0, false);
+        }
+        let _ = at.drain_spc_alerts();
+        assert!(!at.has_spc_alerts());
+    }
+
+    // ─── Hotelling / pipeline tests (GATE-08 wiring) ──────────────
+
+    #[test]
+    fn hotelling_initialized_on_pipeline_observe() {
+        let mut at = AdaptiveThresholds::new();
+        assert!(at.hotelling_detector().is_none());
+        at.observe_pipeline(&[1.0, 1.0, 1.0]);
+        assert!(at.hotelling_detector().is_some());
+    }
+
+    #[test]
+    fn hotelling_detects_joint_anomaly() {
+        let mut at = AdaptiveThresholds::new();
+        // Establish a wider baseline with more variance to avoid
+        // false anomalies on near-mean points.
+        for i in 0..200 {
+            let v = 0.8 + (i as f64 % 20.0) * 0.01;
+            at.observe_pipeline(&[v, v]);
+        }
+
+        // A massive joint shift should be detected.
+        at.observe_pipeline(&[0.0, 0.0]);
+        assert!(at.joint_anomaly_detected());
+    }
+
+    // ─── Residual-based threshold update (TA-15) ──────────────────
+
+    #[test]
+    fn residual_tightens_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        // Establish some baseline.
+        for _ in 0..20 {
+            at.observe(0, true);
+        }
+        let before = at.threshold_for(0);
+
+        // Large residual should tighten (reduce) the threshold.
+        at.observe_residual(0, 0.5);
+        let after = at.threshold_for(0);
+
+        assert!(
+            after < before,
+            "residual should tighten threshold: {after} < {before}"
+        );
+    }
+
+    #[test]
+    fn zero_residual_does_not_change_threshold() {
+        let mut at = AdaptiveThresholds::new();
+        for _ in 0..20 {
+            at.observe(0, true);
+        }
+        let before = at.threshold_for(0);
+        at.observe_residual(0, 0.0);
+        let after = at.threshold_for(0);
+        assert!((after - before).abs() < 1e-10);
     }
 }
