@@ -21,6 +21,9 @@ pub mod hdc;
 pub mod pad;
 /// Robust statistics: trimmed mean, MAD, Hodges-Lehmann estimator (TA-10).
 pub mod robust_stats;
+/// Topological Data Analysis: persistence diagrams, Takens embedding,
+/// persistence landscapes (TA-09).
+pub mod tda;
 pub mod tier;
 
 pub use hdc::{

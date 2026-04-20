@@ -105,6 +105,88 @@ struct SearchCodeArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct CommentIssueArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloseIssueArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddLabelsArguments {
+    owner: String,
+    repo: String,
+    number: u64,
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateLabelArguments {
+    owner: String,
+    repo: String,
+    name: String,
+    color: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListCommitsArguments {
+    owner: String,
+    repo: String,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+    #[serde(default)]
+    per_page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBranchArguments {
+    owner: String,
+    repo: String,
+    branch: String,
+    from_sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetBranchArguments {
+    owner: String,
+    repo: String,
+    branch: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareBranchesArguments {
+    owner: String,
+    repo: String,
+    base: String,
+    head: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetActionsStatusArguments {
+    owner: String,
+    repo: String,
+    #[serde(rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommentPrArguments {
     owner: String,
     repo: String,
@@ -437,7 +519,7 @@ fn handle_tools_list() -> Value {
                         "repo": {"type": "string"},
                         "number": {"type": "integer", "minimum": 1}
                     },
-                    "required": ["owner", "repo", "number", "merge_method"],
+                    "required": ["owner", "repo", "number"],
                     "additionalProperties": false
                 })
             ),
@@ -773,12 +855,6 @@ fn empty_json_object() -> Value {
     Value::Object(serde_json::Map::default())
 }
 
-fn unsupported_tool(name: &str) -> Result<Value, JsonRpcError> {
-    Err(JsonRpcError::invalid_params(format!(
-        "tool handler `{name}` is not implemented yet"
-    )))
-}
-
 fn handle_list_prs(arguments: Value) -> Result<Value, JsonRpcError> {
     let args: ListPrsArguments = serde_json::from_value(arguments).map_err(|err| {
         JsonRpcError::invalid_params(format!("invalid github.list_prs args: {err}"))
@@ -937,23 +1013,79 @@ fn handle_create_issue(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_comment_issue(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.comment_issue")
+    let args: CommentIssueArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.comment_issue args: {err}"))
+    })?;
+    let client = github_client()?;
+    let comment = comment_on_issue(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "id": comment.id,
+                "html_url": comment.html_url,
+                "body": comment.body
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_close_issue(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.close_issue")
+    let args: CloseIssueArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.close_issue args: {err}"))
+    })?;
+    let client = github_client()?;
+    close_issue(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "owner": args.owner,
+                "repo": args.repo,
+                "number": args.number,
+                "state": "closed"
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_add_labels(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.add_labels")
+    let args: AddLabelsArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.add_labels args: {err}"))
+    })?;
+    let client = github_client()?;
+    let labels = add_labels_to_issue(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "number": args.number,
+                "labels": labels
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_create_label(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.create_label")
+    let args: CreateLabelArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.create_label args: {err}"))
+    })?;
+    let client = github_client()?;
+    let label = create_repo_label(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "name": label["name"],
+                "color": label["color"],
+                "description": label["description"]
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_get_file(arguments: Value) -> Result<Value, JsonRpcError> {
@@ -992,28 +1124,94 @@ fn handle_search_code(arguments: Value) -> Result<Value, JsonRpcError> {
 }
 
 fn handle_list_commits(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.list_commits")
+    let args: ListCommitsArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.list_commits args: {err}"))
+    })?;
+    let client = github_client()?;
+    let commits = list_commits(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({ "commits": commits }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_create_branch(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.create_branch")
+    let args: CreateBranchArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.create_branch args: {err}"))
+    })?;
+    let client = github_client()?;
+    let result = create_git_ref(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "ref": result["ref"],
+                "sha": result["object"]["sha"]
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_get_branch(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.get_branch")
+    let args: GetBranchArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.get_branch args: {err}"))
+    })?;
+    let client = github_client()?;
+    let branch = get_branch(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "name": branch["name"],
+                "sha": branch["commit"]["sha"],
+                "protected": branch["protected"]
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_compare_branches(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.compare_branches")
+    let args: CompareBranchesArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.compare_branches args: {err}"))
+    })?;
+    let client = github_client()?;
+    let comparison = compare_branches(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "status": comparison["status"],
+                "ahead_by": comparison["ahead_by"],
+                "behind_by": comparison["behind_by"],
+                "total_commits": comparison["total_commits"]
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn handle_get_actions_status(arguments: Value) -> Result<Value, JsonRpcError> {
-    drop(arguments);
-    unsupported_tool("github.get_actions_status")
+    let args: GetActionsStatusArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid github.get_actions_status args: {err}"))
+    })?;
+    let client = github_client()?;
+    let status = get_combined_status(&client, &args)?;
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "state": status["state"],
+                "total_count": status["total_count"],
+                "statuses": status["statuses"]
+            }).to_string()
+        }],
+        "isError": false
+    }))
 }
 
 fn github_tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -1541,6 +1739,345 @@ fn search_code(
     })
 }
 
+fn comment_on_issue(
+    client: &Client,
+    args: &CommentIssueArguments,
+) -> Result<GithubIssueComment, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{}/comments",
+        args.owner, args.repo, args.number
+    );
+    let payload = serde_json::json!({ "body": args.body });
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            request = request.bearer_auth(&token);
+            request.json(&payload)
+        },
+        "comment on issue",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub comment response: {err}")))
+}
+
+fn close_issue(client: &Client, args: &CloseIssueArguments) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{}",
+        args.owner, args.repo, args.number
+    );
+    let mut payload = serde_json::json!({ "state": "closed" });
+    if let Some(reason) = &args.reason {
+        payload["state_reason"] = Value::String(reason.clone());
+    }
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.patch(&url);
+            request = request.bearer_auth(&token);
+            request.json(&payload)
+        },
+        "close issue",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub issue response: {err}")))
+}
+
+fn add_labels_to_issue(
+    client: &Client,
+    args: &AddLabelsArguments,
+) -> Result<Vec<String>, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{}/labels",
+        args.owner, args.repo, args.number
+    );
+    let payload = serde_json::json!({ "labels": args.labels });
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            request = request.bearer_auth(&token);
+            request.json(&payload)
+        },
+        "add labels to issue",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    let labels: Vec<GithubLabel> = serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub labels response: {err}")))?;
+    Ok(labels.into_iter().map(|l| l.name).collect())
+}
+
+fn create_repo_label(client: &Client, args: &CreateLabelArguments) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/labels",
+        args.owner, args.repo
+    );
+    let mut payload = serde_json::json!({
+        "name": args.name,
+        "color": args.color,
+    });
+    if let Some(description) = &args.description {
+        payload["description"] = Value::String(description.clone());
+    }
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            request = request.bearer_auth(&token);
+            request.json(&payload)
+        },
+        "create label",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub label response: {err}")))
+}
+
+fn list_commits(client: &Client, args: &ListCommitsArguments) -> Result<Vec<Value>, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/commits",
+        args.owner, args.repo
+    );
+    let mut query: Vec<(&str, String)> = Vec::with_capacity(6);
+    if let Some(sha) = &args.sha {
+        query.push(("sha", sha.clone()));
+    }
+    if let Some(path) = &args.path {
+        query.push(("path", path.clone()));
+    }
+    if let Some(since) = &args.since {
+        query.push(("since", since.clone()));
+    }
+    if let Some(until) = &args.until {
+        query.push(("until", until.clone()));
+    }
+    query.push((
+        "per_page",
+        args.per_page.unwrap_or(30).clamp(1, 100).to_string(),
+    ));
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            request = request.bearer_auth(&token);
+            request.query(&query)
+        },
+        "list commits",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    let commits: Vec<Value> = serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub commits response: {err}")))?;
+    Ok(commits
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "sha": c["sha"],
+                "message": c["commit"]["message"],
+                "author": c["commit"]["author"]["name"],
+                "date": c["commit"]["author"]["date"],
+                "html_url": c["html_url"]
+            })
+        })
+        .collect())
+}
+
+fn create_git_ref(client: &Client, args: &CreateBranchArguments) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/refs",
+        args.owner, args.repo
+    );
+    let payload = serde_json::json!({
+        "ref": format!("refs/heads/{}", args.branch),
+        "sha": args.from_sha,
+    });
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.post(&url);
+            request = request.bearer_auth(&token);
+            request.json(&payload)
+        },
+        "create branch",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub ref response: {err}")))
+}
+
+fn get_branch(client: &Client, args: &GetBranchArguments) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/branches/{}",
+        args.owner, args.repo, args.branch
+    );
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            request = request.bearer_auth(&token);
+            request
+        },
+        "get branch",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub branch response: {err}")))
+}
+
+fn compare_branches(
+    client: &Client,
+    args: &CompareBranchesArguments,
+) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/compare/{}...{}",
+        args.owner, args.repo, args.base, args.head
+    );
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            request = request.bearer_auth(&token);
+            request
+        },
+        "compare branches",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body).map_err(|err| {
+        JsonRpcError::internal_error(format!("parse GitHub comparison response: {err}"))
+    })
+}
+
+fn get_combined_status(
+    client: &Client,
+    args: &GetActionsStatusArguments,
+) -> Result<Value, JsonRpcError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/commits/{}/status",
+        args.owner, args.repo, args.ref_name
+    );
+    let token = github_token()?;
+
+    let response = send_github_request(
+        || {
+            let mut request = client.get(&url);
+            request = request.bearer_auth(&token);
+            request
+        },
+        "get combined status",
+    )?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|err| JsonRpcError::internal_error(format!("read GitHub response: {err}")))?;
+    if !status.is_success() {
+        return Err(JsonRpcError::internal_error(format!(
+            "GitHub API returned {status}: {}",
+            body.trim()
+        )));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|err| JsonRpcError::internal_error(format!("parse GitHub status response: {err}")))
+}
+
 fn decode_github_file_content(content: &str) -> Result<Vec<u8>, JsonRpcError> {
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     BASE64
@@ -1864,10 +2401,12 @@ mod tests {
             get_pr["description"],
             "Get a pull request with diff stats and review summary."
         );
-        assert_eq!(
-            get_pr["inputSchema"]["required"],
-            json!(["owner", "repo", "number"])
-        );
+        let required = get_pr["inputSchema"]["required"]
+            .as_array()
+            .expect("required array");
+        assert!(required.contains(&json!("owner")));
+        assert!(required.contains(&json!("repo")));
+        assert!(required.contains(&json!("number")));
         assert!(
             get_pr["inputSchema"]["properties"]
                 .get("include_diff")

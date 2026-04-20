@@ -29,6 +29,8 @@ pub mod observer;
 pub mod phase2;
 /// Reputation Registry with 7-domain EMA scoring (CHAIN-03).
 pub mod reputation_registry;
+/// Chain domain DeFi tool definitions (10 core tools).
+pub mod tools;
 pub mod triage;
 pub mod types;
 pub mod validation_registry;
@@ -38,8 +40,9 @@ pub mod witness;
 pub use agent_registry::AgentRegistry;
 pub use client::ChainClient;
 pub use gate::{
-    MockTxSimulator, SimulationOutcome, TxSimGate, TxSimGateConfig, TxSimulator, WalletCheck,
-    WalletGate, WalletGateConfig,
+    MevAlert, MevAnalysisInput, MevDetector, MevDetectorConfig, MevGate, MevPattern, MevSeverity,
+    MempoolTx, MockTxSimulator, SandwichBundle, SimulationOutcome, TxSimGate, TxSimGateConfig,
+    TxSimulator, WalletCheck, WalletGate, WalletGateConfig,
 };
 pub use futures_market::{FuturesMarket, FuturesMarketConfig};
 pub use heartbeat_ext::{

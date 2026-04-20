@@ -80,6 +80,9 @@ pub mod bayesian_confidence;
 /// Budget tracking and enforcement guardrails for routing decisions.
 pub mod budget;
 pub mod cascade_router;
+/// Causal microstructure discovery: Granger causality, PC algorithm,
+/// and formal causal DAG construction from time series data (TA-08).
+pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
@@ -125,6 +128,9 @@ pub mod quality_judge;
 pub mod regression;
 /// Typed reinforcement signal categories for the learning pipeline (AS-11).
 pub mod reinforce_kind;
+/// Evolutionary resonant pattern organisms with Lotka-Volterra dynamics,
+/// Price equation tracking, and HDC genomes (TA-09).
+pub mod resonant_patterns;
 /// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
 pub mod research_pipeline;
 /// Lookahead and calibration shells around the shipped cascade router.

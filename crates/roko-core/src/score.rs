@@ -141,9 +141,35 @@ impl Score {
 
     /// Scalar effective score combining the primary axes plus salience and coherence.
     ///
-    /// The formula
-    /// `confidence × (1 + novelty) × (1 + utility) × reputation × (0.5 + 0.5 × salience) × (0.5 + 0.5 × coherence)`
-    /// was chosen so that:
+    /// # Formula (6-factor)
+    ///
+    /// ```text
+    /// effective = confidence
+    ///           × (1 + novelty)
+    ///           × (1 + utility)
+    ///           × reputation
+    ///           × salience_factor
+    ///           × coherence_factor
+    /// ```
+    ///
+    /// where `salience_factor` and `coherence_factor` are each `0.5 + 0.5 × axis`
+    /// when the axis is non-zero, or `1.0` when zero (opt-in soft damping).
+    ///
+    /// # Design rationale
+    ///
+    /// The original doc spec (doc 03-score-7-axis-appraisal.md) described a
+    /// 4-factor formula: `confidence × (1 + novelty) × (1 + utility) × reputation`.
+    /// This implementation **extends** the spec with two additional soft factors
+    /// (salience, coherence) because a 7-axis score type that ignores 3 of its
+    /// axes in the scalar reduction wastes information. The extension is
+    /// backward-compatible: when salience and coherence are zero (the default
+    /// for `Score::new()`), the 6-factor formula reduces exactly to the
+    /// 4-factor spec. Precision remains excluded by design -- it describes
+    /// applicability narrowness, not quality, and is consumed separately by
+    /// routers that need specificity ranking.
+    ///
+    /// # Properties
+    ///
     /// - zero confidence → zero effective score (false positives are worthless)
     /// - novelty and utility act as multipliers (additive bonuses to 1.0)
     /// - reputation directly scales the result

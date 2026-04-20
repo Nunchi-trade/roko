@@ -67,6 +67,24 @@ struct SlackDmArguments {
 }
 
 #[derive(Debug, Deserialize)]
+struct SlackGetChannelHistoryArguments {
+    channel: String,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    oldest: Option<String>,
+    #[serde(default)]
+    latest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackUpdateMessageArguments {
+    channel: String,
+    ts: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SlackPostMessageResponse {
     ok: bool,
     #[serde(default)]
@@ -321,6 +339,35 @@ fn handle_tools_list() -> Value {
                     "required": ["user_id", "text"],
                     "additionalProperties": false
                 }
+            }),
+            serde_json::json!({
+                "name": "slack.get_channel_history",
+                "description": "Get recent messages from a Slack channel.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "oldest": {"type": "string", "description": "Start of time range (ts)"},
+                        "latest": {"type": "string", "description": "End of time range (ts)"}
+                    },
+                    "required": ["channel"],
+                    "additionalProperties": false
+                }
+            }),
+            serde_json::json!({
+                "name": "slack.update_message",
+                "description": "Update an existing Slack message.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "channel": {"type": "string"},
+                        "ts": {"type": "string"},
+                        "text": {"type": "string"}
+                    },
+                    "required": ["channel", "ts", "text"],
+                    "additionalProperties": false
+                }
             })
         ]
     })
@@ -341,6 +388,8 @@ fn dispatch_tool_call(name: &str, arguments: Value) -> Result<Value, JsonRpcErro
         "slack.list_channels" => handle_slack_list_channels(arguments),
         "slack_lookup_user" => handle_slack_lookup_user(arguments),
         "slack_dm" => handle_slack_dm(arguments),
+        "slack.get_channel_history" => handle_slack_get_channel_history(arguments),
+        "slack.update_message" => handle_slack_update_message(arguments),
         _ => Err(JsonRpcError::invalid_params(format!(
             "unknown tool: {name}"
         ))),
@@ -496,6 +545,52 @@ fn handle_slack_lookup_user(arguments: Value) -> Result<Value, JsonRpcError> {
                 "real_name": result.real_name,
                 "email": result.email,
                 "matched_by": result.matched_by
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
+fn handle_slack_get_channel_history(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackGetChannelHistoryArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid slack.get_channel_history args: {err}"))
+    })?;
+
+    let client = SlackClient::from_env()?;
+    let messages = client.get_channel_history(
+        &args.channel,
+        args.limit,
+        args.oldest.as_deref(),
+        args.latest.as_deref(),
+    )?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "channel": args.channel,
+                "messages": messages
+            }).to_string()
+        }],
+        "isError": false
+    }))
+}
+
+fn handle_slack_update_message(arguments: Value) -> Result<Value, JsonRpcError> {
+    let args: SlackUpdateMessageArguments = serde_json::from_value(arguments).map_err(|err| {
+        JsonRpcError::invalid_params(format!("invalid slack.update_message args: {err}"))
+    })?;
+
+    let client = SlackClient::from_env()?;
+    client.update_message(&args.channel, &args.ts, &args.text)?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::json!({
+                "channel": args.channel,
+                "ts": args.ts,
+                "updated": true
             }).to_string()
         }],
         "isError": false
@@ -816,6 +911,91 @@ impl SlackClient {
         })
     }
 
+    fn get_channel_history(
+        &self,
+        channel: &str,
+        limit: Option<u32>,
+        oldest: Option<&str>,
+        latest: Option<&str>,
+    ) -> Result<Vec<Value>, JsonRpcError> {
+        let headers = self.auth_headers()?;
+
+        let mut request = self
+            .client
+            .get("https://slack.com/api/conversations.history")
+            .headers(headers)
+            .query(&[("channel", channel)]);
+
+        let limit_str;
+        if let Some(limit) = limit {
+            limit_str = limit.clamp(1, 1000).to_string();
+            request = request.query(&[("limit", limit_str.as_str())]);
+        }
+        if let Some(oldest) = oldest {
+            request = request.query(&[("oldest", oldest)]);
+        }
+        if let Some(latest) = latest {
+            request = request.query(&[("latest", latest)]);
+        }
+
+        let response = request
+            .send()
+            .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+
+        let parsed: SlackThreadResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
+
+        if !parsed.ok {
+            let error = parsed.error.as_deref().unwrap_or("unknown");
+            return Err(JsonRpcError::internal_error(format!(
+                "Slack API error: {error}"
+            )));
+        }
+
+        Ok(parsed.messages)
+    }
+
+    fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<SlackMutationResponse, JsonRpcError> {
+        let mut headers = self.auth_headers()?;
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+
+        let body = serde_json::json!({
+            "channel": channel,
+            "ts": ts,
+            "text": text,
+        });
+
+        let response = self
+            .client
+            .post("https://slack.com/api/chat.update")
+            .headers(headers)
+            .json(&body)
+            .send()
+            .map_err(|err| JsonRpcError::internal_error(format!("slack request failed: {err}")))?;
+
+        let parsed: SlackMutationResponse = response.json().map_err(|err| {
+            JsonRpcError::internal_error(format!("invalid slack response: {err}"))
+        })?;
+
+        if !parsed.ok {
+            let error = parsed.error.as_deref().unwrap_or("unknown");
+            return Err(JsonRpcError::internal_error(format!(
+                "Slack API error: {error}"
+            )));
+        }
+
+        Ok(parsed)
+    }
+
     fn get_thread(&self, channel: &str, thread_ts: &str) -> Result<Vec<Value>, JsonRpcError> {
         let headers = self.auth_headers()?;
 
@@ -879,7 +1059,7 @@ mod tests {
     fn tools_list_contains_post_message() {
         let list = handle_tools_list();
         let tools = list["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
         assert_eq!(tools[0]["name"], "slack.post_message");
         assert_eq!(
             tools[0]["inputSchema"]["required"],
@@ -910,6 +1090,16 @@ mod tests {
         assert_eq!(
             tools[6]["inputSchema"]["required"],
             serde_json::json!(["user_id", "text"])
+        );
+        assert_eq!(tools[7]["name"], "slack.get_channel_history");
+        assert_eq!(
+            tools[7]["inputSchema"]["required"],
+            serde_json::json!(["channel"])
+        );
+        assert_eq!(tools[8]["name"], "slack.update_message");
+        assert_eq!(
+            tools[8]["inputSchema"]["required"],
+            serde_json::json!(["channel", "ts", "text"])
         );
     }
 

@@ -17000,7 +17000,7 @@ impl PlanRunner {
 
     /// Build the strategist system prompt for the Enriching phase.
     ///
-    /// This assembles the same 6-layer system prompt as other agent dispatches,
+    /// This assembles the same 9-layer system prompt as other agent dispatches,
     /// but injects the plan's task context and inline read_files content so the
     /// strategist sees the full enrichment surface before dispatch.
     fn build_enrichment_system_prompt(&self, plan_id: &str) -> String {

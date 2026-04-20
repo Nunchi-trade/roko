@@ -17,6 +17,12 @@ use roko_core::build::{BuildCommand, BuildSystem};
 use roko_core::language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 use std::path::Path;
 
+#[cfg(feature = "tree-sitter")]
+pub mod tree_sitter_parser;
+
+#[cfg(feature = "tree-sitter")]
+pub use tree_sitter_parser::TreeSitterRustProvider;
+
 // ─── CargoBuildSystem ────────────────────────────────────────────────────
 
 /// Build system implementation for Cargo (Rust).

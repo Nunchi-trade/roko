@@ -24,15 +24,26 @@
 //! | `PropertyTest` | 5 | [`PropertyTestGate`](property_test_gate::PropertyTestGate) + [`FactCheckGate`] |
 //! | `Integration` | 6 | [`LlmJudgeGate`](llm_judge_gate::LlmJudgeGate) + [`IntegrationGate`](integration_gate::IntegrationGate) |
 //!
-//! ## Standalone gates
+//! ## Standalone gates (6 gates)
 //!
 //! These gates are invoked outside the rung pipeline for specific scenarios:
 //!
 //! - [`DiffGate`] -- diff analysis (post-task review)
 //! - [`CodeExecutionGate`] -- sandboxed code execution
-//! - [`BenchmarkGate`](benchmark_gate::BenchmarkGate) -- performance benchmarks
+//! - [`ShellGate`] -- arbitrary shell command verification
+//! - [`BenchmarkRegressionGate`](benchmark_gate::BenchmarkRegressionGate) -- performance benchmarks
 //! - [`FormatCheckGate`](format_check_gate::FormatCheckGate) -- code formatting
 //! - [`SecurityScanGate`](security_scan_gate::SecurityScanGate) -- security scanning
+//!
+//! ## Ad-hoc generated checks
+//!
+//! - [`GateGenerator`] / [`GeneratedCheck`] -- dynamically generated verification checks
+//!
+//! ## Composition wrappers
+//!
+//! - [`ParallelGate`] -- run multiple gates in parallel, collect all verdicts
+//! - [`VotingGate`] -- majority-vote across inner gates
+//! - [`FallbackGate`] -- try gates in order, use first non-error verdict
 //!
 //! The crate root re-exports the stable verification API so callers can build
 //! selectors, pipelines, thresholds, dispatchers, and feedback transforms

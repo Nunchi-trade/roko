@@ -57,25 +57,62 @@ impl PlanComplexity {
 
 // ─── Rung identifiers ───────────────────────────────────────────────────
 
-/// Canonical rung identifiers. Numeric repr matches [`CANONICAL_ORDER`]
-/// position, so derived `Ord` gives the correct execution sequence.
+/// Canonical rung identifiers for the 7-rung gate pipeline.
+///
+/// Each rung maps to one or more concrete [`Gate`](roko_core::Gate) impls via
+/// [`run_canonical_rung`](crate::rung_dispatch::run_canonical_rung). The numeric
+/// repr matches [`CANONICAL_ORDER`] position, so derived `Ord` gives the correct
+/// execution sequence.
+///
+/// # Two-tier gate architecture
+///
+/// Not every gate type is rung-dispatched. The crate ships **two tiers**:
+///
+/// 1. **Rung-dispatched gates** (this enum) -- the 7 rungs below cover 12
+///    concrete gates that form the core verification pipeline. These are
+///    selected by plan complexity and executed in order.
+///
+/// 2. **Standalone gates** -- [`DiffGate`](crate::DiffGate),
+///    [`CodeExecutionGate`](crate::CodeExecutionGate),
+///    [`ShellGate`](crate::ShellGate),
+///    [`BenchmarkRegressionGate`](crate::benchmark_gate::BenchmarkRegressionGate),
+///    [`FormatCheckGate`](crate::format_check_gate::FormatCheckGate),
+///    [`SecurityScanGate`](crate::security_scan_gate::SecurityScanGate), and
+///    [`GateGenerator`](crate::GateGenerator) are invoked outside the rung
+///    pipeline for scenario-specific checks (post-task diff review, sandboxed
+///    execution, ad-hoc generated checks, etc.).
+///
+/// Additionally, composition wrappers ([`ParallelGate`](crate::ParallelGate),
+/// [`VotingGate`](crate::VotingGate), [`FallbackGate`](crate::FallbackGate))
+/// let callers combine any gate into parallel / voting / fallback topologies
+/// regardless of whether the inner gates are rung-dispatched or standalone.
+///
+/// This design is intentional: rungs enforce a strict ordering for the
+/// critical build-lint-test path, while standalone gates are invoked ad-hoc
+/// when their specific domain context is available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Rung {
-    /// Rung 0: compile / type-check.
+    /// Rung 0: compile / type-check. Dispatches [`CompileGate`](crate::CompileGate).
     Compile = 0,
-    /// Rung 1: lint (clippy, eslint, …).
+    /// Rung 1: lint (clippy, eslint, ...). Dispatches [`ClippyGate`](crate::ClippyGate).
     Lint = 1,
-    /// Rung 2: existing test suite.
+    /// Rung 2: existing test suite. Dispatches [`TestGate`](crate::TestGate).
     Test = 2,
-    /// Rung 3: symbol-manifest check.
+    /// Rung 3: symbol-manifest check. Dispatches [`SymbolGate`](crate::symbol_gate::SymbolGate).
     Symbol = 3,
-    /// Rung 4: generated behavioural tests.
+    /// Rung 4: generated behavioural tests. Dispatches
+    /// [`GeneratedTestGate`](crate::generated_test_gate::GeneratedTestGate) +
+    /// [`VerifyChainGate`](crate::verify_chain_gate::VerifyChainGate).
     GeneratedTest = 4,
-    /// Rung 5: property-based tests.
+    /// Rung 5: property-based tests. Dispatches
+    /// [`PropertyTestGate`](crate::property_test_gate::PropertyTestGate) +
+    /// [`FactCheckGate`](crate::FactCheckGate).
     PropertyTest = 5,
-    /// Rung 6: integration scenario.
+    /// Rung 6: integration scenario. Dispatches
+    /// [`LlmJudgeGate`](crate::llm_judge_gate::LlmJudgeGate) +
+    /// [`IntegrationGate`](crate::integration_gate::IntegrationGate).
     Integration = 6,
 }
 

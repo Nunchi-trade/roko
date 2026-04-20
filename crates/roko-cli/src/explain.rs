@@ -71,7 +71,7 @@ pub static TOPICS: &[TopicEntry] = &[
                  `Substrate` handles storage, `Scorer` evaluates quality, `Gate` \
                  validates correctness, `Router` selects models/agents, `Composer` \
                  assembles prompts, and `Policy` governs agent behavior. The \
-                 `SystemPromptBuilder` in `roko-compose` assembles 6-layer prompts \
+                 `SystemPromptBuilder` in `roko-compose` assembles 9-layer prompts \
                  from role templates, domain context, and runtime state.",
         internals: "Trait definitions live in `crates/roko-core/src/lib.rs`. The \
                     universal loop is wired in `crates/roko-cli/src/run.rs` via \
