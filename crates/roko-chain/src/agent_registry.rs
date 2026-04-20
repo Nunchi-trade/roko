@@ -288,7 +288,10 @@ impl AgentRegistry {
     }
 }
 
-/// Determine passport tier from KORAI stake amount.
+/// Determine passport tier from KORAI stake amount only (legacy path).
+///
+/// For full tier evaluation including job count and reputation, use
+/// [`TierProgressionRules::evaluate`].
 fn tier_from_stake(stake: u256) -> PassportTier {
     if stake >= TIER_PROTOCOL_STAKE {
         PassportTier::Protocol
@@ -298,6 +301,177 @@ fn tier_from_stake(stake: u256) -> PassportTier {
         PassportTier::Worker
     } else {
         PassportTier::Edge
+    }
+}
+
+// ─── Tier Progression Rules ─────────────────────────────────────────
+
+/// Tier progression requirements per spec.
+///
+/// From `docs/08-chain/04-korai-passport-erc-721-soulbound.md` lines 107-118:
+/// - Edge -> Worker: Stake 5,000 KORAI + 10 jobs with avg reputation > 0.5
+/// - Worker -> Sovereign: Stake 25,000 KORAI + 100 jobs with avg reputation > 0.7
+/// - Sovereign -> Protocol: Governance vote (cannot self-promote)
+/// - Demotion: stake drops below threshold OR reputation below minimum for 30 consecutive days
+#[derive(Debug, Clone, PartialEq)]
+pub struct TierProgressionRules {
+    /// Minimum jobs for Edge -> Worker.
+    pub edge_to_worker_jobs: u64,
+    /// Minimum avg reputation for Edge -> Worker.
+    pub edge_to_worker_min_rep: f64,
+    /// Minimum jobs for Worker -> Sovereign.
+    pub worker_to_sovereign_jobs: u64,
+    /// Minimum avg reputation for Worker -> Sovereign.
+    pub worker_to_sovereign_min_rep: f64,
+    /// Days below minimum reputation before demotion triggers.
+    pub demotion_grace_days: u64,
+}
+
+impl Default for TierProgressionRules {
+    fn default() -> Self {
+        Self {
+            edge_to_worker_jobs: 10,
+            edge_to_worker_min_rep: 0.5,
+            worker_to_sovereign_jobs: 100,
+            worker_to_sovereign_min_rep: 0.7,
+            demotion_grace_days: 30,
+        }
+    }
+}
+
+/// Agent progression state tracked for demotion logic.
+#[derive(Debug, Clone, Default)]
+pub struct AgentProgressionState {
+    /// Total completed jobs across all domains.
+    pub total_jobs: u64,
+    /// Average reputation across all domains (decay-adjusted).
+    pub avg_reputation: f64,
+    /// Current KORAI stake.
+    pub stake: u256,
+    /// Consecutive days reputation has been below tier minimum (for demotion).
+    pub days_below_min: u64,
+    /// Whether Protocol tier was granted via governance (not self-promoted).
+    pub governance_approved: bool,
+}
+
+/// Result of a tier evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TierEvaluation {
+    /// Agent stays at current tier.
+    Maintain(PassportTier),
+    /// Agent qualifies for promotion.
+    Promote(PassportTier),
+    /// Agent should be demoted.
+    Demote(PassportTier),
+    /// Promotion requires governance vote (cannot self-promote to Protocol).
+    RequiresGovernance,
+}
+
+impl TierProgressionRules {
+    /// Evaluate what tier an agent qualifies for based on their full state.
+    ///
+    /// Returns the appropriate action (maintain, promote, or demote).
+    pub fn evaluate(
+        &self,
+        current_tier: PassportTier,
+        state: &AgentProgressionState,
+    ) -> TierEvaluation {
+        // First check demotion conditions.
+        if let Some(demoted) = self.check_demotion(current_tier, state) {
+            return TierEvaluation::Demote(demoted);
+        }
+
+        // Then check promotion conditions.
+        if let Some(promoted) = self.check_promotion(current_tier, state) {
+            return TierEvaluation::Promote(promoted);
+        }
+
+        // Special case: Sovereign -> Protocol requires governance vote.
+        // If they meet stake requirements but lack governance approval, signal it.
+        if current_tier == PassportTier::Sovereign
+            && state.stake >= TIER_PROTOCOL_STAKE
+            && !state.governance_approved
+        {
+            return TierEvaluation::RequiresGovernance;
+        }
+
+        TierEvaluation::Maintain(current_tier)
+    }
+
+    /// Check if agent qualifies for promotion.
+    fn check_promotion(
+        &self,
+        current_tier: PassportTier,
+        state: &AgentProgressionState,
+    ) -> Option<PassportTier> {
+        match current_tier {
+            PassportTier::Edge => {
+                if state.stake >= TIER_WORKER_STAKE
+                    && state.total_jobs >= self.edge_to_worker_jobs
+                    && state.avg_reputation >= self.edge_to_worker_min_rep
+                {
+                    Some(PassportTier::Worker)
+                } else {
+                    None
+                }
+            }
+            PassportTier::Worker => {
+                if state.stake >= TIER_SOVEREIGN_STAKE
+                    && state.total_jobs >= self.worker_to_sovereign_jobs
+                    && state.avg_reputation >= self.worker_to_sovereign_min_rep
+                {
+                    Some(PassportTier::Sovereign)
+                } else {
+                    None
+                }
+            }
+            PassportTier::Sovereign => {
+                if state.stake >= TIER_PROTOCOL_STAKE && state.governance_approved {
+                    Some(PassportTier::Protocol)
+                } else {
+                    None
+                }
+            }
+            PassportTier::Protocol => None, // Already highest
+        }
+    }
+
+    /// Check if agent should be demoted.
+    fn check_demotion(
+        &self,
+        current_tier: PassportTier,
+        state: &AgentProgressionState,
+    ) -> Option<PassportTier> {
+        // Protocol tier is only demoted by governance, not automatically.
+        if current_tier == PassportTier::Protocol {
+            return None;
+        }
+
+        let (min_stake, min_rep) = match current_tier {
+            PassportTier::Sovereign => (TIER_SOVEREIGN_STAKE, self.worker_to_sovereign_min_rep),
+            PassportTier::Worker => (TIER_WORKER_STAKE, self.edge_to_worker_min_rep),
+            PassportTier::Edge | PassportTier::Protocol => return None,
+        };
+
+        // Immediate demotion if stake drops below threshold.
+        if state.stake < min_stake {
+            return Some(match current_tier {
+                PassportTier::Sovereign => PassportTier::Worker,
+                PassportTier::Worker => PassportTier::Edge,
+                _ => return None,
+            });
+        }
+
+        // Demotion after grace period if reputation stays below minimum.
+        if state.avg_reputation < min_rep && state.days_below_min >= self.demotion_grace_days {
+            return Some(match current_tier {
+                PassportTier::Sovereign => PassportTier::Worker,
+                PassportTier::Worker => PassportTier::Edge,
+                _ => return None,
+            });
+        }
+
+        None
     }
 }
 
@@ -447,5 +621,153 @@ mod tests {
             .submit_prompt_update(id, &other(), [0xFF; 32], 100)
             .unwrap_err();
         assert_eq!(err, RegistryError::NotOwner);
+    }
+
+    // ─── Tier progression tests ─────────────────────────────────────
+
+    #[test]
+    fn edge_promotes_to_worker_with_stake_jobs_and_rep() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 12,
+            avg_reputation: 0.6,
+            stake: 5_000,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Edge, &state);
+        assert_eq!(result, TierEvaluation::Promote(PassportTier::Worker));
+    }
+
+    #[test]
+    fn edge_stays_without_enough_jobs() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 5, // need 10
+            avg_reputation: 0.8,
+            stake: 10_000,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Edge, &state);
+        assert_eq!(result, TierEvaluation::Maintain(PassportTier::Edge));
+    }
+
+    #[test]
+    fn edge_stays_without_enough_reputation() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 20,
+            avg_reputation: 0.4, // need 0.5
+            stake: 10_000,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Edge, &state);
+        assert_eq!(result, TierEvaluation::Maintain(PassportTier::Edge));
+    }
+
+    #[test]
+    fn worker_promotes_to_sovereign() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 150,
+            avg_reputation: 0.75,
+            stake: 25_000,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Worker, &state);
+        assert_eq!(result, TierEvaluation::Promote(PassportTier::Sovereign));
+    }
+
+    #[test]
+    fn sovereign_requires_governance_for_protocol() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 500,
+            avg_reputation: 0.95,
+            stake: 100_000,
+            governance_approved: false,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Sovereign, &state);
+        assert_eq!(result, TierEvaluation::RequiresGovernance);
+    }
+
+    #[test]
+    fn sovereign_promotes_with_governance_approval() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 500,
+            avg_reputation: 0.95,
+            stake: 100_000,
+            governance_approved: true,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Sovereign, &state);
+        assert_eq!(result, TierEvaluation::Promote(PassportTier::Protocol));
+    }
+
+    #[test]
+    fn demotion_on_stake_drop() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 200,
+            avg_reputation: 0.8,
+            stake: 4_000, // below Worker threshold (5000)
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Worker, &state);
+        assert_eq!(result, TierEvaluation::Demote(PassportTier::Edge));
+    }
+
+    #[test]
+    fn demotion_after_grace_period() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 200,
+            avg_reputation: 0.3, // below Worker min (0.5)
+            stake: 10_000,       // stake is fine
+            days_below_min: 30,  // grace period expired
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Worker, &state);
+        assert_eq!(result, TierEvaluation::Demote(PassportTier::Edge));
+    }
+
+    #[test]
+    fn no_demotion_within_grace_period() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 200,
+            avg_reputation: 0.3, // below Worker min
+            stake: 10_000,
+            days_below_min: 15,  // within grace period
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Worker, &state);
+        assert_eq!(result, TierEvaluation::Maintain(PassportTier::Worker));
+    }
+
+    #[test]
+    fn protocol_never_auto_demoted() {
+        let rules = TierProgressionRules::default();
+        let state = AgentProgressionState {
+            total_jobs: 0,
+            avg_reputation: 0.0,
+            stake: 0, // even with zero everything
+            days_below_min: 999,
+            governance_approved: true,
+            ..Default::default()
+        };
+
+        let result = rules.evaluate(PassportTier::Protocol, &state);
+        assert_eq!(result, TierEvaluation::Maintain(PassportTier::Protocol));
     }
 }

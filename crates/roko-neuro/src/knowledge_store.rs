@@ -28,6 +28,26 @@ pub const QUERY_SCORE_FLOOR: f64 = 0.0;
 const ANTI_KNOWLEDGE_CONFIDENCE_FLOOR: f64 = 0.3;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
 const CONFIRMATION_BOOST: f64 = 1.5;
+
+/// Death threshold: when recency factor falls below 1% of initial weight,
+/// the entry is considered "dead" and eligible for pruning.
+///
+/// Per spec (agent-chain-new/04-knowledge-layer.md): entries below 1% of
+/// initial weight enter the Death stage and should be pruned.
+pub const DEATH_THRESHOLD: f64 = 0.01;
+
+/// Confirmation decay adjustment factor.
+///
+/// Per spec: `weight(b) = initialWeight * 0.5^(age/halfLife) * (1 + confirmations * 0.1)`
+/// Each confirmation extends effective lifetime by 10%.
+const CONFIRMATION_DECAY_FACTOR: f64 = 0.1;
+
+/// Base confidence for resurrected entries (re-confirmed dead/frozen entries).
+///
+/// When an entry that was previously pruned or frozen is re-confirmed by a
+/// new episode, it is "resurrected" with this starter confidence and reset
+/// to Transient tier for re-validation.
+pub const RESURRECTION_CONFIDENCE: f64 = 0.6;
 /// Minimum number of shared tags for two entries to be considered similar.
 const MIN_TAG_OVERLAP: usize = 1;
 /// Minimum number of shared content keywords for two entries to be
@@ -906,6 +926,86 @@ impl KnowledgeStore {
         Ok(removed)
     }
 
+    /// Resurrect a frozen/dead entry by re-confirming it with fresh weight.
+    ///
+    /// Per spec (agent-chain-new/04-knowledge-layer.md): entries that drop below
+    /// 1% threshold enter the Death stage and are pruned. If they are later
+    /// re-confirmed by a new episode, they are "resurrected" with fresh weight
+    /// and reset to Transient tier for re-validation.
+    ///
+    /// Returns `true` if the entry was found and resurrected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn resurrect(&self, entry_id: &str, confirming_episode: &str) -> Result<bool> {
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut found = false;
+
+        for entry in &mut entries {
+            if entry.id == entry_id && entry.frozen {
+                // Resurrect: fresh confidence, reset tier, unfreeze.
+                entry.confidence = RESURRECTION_CONFIDENCE;
+                entry.tier = KnowledgeTier::Transient;
+                entry.frozen = false;
+                entry.balance = 1.0; // Fresh balance
+                entry.confirmation_count += 1;
+                if !entry.source_episodes.contains(&confirming_episode.to_string()) {
+                    entry.source_episodes.push(confirming_episode.to_string());
+                }
+                entry.created_at = Utc::now(); // Reset age for decay calculation
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(found)
+    }
+
+    /// Prune entries that have decayed below the death threshold (1% of initial weight).
+    ///
+    /// Unlike `gc()` which uses confidence directly, this checks the recency-adjusted
+    /// effective weight per the knowledge lifecycle spec.
+    ///
+    /// Returns the number of entries pruned (or frozen if using freeze semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn prune_dead(&self) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let now = Utc::now();
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let mut entries = Vec::with_capacity(before_len);
+
+        for mut entry in before {
+            // AntiKnowledge is always preserved.
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                entries.push(entry);
+                continue;
+            }
+
+            if is_dead(&entry, now) {
+                if entry.frozen {
+                    // Already frozen and dead: permanent removal.
+                    continue;
+                }
+                // Freeze into cold storage (preserves for potential resurrection).
+                entry.frozen = true;
+            }
+            entries.push(entry);
+        }
+
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
     /// NEURO-10: Apply demurrage tax to all entries based on elapsed time
     /// since their creation.
     ///
@@ -1482,6 +1582,12 @@ fn keyword_score(entry: &KnowledgeEntry, terms: &[String], topic_norm: &str) -> 
     score
 }
 
+/// Compute recency factor with confirmation-adjusted decay.
+///
+/// Per spec: `weight = initialWeight * 0.5^(age/halfLife) * (1 + confirmations * 0.1)`
+///
+/// Confirmations extend the effective lifetime — each independent confirmation
+/// adds 10% to the weight, rewarding knowledge that multiple episodes validate.
 fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
     let age = now
         .signed_duration_since(entry.created_at)
@@ -1489,7 +1595,18 @@ fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
         .max(0) as f64
         / 86_400.0;
     let half_life = effective_half_life_days(entry);
-    0.5_f64.powf(age / half_life)
+    let base_decay = 0.5_f64.powf(age / half_life);
+    let confirmation_adjustment = 1.0 + entry.confirmation_count as f64 * CONFIRMATION_DECAY_FACTOR;
+    base_decay * confirmation_adjustment
+}
+
+/// Check if an entry has decayed below the death threshold.
+///
+/// Returns true if the entry's recency factor is below 1% of initial weight,
+/// indicating it should enter the Death stage per the knowledge lifecycle spec.
+pub fn is_dead(entry: &KnowledgeEntry, now: DateTime<Utc>) -> bool {
+    let factor = recency_factor(entry, now);
+    factor < DEATH_THRESHOLD
 }
 
 fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {

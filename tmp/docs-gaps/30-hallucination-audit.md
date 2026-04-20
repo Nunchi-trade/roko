@@ -393,13 +393,14 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-03: Trust tiers (spec has different trust terminology)
 
-- [ ] **Spec** (`docs/08-chain/04-korai-passport-erc-721-soulbound.md` lines 107-118): Tier progression rules:
-  - Edge -> Worker: Stake 5,000 KORAI + 10 jobs with avg reputation > 0.5
-  - Worker -> Sovereign: Stake 25,000 KORAI + 100 jobs with avg reputation > 0.7
-  - Sovereign -> Protocol: Governance vote
-  - Demotion when stake drops below threshold or reputation below minimum for 30 consecutive days
-- **Code** (`crates/roko-chain/src/agent_registry.rs` line 292): `tier_from_stake()` determines tier from stake amount only -- no job count, no reputation threshold, no demotion logic.
-- **Fix**: Add job count and reputation checks to tier progression. Implement demotion logic with 30-day tracking.
+- [x] **Spec** (`docs/08-chain/04-korai-passport-erc-721-soulbound.md` lines 107-118): Tier progression rules.
+- **FIXED**: Implemented `TierProgressionRules` with full spec-aligned logic:
+  - Edge->Worker: 5000 KORAI + 10 jobs + avg rep >= 0.5
+  - Worker->Sovereign: 25000 KORAI + 100 jobs + avg rep >= 0.7
+  - Sovereign->Protocol: requires governance_approved flag
+  - Demotion on stake drop (immediate) or low reputation (30-day grace period)
+  - `TierEvaluation` enum: Maintain/Promote/Demote/RequiresGovernance
+  - 10 unit tests covering all paths
 
 ### P1-04: Token emission schedule (halving + terminal emission)
 
@@ -421,12 +422,13 @@ Features that the spec describes as core functionality that the code does not ye
 
 ### P1-07: Knowledge entry lifecycle progression
 
-- [ ] **Spec** (`bardo-backup/tmp/agent-chain-new/04-knowledge-layer.md` lines 143-192): Knowledge lifecycle has 5 stages: Birth -> Life (confirmations strengthen) -> Aging (demurrage decays) -> Death (below 1% threshold, pruned) -> Resurrection (re-confirmed with fresh weight).
-- **Code** (`crates/roko-neuro/src/knowledge_store.rs`): Has tier progression (Transient -> Working -> Consolidated -> Persistent) and decay, but:
-  - No explicit "Death" threshold at 1% of initial weight
-  - No "Resurrection" mechanism (re-confirmed pruned entries get fresh weight)
-  - No `confirmation_count` effect on decay rate matching `weight(b) = initialWeight x 0.5^((b - postedBlock) / halfLifeBlocks) x (1 + confirmations x 0.1)`
-- **Fix**: Add 1% death threshold, resurrection mechanism, and confirmation-adjusted decay formula.
+- [x] **Spec** (`bardo-backup/tmp/agent-chain-new/04-knowledge-layer.md` lines 143-192): Knowledge lifecycle.
+- **FIXED**: Implemented full lifecycle in knowledge_store.rs:
+  - `DEATH_THRESHOLD = 0.01` (1% of initial weight → Death stage)
+  - `is_dead(entry, now)` function checks recency factor vs threshold
+  - `prune_dead()` method freezes entries below threshold (preserves for resurrection)
+  - `resurrect(entry_id, confirming_episode)` method: unfreezes, resets confidence to 0.6, resets tier to Transient, increments confirmation_count
+  - Confirmation-adjusted decay: `recency = base_decay * (1 + confirmations * 0.1)` — each confirmation extends effective lifetime by 10%
 
 ### P1-08: Shapley-value attribution
 
