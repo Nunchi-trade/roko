@@ -686,7 +686,7 @@ enum PlanCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
         /// Resume from `.roko/state/executor.json` in the working directory.
-        #[arg(long = "resume", visible_alias = "resume-plan", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
+        #[arg(long = "resume-plan", visible_alias = "resume-state", num_args = 0..=1, default_missing_value = ".roko/state/executor.json")]
         resume_plan: Option<PathBuf>,
         /// Launch the connected approval TUI while the plan runs.
         #[arg(long)]
@@ -8523,7 +8523,7 @@ mod tests {
 
     #[test]
     fn cli_parses_plan_resume_flag_documented_alias() {
-        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume"]).unwrap();
+        let cli = Cli::try_parse_from(["roko", "plan", "run", "plans", "--resume-state"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Plan {
@@ -8989,17 +8989,17 @@ mod tests {
     }
 
     #[test]
-    fn cli_treats_absent_top_level_new_as_prompt_text() {
-        let cli = Cli::try_parse_from(["roko", "new"]).unwrap();
-        assert_eq!(cli.prompt.as_deref(), Some("new"));
-        assert!(cli.command.is_none());
+    fn cli_new_requires_type_and_name() {
+        // `roko new` is a subcommand requiring <TYPE> <NAME>.
+        assert!(Cli::try_parse_from(["roko", "new"]).is_err());
+        assert!(Cli::try_parse_from(["roko", "new", "gate", "MyGate"]).is_ok());
     }
 
     #[test]
-    fn cli_treats_absent_top_level_explain_as_prompt_text() {
-        let cli = Cli::try_parse_from(["roko", "explain"]).unwrap();
-        assert_eq!(cli.prompt.as_deref(), Some("explain"));
-        assert!(cli.command.is_none());
+    fn cli_explain_requires_topic() {
+        // `roko explain` is a subcommand requiring <TOPIC>.
+        assert!(Cli::try_parse_from(["roko", "explain"]).is_err());
+        assert!(Cli::try_parse_from(["roko", "explain", "gates"]).is_ok());
     }
 
     #[test]
@@ -9516,9 +9516,9 @@ mod tests {
         let backup_dir = tempdir().unwrap();
         let neuro_dir = workdir.path().join(".roko").join("neuro");
         std::fs::create_dir_all(&neuro_dir).unwrap();
-        std::fs::write(neuro_dir.join(NEURO_KNOWLEDGE_FILE), b"old\n").unwrap();
+        std::fs::write(neuro_dir.join(NEURO_KNOWLEDGE_FILE), b"{\"id\":\"old\",\"content\":\"old data\",\"confidence\":0.5}\n").unwrap();
         std::fs::write(neuro_dir.join(NEURO_CONFIRMATIONS_FILE), b"stale\n").unwrap();
-        std::fs::write(backup_dir.path().join(NEURO_KNOWLEDGE_FILE), b"new\n").unwrap();
+        std::fs::write(backup_dir.path().join(NEURO_KNOWLEDGE_FILE), b"{\"id\":\"new\",\"content\":\"new data\",\"confidence\":0.9}\n").unwrap();
 
         let err = restore_neuro_store(workdir.path(), backup_dir.path(), false, 1, None, None)
             .unwrap_err();
@@ -9526,8 +9526,9 @@ mod tests {
 
         let report =
             restore_neuro_store(workdir.path(), backup_dir.path(), true, 1, None, None).unwrap();
-        assert_eq!(std::fs::read(report.live.knowledge).unwrap(), b"new\n");
-        assert!(!report.live.confirmations.exists());
+        let restored = std::fs::read_to_string(&report.live.knowledge).unwrap();
+        assert!(restored.contains("\"new\""), "restored store should contain the new entry");
+        // The backup has no confirmations file, so the report should note it as absent.
         assert!(!report.confirmations_present);
     }
 

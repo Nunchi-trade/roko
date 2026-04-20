@@ -927,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_tab_number_keys_toggle_expected_level() {
+    fn logs_tab_number_keys_switch_subview() {
         let action = handle_key(
             key(KeyCode::Char('3')),
             InputMode::Normal,
@@ -935,7 +935,8 @@ mod tests {
             FocusZone::PlanTree,
             &modals(None),
         );
-        assert_eq!(action, TuiAction::ToggleLogFilter(LogFilterLevel::Error));
+        // Number keys on logs tab switch sub-views (0-indexed from the key digit).
+        assert_eq!(action, TuiAction::SwitchSubView(2));
     }
 
     #[test]

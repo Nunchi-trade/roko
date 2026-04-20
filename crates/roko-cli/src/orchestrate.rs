@@ -18644,8 +18644,24 @@ acceptance = []
         let plan_dir = write_plan_revision_fixture(tmp.path());
         let tasks = TasksFile::parse(&plan_dir.join("tasks.toml")).expect("parse tasks");
 
-        let mut runner = runner_for_repo(tmp.path(), false).await;
-        runner.learning_config = runtime_learning_config(tmp.path());
+        let snapshot_json = ExecutorSnapshot::new(0).to_json().expect("snapshot json");
+        let mut config = Config::default();
+        config.executor.auto_replan = true;
+        let mut runner = PlanRunner::from_snapshot(
+            &snapshot_json,
+            tmp.path(),
+            config,
+            Arc::new(MetricRegistry::new()),
+            false,
+        )
+        .await
+        .expect("plan runner");
+        runner.learning_config = RuntimeLearningConfig {
+            replan_on_gate_failure: true,
+            replan_max_per_plan: 2,
+            replan_gate_attempts: 3,
+            ..Default::default()
+        };
         assert!(runner.executor.add_plan(PlanState::new("plan-1")));
         runner
             .task_trackers

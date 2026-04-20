@@ -29,8 +29,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
+#[cfg(target_os = "macos")]
 pub mod launchd;
 /// Linux systemd user-service helpers for daemon installation.
+#[cfg(target_os = "linux")]
 pub mod systemd;
 
 // ─── DaemonCmd IPC protocol ──────────────────────────────────────────────────
@@ -516,6 +518,7 @@ pub fn daemon_uninstall() -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn daemon_install_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
     let plist_dir = plist_path
@@ -547,6 +550,7 @@ fn daemon_install_launchd() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn daemon_uninstall_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
 

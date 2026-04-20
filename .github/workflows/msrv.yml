@@ -18,6 +18,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           # Must match workspace rust-version in Cargo.toml
-          toolchain: "1.85"
+          toolchain: "1.91"
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
