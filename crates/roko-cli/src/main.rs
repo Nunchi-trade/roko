@@ -417,6 +417,48 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         depth: u8,
     },
+    /// Generate boilerplate for a Synapse trait or domain profile.
+    ///
+    /// Types: gate, scorer, router, policy, substrate, composer, domain, template, event-source.
+    New {
+        /// Type of scaffold to generate (e.g. gate, scorer, router).
+        #[arg(value_name = "TYPE")]
+        type_name: String,
+        /// Name for the generated component (e.g. my-custom-gate).
+        name: String,
+        /// Output directory (default: current directory).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Manage plugins (list, install, audit).
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCmd {
+    /// List available and installed plugins.
+    List {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Install a plugin from a local path or registry.
+    Install {
+        /// Path to the plugin manifest (plugin.toml) or directory.
+        source: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Audit installed plugins and report capabilities.
+    Audit {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1256,6 +1298,31 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cmd_explain(&topic, depth);
             Ok(EXIT_SUCCESS)
         }
+        Command::New {
+            type_name,
+            name,
+            output,
+        } => {
+            let output_dir = output.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            match roko_cli::scaffold::scaffold(&type_name, &name, &output_dir) {
+                Ok(files) => {
+                    println!(
+                        "scaffolded `{type_name}` as `{name}` ({} file{})",
+                        files.len(),
+                        if files.len() == 1 { "" } else { "s" }
+                    );
+                    for f in &files {
+                        println!("  {}", f.display());
+                    }
+                    Ok(EXIT_SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    Ok(EXIT_SYSTEM_ERROR)
+                }
+            }
+        }
+        Command::Plugin { cmd } => cmd_plugin(cli, cmd).await,
     }
 }
 
@@ -1304,6 +1371,222 @@ async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<i32> {
     prepare_runtime_hooks(&workdir, cli.quiet);
     agent_serve::run(cmd).await?;
     Ok(EXIT_SUCCESS)
+}
+
+async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
+    let workdir = match &cmd {
+        PluginCmd::List { workdir } => workdir.clone(),
+        PluginCmd::Install { workdir, .. } => workdir.clone(),
+        PluginCmd::Audit { workdir } => workdir.clone(),
+    }
+    .unwrap_or_else(|| resolve_workdir(cli));
+
+    match cmd {
+        PluginCmd::List { .. } => {
+            let plugins_dir = workdir.join("plugins");
+            let roko_plugins = workdir.join(".roko").join("plugins");
+            let mut all_plugins = Vec::new();
+
+            for dir in [&plugins_dir, &roko_plugins] {
+                match roko_plugin::manifest::discover_plugins(dir) {
+                    Ok(found) => all_plugins.extend(found),
+                    Err(_) => {} // Directory doesn't exist — fine
+                }
+            }
+
+            if all_plugins.is_empty() {
+                println!("no plugins found");
+                println!("  search paths: {}, {}", plugins_dir.display(), roko_plugins.display());
+                println!("  install a plugin with: roko plugin install <path>");
+            } else {
+                println!("installed plugins ({}):", all_plugins.len());
+                for plugin in &all_plugins {
+                    let m = &plugin.manifest.plugin;
+                    let desc = m
+                        .description
+                        .as_deref()
+                        .unwrap_or("no description");
+                    println!(
+                        "  {} v{} — {}",
+                        m.name, m.version, desc
+                    );
+                    if !plugin.manifest.prompts.is_empty() {
+                        println!(
+                            "    prompts: {}",
+                            plugin
+                                .manifest
+                                .prompts
+                                .iter()
+                                .map(|p| p.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                    if !plugin.manifest.tools.is_empty() {
+                        println!(
+                            "    tools: {}",
+                            plugin
+                                .manifest
+                                .tools
+                                .iter()
+                                .map(|t| t.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                    if !plugin.manifest.profiles.is_empty() {
+                        println!(
+                            "    profiles: {}",
+                            plugin
+                                .manifest
+                                .profiles
+                                .iter()
+                                .map(|p| p.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        PluginCmd::Install { source, .. } => {
+            let source_path = std::path::Path::new(&source);
+
+            // Find the manifest file.
+            let manifest_path = if source_path.is_file() {
+                source_path.to_path_buf()
+            } else if source_path.is_dir() {
+                let candidate = source_path.join("plugin.toml");
+                if candidate.exists() {
+                    candidate
+                } else {
+                    eprintln!("error: no plugin.toml found in {}", source_path.display());
+                    return Ok(EXIT_SYSTEM_ERROR);
+                }
+            } else {
+                eprintln!("error: source path does not exist: {source}");
+                return Ok(EXIT_SYSTEM_ERROR);
+            };
+
+            // Load and validate the manifest.
+            let manifest = match roko_plugin::manifest::load_manifest(&manifest_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: failed to load plugin manifest: {e}");
+                    return Ok(EXIT_SYSTEM_ERROR);
+                }
+            };
+
+            // Copy to .roko/plugins/<name>/
+            let install_dir = workdir
+                .join(".roko")
+                .join("plugins")
+                .join(&manifest.plugin.name);
+            std::fs::create_dir_all(&install_dir)?;
+
+            // Copy the manifest.
+            let dest_manifest = install_dir.join("plugin.toml");
+            std::fs::copy(&manifest_path, &dest_manifest)?;
+
+            // Copy the containing directory's files if source is a directory.
+            if source_path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(source_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path != manifest_path {
+                            let dest = install_dir.join(entry.file_name());
+                            std::fs::copy(&path, &dest)?;
+                        }
+                    }
+                }
+            }
+
+            println!(
+                "installed plugin `{}` v{} to {}",
+                manifest.plugin.name,
+                manifest.plugin.version,
+                install_dir.display()
+            );
+            println!(
+                "  {} prompt(s), {} profile(s), {} tool(s), {} trigger(s)",
+                manifest.prompts.len(),
+                manifest.profiles.len(),
+                manifest.tools.len(),
+                manifest.triggers.len(),
+            );
+            Ok(EXIT_SUCCESS)
+        }
+        PluginCmd::Audit { .. } => {
+            let plugins_dir = workdir.join("plugins");
+            let roko_plugins = workdir.join(".roko").join("plugins");
+            let mut all_plugins = Vec::new();
+
+            for dir in [&plugins_dir, &roko_plugins] {
+                match roko_plugin::manifest::discover_plugins(dir) {
+                    Ok(found) => all_plugins.extend(found),
+                    Err(_) => {}
+                }
+            }
+
+            if all_plugins.is_empty() {
+                println!("no plugins to audit");
+            } else {
+                println!("plugin audit ({} plugins):", all_plugins.len());
+                for plugin in &all_plugins {
+                    let m = &plugin.manifest;
+                    println!("\n  {} v{}", m.plugin.name, m.plugin.version);
+                    println!("    location: {}", plugin.base_dir.display());
+
+                    // Tier capabilities
+                    let mut tiers = Vec::new();
+                    if !m.prompts.is_empty() {
+                        tiers.push(format!("T1:prompts({})", m.prompts.len()));
+                    }
+                    if !m.profiles.is_empty() {
+                        tiers.push(format!("T2:profiles({})", m.profiles.len()));
+                    }
+                    if !m.tools.is_empty() {
+                        tiers.push(format!("T3:tools({})", m.tools.len()));
+                    }
+                    println!("    capabilities: {}", if tiers.is_empty() { "none".to_string() } else { tiers.join(", ") });
+
+                    // Tools with their commands (security audit)
+                    for tool in &m.tools {
+                        println!(
+                            "    tool `{}`: `{}` (timeout: {}ms)",
+                            tool.name, tool.command, tool.timeout_ms
+                        );
+                    }
+
+                    // Triggers
+                    for trigger in &m.triggers {
+                        match trigger {
+                            roko_plugin::manifest::TriggerDef::Cron { expression, .. } => {
+                                println!("    trigger: cron({expression})");
+                            }
+                            roko_plugin::manifest::TriggerDef::FileWatch { paths, .. } => {
+                                println!("    trigger: file_watch({})", paths.join(", "));
+                            }
+                            roko_plugin::manifest::TriggerDef::Webhook { path, .. } => {
+                                println!("    trigger: webhook({path})");
+                            }
+                        }
+                    }
+
+                    // Dependencies
+                    for dep in &m.dependencies {
+                        println!(
+                            "    requires: {} {}",
+                            dep.name,
+                            dep.version.as_deref().unwrap_or("*")
+                        );
+                    }
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
 }
 
 // -----------------------------------------------------------------------

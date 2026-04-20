@@ -36,8 +36,11 @@ use roko_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Emergent goal structures -- goals that emerge from behavior patterns.
+pub mod goals;
 mod phase2_stubs;
 
+pub use self::goals::{GoalNode, GoalSeed, GoalStatus, GoalTree};
 pub use self::phase2_stubs::{
     AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
     BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,

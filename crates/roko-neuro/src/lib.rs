@@ -1171,6 +1171,8 @@ pub mod episode_completion;
 #[cfg(feature = "hdc")]
 mod hdc;
 pub mod knowledge_store;
+/// Temporal knowledge topology -- Allen interval algebra over knowledge states.
+pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
@@ -1184,6 +1186,9 @@ pub use knowledge_store::{
     AntiKnowledgeConflict, BackupHeader, DEFAULT_GC_MIN_CONFIDENCE, ExportFilter, ImportOptions,
     KnowledgeConfirmationRecord, KnowledgeQueryBreakdown, KnowledgeQueryHit,
     KnowledgeSimilarityHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
+};
+pub use temporal::{
+    AllenRelation, KnowledgeEpoch, TemporalIndex, TemporalInterval, TemporalRelation,
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};

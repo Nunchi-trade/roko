@@ -40,7 +40,10 @@ pub use direct_client::{
 pub use estimate::{EnrichmentEstimate, PlanInfo, estimate_enrichment};
 pub use inputs::step_dependency_paths;
 pub use outcome::{SkipReason, StepCost, StepOutcome};
-pub use pipeline::{EnrichmentPipeline, StepOutcomeHistory};
+pub use pipeline::{
+    ConcurrentStepGroup, EnrichmentPipeline, StepOutcomeHistory, concurrent_step_groups,
+    update_history,
+};
 pub use prompts::{StepInputs, build_prompt, build_repair_prompt, generate_without_llm};
 pub use select::StepSelector;
 pub use step::{ALL_ORDERED, EnrichStep, LlmBackend};

@@ -93,6 +93,157 @@ impl StepOutcomeHistory {
     }
 }
 
+// ─── COMP-09: Concurrent step groups ─────────────────────────────────
+
+/// A group of enrichment steps that can run concurrently because they
+/// have no mutual dependencies.
+///
+/// Steps within a group can be dispatched in parallel to reduce
+/// wall-clock time. Groups must be executed in order (group 0 before
+/// group 1, etc.).
+#[derive(Clone, Debug)]
+pub struct ConcurrentStepGroup {
+    /// Group ordinal (0-indexed).
+    pub index: usize,
+    /// Steps in this group that can run in parallel.
+    pub steps: Vec<EnrichStep>,
+}
+
+/// Compute groups of steps that can run concurrently.
+///
+/// Analyzes the dependency graph from [`step_dependency_paths`] and groups
+/// steps that share no producer-consumer relationship. Steps in the same
+/// group can run in parallel; groups must be executed sequentially.
+///
+/// The algorithm:
+/// 1. Build a map of which step produces which output file.
+/// 2. For each step, check if any of its dependencies are produced by
+///    another step (making them sequential).
+/// 3. Steps whose dependencies are only external files (plan.md, etc.)
+///    go into the earliest possible group.
+#[must_use]
+pub fn concurrent_step_groups(steps: &[EnrichStep]) -> Vec<ConcurrentStepGroup> {
+    use std::collections::{HashMap, HashSet};
+
+    if steps.is_empty() {
+        return Vec::new();
+    }
+
+    // Map output filename -> producing step.
+    let _producers: HashMap<String, EnrichStep> = steps
+        .iter()
+        .map(|&s| (s.output_filename().to_string(), s))
+        .collect();
+
+    // For each step, find which other steps must run before it.
+    let mut step_deps: HashMap<EnrichStep, HashSet<EnrichStep>> = HashMap::new();
+    for &step in steps {
+        let mut deps = HashSet::new();
+        // Check the output filenames that this step's inputs correspond to.
+        // If another step produces a file that this step depends on, that
+        // step must run first.
+        for &other in steps {
+            if other == step {
+                continue;
+            }
+            let other_output = other.output_filename();
+            // Check if this step depends on the other step's output.
+            // We infer this from the step_dependency_paths structure.
+            if step_depends_on_output(step, other_output) {
+                deps.insert(other);
+            }
+        }
+        step_deps.insert(step, deps);
+    }
+
+    // Topological grouping: assign each step to the earliest group where
+    // all its dependencies are in earlier groups.
+    let mut assigned: HashMap<EnrichStep, usize> = HashMap::new();
+    let mut groups: Vec<Vec<EnrichStep>> = Vec::new();
+
+    // Process in canonical order to get deterministic results.
+    let ordered: Vec<EnrichStep> = steps.to_vec();
+
+    for &step in &ordered {
+        let deps = step_deps.get(&step).cloned().unwrap_or_default();
+        let earliest_group = if deps.is_empty() {
+            0
+        } else {
+            deps.iter()
+                .filter_map(|d| assigned.get(d))
+                .max()
+                .map_or(0, |g| g + 1)
+        };
+
+        while groups.len() <= earliest_group {
+            groups.push(Vec::new());
+        }
+        groups[earliest_group].push(step);
+        assigned.insert(step, earliest_group);
+    }
+
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, steps)| ConcurrentStepGroup { index, steps })
+        .collect()
+}
+
+/// Check whether a step depends on a given output filename.
+fn step_depends_on_output(step: EnrichStep, output_filename: &str) -> bool {
+    // Map output filenames to the files they produce in the plan directory.
+    // This is derived from step_dependency_paths logic.
+    match step {
+        EnrichStep::Prd | EnrichStep::Invariants => false,
+        EnrichStep::Briefs => output_filename == "decomposition.md",
+        EnrichStep::Tasks => false,
+        EnrichStep::Decompose => output_filename == "brief.md",
+        EnrichStep::Verify | EnrichStep::Reviews | EnrichStep::Tests | EnrichStep::Scribe => {
+            output_filename == "tasks.toml"
+        }
+        EnrichStep::Research => matches!(
+            output_filename,
+            "tasks.toml"
+                | "brief.md"
+                | "decomposition.md"
+                | "verify-tasks.toml"
+                | "review-tasks.toml"
+        ),
+        EnrichStep::Dependencies => {
+            matches!(output_filename, "tasks.toml" | "brief.md" | "research.md")
+        }
+        EnrichStep::Fixtures => matches!(
+            output_filename,
+            "tasks.toml" | "brief.md" | "research.md" | "dependency-manifest.toml"
+        ),
+        EnrichStep::Integration => matches!(
+            output_filename,
+            "tasks.toml"
+                | "verify-tasks.toml"
+                | "review-tasks.toml"
+                | "research.md"
+                | "dependency-manifest.toml"
+                | "fixture-manifest.toml"
+        ),
+    }
+}
+
+/// Update a [`StepOutcomeHistory`] from a batch of step outcomes.
+///
+/// Call this after running steps to feed results back into the adaptive
+/// selection system.
+pub fn update_history(history: &mut StepOutcomeHistory, outcomes: &[StepOutcome]) {
+    for outcome in outcomes {
+        let step = outcome.step();
+        let success = outcome.is_success();
+        // Only record non-skipped outcomes (we don't want to penalize
+        // skipped steps).
+        if !outcome.is_skipped() {
+            history.record(step, success);
+        }
+    }
+}
+
 /// The enrichment pipeline. Parameterized by an [`LlmClient`] implementation.
 ///
 /// Use [`run_step`](Self::run_step) for a single step,

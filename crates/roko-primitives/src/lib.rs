@@ -14,6 +14,9 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+/// HDC codebook: deterministic symbol allocation, role-filler binding,
+/// pattern store, and cross-domain resonance detection (TA-05).
+pub mod codebook;
 pub mod hdc;
 pub mod pad;
 /// Robust statistics: trimmed mean, MAD, Hodges-Lehmann estimator (TA-10).
@@ -22,6 +25,10 @@ pub mod tier;
 
 pub use hdc::{
     BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,
+};
+pub use codebook::{
+    Codebook, CodingCodebook, PatternStore, ResonanceResult, StoredPattern,
+    RESONANCE_THRESHOLD, detect_cross_domain_resonance, role_bind, unbind,
 };
 pub use pad::PadVector;
 pub use tier::{InferenceTier, T2_VITALITY_THRESHOLD, TierError, TierRouter};

@@ -1504,7 +1504,23 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
     let somatic_bias = negative_somatic * (0.90 * caution - 0.20 * action)
         + positive_somatic * (0.75 * action - 0.08 * caution);
 
-    arousal_bias + pleasure_bias + emotional_congruence + somatic_bias
+    // COMP-06: Dominance modulates retrieval bias.
+    // High dominance -> prefer authoritative sources (knowledge entries, proven
+    // patterns) over exploratory/diverse ones.
+    // Low dominance -> prefer diverse sources (different families, broader
+    // coverage) and penalize concentration on a single authoritative source.
+    let dominance = affect.dominance.clamp(-1.0, 1.0);
+    let authoritative = authoritative_orientation(chunk);
+    let dominance_bias = if dominance > 0.0 {
+        // High dominance: boost authoritative sources.
+        dominance * 0.25 * authoritative
+    } else {
+        // Low dominance: boost diverse/non-authoritative sources and penalize
+        // concentration on a single high-authority type.
+        dominance.abs() * 0.20 * (1.0 - authoritative)
+    };
+
+    arousal_bias + pleasure_bias + emotional_congruence + somatic_bias + dominance_bias
 }
 
 /// Apply a lightweight somatic prior to gathered chunks before scoring.
@@ -1610,6 +1626,41 @@ fn caution_orientation(chunk: &ContextChunk) -> f64 {
             (kind_score + content_score).clamp(0.0, 1.0)
         }
         _ => 0.0,
+    }
+}
+
+/// COMP-06: How "authoritative" a chunk is -- knowledge entries from proven
+/// sources (facts, constraints, tested patterns) score high; speculative or
+/// exploratory sources score low. Used by the dominance axis to modulate
+/// retrieval bias: high dominance boosts authoritative sources, low dominance
+/// boosts diverse/non-authoritative ones.
+fn authoritative_orientation(chunk: &ContextChunk) -> f64 {
+    match &chunk.source {
+        ContextSource::KnowledgeEntry { kind, .. } => {
+            let kind = kind.to_ascii_lowercase();
+            let kind_score: f64 = match kind.as_str() {
+                "fact" => 0.95,
+                "constraint" => 0.90,
+                "procedure" => 0.85,
+                "causal_link" => 0.75,
+                "heuristic" => 0.65,
+                "playbook" => 0.60,
+                "insight" => 0.45,
+                "strategy_fragment" => 0.35,
+                "warning" | "antiknowledge" | "anti_knowledge" => 0.30,
+                _ => 0.40,
+            };
+            // Confidence serves as an authority proxy when available.
+            let confidence_bonus = chunk.confidence.unwrap_or(0.5) * 0.1;
+            (kind_score + confidence_bonus).clamp(0.0, 1.0)
+        }
+        // Episodes from prior successful runs are moderately authoritative.
+        ContextSource::Episode { .. } => 0.50,
+        // Inline files are concrete but not reviewed knowledge.
+        ContextSource::InlineFile { .. } => 0.35,
+        // Recent signals are ephemeral.
+        ContextSource::RecentSignal { .. } => 0.15,
+        _ => 0.25,
     }
 }
 

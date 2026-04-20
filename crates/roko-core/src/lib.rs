@@ -53,6 +53,8 @@ pub mod arbitration;
 pub mod attestation;
 pub mod body;
 pub mod build;
+/// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
+pub mod bus_backends;
 pub mod catalyst;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
@@ -71,6 +73,8 @@ pub mod error;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
 pub mod hash;
+/// Cognitive immune system -- quarantine, anomaly detection, incident linking.
+pub mod immune;
 pub mod kind;
 pub mod language;
 pub mod loop_tick;
@@ -129,6 +133,10 @@ pub use forensic::{
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
 };
 pub use hash::ContentHash;
+pub use immune::{
+    AnomalyScore, ImmuneResponse, IncidentLink, IncidentRelation, QuarantineDecision,
+    QuarantineEntry, QuarantineStatus, QuarantineVault, ResponseAction,
+};
 pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 pub use loop_tick::{TickConfig, TickOutcome, loop_tick, loop_tick_with_config};
@@ -156,6 +164,7 @@ pub use provenance::{
     Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
 };
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
+pub use bus_backends::{BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus};
 pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
@@ -184,7 +193,7 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Bus, Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use namespace::{
     Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };

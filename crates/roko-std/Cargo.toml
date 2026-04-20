@@ -21,3 +21,4 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt", "process", "time"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "macros", "test-util"] }
 tempfile = { workspace = true }
+proptest = { workspace = true }

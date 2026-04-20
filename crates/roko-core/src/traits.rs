@@ -78,7 +78,78 @@ pub trait Substrate: Send + Sync {
     }
 }
 
-// ─── Scorer ────────────────────────────────────────────────────────────────
+// ─── ColdSubstrate ───────────────────────────────────────────────────────
+
+/// Archival substrate for aged-out engrams that no longer need hot-path access.
+///
+/// While a [`Substrate`] keeps engrams in-memory or on fast storage for
+/// real-time queries, a `ColdSubstrate` stores them in compressed, append-only
+/// archives for durability and audit trails. Engrams are migrated from hot to
+/// cold when they age out (e.g., low decay weight, old epoch, pruned).
+///
+/// # Migration flow
+///
+/// ```text
+/// Substrate (hot) ──age_out()──► ColdSubstrate (cold/archive)
+///                   ◄──thaw()──
+/// ```
+///
+/// # Implementations
+///
+/// - `ArchiveColdSubstrate` (roko-fs) — compressed JSONL archive files
+#[async_trait]
+pub trait ColdSubstrate: Send + Sync {
+    /// Archive an engram into cold storage. Returns its content hash.
+    ///
+    /// The engram is removed from the hot substrate by the caller after
+    /// successful archival.
+    async fn archive(&self, engram: Engram) -> Result<ContentHash>;
+
+    /// Archive a batch of engrams. Returns the count of successfully archived.
+    async fn archive_batch(&self, engrams: Vec<Engram>) -> Result<usize> {
+        let mut count = 0;
+        for e in engrams {
+            self.archive(e).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Retrieve an engram from cold storage by content hash.
+    ///
+    /// Returns `None` if the engram was never archived or has been purged.
+    /// This is a potentially slow operation (decompression, disk reads).
+    async fn thaw(&self, id: &ContentHash) -> Result<Option<Engram>>;
+
+    /// Check whether an engram exists in cold storage without fully loading it.
+    async fn contains(&self, id: &ContentHash) -> Result<bool> {
+        Ok(self.thaw(id).await?.is_some())
+    }
+
+    /// Total count of archived engrams.
+    async fn archived_count(&self) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// Total size of cold storage in bytes (approximate).
+    async fn storage_bytes(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Purge engrams older than the given epoch (millis since UNIX epoch).
+    /// Returns count of purged engrams.
+    async fn purge_before(&self, epoch_ms: i64) -> Result<usize> {
+        let _ = epoch_ms;
+        Ok(0)
+    }
+
+    /// Human-readable name for logging/debugging.
+    fn name(&self) -> &'static str {
+        "unnamed_cold_substrate"
+    }
+}
+
+// ─── Scorer ───────��────────────────────────────────────��───────────────────
 
 /// Rates an engram along multi-dimensional axes.
 ///

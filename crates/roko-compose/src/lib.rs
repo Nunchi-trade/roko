@@ -21,6 +21,7 @@ pub mod agents_md;
 pub mod attention;
 pub mod auction;
 pub mod budget;
+pub mod budget_predictor;
 pub mod compaction;
 pub mod context_assembler;
 pub mod context_mesh;
@@ -47,6 +48,7 @@ pub use auction::{
     SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation, is_pareto_optimal, vcg_allocate,
 };
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
+pub use budget_predictor::{BudgetPredictor, SectionInfluence, TaskFeatures};
 pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_mesh::{ContextMesh, SharedContextEntry};

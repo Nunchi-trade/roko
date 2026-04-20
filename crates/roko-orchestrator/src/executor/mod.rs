@@ -35,6 +35,7 @@ pub mod plan_state;
 pub mod priority_ceiling;
 pub mod recovery;
 pub mod reorder;
+pub mod resource_budget;
 pub mod snapshot;
 pub mod state_machine;
 
@@ -44,6 +45,10 @@ pub use priority_ceiling::{
     EffectivePriorityTracker, PlanResourceInfo, PriorityCeiling, ResourceId,
 };
 pub use reorder::{priority_reorder, reorder_queue};
+pub use resource_budget::{
+    CostBudget, FullResourceBudget, RateLimitResource, ResourceCheck, ResourcePool,
+    ResourceReservation, TaskResourceRequest, TokenBudget,
+};
 pub use snapshot::{
     CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorSnapshot, PersistedCircuitBreakerFailureRecord,
     PersistedCircuitBreakerState, SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier,

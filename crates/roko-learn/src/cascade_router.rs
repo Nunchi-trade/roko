@@ -3008,7 +3008,7 @@ impl CascadeRouter {
     pub fn feedback(
         &self,
         model_slug: &str,
-        predicted_success: f64,
+        _predicted_success: f64,
         actual_success: bool,
         residual: f64,
     ) {

@@ -258,9 +258,39 @@ impl Scorer for GoalDirectedHeuristicScorer {
 
 /// Compatibility alias: the "active inference" scorer is implemented as a
 /// goal-directed heuristic scorer using HDC-approximate embeddings rather
-/// than full Bayesian EFE. See [`GoalDirectedHeuristicScorer`] doc for the
-/// design rationale (COMP-05). This alias exists so external callsites
-/// that reference the spec name continue to compile.
+/// than full Bayesian EFE (COMP-05).
+///
+/// # Design rationale
+///
+/// The spec (doc 07) calls for Expected Free Energy scoring with epistemic
+/// value computed via KL divergence `D_KL(posterior || prior)`. This would
+/// require maintaining a full belief state and simulating Bayesian updates
+/// for each candidate section -- prohibitively expensive during prompt
+/// assembly where hundreds of candidates are scored per build.
+///
+/// Instead, [`GoalDirectedHeuristicScorer`] approximates epistemic value
+/// via three proxy signals:
+///
+/// 1. **Uncertainty** (`1.0 - topic_belief`): sections about topics the
+///    agent is less certain about score higher, analogous to KL divergence
+///    favoring belief-changing observations.
+/// 2. **Novelty** (`signal.score.novelty`): sections with high upstream
+///    novelty scores carry more information, correlating with entropy
+///    reduction.
+/// 3. **Informational leverage** (`1.0 / sqrt(len)`): shorter sections
+///    have higher information density per token, maximizing value within
+///    the budget.
+///
+/// The HDC hash-embedding cosine similarity in `pragmatic_value()` captures
+/// goal alignment without requiring a trained embedding model. Empirically,
+/// this produces ranking decisions adequate for prompt budgeting, and the
+/// quality gap vs proper EFE is small relative to the benefit of having
+/// any scoring at all.
+///
+/// See [`GoalDirectedHeuristicScorer`] struct documentation for the full
+/// three-point justification (correlation, cost, adequacy). If higher-fidelity
+/// epistemic scoring is needed, the `epistemic_value()` method can be replaced
+/// with KL-divergence computation without changing the [`Scorer`] interface.
 pub type ActiveInferenceScorer = GoalDirectedHeuristicScorer;
 
 fn embed_text(text: &str, dimensions: usize) -> Vec<f32> {

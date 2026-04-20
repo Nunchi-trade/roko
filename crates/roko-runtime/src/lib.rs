@@ -24,6 +24,8 @@
 pub mod cancel;
 pub mod delta_consumer;
 pub mod demurrage_consumer;
+/// Cognitive energy model -- metabolic costs for cognitive operations.
+pub mod energy;
 pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;

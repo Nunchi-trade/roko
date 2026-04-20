@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 use roko_agent::chat_types::FinishReason;
 
 use crate::anomaly::AnomalyDetector;
+use crate::calibration_policy::CalibrationPolicy;
 use crate::cascade_router::CascadeRouter;
 use crate::cost_table::CostTable;
 use crate::costs_db::{CostsDb, create_cost_record};
@@ -24,6 +25,7 @@ use crate::efficiency::{AgentEfficiencyEvent, ToolCallMeta};
 use crate::events::AgentEvent;
 use crate::latency::LatencyRegistry;
 use crate::provider_health::ProviderHealthRegistry;
+use crate::verdict_scorer::{VerdictHistory, VerdictRecord};
 
 #[derive(Debug, Clone)]
 struct ActiveTurn {
@@ -59,6 +61,8 @@ pub async fn run_learning_subscriber(
     }
     .with_defaults();
     let mut active_turn: Option<ActiveTurn> = None;
+    let mut calibration_policy = CalibrationPolicy::new();
+    let mut verdict_history = VerdictHistory::new();
 
     loop {
         let event = match rx.recv().await {
@@ -72,20 +76,32 @@ pub async fn run_learning_subscriber(
 
         match event {
             AgentEvent::TurnStarted {
-                task_id,
-                model,
-                provider,
+                ref task_id,
+                ref model,
+                ref provider,
                 ..
             } => {
-                active_turn = Some(ActiveTurn::from_started(&task_id, &model, &provider));
+                active_turn = Some(ActiveTurn::from_started(task_id, model, provider));
+                // Feed to calibration policy for predict-publish-correct loop (LEARN-09).
+                let _ = calibration_policy.process_event(&event);
             }
             AgentEvent::TurnCompleted {
                 turn,
                 usage,
                 tool_call_count,
                 gate_passed,
-                finish_reason,
+                ref finish_reason,
             } => {
+                // Feed calibration policy for predict-publish-correct loop (LEARN-09).
+                if let Some(correction) = calibration_policy.process_event(&event) {
+                    tracing::info!(
+                        model = %correction.model,
+                        category = %correction.category,
+                        bias = correction.mean_bias,
+                        "calibration correction triggered"
+                    );
+                }
+
                 let Some(turn_ctx) = active_turn.take() else {
                     continue;
                 };
@@ -195,8 +211,24 @@ pub async fn run_learning_subscriber(
                     let _ = detector.check_cost(cost_usd);
                 }
             }
-            AgentEvent::GateResult { .. }
-            | AgentEvent::AnomalyDetected { .. }
+            AgentEvent::GateResult {
+                ref gate_name,
+                passed,
+                ..
+            } => {
+                // Feed verdict history for routing penalty computation (GATE-05).
+                if let Some(turn_ctx) = &active_turn {
+                    verdict_history.record(VerdictRecord {
+                        model_slug: turn_ctx.model.clone(),
+                        task_type: String::new(), // filled from context when available
+                        target_crate: String::new(),
+                        gate: gate_name.clone(),
+                        passed,
+                        timestamp_ms: Utc::now().timestamp_millis(),
+                    });
+                }
+            }
+            AgentEvent::AnomalyDetected { .. }
             | AgentEvent::ExperimentAssigned { .. }
             | AgentEvent::SessionEstablished { .. }
             | AgentEvent::ModelSelected { .. }

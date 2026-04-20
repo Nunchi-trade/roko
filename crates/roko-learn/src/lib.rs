@@ -138,3 +138,5 @@ pub mod section_effect;
 pub mod signal_metabolism;
 pub mod skill_library;
 pub mod task_metric;
+/// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
+pub mod verdict_scorer;

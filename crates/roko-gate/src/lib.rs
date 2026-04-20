@@ -45,6 +45,8 @@ pub mod adaptive_threshold;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
+/// Standalone gate combinators: ParallelGate, VotingGate, FallbackGate (GATE-04).
+pub mod composition;
 pub mod compile;
 pub mod diff_gate;
 pub mod env_builder;
@@ -81,6 +83,7 @@ pub use code_exec::{
     CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
 };
 pub use compile::CompileGate;
+pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};

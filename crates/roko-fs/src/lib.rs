@@ -22,6 +22,8 @@
 
 pub mod archive;
 pub mod bandit;
+/// Archive-backed [`ColdSubstrate`](roko_core::ColdSubstrate) for aged-out engrams.
+pub mod cold_substrate;
 pub mod file_substrate;
 pub mod gc;
 pub mod layout;
@@ -34,6 +36,7 @@ pub mod trace_sink;
 
 pub use archive::{ArchiveEntry, ArchiveKind, ArchiveStats, Archiver};
 pub use bandit::{ArmSnapshot, BanditStore};
+pub use cold_substrate::{ArchiveColdSubstrate, SubstrateMigrator};
 pub use file_substrate::FileSubstrate;
 pub use gc::{GcCandidate, GcEngine, GcReport, RetentionPolicy};
 pub use layout::{LayoutVersion, RokoLayout};
