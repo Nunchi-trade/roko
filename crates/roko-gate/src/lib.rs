@@ -19,6 +19,8 @@ pub mod adaptive_threshold;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
+pub mod custody_gate;
+pub mod risk_limit_gate;
 pub mod compile;
 pub mod diff_gate;
 pub mod env_builder;
@@ -41,6 +43,8 @@ pub mod verify_chain_gate;
 
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
+pub use custody_gate::CustodyGate;
+pub use risk_limit_gate::RiskLimitGate;
 pub use code_exec::{
     CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
 };

@@ -27,6 +27,7 @@ use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use commands::experiment::{ExperimentCmd, dispatch_experiment};
+use commands::trading::{dispatch_jobs, dispatch_trading};
 use octocrab::Octocrab;
 use octocrab::models::hooks::{Config as HookConfig, ContentType, Hook};
 use octocrab::models::webhook_events::WebhookEventType;
@@ -346,6 +347,17 @@ enum Command {
         /// Port to listen on (default: 8080, overridden by PORT env).
         #[arg(long, default_value_t = 8080)]
         port: u16,
+    },
+    /// Trading surface (ports offchainservices-agent / agent-cli). See
+    /// plans/P08-trading-surface.md.
+    Trading {
+        #[command(subcommand)]
+        cmd: commands::trading::TradingCmd,
+    },
+    /// Perpetual Agent Jobs — keeper / operator / cooperative / managed.
+    Jobs {
+        #[command(subcommand)]
+        cmd: commands::trading::JobsCmd,
     },
 }
 
@@ -1033,6 +1045,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             roko_cli::worker::run_worker(port).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Trading { cmd } => dispatch_trading(cmd).await,
+        Command::Jobs { cmd } => dispatch_jobs(cmd).await,
     }
 }
 

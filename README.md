@@ -433,8 +433,29 @@ roko config migrate                         # upgrade legacy format
 | `roko serve` | Start HTTP API server |
 | `roko daemon start` | Start background daemon |
 | `roko deploy railway` | Deploy to Railway |
+| `roko trading strategies list` | List built-in trading strategies (simple_mm, grid_mm, avellaneda_mm, …) |
+| `roko trading trade --venue mock …` | Place a single mock / HL / Nunchi order |
+| `roko trading apex presets` | Show APEX orchestrator presets |
+| `roko jobs list` | List Perpetual-Agent-Jobs (oracle_updater, funding_keeper, liq_executor, market_maker, …) |
+| `roko jobs info <job_id>` | Show a job's custody policy, trigger, stake |
 
 Full reference with all 85+ commands, flags, and examples: [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md)
+
+## Trading surface
+
+`roko` ships with a first-class trading surface — every strategy, orchestrator, and perpetual-agent-job from [`Nunchi-trade/offchainservices-agent`](https://github.com/Nunchi-trade/offchainservices-agent) ported into Rust crates.
+
+- `roko-venue` — `VenueAdapter` trait + HL + Nunchi implementations
+- `roko-strategy` — `Strategy` trait + 11 built-in strategies (simple_mm, grid_mm, avellaneda_mm, mean_reversion, momentum_breakout, trend_follower, funding_momentum, basis_arb, aggressive_taker, hedge_agent, oi_divergence)
+- `roko-quoting` — wave-based quoting engine (FV band, disagreement, liquidation detection, session regimes, inventory caps)
+- `roko-execution` — smart routing, TWAP, bracket/conditional/pegged orders, portfolio-risk manager
+- `roko-custody` — pre-signing `CustodyGuard` with destination/selector/value/rate-limit policies
+- `roko-jobs` — Perpetual-Agent-Jobs runtime matching `contracts-core/docs/agent_cli_jobs_spec.tex`
+- `roko-apex` — multi-slot orchestrator
+- `roko-reflect` — nightly performance adapter that tunes APEX config from realized metrics
+- `roko-trading-agent` — glue that composes the above into a single `step()` loop
+
+See [`examples/trading/`](examples/trading/) for end-to-end walkthroughs and [`plans/P08-trading-surface.md`](plans/P08-trading-surface.md) for the porting plan.
 
 ## Building and testing
 

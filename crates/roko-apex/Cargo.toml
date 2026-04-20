@@ -1,0 +1,21 @@
+[package]
+name = "roko-apex"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "APEX multi-slot orchestrator — capital allocation across strategies, slot preset loader. Ports offchainservices-agent's cli/commands/apex.py + APEX modules. See plans/P08-trading-surface.md."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-strategy = { path = "../roko-strategy" }
+roko-venue = { path = "../roko-venue" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

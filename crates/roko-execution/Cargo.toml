@@ -1,0 +1,22 @@
+[package]
+name = "roko-execution"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Routing, TWAP, parent-order splitter, managed order types + portfolio-risk helpers. Ports offchainservices-agent's execution/. See plans/P08-trading-surface.md."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-venue = { path = "../roko-venue" }
+roko-strategy = { path = "../roko-strategy" }
+serde = { workspace = true, features = ["derive"] }
+uuid = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
