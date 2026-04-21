@@ -1191,7 +1191,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn gates_history_collection_is_served_under_api_grouping() -> Result<(), Box<dyn Error>> {
         let (dir, state) = test_state()?;
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         let signals_parent = signals
             .parent()
             .ok_or_else(|| anyhow!("signals path should have a parent directory"))?;
@@ -1499,16 +1499,28 @@ mod tests {
         tokio::fs::create_dir_all(&learn_dir)
             .await
             .map_err(|err| anyhow!("failed to create learn dir for c-factor trend test: {err}"))?;
+        // Anchor both timestamps within the current hour bucket so they always
+        // land in the same bucket regardless of when the test runs.
+        let now = chrono::Utc::now();
+        let now_ms = now.timestamp_millis();
+        let hour_ms: i64 = 3_600_000;
+        let hour_start_ms = (now_ms / hour_ms) * hour_ms;
+        let t1 = chrono::DateTime::from_timestamp_millis(hour_start_ms + 10 * 60_000)
+            .unwrap()
+            .to_rfc3339();
+        let t2 = chrono::DateTime::from_timestamp_millis(hour_start_ms + 40 * 60_000)
+            .unwrap()
+            .to_rfc3339();
         tokio::fs::write(
             learn_dir.join("c-factor.jsonl"),
             [
                 serde_json::json!({
-                    "computed_at": "2026-04-16T08:10:00Z",
+                    "computed_at": t1,
                     "overall": 0.35
                 })
                 .to_string(),
                 serde_json::json!({
-                    "computed_at": "2026-04-16T08:40:00Z",
+                    "computed_at": t2,
                     "overall": 0.65
                 })
                 .to_string(),

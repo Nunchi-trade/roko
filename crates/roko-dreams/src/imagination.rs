@@ -488,6 +488,15 @@ fn hypothetical_entry(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -532,7 +541,8 @@ impl ImaginationMode {
 mod tests {
     use super::*;
 
-    fn episode(id: &str, task_id: &str, model: &str, success: bool) -> Episode {
+    fn episode(id: &str, task_id: &str, model: &str, success: bool, minutes_ago: i64) -> Episode {
+        let timestamp = Utc::now() - chrono::Duration::minutes(minutes_ago);
         let mut episode = Episode::new("agent", task_id);
         episode.id = id.to_string();
         episode.task_id = task_id.to_string();
@@ -541,35 +551,87 @@ mod tests {
         if !success {
             episode.failure_reason = Some("timeout".to_string());
         }
+        episode.timestamp = timestamp;
+        episode.started_at = timestamp;
+        episode.completed_at = timestamp;
         episode
     }
 
     #[test]
-    fn imagine_uses_trust_region() {
-        let episodes = vec![episode("a", "task-1", "claude-haiku-4-5", true)];
+    fn imagine_preserves_mode_and_output_shape() {
+        let episodes = vec![episode("a", "task-1", "claude-haiku-4-5", true, 5)];
         let model = CausalModel::from_episodes(&episodes);
         let query = CounterfactualQuery {
             episode_id: "a".to_string(),
             intervention: ("model".to_string(), "claude-sonnet-4-5".to_string()),
         };
-        let outcome = imagine(&query, &model, ImaginationMode::Transformational);
-        assert!(outcome.plausible);
-        assert!(outcome.confidence > 0.0);
+        let combinational = imagine(&query, &model, ImaginationMode::Combinational);
+        let exploratory = imagine(&query, &model, ImaginationMode::Exploratory);
+        let transformational = imagine(&query, &model, ImaginationMode::Transformational);
+
+        for outcome in [&combinational, &exploratory, &transformational] {
+            assert_eq!(outcome.query, query);
+            assert_eq!(outcome.query.episode_id, "a");
+            assert_eq!(outcome.query.intervention.0, "model");
+            assert!(outcome.plausible);
+            assert!(outcome.confidence > 0.0);
+            assert!(outcome.narrative.contains("If model changed from"));
+        }
+        assert!(combinational.narrative.contains("combinational"));
+        assert!(exploratory.narrative.contains("exploratory"));
+        assert!(transformational.narrative.contains("transformational"));
+        assert!(combinational.projected_success_delta > exploratory.projected_success_delta);
+        assert!(exploratory.projected_success_delta > transformational.projected_success_delta);
     }
 
     #[test]
-    fn synthesize_hypotheses_emits_entries() {
+    fn synthesize_hypotheses_emits_tagged_working_entries() {
         let episodes = vec![
-            episode("a", "task-1", "claude-haiku-4-5", true),
-            episode("b", "task-2", "claude-haiku-4-5", true),
-            episode("c", "task-3", "claude-haiku-4-5", false),
+            episode("a", "task-1", "claude-haiku-4-5", true, 3),
+            episode("b", "task-2", "claude-haiku-4-5", true, 2),
+            episode("c", "task-3", "", false, 1),
         ];
         let entries = synthesize_hypotheses(&episodes, Utc::now());
-        assert!(!entries.is_empty());
+        assert_eq!(entries.len(), 3);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.source.as_deref() == Some("dream"))
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.tier == KnowledgeTier::Working)
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.tags.iter().any(|tag| tag == "dream"))
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.tags.iter().any(|tag| tag == "counterfactual"))
+        );
         assert!(
             entries
                 .iter()
                 .any(|entry| entry.tags.iter().any(|tag| tag == "rem"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.tags.iter().any(|tag| tag == "combinational"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.tags.iter().any(|tag| tag == "exploratory"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.tags.iter().any(|tag| tag == "transformational"))
         );
     }
 }

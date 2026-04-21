@@ -603,6 +603,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safety_blocks_direct_git_force_push_before_spawn() {
+        let agent = ExecAgent::new(
+            "git",
+            vec![
+                "push".into(),
+                "--force".into(),
+                "origin".into(),
+                "main".into(),
+            ],
+        )
+        .with_safety_layer(Some(SafetyLayer::with_defaults()));
+        let result = agent.run(&prompt(""), &Context::now()).await;
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .body
+                .as_text()
+                .unwrap()
+                .contains("blocked by safety layer")
+        );
+    }
+
+    #[tokio::test]
     async fn benign_stderr_is_suppressed_from_trace() {
         let agent = ExecAgent::new(
             "sh",

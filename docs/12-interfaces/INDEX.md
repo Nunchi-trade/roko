@@ -1,19 +1,40 @@
 # Topic 12: Interfaces
 
-> CLI, HTTP API, TUI dashboard, Web Portal, Spectre creatures, sonification, and generative UI — every way an operator interacts with Roko's cognitive agents.
+> CLI, TUI, HTTP API, and the interface specs around them.
 
 ---
 
 ## Overview
 
-This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), the HTTP API server (`roko-serve`), the TUI terminal dashboard (ratatui-based), the Web Portal (React 19 / Next.js 15.5+), the Spectre creature visualization system, ambient sonification, and the A2UI generative interface protocol. All interfaces share the ROSEDUST design language and consume the same underlying data model (Engrams, behavioral states, C-Factor metrics, knowledge tiers).
+This topic mixes current operator surfaces with target-state UX specs. Read it in three tiers:
+
+- **Shipping**: CLI (`roko`), TUI (ratatui-based), and the HTTP API in `roko-serve`.
+- **Minimal**: chat-oriented interaction exists, but the current chat surface is still a small REPL rather than a polished shared session UI.
+- **Target-state**: first-party web UI, universal verb symmetry across four surfaces, rich UX primitives, and the four-layer Rust SDK.
+
+The audit keeps two refinement directions intact here:
+
+- **REF28**: make bare `roko` the familiar interactive entry point, improve chat and init flows, and preserve diff-first review, transcripts, and CLI muscle memory.
+- **REF26**: keep hardening the existing `StateHub` and evolve it toward clearer shared projections over time.
+
+The audit narrows or defers the rest:
+
+- The universal nine-verb surface is a target-state reference, not current product parity.
+- The first-party Web Portal is deferred; `roko-serve` is an API surface, not a shipped browser app.
+- Rich UX primitives stay as design targets until the projection and telemetry contracts behind them are real.
+- The Rust SDK chapter is deferred until there is a real external library surface to document.
 
 **Key design principles:**
 - **Progressive disclosure**: Overview first, detail on demand
+- **Ship what exists first**: CLI, TUI, and HTTP API are the current operator surfaces
+- **Familiar workflow parity**: slash commands, diff-first review, transcript resumption, and visible budgets are worth pursuing where the underlying workflow already exists
 - **ROSEDUST everywhere**: One design language across TUI, Web, and CLI
-- **Real-time**: WebSocket and SSE feeds for live agent monitoring
+- **Realtime surface**: WebSocket and SSE are current; gRPC is deferred
+- **Shared projections**: the current `StateHub` is real; finer-grained named projections are an evolution path
+- **Rich UX primitives**: useful as target-state vocabulary, not a description of current implementation
+- **Deliberate small web surface**: if a first-party browser UI is built later, it should stay narrow
 - **Spectre as readout**: Every agent has a procedurally generated creature that encodes cognitive state
-- **No mortality references**: Spectres never die, music reflects engagement not lifecycle
+- **No ending framing**: Spectres stay continuous; music reflects engagement, not lifecycle
 
 ---
 
@@ -21,25 +42,29 @@ This topic covers all user-facing interfaces in Roko: the CLI binary (`roko`), t
 
 | # | Document | Summary |
 |---|---|---|
-| 00 | [00-cli-overview.md](./00-cli-overview.md) | CLI as primary interface — 5 operating modes, command groups, global flags, event system, zero-to-agent quickstart |
-| 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — Getting Started, Scaffolding, Orchestration, PRD, Research, Knowledge, Infrastructure, Debugging, Deployment |
+| 00 | [00-cli-overview.md](./00-cli-overview.md) | CLI as primary interface — default `roko` interactive entry, familiar workflow contract, six operating modes, plugin workflow, command groups, global flags, diff-first approval, transcripts, and zero-to-agent quickstart |
+| 01 | [01-cli-command-reference.md](./01-cli-command-reference.md) | Full command reference organized by group — bare `roko`, slash commands, completion, getting started, plugins, orchestration, replay, import, non-interactive output modes, and CI parity |
 | 02 | [02-roko-new-scaffolders.md](./02-roko-new-scaffolders.md) | `roko new` scaffolder specifications for all 9 types (domain, gate, scorer, router, policy, substrate, probe, event-source, template) with generated code examples |
-| 03 | [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) | Progressive disclosure help system — `roko explain` 3-level output, error-as-teacher format, config wizard, TeachingError struct |
-| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), `ROKO_*` env vars, full `roko.toml` schema with all sections, auto-detection |
-| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, event bus, dispatch loop |
-| 06 | [06-websocket-streaming.md](./06-websocket-streaming.md) | Real-time streaming — 4 WebSocket endpoints, SSE endpoint, reconnection protocol with ring buffer, event coalescing |
+| 03 | [03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md) | Progressive disclosure help system — `roko explain` 3-level output, error-as-teacher format, diff-review explainability, config wizard, and TeachingError struct |
+| 04 | [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) | Layered config resolution (CLI → env → TOML → defaults), runtime-shape-aware deployment overlays for laptop/single-server/container/clustered/edge, `ROKO_*` env vars, full `roko.toml` schema, auto-detection |
+| 05 | [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) | roko-serve architecture — axum HTTP server, 12 route groups, REST endpoints, authentication, deployment probes, and runtime-shape-aware control-plane behavior |
+| 06 | [06-websocket-streaming.md](./06-websocket-streaming.md) | Shared realtime surface — shipping WebSocket + SSE today, with gRPC explicitly deferred and documented only as target-state protocol shape |
 | 07 | [07-rosedust-design-language.md](./07-rosedust-design-language.md) | ROSEDUST design system — void-black palette, rose accents, glass morphism (CSS + Rust), motion system, typography, RosedustTheme struct |
 | 08 | [08-tui-main-layout.md](./08-tui-main-layout.md) | TUI main layout — 3 regions (sidebar, detail, Spectre viewport), rendering architecture, 60fps frame budget, bloom composite, responsive breakpoints |
 | 09 | [09-tui-29-screens.md](./09-tui-29-screens.md) | Complete 29-screen inventory across 6 regions — Navigation (6), Agent Detail (6), Plan Detail (5), Knowledge (4), Collective (4), System (4) |
 | 10 | [10-spectre-creature-visualization.md](./10-spectre-creature-visualization.md) | Spectre creature system — deterministic generation from agent hash, dot-cloud geometry, spring physics, 6 behavioral state animations, eye/glow/tendril systems |
 | 11 | [11-spectre-rendering-per-interface.md](./11-spectre-rendering-per-interface.md) | Per-renderer Spectre implementations — TUI ASCII rasterization, Web Portal WebGL, CLI inline, API JSON state |
 | 12 | [12-spectre-as-collective-display.md](./12-spectre-as-collective-display.md) | Multi-agent Spectre visualization — filament connections, pheromone fields, breathing synchronization (Kuramoto coupling), C-Factor harmony encoding |
-| 13 | [13-web-portal.md](./13-web-portal.md) | Web Portal — React 19 + Next.js 15.5+, ROSEDUST Tailwind config, glass morphism CSS, 9 pages, WebGL Spectre, WebSocket integration |
-| 14 | [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md) | Onboarding journey — domain selection, template instantiation, model routing, knowledge bootstrapping, Spectre generation, first-task validation |
+| 13 | [13-web-portal.md](./13-web-portal.md) | Web Portal — deferred five-page first-party web UI spec on top of the HTTP API and future StateHub/realtime hardening |
+| 14 | [14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md) | Onboarding journey — domain selection, template instantiation, model routing, profile install/composition, knowledge bootstrapping, Spectre generation, first-task validation |
 | 15 | [15-generative-interfaces-a2ui.md](./15-generative-interfaces-a2ui.md) | A2UI protocol — agents emit JSONL UI descriptions, 12 component types, ROSEDUST inheritance, sandboxed rendering across TUI/Web/CLI |
-| 16 | [16-sonification-reframed.md](./16-sonification-reframed.md) | Ambient sonification — Eno mandate, 5 musical layers, 8 behavioral state presets, emotional harmonic vocabulary. No mortality audio. |
+| 16 | [16-sonification-reframed.md](./16-sonification-reframed.md) | Ambient sonification — Eno mandate, 5 musical layers, 8 behavioral state presets, emotional harmonic vocabulary. No lifecycle audio. |
 | 17 | [17-accessibility-and-current-status.md](./17-accessibility-and-current-status.md) | WCAG 2.1 AA targets, keyboard nav, screen reader support, reduced motion, port allocation, comprehensive implementation status |
 | 18 | [18-ux-innovation-proposals.md](./18-ux-innovation-proposals.md) | 7 UX innovations — Conversational Development, Time-Travel Debugging, Dream Journal, Agent Garden, Pair Programming with Affect, Collaborative Planning, Knowledge Map |
+| 19 | [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) | Rust SDK developer UX — deferred external-SDK target; the live extension surface today is still the kernel trait layer |
+| 21 | [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) | User UX — keeps familiar-first CLI parity and narrows the broader four-surface redesign to chat/init improvements plus target-state guidance |
+| 22 | [22-statehub-projection-layer.md](./22-statehub-projection-layer.md) | StateHub — keep this direction; today’s hub is real, and the projection catalog is the target evolution path |
+| 23 | [23-rich-ux-primitives.md](./23-rich-ux-primitives.md) | Rich UX primitives — target-state vocabulary that depends on future projection and telemetry contracts |
 
 ---
 
@@ -64,13 +89,13 @@ This topic builds on:
 
 ## Key Architectural Decisions
 
-1. **ROSEDUST is dark-only**: No light theme variant. The void-black background is integral to the design language, not a preference.
+1. **ROSEDUST is dark-led, not dark-only**: the browser surface ships light, dark, and high-contrast themes over one token system while the TUI remains deep-background-first.
 
 2. **TUI is the primary development interface**: The CLI + TUI combination is the most capable interface. The Portal is a monitoring/analysis complement, not a replacement.
 
 3. **Spectre creatures are information displays, not decoration**: Every visual property traces to a data source. If it can't be grounded in data, it doesn't exist.
 
-4. **WebSocket for bidirectional, SSE for monitoring**: WebSocket when you need to send commands (inject, pause, resume); SSE when you only consume events.
+4. **One realtime protocol, multiple transports**: WebSocket and SSE are the current transports; optional gRPC is deferred.
 
 5. **A2UI is agent-authored, not user-authored**: Agents create UI components; users consume them. The rendering is always in ROSEDUST.
 
@@ -102,4 +127,47 @@ This topic was generated from:
 - `bardo-backup/prd/shared/` (branding, port allocation)
 - Active code: `roko-cli/src/tui/`, `roko-serve/src/routes/`, `roko-cli/src/main.rs`
 
-All naming follows the authoritative naming map: bardo→Roko, golem→agent, grimoire→Neuro, Signal→Engram, clade→collective/mesh, mori→Roko Orchestrator. Mortality and death references have been removed per the reframe rules. Sonification presets have been remapped from lifecycle phases to behavioral states.
+All naming follows the authoritative naming map. Legacy/renamed terms include bardo→Roko, golem→agent, grimoire→Neuro, Signal→Engram, clade→collective/mesh, and mori→Roko Orchestrator. Legacy lifecycle and death framing has been removed per the reframe rules. Sonification presets have been remapped from lifecycle phases to behavioral states.
+REF17 adds the interface-side plugin surface; start with [00-cli-overview.md](./00-cli-overview.md),
+[01-cli-command-reference.md](./01-cli-command-reference.md), and
+[tmp/refinements/17-plugin-extension-architecture.md](../../tmp/refinements/17-plugin-extension-architecture.md).
+REF22 adds the Rust SDK developer-UX chapter; start with [19-rust-sdk-developer-ux.md](./19-rust-sdk-developer-ux.md) and [tmp/refinements/22-developer-ux-rust.md](../../tmp/refinements/22-developer-ux-rust.md).
+REF24 adds the runtime-shape-aware deployment and control-plane framing; start with
+[04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md),
+[05-http-api-roko-serve.md](./05-http-api-roko-serve.md),
+[../19-deployment/INDEX.md](../19-deployment/INDEX.md),
+[../19-deployment/10-secret-management.md](../19-deployment/10-secret-management.md),
+and [tmp/refinements/24-deployment-ux.md](../../tmp/refinements/24-deployment-ux.md).
+REF25 adds the domain-profile install/composition framing; start with
+[00-cli-overview.md](./00-cli-overview.md), [01-cli-command-reference.md](./01-cli-command-reference.md),
+[14-agent-onboarding-flow.md](./14-agent-onboarding-flow.md),
+[21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and
+[tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
+REF26 adds the StateHub projection layer; start with
+[22-statehub-projection-layer.md](./22-statehub-projection-layer.md),
+[../00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md), and
+[tmp/refinements/26-statehub-rearchitecture.md](../../tmp/refinements/26-statehub-rearchitecture.md).
+REF27 adds the shared realtime surface; start with
+[06-websocket-streaming.md](./06-websocket-streaming.md),
+[05-http-api-roko-serve.md](./05-http-api-roko-serve.md),
+[13-web-portal.md](./13-web-portal.md),
+[../19-deployment/11-remote-orchestrator.md](../19-deployment/11-remote-orchestrator.md), and
+[tmp/refinements/27-realtime-event-surface.md](../../tmp/refinements/27-realtime-event-surface.md).
+REF28 adds familiar workflow parity across surfaces; start with
+[00-cli-overview.md](./00-cli-overview.md),
+[01-cli-command-reference.md](./01-cli-command-reference.md),
+[03-progressive-help-and-explain.md](./03-progressive-help-and-explain.md),
+[21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and
+[tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md).
+REF29 adds the five-page first-party web UI architecture; start with
+[13-web-portal.md](./13-web-portal.md),
+[22-statehub-projection-layer.md](./22-statehub-projection-layer.md),
+[06-websocket-streaming.md](./06-websocket-streaming.md),
+[21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and
+[tmp/refinements/29-web-ui-architecture.md](../../tmp/refinements/29-web-ui-architecture.md).
+REF30 adds the shared rich UX primitive vocabulary; start with
+[23-rich-ux-primitives.md](./23-rich-ux-primitives.md),
+[21-user-ux-running-agents.md](./21-user-ux-running-agents.md),
+[13-web-portal.md](./13-web-portal.md),
+[22-statehub-projection-layer.md](./22-statehub-projection-layer.md), and
+[tmp/refinements/30-rich-ux-primitives.md](../../tmp/refinements/30-rich-ux-primitives.md).

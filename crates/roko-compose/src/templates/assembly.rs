@@ -140,7 +140,7 @@ impl PromptAssembler {
         let critical_tokens: usize = critical.iter().map(|s| estimate_tokens(&s.content)).sum();
 
         // Sort optional by priority DESC (High first, Low last).
-        optional.sort_by(|a, b| (b.priority as u8).cmp(&(a.priority as u8)));
+        optional.sort_by_key(|s| std::cmp::Reverse(s.priority as u8));
 
         // Greedy inclusion under budget.
         let mut kept = critical;

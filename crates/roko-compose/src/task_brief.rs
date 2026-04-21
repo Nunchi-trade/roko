@@ -209,7 +209,7 @@ fn extract_why(plan: &str, task: &TaskInput, max_lines: usize) -> String {
     }
 
     // Sort by score descending
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
 
     // Take the most relevant paragraphs up to max_lines
     let mut total_lines = 0;

@@ -5,6 +5,7 @@ pub mod rosedust;
 
 pub mod braille;
 pub mod diff_panel;
+pub mod dream_view;
 pub mod error_digest;
 pub mod header_bar;
 pub mod parallel_pool;

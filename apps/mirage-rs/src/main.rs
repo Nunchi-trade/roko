@@ -278,7 +278,8 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
 
     // Prefund the synthetic ERC-8004 bootstrap deployer so contract creation
     // succeeds even on a real mainnet fork (where the address has 0 balance).
-    fork.db.set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
+    fork.db
+        .set_balance(ERC8004_BOOTSTRAP_DEPLOYER, U256::from(10_u128.pow(18)));
 
     let erc8004_contracts =
         bootstrap_erc8004_contracts(&mut fork).context("bootstrap ERC-8004 contracts")?;
@@ -299,6 +300,7 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         if toggles.any_enabled() {
             let chain_ctx = {
                 // Restore from snapshot if available, otherwise create fresh.
+                #[allow(unused_mut)]
                 let mut ctx = if let Some(chain_snap) =
                     loaded_snapshot.as_ref().and_then(|s| s.chain.clone())
                 {
@@ -496,13 +498,13 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         tracing::info!("writing final snapshot before exit");
         #[cfg(feature = "chain")]
         {
-            let snap = match chain_ctx_for_persist.as_ref() {
-                Some(ctx) => {
+            let snap = chain_ctx_for_persist.as_ref().map_or_else(
+                || persist::capture_snapshot(&mirage, None),
+                |ctx| {
                     let chain = ctx.read();
                     persist::capture_snapshot(&mirage, Some(&*chain))
-                }
-                None => persist::capture_snapshot(&mirage, None),
-            };
+                },
+            );
             if let Err(e) = persist::write_snapshot(&snap, &state_dir) {
                 tracing::warn!("final snapshot failed: {e}");
             }

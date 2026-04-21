@@ -86,11 +86,21 @@ pub fn threat_warning_entries(
     episodes: &[Episode],
     created_at: DateTime<Utc>,
 ) -> Vec<KnowledgeEntry> {
+    threat_warning_entries_with_floor(episodes, created_at, 0.20)
+}
+
+/// Convert threat scenarios into warning knowledge entries using a minimum severity floor.
+#[must_use]
+pub fn threat_warning_entries_with_floor(
+    episodes: &[Episode],
+    created_at: DateTime<Utc>,
+    severity_floor: f64,
+) -> Vec<KnowledgeEntry> {
     let threats = enumerate_threats(episodes);
     let mut out = Vec::new();
     for threat in threats
         .into_iter()
-        .filter(|threat| threat.severity() >= 0.20)
+        .filter(|threat| threat.severity() >= severity_floor)
     {
         let source_episodes = source_episode_ids(episodes, &threat);
         let tags = vec![
@@ -100,6 +110,19 @@ pub fn threat_warning_entries(
             "fmea".to_string(),
             "fta".to_string(),
         ];
+        // Transfer the most intense emotional tag from source episodes.
+        // This ensures the emotional retrieval boost is active for
+        // affect-congruent knowledge surfacing (P0-25).
+        let emotional_tag = episodes
+            .iter()
+            .filter(|ep| source_episodes.contains(&ep.id))
+            .filter_map(|ep| ep.emotional_tag.as_ref())
+            .max_by(|a, b| a.intensity.total_cmp(&b.intensity))
+            .cloned();
+        let emotional_provenance = emotional_tag
+            .as_ref()
+            .map(roko_neuro::EmotionalProvenance::from_tag);
+
         out.push(KnowledgeEntry {
             id: threat_entry_id(&threat, &source_episodes, &tags),
             kind: KnowledgeKind::Warning,
@@ -116,9 +139,18 @@ pub fn threat_warning_entries(
             created_at,
             half_life_days: KnowledgeKind::Warning.default_half_life_days(),
             tier: KnowledgeTier::Working,
-            emotional_tag: None,
-            emotional_provenance: None,
+            emotional_tag,
+            emotional_provenance,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         });
     }
     out
@@ -288,25 +320,58 @@ mod tests {
         let episodes = vec![
             episode("a", "task-1", "haiku", Some("timeout")),
             episode("b", "task-1", "haiku", Some("timeout")),
-            episode("c", "task-2", "haiku", None),
+            episode("c", "task-2", "haiku", Some("compile")),
         ];
         let threats = enumerate_threats(&episodes);
-        assert_eq!(threats.len(), 1);
+        assert_eq!(threats.len(), 2);
+        assert!(threats[0].severity() >= threats[1].severity());
+        assert!(threats[0].id.starts_with("dream-threat-"));
+        assert!(threats[0].description.contains("task-1"));
+        assert!(threats[0].description.contains("haiku"));
+        assert!(threats[0].description.contains("timeout"));
         assert!(threats[0].severity() > 0.0);
     }
 
     #[test]
-    fn threat_warning_entries_emit_warning_kind() {
+    fn threat_warning_entries_remain_warning_tagged_and_bounded() {
         let episodes = vec![
             episode("a", "task-1", "haiku", Some("timeout")),
             episode("b", "task-1", "haiku", Some("timeout")),
         ];
         let entries = threat_warning_entries(&episodes, Utc::now());
-        assert!(!entries.is_empty());
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry.kind == KnowledgeKind::Warning)
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry.kind, KnowledgeKind::Warning);
+        assert_eq!(entry.source.as_deref(), Some("dream"));
+        assert_eq!(
+            entry.tags,
+            vec![
+                "dream".to_string(),
+                "threat".to_string(),
+                "warning".to_string(),
+                "fmea".to_string(),
+                "fta".to_string(),
+            ]
         );
+        assert!(entry.content.contains("Mitigation:"));
+        assert_eq!(
+            entry.half_life_days,
+            KnowledgeKind::Warning.default_half_life_days()
+        );
+    }
+
+    #[test]
+    fn threat_warning_entries_respect_minimum_severity_floor() {
+        let episodes = vec![
+            episode("a", "task-1", "haiku", Some("timeout")),
+            episode("b", "task-1", "haiku", Some("timeout")),
+        ];
+
+        let threats = enumerate_threats(&episodes);
+        let floor = threats[0].severity() + 0.05;
+        let entries = threat_warning_entries_with_floor(&episodes, Utc::now(), floor);
+
+        assert!(entries.is_empty());
     }
 }

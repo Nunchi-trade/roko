@@ -162,9 +162,18 @@ impl RokoLayout {
 
     // ── per-entity paths ─────────────────────────────────────────────────
 
-    /// `.roko/signals.jsonl` — the main signal log.
+    /// `.roko/engrams.jsonl` — the main engram log.
     #[must_use]
-    pub fn signals_path(&self) -> PathBuf {
+    pub fn engrams_path(&self) -> PathBuf {
+        self.root.join("engrams.jsonl")
+    }
+
+    /// Legacy path for the engram log (pre-rename).
+    ///
+    /// Use [`Self::engrams_path`] for new code. This helper exists so
+    /// callers can check for the old file and migrate it.
+    #[must_use]
+    pub fn engrams_path_legacy(&self) -> PathBuf {
         self.root.join("signals.jsonl")
     }
 
@@ -214,6 +223,26 @@ impl RokoLayout {
     #[must_use]
     pub fn episodes_path(&self) -> PathBuf {
         self.memory_dir().join("episodes.jsonl")
+    }
+
+    /// `.roko/custody.jsonl` — append-only custody audit chain.
+    ///
+    /// Each line is a JSON-serialized [`Custody`] record capturing who
+    /// did what, with what authorization, under what taint, and which
+    /// gates passed.
+    #[must_use]
+    pub fn custody_log(&self) -> PathBuf {
+        self.root.join("custody.jsonl")
+    }
+
+    /// `.roko/witness.jsonl` — append-only witness DAG log.
+    ///
+    /// Each line is a JSON-serialized `WitnessVertex` recording the
+    /// agent reasoning chain (observation, prediction, decision,
+    /// resolution, neuro entry).
+    #[must_use]
+    pub fn witness_log(&self) -> PathBuf {
+        self.root.join("witness.jsonl")
     }
 
     /// `.roko/memory/playbook.toml` — the active playbook.
@@ -424,6 +453,15 @@ mod tests {
         assert_eq!(
             layout.context_pack_cache_dir(),
             PathBuf::from("/c/.roko/cache/context-pack-cache")
+        );
+    }
+
+    #[test]
+    fn witness_log_path() {
+        let layout = RokoLayout::new("/w/.roko");
+        assert_eq!(
+            layout.witness_log(),
+            PathBuf::from("/w/.roko/witness.jsonl")
         );
     }
 

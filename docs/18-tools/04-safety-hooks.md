@@ -2,6 +2,7 @@
 
 > Capability<T> flow, safety hook chain, Revm simulation, WASM sandbox for untrusted tools,
 > TaintedString for sensitive data handling.
+> See also [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 
 > **Implementation**: Shipping
@@ -361,6 +362,11 @@ pub struct SafetyAuditRecord {
 Audit records are stored as Engrams (the universal data type — see
 `docs/01-synapse-architecture/`) with `Kind::Custom("safety.audit")` and
 lineage linking back to the tool call Engram. This creates a complete provenance chain:
+
+Domain-specific profiles should attach their own `TypedContext` snapshot to that chain so the
+audit record preserves structured intent, not just a parameter hash. For consequential write
+paths, the same lineage should also anchor the domain's `Custody` record so downstream review
+can answer who acted, why, and what was simulated before the action executed.
 
 ```
 Tool Call Engram

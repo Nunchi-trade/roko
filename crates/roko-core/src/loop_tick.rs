@@ -18,10 +18,76 @@
 //!   if passed: substrate.put(composed) + policy.decide(stream, ctx)
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     Budget, Composer, Context, Engram, Gate, Policy, Query, Router, Scorer, Substrate, Verdict,
     error::Result,
 };
+
+/// Configuration for a single tick of the universal loop (IF-04).
+///
+/// Controls limits and verbosity without changing the core loop logic.
+/// Use `TickConfig::default()` for unlimited execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickConfig {
+    /// Maximum number of turns (candidates examined) before stopping.
+    /// `None` means unlimited.
+    pub max_turns: Option<u64>,
+    /// Timeout in seconds for the entire tick. `None` means no timeout.
+    pub timeout_secs: Option<u64>,
+    /// Budget ceiling in USD. `None` means no budget limit.
+    pub budget_usd: Option<f64>,
+    /// Whether to emit verbose tracing for this tick.
+    pub verbose: bool,
+}
+
+impl Default for TickConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: None,
+            timeout_secs: None,
+            budget_usd: None,
+            verbose: false,
+        }
+    }
+}
+
+impl TickConfig {
+    /// Create a config with no limits (equivalent to `Default`).
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum number of turns.
+    #[must_use]
+    pub const fn with_max_turns(mut self, max: u64) -> Self {
+        self.max_turns = Some(max);
+        self
+    }
+
+    /// Set the timeout in seconds.
+    #[must_use]
+    pub const fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = Some(secs);
+        self
+    }
+
+    /// Set the budget ceiling in USD.
+    #[must_use]
+    pub fn with_budget_usd(mut self, usd: f64) -> Self {
+        self.budget_usd = Some(usd);
+        self
+    }
+
+    /// Enable verbose tracing.
+    #[must_use]
+    pub const fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+}
 
 /// What happened during one tick of the universal loop.
 #[derive(Debug)]
@@ -84,6 +150,44 @@ pub async fn loop_tick(
     query: &Query,
     budget: &Budget,
     ctx: &Context,
+) -> Result<TickOutcome> {
+    loop_tick_with_config(
+        substrate,
+        scorer,
+        router,
+        composer,
+        gate,
+        policy,
+        query,
+        budget,
+        ctx,
+        &TickConfig::default(),
+    )
+    .await
+}
+
+/// Run one tick of the universal loop with explicit configuration.
+///
+/// Like [`loop_tick`] but accepts a [`TickConfig`] for controlling limits
+/// and verbosity. The `tick_config` parameter is consulted for verbose
+/// logging; budget and turn limits are advisory and should be enforced
+/// by the outer orchestration loop that calls this function repeatedly.
+///
+/// # Errors
+///
+/// Propagates errors from the substrate and composer.
+#[allow(clippy::similar_names, clippy::too_many_arguments)]
+pub async fn loop_tick_with_config(
+    substrate: &dyn Substrate,
+    scorer: &dyn Scorer,
+    router: &dyn Router,
+    composer: &dyn Composer,
+    gate: &dyn Gate,
+    policy: &dyn Policy,
+    query: &Query,
+    budget: &Budget,
+    ctx: &Context,
+    _tick_config: &TickConfig,
 ) -> Result<TickOutcome> {
     // 1. Query the substrate for candidates.
     let candidates = substrate.query(query, ctx).await?;

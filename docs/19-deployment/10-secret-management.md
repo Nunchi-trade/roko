@@ -1,48 +1,65 @@
 # Secret Management
 
-> Roko handles sensitive credentials (LLM provider API keys, webhook secrets, chain private
-> keys) through a layered resolution strategy: CLI flags, environment variables, .env files
-> (via dotenvy), OS keychain, and config files. This document covers the resolution order,
-> scoped secrets per repository, secure storage patterns, Docker and Fly.io secret injection,
-> and the `${VAR}` interpolation system in roko.toml.
-
+> Roko handles sensitive credentials through a layered resolution strategy that works across
+> laptop-local, single-server, container, clustered, and edge profiles. The goal is the same
+> everywhere: secrets should be easy to inject, hard to leak, and portable across shapes.
+> See also `../../tmp/refinements/24-deployment-ux.md`.
 
 > **Implementation**: Specified
 
 ---
 
+## Shape-Aware Secret Policy
+
+Secret handling follows the deployment profile. The same binary uses different defaults based
+on the selected shape:
+
+| Shape | Default secret source | Notes |
+|---|---|---|
+| laptop-local | OS keychain | Best interactive experience; secrets stay off disk |
+| single-server | OS keychain or host secret store | Shared machine, scoped by user or role |
+| container | Env vars or `_FILE` mounts | Fits Docker, Compose, and orchestrators |
+| clustered | External secret store | Vault, cloud secret manager, or sealed secrets |
+| edge | Provider-native secret injection | Minimal surface; avoid local persistence |
+
+Profiles can override these defaults, but they should not change the resolution semantics.
+
+---
+
 ## Secret Resolution Order
 
-All Roko binaries (roko-cli, roko-serve, mirage-rs) resolve secrets using the same tiered
-strategy. Higher-priority sources override lower ones:
+Higher-priority sources override lower ones:
 
+```text
+1. CLI flags         roko run --api-key sk-ant-...
+       ↓
+2. Environment       ANTHROPIC_API_KEY=sk-ant-...
+       ↓
+3. Config files      roko.toml / ~/.config/roko/config.toml
+       ↓
+4. OS keychain       macOS Keychain / Linux Secret Service / Windows Credential Manager
+       ↓
+5. Secret store      Vault / AWS Secrets Manager / 1Password CLI / K8s Secret / Swarm secret
+       ↓
+6. Compiled default  fail with an actionable error message
 ```
-1. CLI flag         roko run --api-key sk-ant-...           (highest priority)
-       ↓
-2. Environment      ANTHROPIC_API_KEY=sk-ant-...
-       ↓
-3. .env file        .env in the repo root (loaded by dotenvy)
-       ↓
-4. OS keychain      macOS Keychain / Linux Secret Service / Windows Credential Manager
-       ↓
-5. Config file      ~/.config/roko/config.toml → [credentials]
-       ↓
-6. Compiled default (none — fail with actionable error message)  (lowest priority)
-```
+
+This order keeps fast local overrides at the top, then falls back to durable profile-specific
+stores for shared and production deployments.
 
 ### Why This Order
 
-- **CLI flags** are for one-off overrides and debugging: `roko run --api-key sk-ant-test-...`
-- **Environment variables** are for CI, Docker, and shell-level configuration
-- **.env files** are for per-project secrets that the team shares (gitignored)
-- **OS keychain** is the secure default for interactive use — keys never touch the filesystem
-- **Config files** are the fallback for environments without keychain support
+- CLI flags are for one-off debugging and scripted overrides.
+- Environment variables are the portable default for containers and CI.
+- Config files hold declarative references, including `${VAR}` interpolation.
+- OS keychains are the default for interactive laptop-local use.
+- Secret stores are the default for single-server and clustered production deployments.
 
 ---
 
 ## Environment Variable Conventions
 
-Each Roko product uses a consistent prefix:
+Each product reads a consistent prefix:
 
 | Product | Prefix | Key Examples |
 |---|---|---|
@@ -50,284 +67,159 @@ Each Roko product uses a consistent prefix:
 | roko-serve | `ROKO_SERVE_` | `ROKO_SERVE_PORT`, `ROKO_SERVE_BIND` |
 | mirage-rs | `MIRAGE_` | `MIRAGE_RPC_URL`, `MIRAGE_PORT` |
 
-Cross-product environment variables (read by multiple products):
+Cross-product environment variables:
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | roko-cli, roko-serve | Anthropic Claude provider key |
-| `OPENAI_API_KEY` | roko-cli, roko-serve | OpenAI GPT provider key |
+| `ANTHROPIC_API_KEY` | roko-cli, roko-serve | Anthropic provider key |
+| `OPENAI_API_KEY` | roko-cli, roko-serve | OpenAI provider key |
 | `OPENROUTER_API_KEY` | roko-cli, roko-serve | OpenRouter multi-model key |
-| `RUST_LOG` | all | Log level filter (e.g., `info`, `roko=debug`) |
+| `RUST_LOG` | all | Log level filter |
 
 ---
 
 ## .env File Loading
 
-Roko uses the `dotenvy` crate to load `.env` files from the repository root. The loading
-behavior:
-
-1. Look for `.env` in the current working directory
-2. If found, load its contents as environment variables
-3. **Existing environment variables are NOT overwritten** — .env values only fill in gaps
-4. If `.env` does not exist, silently continue (not an error)
+`dotenvy` can load `.env` files from the working directory for laptop-local and single-server
+projects. This is a convenience layer, not the primary secret store.
 
 ```rust
-// Early in main(), before config loading
-dotenvy::dotenv().ok(); // Load .env if it exists, ignore if not
+dotenvy::dotenv().ok();
 ```
+
+Rules:
+
+1. Look for `.env` in the current working directory.
+2. Load it if present.
+3. Do not overwrite existing environment variables.
+4. Continue silently if the file is missing.
+
+---
 
 ### .env File Format
 
 ```bash
-# .env (gitignored — never commit this file)
-#
-# API keys for LLM providers
+# .env (gitignored)
 ANTHROPIC_API_KEY=sk-ant-abc123...
 OPENAI_API_KEY=sk-def456...
-
-# Webhook secrets
-ROKO_WEBHOOK_SECRET_A=whsec_abc123
-ROKO_WEBHOOK_SECRET_B=whsec_def456
-
-# mirage-rs RPC endpoint
+ROKO_WEBHOOK_SECRET=whsec_abc123
 MIRAGE_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 ```
 
 ### .env in .gitignore
 
-The `.env` file must be in `.gitignore` to prevent accidental commits of secrets:
+Keep `.env` files out of version control:
 
-```
-# .gitignore
+```gitignore
 .env
 .env.local
 .env.*.local
 ```
 
-The `roko init` command automatically adds `.env` to `.gitignore` if it is not already listed.
-
 ---
 
 ## ${VAR} Interpolation in roko.toml
 
-Config files (`roko.toml`, `~/.config/roko/config.toml`) support `${VAR}` syntax for
-referencing environment variables:
+Config files support `${VAR}` syntax so profile configuration can stay declarative:
 
 ```toml
-# roko.toml
-[agent]
-model = "claude-sonnet-4-6"
-
 [agent.providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
 
 [agent.providers.openai]
 api_key = "${OPENAI_API_KEY}"
 
-[subscriptions.webhook]
+[subscription.webhook]
 secret = "${ROKO_WEBHOOK_SECRET}"
 ```
 
 ### Interpolation Rules
 
-1. `${VAR}` — resolved from environment at config load time
-2. `${VAR:-default}` — resolved from environment, falls back to `default` if not set
-3. Literal `$` is escaped as `$$` (e.g., `$$HOME` produces the literal string `$HOME`)
-4. Unresolved `${VAR}` (variable not set, no default) produces a warning log and keeps the
-   literal string — this makes misconfiguration visible rather than silently failing
-
-```rust
-/// Resolve ${VAR} and ${VAR:-default} in a string.
-fn interpolate_env(input: &str) -> String {
-    let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap();
-
-    re.replace_all(input, |caps: &regex::Captures| {
-        let var_name = &caps[1];
-        let default = caps.get(2).map(|m| m.as_str());
-
-        match std::env::var(var_name) {
-            Ok(val) => val,
-            Err(_) => match default {
-                Some(d) => d.to_string(),
-                None => {
-                    tracing::warn!(
-                        var = var_name,
-                        "Unresolved environment variable in config"
-                    );
-                    caps[0].to_string() // Keep literal ${VAR}
-                }
-            }
-        }
-    }).to_string()
-}
-```
+1. `${VAR}` resolves from the environment.
+2. `${VAR:-default}` falls back to a default.
+3. `$$` escapes a literal dollar sign.
+4. An unresolved variable should log a warning and remain visible in the config path.
 
 ---
 
 ## OS Keychain Integration
 
-For interactive use (developer laptops), the `keyring` crate provides cross-platform access to
-the OS credential store:
+For interactive use, the OS keychain is the preferred secret store.
 
 | Platform | Backend |
 |---|---|
-| macOS | Keychain (via Security.framework) |
-| Linux | Secret Service (GNOME Keyring, KDE Wallet) |
+| macOS | Keychain |
+| Linux | Secret Service |
 | Windows | Credential Manager |
 
-### Storing Keys
-
-```rust
-use keyring::Entry;
-
-/// Save an API key to the OS keychain.
-fn save_to_keychain(service: &str, key_name: &str, value: &str) -> Result<()> {
-    let entry = Entry::new(service, key_name)?;
-    entry.set_password(value)?;
-    Ok(())
-}
-
-// Usage during `roko init --global`:
-save_to_keychain("roko", "ANTHROPIC_API_KEY", "sk-ant-...")?;
-```
-
-### Retrieving Keys
-
-```rust
-/// Get an API key, checking env → keychain → config in order.
-fn resolve_api_key(key_name: &str) -> Option<String> {
-    // 1. Check environment variable
-    if let Ok(val) = std::env::var(key_name) {
-        return Some(val);
-    }
-
-    // 2. Check OS keychain
-    if let Ok(entry) = Entry::new("roko", key_name) {
-        if let Ok(val) = entry.get_password() {
-            return Some(val);
-        }
-    }
-
-    // 3. Check config file
-    // (loaded separately during config merge)
-
-    None
-}
-```
+Use it for laptop-local and single-server profiles when a user is at the keyboard.
 
 ### Interactive Key Setup
 
-The `roko init --global` command prompts for API keys and offers keychain storage:
-
-```
-$ roko init --global
-
-Roko Global Setup
-
-ANTHROPIC_API_KEY not found in environment or keychain.
-Enter your Anthropic API key: sk-ant-...
-Save to OS keychain? [Y/n] y
-  Saved to macOS Keychain (service: roko, account: ANTHROPIC_API_KEY)
-
-OPENAI_API_KEY not found (optional, for fallback routing).
-Enter your OpenAI API key (or press Enter to skip):
-
-Created: ~/.config/roko/config.toml
-  API keys stored in OS keychain (not in config file).
-```
+`roko init` should be able to prompt for a key and offer to store it in the keychain instead of
+writing the value into a config file.
 
 ### Key Rotation
 
-To rotate a key:
-
-```bash
-# Update in keychain
-roko config set-secret ANTHROPIC_API_KEY sk-ant-new-key-...
-# This updates the keychain entry; no config file changes needed
-
-# Verify
-roko doctor
-#   ANTHROPIC_API_KEY: set (sk-ant-...ew-k) ← shows last 4 chars
-```
+Rotation should update the backing store without forcing a restart when the deployment profile
+supports live secret refresh.
 
 ---
 
 ## Scoped Secrets
 
-Different repositories may need different API keys (e.g., one project uses a team Anthropic
-key, another uses a personal key). Scoped secrets are configured per-repo:
+Secrets can be scoped per repository, per tenant, or per role.
 
 ```toml
-# .roko/config.toml (in repo root)
 [credentials]
-# Override the global Anthropic key for this repo
 anthropic_api_key = "${ANTHROPIC_API_KEY_TEAM}"
 ```
 
-The per-repo `.env` file can also scope secrets:
+In a shared deployment, the same `roko.toml` can point to different sources for different
+projects or teams without changing the binary.
+
+### Secret CLI
+
+The operator-facing CLI should make secret lifecycle actions explicit:
 
 ```bash
-# project-a/.env
-ANTHROPIC_API_KEY=sk-ant-team-key-...
-
-# project-b/.env
-ANTHROPIC_API_KEY=sk-ant-personal-key-...
+roko secret set anthropic.api_key
+roko secret get anthropic.api_key
+roko secret list
+roko secret rotate anthropic.api_key
 ```
 
-Since `dotenvy` loads from the working directory, each project's `.env` takes effect when
-roko is run from that project's root.
+The command surface can route to the active profile's backing store, whether that is a
+keychain, secret manager, container mount, or provider-native secret system.
+
+### Role-Based Secrets
+
+Some roles need additional keys. The secret layer should support role-scoped injection so a
+reviewer, implementer, or operator only receives the credentials it needs.
 
 ---
 
 ## Docker Secret Patterns
 
-In Docker containers, secrets come from environment variables. The config file is optional.
-
-### Docker Compose
+Containers should prefer environment variables or `_FILE` indirection.
 
 ```yaml
 services:
   roko:
     image: ghcr.io/nunchi/roko-cli:latest
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
 ```
 
-The `${VAR:?message}` syntax in docker-compose ensures the container fails fast if a required
-secret is not set, rather than starting and failing on the first API call.
-
-### Docker Secrets (Swarm)
-
-For Docker Swarm deployments, use Docker secrets instead of environment variables:
-
-```yaml
-services:
-  roko:
-    image: ghcr.io/nunchi/roko-cli:latest
-    secrets:
-      - anthropic_api_key
-    environment:
-      ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
-
-secrets:
-  anthropic_api_key:
-    external: true
-```
-
-Roko supports the `_FILE` suffix convention: if `ANTHROPIC_API_KEY_FILE` is set, the value is
-read from the file at that path instead of from the `ANTHROPIC_API_KEY` environment variable.
-This is the standard Docker pattern for secret injection.
+For Docker secrets and similar orchestrator mounts, support the `_FILE` suffix:
 
 ```rust
-/// Resolve an environment variable, supporting the _FILE suffix.
 fn resolve_env_or_file(var_name: &str) -> Option<String> {
-    // Check direct env var first
     if let Ok(val) = std::env::var(var_name) {
         return Some(val);
     }
 
-    // Check _FILE variant
     let file_var = format!("{var_name}_FILE");
     if let Ok(path) = std::env::var(&file_var) {
         if let Ok(val) = std::fs::read_to_string(&path) {
@@ -339,93 +231,63 @@ fn resolve_env_or_file(var_name: &str) -> Option<String> {
 }
 ```
 
+This keeps secrets out of process listings and image layers.
+
 ---
 
 ## Fly.io Secret Management
 
-On Fly.io, secrets are set via the `fly secrets` CLI and injected as environment variables into
-the machine:
+Fly.io and similar platforms inject secrets as environment variables at runtime.
 
 ```bash
-# Set secrets (encrypted at rest on Fly's infrastructure)
 fly secrets set ANTHROPIC_API_KEY=sk-ant-... --app roko-cli
-
-# List secrets (shows names only, not values)
 fly secrets list --app roko-cli
-# NAME                  DIGEST                 CREATED AT
-# ANTHROPIC_API_KEY     abc123def456           2026-04-10T12:00:00Z
-
-# Remove a secret
 fly secrets unset ANTHROPIC_API_KEY --app roko-cli
 ```
 
-Secrets never appear in `fly.toml`, Docker images, or logs. They exist only in Fly's encrypted
-secret store and are injected as environment variables when the machine starts.
-
-The deploy script (`deploy/scripts/fly-secrets.sh`) automates secret setup for all services.
-See `06-cloud-fly-io.md` for the full Fly.io secret management flow.
+Secrets should never land in `fly.toml`, image layers, or logs.
 
 ---
 
 ## Secret Safety Rules
 
-1. **Never log secrets.** All log formatters mask values that match API key patterns
-   (`sk-ant-*`, `sk-*`, keys longer than 20 characters).
-2. **Never include secrets in Engram bodies.** The `Provenance` field tracks which API key
-   was used (by hash, not value) for audit purposes.
-3. **Never write secrets to `.roko/` state files.** Config files may reference `${VAR}` but
-   the resolved values are held in memory only.
-4. **Always gitignore `.env` files.** The `roko init` command enforces this.
-5. **Prefer OS keychain over config files** for interactive use. Config file storage is the
-   last resort for environments without keychain support.
-6. **Use `_FILE` suffix for container secrets.** This prevents secrets from appearing in
-   `docker inspect` output or process environment listings.
+1. Never log secret values.
+2. Never write secret values into Engram bodies or long-lived state.
+3. Never persist resolved secret values into `.roko/` archives.
+4. Keep `.env` files gitignored.
+5. Prefer the OS keychain for laptop-local use.
+6. Prefer `_FILE` and secret stores for container and clustered deployments.
 
 ### Audit Trail
 
-The daemon logs when secrets are resolved (but not their values):
+The daemon may log which source resolved a secret without exposing the value:
 
-```
+```text
 [INFO] Secret resolved: ANTHROPIC_API_KEY source=keychain
 [INFO] Secret resolved: OPENAI_API_KEY source=env
-[WARN] Secret not found: OPENROUTER_API_KEY (optional, skipped)
+[WARN] Secret not found: OPENROUTER_API_KEY (optional)
 ```
-
-This makes it clear which secrets are active and where they came from, without exposing values.
 
 ---
 
 ## The `roko doctor` Secret Check
 
-The `roko doctor` command validates secret availability:
+`roko doctor` should validate secret availability across the active profile:
 
-```bash
-$ roko doctor
-
+```text
 Credentials:
-    ANTHROPIC_API_KEY: set (sk-ant-...a8Qf) [source: keychain]
-    OPENAI_API_KEY: set (sk-...ef12) [source: .env]
-    OPENROUTER_API_KEY: not set (optional, for multi-provider routing)
+  ANTHROPIC_API_KEY: set [source: keychain]
+  OPENAI_API_KEY: set [source: .env]
+  OPENROUTER_API_KEY: not set (optional)
 ```
 
-The check:
-1. Resolves each known secret using the full resolution chain
-2. Prints the last 4 characters (masked) for identification
-3. Shows the source (env, .env, keychain, config file)
-4. Marks optional secrets as optional (not failures)
+The check should resolve sources in order, mask values, and show the source that won.
 
 ---
 
 ## Current Status
 
-Secret management is partially implemented:
-
-- **Environment variable resolution**: Fully wired in `roko-agent` for all LLM provider backends
-- **dotenvy loading**: Not yet wired (the `dotenvy` crate is not yet a workspace dependency)
-- **OS keychain**: Not yet wired (the `keyring` crate is not yet a workspace dependency)
-- **${VAR} interpolation**: Not yet implemented in the config parser
-- **_FILE suffix support**: Not yet implemented
-- **roko doctor secret check**: Scaffold exists, not yet checking all sources
-
-These are straightforward additions that can be wired incrementally as daemon mode development
-progresses.
+The target design is profile-aware and shape-aware. The important point for the deployment
+chapter is not the exact backend implementation, but that the same secret model works for
+laptop-local, single-server, container, clustered, and edge deployments without special-case
+code.

@@ -10,7 +10,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
+use crate::task::TaskDomain;
+use crate::temperament::Temperament;
 use crate::tool::{ToolFormat, profile_for_model};
+use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Current schema version. Bump on incompatible changes.
@@ -95,6 +98,30 @@ pub struct RokoConfig {
     #[serde(default)]
     pub learning: LearningConfig,
 
+    /// Knowledge demurrage (Gesellian decay) settings.
+    #[serde(default)]
+    pub demurrage: DemurrageConfig,
+
+    /// Attention token budget allocation and context window management.
+    #[serde(default)]
+    pub attention: AttentionConfig,
+
+    /// Anomaly detection thresholds and quarantine settings.
+    #[serde(default)]
+    pub immune: ImmuneConfig,
+
+    /// Time horizon preferences and planning depth.
+    #[serde(default)]
+    pub temporal: TemporalConfig,
+
+    /// Goal hierarchy, priority weights, and completion criteria.
+    #[serde(default)]
+    pub goals: GoalsConfig,
+
+    /// Compute budget, cost caps per tier.
+    #[serde(default)]
+    pub energy: EnergyConfig,
+
     /// Terminal UI preferences.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -130,6 +157,22 @@ pub struct RokoConfig {
     /// Gemini-specific settings (model defaults, thinking, safety, caching).
     #[serde(default)]
     pub gemini: GeminiConfig,
+
+    /// Tool profile configuration (TOOL-03).
+    #[serde(default)]
+    pub tools: ToolsConfig,
+
+    /// Oneirography (dream art) pipeline settings (DREAM-13).
+    ///
+    /// Disabled by default. Opt-in via `[oneirography]` section in roko.toml:
+    /// ```toml
+    /// [oneirography]
+    /// enabled = true
+    /// provider = "dall-e-3"
+    /// variants = 3
+    /// ```
+    #[serde(default)]
+    pub oneirography: OneirographyConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -157,6 +200,12 @@ impl Default for RokoConfig {
             conductor: ConductorConfig::default(),
             watcher: WatcherConfig::default(),
             learning: LearningConfig::default(),
+            demurrage: DemurrageConfig::default(),
+            attention: AttentionConfig::default(),
+            immune: ImmuneConfig::default(),
+            temporal: TemporalConfig::default(),
+            goals: GoalsConfig::default(),
+            energy: EnergyConfig::default(),
             tui: TuiConfig::default(),
             serve: ServeConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -166,6 +215,8 @@ impl Default for RokoConfig {
             deploy: DeployConfig::default(),
             perplexity: PerplexityConfig::default(),
             gemini: GeminiConfig::default(),
+            tools: ToolsConfig::default(),
+            oneirography: OneirographyConfig::default(),
         }
     }
 }
@@ -208,6 +259,7 @@ impl RokoConfig {
         let _ = writeln!(out, "default_model = \"{}\"", cfg.agent.default_model);
         let _ = writeln!(out, "default_backend = \"{}\"", cfg.agent.default_backend);
         let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
+        let _ = writeln!(out, "temperament = \"{}\"", cfg.agent.temperament);
         let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
         let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
 
@@ -216,6 +268,7 @@ impl RokoConfig {
         let _ = writeln!(out, "# role = \"implementer\"");
         let _ = writeln!(out, "# model = \"claude-opus-4-6\"");
         let _ = writeln!(out, "# effort = \"high\"");
+        let _ = writeln!(out, "# temperament = \"exploratory\"");
         let _ = writeln!(out, "# context_limit_k = 200");
         let _ = writeln!(out, "# tools = [\"read\", \"edit\", \"bash\", \"git-*\"]");
         let _ = writeln!(
@@ -384,6 +437,94 @@ impl RokoConfig {
             "replan_gate_attempts = {}\n",
             cfg.learning.replan_gate_attempts
         );
+    }
+
+    fn write_example_demurrage(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Knowledge demurrage --");
+        let _ = writeln!(out, "[demurrage]");
+        let _ = writeln!(out, "rate_per_hour = {}", cfg.demurrage.rate_per_hour);
+        let _ = writeln!(out, "min_balance = {}", cfg.demurrage.min_balance);
+        let _ = writeln!(out, "freeze_threshold = {}", cfg.demurrage.freeze_threshold);
+        let _ = writeln!(out, "thaw_balance = {}", cfg.demurrage.thaw_balance);
+        let _ = writeln!(out, "max_balance = {}", cfg.demurrage.max_balance);
+        let _ = writeln!(out, "death_threshold = {}", cfg.demurrage.death_threshold);
+        let _ = writeln!(
+            out,
+            "freeze_before_delete = {}",
+            cfg.demurrage.freeze_before_delete
+        );
+        let _ = writeln!(
+            out,
+            "gc_interval_secs = {}\n",
+            cfg.demurrage.gc_interval_secs
+        );
+    }
+
+    fn write_example_attention(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Attention budget allocation --");
+        let _ = writeln!(out, "[attention]");
+        let _ = writeln!(
+            out,
+            "max_tokens_per_layer = {}",
+            cfg.attention.max_tokens_per_layer
+        );
+        let _ = writeln!(
+            out,
+            "utilization_target = {}",
+            cfg.attention.utilization_target
+        );
+        let _ = writeln!(out, "auction_enabled = {}", cfg.attention.auction_enabled);
+        let _ = writeln!(
+            out,
+            "task_reserve_tokens = {}\n",
+            cfg.attention.task_reserve_tokens
+        );
+    }
+
+    fn write_example_immune(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Anomaly detection / immune system --");
+        let _ = writeln!(out, "[immune]");
+        let _ = writeln!(
+            out,
+            "quarantine_threshold = {}",
+            cfg.immune.quarantine_threshold
+        );
+        let _ = writeln!(out, "max_quarantined = {}", cfg.immune.max_quarantined);
+        let _ = writeln!(out, "auto_reject = {}", cfg.immune.auto_reject);
+        let _ = writeln!(out, "taint_levels = {:?}\n", cfg.immune.taint_levels);
+    }
+
+    fn write_example_temporal(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Temporal planning --");
+        let _ = writeln!(out, "[temporal]");
+        let _ = writeln!(out, "max_depth = {}", cfg.temporal.max_depth);
+        let _ = writeln!(out, "epoch_secs = {}", cfg.temporal.epoch_secs);
+        let _ = writeln!(
+            out,
+            "enforce_allen_relations = {}\n",
+            cfg.temporal.enforce_allen_relations
+        );
+    }
+
+    fn write_example_goals(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Goal hierarchy --");
+        let _ = writeln!(out, "[goals]");
+        let _ = writeln!(out, "max_active = {}", cfg.goals.max_active);
+        let _ = writeln!(out, "correctness_weight = {}", cfg.goals.correctness_weight);
+        let _ = writeln!(
+            out,
+            "completion_threshold = {}",
+            cfg.goals.completion_threshold
+        );
+        let _ = writeln!(out, "prune_threshold = {}\n", cfg.goals.prune_threshold);
+    }
+
+    fn write_example_energy(out: &mut String, cfg: &Self) {
+        let _ = writeln!(out, "# -- Compute budget / energy --");
+        let _ = writeln!(out, "[energy]");
+        let _ = writeln!(out, "pool_usd = {}", cfg.energy.pool_usd);
+        let _ = writeln!(out, "per_task_cap_usd = {}", cfg.energy.per_task_cap_usd);
+        let _ = writeln!(out, "metabolism_rate = {}\n", cfg.energy.metabolism_rate);
     }
 
     fn write_example_tui_and_server(out: &mut String, cfg: &Self) {
@@ -699,6 +840,162 @@ impl RokoConfig {
         self.apply_env(&|key| std::env::var(key).ok());
     }
 
+    /// Interpolate `${VAR}` patterns in string values of this config.
+    ///
+    /// Any occurrence of `${SOME_VAR}` is replaced with the contents of the
+    /// environment variable `SOME_VAR`. Missing variables expand to the empty
+    /// string. This runs after TOML parsing so that secrets can be injected
+    /// from the environment without being hardcoded in `roko.toml`:
+    ///
+    /// ```toml
+    /// [providers.anthropic]
+    /// api_key_env = "${ANTHROPIC_API_KEY}"
+    /// ```
+    pub fn interpolate_env_vars(&mut self) {
+        Self::interpolate_env_vars_with(&mut self.providers, &|key| std::env::var(key).ok());
+    }
+
+    /// Interpolate `${VAR}` patterns in provider config strings using a custom
+    /// environment resolver (testable).
+    fn interpolate_env_vars_with(
+        providers: &mut HashMap<String, ProviderConfig>,
+        env_fn: &dyn Fn(&str) -> Option<String>,
+    ) {
+        for provider in providers.values_mut() {
+            if let Some(ref mut url) = provider.base_url {
+                *url = interpolate_vars(url, env_fn);
+            }
+            if let Some(ref mut key_env) = provider.api_key_env {
+                *key_env = interpolate_vars(key_env, env_fn);
+            }
+            if let Some(ref mut cmd) = provider.command {
+                *cmd = interpolate_vars(cmd, env_fn);
+            }
+            if let Some(ref headers) = provider.extra_headers {
+                let mut resolved = HashMap::with_capacity(headers.len());
+                for (k, v) in headers {
+                    resolved.insert(k.clone(), interpolate_vars(v, env_fn));
+                }
+                provider.extra_headers = Some(resolved);
+            }
+        }
+    }
+
+    /// Resolve `*_file` secret references in provider configs.
+    ///
+    /// Any `ProviderConfig` whose `api_key_env` field ends with `_file` has its
+    /// value treated as a file path: the file contents (trimmed) become the
+    /// resolved secret. This is the standard Docker/K8s secret mounting pattern:
+    ///
+    /// ```toml
+    /// [providers.anthropic]
+    /// api_key_env = "/run/secrets/anthropic_key"
+    /// ```
+    ///
+    /// Note: for the `_file` pattern to work, the config must use a dedicated
+    /// `api_key_file` field or the `api_key_env` field must point to a path.
+    /// This method checks `extra_headers` for any key ending in `_file` as well.
+    pub fn resolve_file_secrets(&mut self) {
+        for provider in self.providers.values_mut() {
+            // Check extra_headers for _file references.
+            if let Some(ref headers) = provider.extra_headers {
+                let mut resolved = HashMap::with_capacity(headers.len());
+                for (key, value) in headers {
+                    if key.ends_with("_file") {
+                        let base_key = key.trim_end_matches("_file").to_string();
+                        if let Ok(content) = std::fs::read_to_string(value.trim()) {
+                            resolved.insert(base_key, content.trim().to_string());
+                        }
+                    } else {
+                        resolved.insert(key.clone(), value.clone());
+                    }
+                }
+                provider.extra_headers = Some(resolved);
+            }
+        }
+    }
+
+    /// Classify a proposed configuration change into hot-reloadable fields,
+    /// fields that require restart, and fields that emit warnings.
+    ///
+    /// Returns a [`ConfigChangeReport`] indicating which sections changed and
+    /// whether the changes can be applied without a process restart.
+    ///
+    /// Hot-reloadable sections: `[budget]`, `[gates]`, `[routing]`, `[learning]`,
+    /// `[demurrage]`, `[scheduler]`, `[watcher]`, `subscriptions`.
+    ///
+    /// Restart-required sections: `[agent]` (model/backend changes), `[project]`,
+    /// `[serve]` (port changes), `providers`.
+    #[must_use]
+    pub fn classify_changes(&self, proposed: &Self) -> ConfigChangeReport {
+        let mut report = ConfigChangeReport::default();
+
+        // Hot-reloadable sections.
+        if self.budget != proposed.budget {
+            report.hot_reloaded.push("budget");
+        }
+        if self.gates != proposed.gates {
+            report.hot_reloaded.push("gates");
+        }
+        if self.routing != proposed.routing {
+            report.hot_reloaded.push("routing");
+        }
+        if self.learning != proposed.learning {
+            report.hot_reloaded.push("learning");
+        }
+        if self.demurrage != proposed.demurrage {
+            report.hot_reloaded.push("demurrage");
+        }
+        if self.scheduler != proposed.scheduler {
+            report.hot_reloaded.push("scheduler");
+        }
+        if self.watcher != proposed.watcher {
+            report.hot_reloaded.push("watcher");
+        }
+        if self.subscriptions != proposed.subscriptions {
+            report.hot_reloaded.push("subscriptions");
+        }
+        if self.conductor != proposed.conductor {
+            report.hot_reloaded.push("conductor");
+        }
+        if self.attention != proposed.attention {
+            report.hot_reloaded.push("attention");
+        }
+        if self.goals != proposed.goals {
+            report.hot_reloaded.push("goals");
+        }
+
+        // Restart-required sections.
+        if self.agent != proposed.agent {
+            report.requires_restart.push("agent");
+        }
+        if self.project != proposed.project {
+            report.requires_restart.push("project");
+        }
+        if self.serve != proposed.serve {
+            report.requires_restart.push("serve");
+        }
+        if self.providers != proposed.providers {
+            report.requires_restart.push("providers");
+        }
+        if self.models != proposed.models {
+            report.requires_restart.push("models");
+        }
+        if self.server != proposed.server {
+            report.requires_restart.push("server");
+        }
+
+        // Warnings for sensitive changes.
+        if proposed.budget.max_plan_usd > self.budget.max_plan_usd {
+            report.warnings.push(format!(
+                "budget.max_plan_usd increased from {} to {}",
+                self.budget.max_plan_usd, proposed.budget.max_plan_usd
+            ));
+        }
+
+        report
+    }
+
     /// Generate an example config string showing every field with doc comments.
     #[must_use]
     pub fn example_toml() -> String {
@@ -715,12 +1012,70 @@ impl RokoConfig {
         Self::write_example_budget(&mut out, &cfg);
         Self::write_example_conductor(&mut out, &cfg);
         Self::write_example_learning(&mut out, &cfg);
+        Self::write_example_demurrage(&mut out, &cfg);
+        Self::write_example_attention(&mut out, &cfg);
+        Self::write_example_immune(&mut out, &cfg);
+        Self::write_example_temporal(&mut out, &cfg);
+        Self::write_example_goals(&mut out, &cfg);
+        Self::write_example_energy(&mut out, &cfg);
         Self::write_example_tui_and_server(&mut out, &cfg);
         Self::write_example_scheduler(&mut out, &cfg);
         Self::write_example_webhooks(&mut out, &cfg);
         Self::write_example_deploy(&mut out, &cfg);
 
         out
+    }
+}
+
+/// Report produced by [`RokoConfig::classify_changes`].
+///
+/// Groups changed config sections into hot-reloadable (no restart needed) and
+/// restart-required buckets, plus optional warnings for sensitive changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigChangeReport {
+    /// Sections that changed and can be applied without restart.
+    pub hot_reloaded: Vec<&'static str>,
+    /// Sections that changed but require a process restart.
+    pub requires_restart: Vec<&'static str>,
+    /// Operator-facing warnings about sensitive changes.
+    pub warnings: Vec<String>,
+}
+
+impl ConfigChangeReport {
+    /// Whether any changes were detected at all.
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        !self.hot_reloaded.is_empty() || !self.requires_restart.is_empty()
+    }
+
+    /// Whether a restart is needed to fully apply the changes.
+    #[must_use]
+    pub fn needs_restart(&self) -> bool {
+        !self.requires_restart.is_empty()
+    }
+
+    /// Total number of changed sections.
+    #[must_use]
+    pub fn changed_count(&self) -> usize {
+        self.hot_reloaded.len() + self.requires_restart.len()
+    }
+}
+
+impl fmt::Display for ConfigChangeReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.hot_reloaded.is_empty() {
+            write!(f, "hot-reloaded: {}", self.hot_reloaded.join(", "))?;
+        }
+        if !self.requires_restart.is_empty() {
+            if !self.hot_reloaded.is_empty() {
+                write!(f, "; ")?;
+            }
+            write!(f, "requires restart: {}", self.requires_restart.join(", "))?;
+        }
+        for w in &self.warnings {
+            write!(f, "\n  warning: {w}")?;
+        }
+        Ok(())
     }
 }
 
@@ -778,7 +1133,7 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
 
     let mut model_entries = config.models.iter().collect::<Vec<_>>();
-    model_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    model_entries.sort_unstable_by_key(|(left, _)| *left);
     for (model_key, profile) in model_entries {
         let provider = profile.provider.trim();
         if !provider_keys.contains(provider) {
@@ -819,7 +1174,7 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
 
     if !explicit_model_keys.is_empty() {
         let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
-        tier_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        tier_entries.sort_unstable_by_key(|(left, _)| *left);
         for (tier, model_key) in tier_entries {
             let model_key = model_key.trim();
             if model_key.is_empty() || explicit_model_keys.contains(model_key) {
@@ -840,6 +1195,22 @@ fn parse_bool_env(s: &str) -> bool {
         s.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Expand `${VAR_NAME}` placeholders in a string using the given resolver.
+///
+/// Missing variables expand to the empty string, matching shell behavior for
+/// `${UNSET:-}`. The regex matches `${A_Z09_UPPER_SNAKE}` identifiers only.
+fn interpolate_vars(value: &str, env_fn: &dyn Fn(&str) -> Option<String>) -> String {
+    // Fast path: no `${` means no expansion needed.
+    if !value.contains("${") {
+        return value.to_string();
+    }
+    let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex");
+    re.replace_all(value, |caps: &regex::Captures| {
+        env_fn(&caps[1]).unwrap_or_default()
+    })
+    .into_owned()
 }
 
 fn find_similar<'a>(needle: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
@@ -890,6 +1261,146 @@ fn edit_distance(left: &str, right: &str) -> usize {
     }
 
     *costs.last().unwrap_or(&0)
+}
+
+// ─── Tool profile configuration (TOOL-03) ──────────────────────────────────
+
+/// Tool profile configuration section.
+///
+/// Parsed from the `[tools]` section in `roko.toml`:
+///
+/// ```toml
+/// [tools]
+/// # Extra tools allowed beyond the role profile.
+/// allow = ["bash", "web_fetch"]
+/// # Tools to deny regardless of role profile.
+/// deny = ["write_file"]
+///
+/// [tools.profiles.coding]
+/// extra_tools = ["bash", "edit_file", "write_file"]
+/// excluded_tools = []
+///
+/// [tools.profiles.research]
+/// extra_tools = ["web_search", "web_fetch"]
+/// excluded_tools = ["write_file", "edit_file"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Global tool allowlist — these tools are always available regardless of
+    /// role or domain profile. Additive with profile-specific tools.
+    #[serde(default)]
+    pub allow: Vec<String>,
+
+    /// Global tool denylist — these tools are never available regardless of
+    /// role or domain profile. Takes precedence over `allow`.
+    #[serde(default)]
+    pub deny: Vec<String>,
+
+    /// Named domain profiles keyed by domain label (e.g., "coding", "research", "chain").
+    #[serde(default)]
+    pub profiles: HashMap<String, ToolProfileConfig>,
+}
+
+/// Configuration for the oneirography (dream art) pipeline (DREAM-13).
+///
+/// Disabled by default. Opt-in via `[oneirography]` in roko.toml:
+/// ```toml
+/// [oneirography]
+/// enabled = true
+/// provider = "dall-e-3"
+/// variants = 3
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OneirographyConfig {
+    /// Whether dream art generation is enabled (default `false`).
+    pub enabled: bool,
+    /// Image generation provider identifier (e.g., `"dall-e-3"`, `"stable-diffusion"`).
+    pub provider: String,
+    /// Number of image variants to generate per dream cycle.
+    pub variants: usize,
+    /// Base reserve price for affect-reactive auctions.
+    pub base_reserve: f64,
+    /// Base auction duration in seconds.
+    pub base_duration_seconds: u64,
+}
+
+impl Default for OneirographyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "disabled".to_string(),
+            variants: 3,
+            base_reserve: 0.01,
+            base_duration_seconds: 3600,
+        }
+    }
+}
+
+/// A single named tool profile with extra/excluded tool lists.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolProfileConfig {
+    /// Tools added for this domain/profile.
+    #[serde(default)]
+    pub extra_tools: Vec<String>,
+
+    /// Tools excluded for this domain/profile.
+    #[serde(default)]
+    pub excluded_tools: Vec<String>,
+}
+
+impl ToolsConfig {
+    /// Compute the effective tool set for a given domain.
+    ///
+    /// The result is: `(base_tools + extra_tools + global_allow) - excluded_tools - global_deny`.
+    pub fn effective_tools_for_domain(&self, domain: &str, base_tools: &[String]) -> Vec<String> {
+        let mut tools: std::collections::HashSet<String> = base_tools.iter().cloned().collect();
+
+        // Add global allows.
+        for tool in &self.allow {
+            tools.insert(tool.clone());
+        }
+
+        // Add domain-specific extras.
+        if let Some(profile) = self.profiles.get(domain) {
+            for tool in &profile.extra_tools {
+                tools.insert(tool.clone());
+            }
+            // Remove domain-specific exclusions.
+            for tool in &profile.excluded_tools {
+                tools.remove(tool);
+            }
+        }
+
+        // Remove global denies (highest priority).
+        for tool in &self.deny {
+            tools.remove(tool);
+        }
+
+        let mut result: Vec<String> = tools.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Returns `true` if a specific tool is allowed for a domain, considering
+    /// all profile layers.
+    pub fn is_tool_allowed(&self, domain: &str, tool_name: &str) -> bool {
+        // Global deny takes precedence.
+        if self.deny.iter().any(|t| t == tool_name) {
+            return false;
+        }
+
+        // Check domain-specific exclusion.
+        if let Some(profile) = self.profiles.get(domain) {
+            if profile.excluded_tools.iter().any(|t| t == tool_name) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1254,6 +1765,9 @@ pub struct ProjectConfig {
     /// Git branch used as the base for fresh batch/worktree creation.
     #[serde(default = "default_fresh_base_branch")]
     pub fresh_base_branch: String,
+    /// Default work domain for tasks that don't declare one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_domain: Option<TaskDomain>,
 }
 
 fn default_project_name() -> String {
@@ -1274,6 +1788,7 @@ impl Default for ProjectConfig {
             name: default_project_name(),
             root: default_dot(),
             fresh_base_branch: default_fresh_base_branch(),
+            default_domain: None,
         }
     }
 }
@@ -1293,6 +1808,9 @@ pub struct AgentConfig {
     /// Default reasoning effort (`"low"`, `"medium"`, `"high"`, `"max"`).
     #[serde(default = "default_effort", alias = "effort")]
     pub default_effort: String,
+    /// Default agent temperament for roles without a local override.
+    #[serde(default)]
+    pub temperament: Temperament,
     /// Context window limit in thousands of tokens.
     #[serde(default = "default_context_limit_k")]
     pub context_limit_k: u32,
@@ -1320,6 +1838,16 @@ pub struct AgentConfig {
     /// Per-role overrides keyed by role label (e.g. `"implementer"`, `"architect"`).
     #[serde(default)]
     pub roles: HashMap<String, RoleOverride>,
+
+    /// Configuration for the Data LLM used in CaMeL dual-LLM isolation.
+    ///
+    /// When configured, content tagged with `Taint::ExternalFetch` or
+    /// `Taint::ThirdPartyPlugin` is routed through this model with tool
+    /// calls stripped. The Data LLM processes untrusted content and returns
+    /// schema-constrained structured output that is safe for the Control
+    /// LLM to consume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_llm: Option<DataLlmConfig>,
 }
 
 fn default_model() -> String {
@@ -1356,6 +1884,7 @@ impl Default for AgentConfig {
             default_model: default_model(),
             default_backend: default_backend(),
             default_effort: default_effort(),
+            temperament: Temperament::default(),
             context_limit_k: default_context_limit_k(),
             bare_mode: default_true(),
             command: None,
@@ -1365,6 +1894,7 @@ impl Default for AgentConfig {
             tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
+            data_llm: None,
         }
     }
 }
@@ -1410,6 +1940,85 @@ pub struct RoutingOverrides {
     pub force_tier: Option<String>,
 }
 
+// ---- CaMeL dual-LLM configuration (SAFE-07) ────────────────────────────
+
+/// Configuration for the Data LLM in the CaMeL dual-LLM architecture.
+///
+/// The Data LLM processes untrusted external content (web fetches, plugin
+/// output, user-provided files) with tool-call capability stripped. It
+/// receives the untrusted content plus a schema for valid outputs, and
+/// returns a structured extraction that is safe for the Control LLM.
+///
+/// Three defense layers:
+/// 1. Input sanitization (strip known injection patterns)
+/// 2. Data LLM isolation (no tools, schema-constrained output)
+/// 3. Output validation (schema check + anomaly detection)
+///
+/// ```toml
+/// [agent.data_llm]
+/// model = "claude-haiku-3-5"
+/// max_tokens = 4096
+/// temperature = 0.0
+/// strip_tool_calls = true
+/// ```
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DataLlmConfig {
+    /// Model slug for the Data LLM (can be a smaller/cheaper model).
+    #[serde(default = "default_data_llm_model")]
+    pub model: String,
+
+    /// Maximum tokens the Data LLM is allowed to generate.
+    #[serde(default = "default_data_llm_max_tokens")]
+    pub max_tokens: u64,
+
+    /// Sampling temperature (0.0 for deterministic extraction).
+    #[serde(default)]
+    pub temperature: f64,
+
+    /// Whether to strip tool-call capability from the Data LLM dispatch.
+    ///
+    /// When `true` (the default), the Data LLM cannot generate tool calls
+    /// and can only produce text/JSON output.
+    #[serde(default = "default_true")]
+    pub strip_tool_calls: bool,
+
+    /// Optional JSON Schema that the Data LLM output must conform to.
+    ///
+    /// When set, the router validates the Data LLM response against this
+    /// schema before passing it to the Control LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+
+    /// Whether to sanitize the input before sending to the Data LLM.
+    ///
+    /// When `true`, known prompt injection patterns are stripped from the
+    /// untrusted content before it reaches the Data LLM.
+    #[serde(default = "default_true")]
+    pub sanitize_input: bool,
+}
+
+fn default_data_llm_model() -> String {
+    "claude-haiku-3-5".into()
+}
+
+const fn default_data_llm_max_tokens() -> u64 {
+    4096
+}
+
+impl Default for DataLlmConfig {
+    fn default() -> Self {
+        Self {
+            model: default_data_llm_model(),
+            max_tokens: default_data_llm_max_tokens(),
+            temperature: 0.0,
+            strip_tool_calls: true,
+            output_schema: None,
+            sanitize_input: true,
+        }
+    }
+}
+
 /// Per-role override under `[agent.roles.<role>]`.
 ///
 /// Every field is optional; absent means "use the agent-level default".
@@ -1428,6 +2037,9 @@ pub struct RoleOverride {
     /// Reasoning effort override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Temperament override for this role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperament: Option<Temperament>,
     /// Context window override (in thousands of tokens).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit_k: Option<u32>,
@@ -1471,6 +2083,24 @@ impl RoleOverride {
         (budget.max_tokens_per_turn.is_some() || budget.max_cost_usd_cents_per_turn.is_some())
             .then_some(budget)
     }
+
+    /// Resolve the effective temperament for this role override.
+    #[must_use]
+    pub fn resolved_temperament(&self, default: Temperament) -> Temperament {
+        self.temperament.unwrap_or(default)
+    }
+}
+
+impl AgentConfig {
+    /// Resolve the effective temperament for `role_label`.
+    #[must_use]
+    pub fn temperament_for_role(&self, role_label: &str) -> Temperament {
+        self.roles
+            .get(role_label)
+            .map_or(self.temperament, |override_cfg| {
+                override_cfg.resolved_temperament(self.temperament)
+            })
+    }
 }
 
 fn usd_to_cents_per_turn(usd: f32) -> Option<u32> {
@@ -1502,6 +2132,10 @@ pub struct GatesConfig {
     /// Max gate retry iterations before giving up.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// Per-domain gate overrides. Keys are domain labels (e.g. "research", "docs"),
+    /// values are shell commands to run as gates (e.g. `["shell:true"]`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub domain_gates: HashMap<String, Vec<String>>,
 }
 
 const fn default_max_iterations() -> u32 {
@@ -1514,6 +2148,7 @@ impl Default for GatesConfig {
             clippy_enabled: default_true(),
             skip_tests: false,
             max_iterations: default_max_iterations(),
+            domain_gates: HashMap::new(),
         }
     }
 }
@@ -2163,6 +2798,302 @@ impl Default for LearningConfig {
     }
 }
 
+// ---- [demurrage] ---------------------------------------------------------
+
+/// Knowledge demurrage configuration.
+///
+/// Controls the Gesellian decay applied to playbook rules and knowledge
+/// entries so that stale, unvalidated heuristics naturally fade.
+#[allow(clippy::derive_partial_eq_without_eq)] // contains f64
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DemurrageConfig {
+    /// Exponential decay rate per hour applied to knowledge entry balances.
+    #[serde(default = "default_demurrage_rate_per_hour")]
+    pub rate_per_hour: f64,
+    /// Entries with balance below this threshold are deprioritized in retrieval.
+    #[serde(default = "default_demurrage_min_balance")]
+    pub min_balance: f64,
+    /// Balance below which entries are frozen into cold storage.
+    #[serde(default = "default_demurrage_freeze_threshold")]
+    pub freeze_threshold: f64,
+    /// Starting balance for thawed (resurrected) entries.
+    #[serde(default = "default_demurrage_thaw_balance")]
+    pub thaw_balance: f64,
+    /// Maximum balance an entry can accumulate from reinforcement.
+    #[serde(default = "default_demurrage_max_balance")]
+    pub max_balance: f64,
+    /// How often to run demurrage GC (in seconds, 0 = manual only).
+    #[serde(default)]
+    pub gc_interval_secs: u64,
+    /// Per-kind rate multipliers (e.g., Warnings decay faster).
+    /// Keys are knowledge kind strings ("warning", "insight", etc.).
+    #[serde(default)]
+    pub kind_rate_multipliers: std::collections::HashMap<String, f64>,
+    /// Whether to freeze entries before deleting (true = preserve for resurrection).
+    #[serde(default = "default_true")]
+    pub freeze_before_delete: bool,
+    /// Death threshold: entries with recency factor below this are considered dead.
+    #[serde(default = "default_demurrage_death_threshold")]
+    pub death_threshold: f64,
+}
+
+const fn default_demurrage_rate_per_hour() -> f64 {
+    0.01
+}
+
+const fn default_demurrage_min_balance() -> f64 {
+    0.1
+}
+
+const fn default_demurrage_freeze_threshold() -> f64 {
+    0.05
+}
+
+const fn default_demurrage_thaw_balance() -> f64 {
+    0.6
+}
+
+const fn default_demurrage_max_balance() -> f64 {
+    5.0
+}
+
+const fn default_demurrage_death_threshold() -> f64 {
+    0.01
+}
+
+impl Default for DemurrageConfig {
+    fn default() -> Self {
+        Self {
+            rate_per_hour: default_demurrage_rate_per_hour(),
+            min_balance: default_demurrage_min_balance(),
+            freeze_threshold: default_demurrage_freeze_threshold(),
+            thaw_balance: default_demurrage_thaw_balance(),
+            max_balance: default_demurrage_max_balance(),
+            gc_interval_secs: 0,
+            kind_rate_multipliers: std::collections::HashMap::new(),
+            freeze_before_delete: true,
+            death_threshold: default_demurrage_death_threshold(),
+        }
+    }
+}
+
+// ---- [attention] ---------------------------------------------------------
+
+/// Attention token budget allocation and context window management.
+///
+/// Controls how the runtime distributes token budget across prompt layers
+/// and manages context window pressure.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttentionConfig {
+    /// Maximum tokens to allocate per prompt layer (0 = unlimited).
+    #[serde(default = "default_attention_max_tokens_per_layer")]
+    pub max_tokens_per_layer: usize,
+    /// Context window utilization target as a fraction in `[0.0, 1.0]`.
+    #[serde(default = "default_attention_utilization_target")]
+    pub utilization_target: f64,
+    /// Enable attention auction where layers bid for token budget.
+    #[serde(default)]
+    pub auction_enabled: bool,
+    /// Minimum tokens reserved for task context regardless of auction.
+    #[serde(default = "default_attention_task_reserve")]
+    pub task_reserve_tokens: usize,
+}
+
+const fn default_attention_max_tokens_per_layer() -> usize {
+    4096
+}
+
+const fn default_attention_utilization_target() -> f64 {
+    0.85
+}
+
+const fn default_attention_task_reserve() -> usize {
+    512
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_per_layer: default_attention_max_tokens_per_layer(),
+            utilization_target: default_attention_utilization_target(),
+            auction_enabled: false,
+            task_reserve_tokens: default_attention_task_reserve(),
+        }
+    }
+}
+
+// ---- [immune] ------------------------------------------------------------
+
+/// Anomaly detection thresholds and quarantine settings.
+///
+/// Configures the cognitive immune system that detects anomalous outputs,
+/// quarantines suspect results, and classifies taint levels.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImmuneConfig {
+    /// Anomaly score threshold above which outputs are quarantined.
+    #[serde(default = "default_immune_quarantine_threshold")]
+    pub quarantine_threshold: f64,
+    /// Maximum number of quarantined items before triggering escalation.
+    #[serde(default = "default_immune_max_quarantined")]
+    pub max_quarantined: usize,
+    /// Whether to auto-reject quarantined outputs or hold for review.
+    #[serde(default)]
+    pub auto_reject: bool,
+    /// Taint classification levels: low, medium, high.
+    #[serde(default = "default_immune_taint_levels")]
+    pub taint_levels: Vec<String>,
+}
+
+const fn default_immune_quarantine_threshold() -> f64 {
+    0.8
+}
+
+const fn default_immune_max_quarantined() -> usize {
+    50
+}
+
+fn default_immune_taint_levels() -> Vec<String> {
+    vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+}
+
+impl Default for ImmuneConfig {
+    fn default() -> Self {
+        Self {
+            quarantine_threshold: default_immune_quarantine_threshold(),
+            max_quarantined: default_immune_max_quarantined(),
+            auto_reject: false,
+            taint_levels: default_immune_taint_levels(),
+        }
+    }
+}
+
+// ---- [temporal] ----------------------------------------------------------
+
+/// Time horizon preferences and planning depth configuration.
+///
+/// Controls how deep the planner looks ahead and how temporal relations
+/// between tasks are evaluated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TemporalConfig {
+    /// Maximum planning depth (number of future task levels to consider).
+    #[serde(default = "default_temporal_max_depth")]
+    pub max_depth: usize,
+    /// Default epoch duration in seconds for batching temporal events.
+    #[serde(default = "default_temporal_epoch_secs")]
+    pub epoch_secs: u64,
+    /// Whether to enforce Allen temporal relations between dependent tasks.
+    #[serde(default = "default_true")]
+    pub enforce_allen_relations: bool,
+}
+
+const fn default_temporal_max_depth() -> usize {
+    5
+}
+
+const fn default_temporal_epoch_secs() -> u64 {
+    3600
+}
+
+impl Default for TemporalConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: default_temporal_max_depth(),
+            epoch_secs: default_temporal_epoch_secs(),
+            enforce_allen_relations: true,
+        }
+    }
+}
+
+// ---- [goals] -------------------------------------------------------------
+
+/// Goal hierarchy configuration with priority weights and completion criteria.
+///
+/// Controls how goals are ranked, pruned, and when they are considered complete.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoalsConfig {
+    /// Maximum number of active goals at any level of the hierarchy.
+    #[serde(default = "default_goals_max_active")]
+    pub max_active: usize,
+    /// Priority weight for correctness vs. speed tradeoff in `[0.0, 1.0]`.
+    /// Higher values favor correctness.
+    #[serde(default = "default_goals_correctness_weight")]
+    pub correctness_weight: f64,
+    /// Minimum completion ratio in `[0.0, 1.0]` for a goal to be considered done.
+    #[serde(default = "default_goals_completion_threshold")]
+    pub completion_threshold: f64,
+    /// Prune goals with priority below this value.
+    #[serde(default = "default_goals_prune_threshold")]
+    pub prune_threshold: f64,
+}
+
+const fn default_goals_max_active() -> usize {
+    10
+}
+
+const fn default_goals_correctness_weight() -> f64 {
+    0.7
+}
+
+const fn default_goals_completion_threshold() -> f64 {
+    0.95
+}
+
+const fn default_goals_prune_threshold() -> f64 {
+    0.1
+}
+
+impl Default for GoalsConfig {
+    fn default() -> Self {
+        Self {
+            max_active: default_goals_max_active(),
+            correctness_weight: default_goals_correctness_weight(),
+            completion_threshold: default_goals_completion_threshold(),
+            prune_threshold: default_goals_prune_threshold(),
+        }
+    }
+}
+
+// ---- [energy] ------------------------------------------------------------
+
+/// Compute budget and cost caps per model tier.
+///
+/// Controls how much compute budget is available and how costs are capped
+/// across different model tiers (cheap, standard, premium).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EnergyConfig {
+    /// Total compute budget pool in USD.
+    #[serde(default = "default_energy_pool_usd")]
+    pub pool_usd: f64,
+    /// Per-task cost cap in USD (0.0 = no cap).
+    #[serde(default)]
+    pub per_task_cap_usd: f64,
+    /// Per-tier cost multipliers keyed by tier name (e.g., "cheap": 0.5).
+    #[serde(default)]
+    pub tier_caps: HashMap<String, f64>,
+    /// Metabolism rate: fraction of budget replenished per hour.
+    #[serde(default = "default_energy_metabolism_rate")]
+    pub metabolism_rate: f64,
+}
+
+const fn default_energy_pool_usd() -> f64 {
+    50.0
+}
+
+const fn default_energy_metabolism_rate() -> f64 {
+    0.1
+}
+
+impl Default for EnergyConfig {
+    fn default() -> Self {
+        Self {
+            pool_usd: default_energy_pool_usd(),
+            per_task_cap_usd: 0.0,
+            tier_caps: HashMap::new(),
+            metabolism_rate: default_energy_metabolism_rate(),
+        }
+    }
+}
+
 // ---- [tui] ---------------------------------------------------------------
 
 /// Terminal UI preferences.
@@ -2297,6 +3228,13 @@ pub struct SubscriptionConfig {
     pub template: String,
     /// Engram kind glob used to match webhook signals.
     pub trigger: String,
+    /// Typed trigger configuration (cron schedule, file-watch paths, or webhook URL).
+    ///
+    /// When set, this takes precedence over the plain `trigger` string for
+    /// determining how the subscription fires. The `trigger` field is still
+    /// used for signal matching in the dispatch loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_config: Option<SubscriptionTrigger>,
     /// Optional repo / branch / path filters.
     #[serde(default, skip_serializing_if = "SubscriptionFilterConfig::is_empty")]
     pub filter: SubscriptionFilterConfig,
@@ -2306,6 +3244,10 @@ pub struct SubscriptionConfig {
     /// Minimum interval between dispatches, in seconds.
     #[serde(default)]
     pub cooldown_secs: u64,
+    /// Debounce window in milliseconds. Events arriving within this window
+    /// after the first event are coalesced into a single dispatch.
+    #[serde(default)]
+    pub debounce_ms: u64,
     /// Whether the subscription is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -2316,9 +3258,11 @@ impl Default for SubscriptionConfig {
         Self {
             template: String::new(),
             trigger: String::new(),
+            trigger_config: None,
             filter: SubscriptionFilterConfig::default(),
             concurrency_limit: default_subscription_concurrency_limit(),
             cooldown_secs: 0,
+            debounce_ms: 0,
             enabled: default_true(),
         }
     }
@@ -2326,6 +3270,50 @@ impl Default for SubscriptionConfig {
 
 fn default_subscription_concurrency_limit() -> usize {
     1
+}
+
+/// Typed trigger configuration for subscriptions.
+///
+/// Each variant corresponds to a distinct firing mechanism:
+/// - `Cron` fires on a cron schedule (e.g., `*/30 * * * *`).
+/// - `FileWatch` fires when watched paths change on disk.
+/// - `Webhook` fires when a matching webhook payload arrives.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SubscriptionTrigger {
+    /// Cron-schedule trigger.
+    Cron {
+        /// Standard cron expression (5 or 6 fields).
+        schedule: String,
+    },
+    /// File-system watch trigger.
+    FileWatch {
+        /// Directories or file globs to watch.
+        paths: Vec<String>,
+        /// File-extension filter (e.g., `["rs", "toml"]`). Empty means all.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extensions: Vec<String>,
+        /// Whether to watch recursively (default `true`).
+        #[serde(default = "default_true")]
+        recursive: bool,
+    },
+    /// Webhook trigger (matched against incoming webhook signals).
+    Webhook {
+        /// URL pattern or event type glob to match.
+        event: String,
+    },
+}
+
+impl SubscriptionTrigger {
+    /// Return the trigger type as a string label.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Cron { .. } => "cron",
+            Self::FileWatch { .. } => "file_watch",
+            Self::Webhook { .. } => "webhook",
+        }
+    }
 }
 
 /// Optional filter applied after the trigger pattern matches.
@@ -3495,11 +4483,13 @@ auto_plan = true
 [agent]
 default_model = "claude-opus-4-6"
 default_effort = "high"
+temperament = "balanced"
 
 [agent.roles.implementer]
 role = "code_implementer"
 model = "claude-sonnet-4-6"
 effort = "max"
+temperament = "exploratory"
 tools = ["read_file", "git-*"]
 context_limit_k = 300
 budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 550 }
@@ -3513,11 +4503,13 @@ turn_budget_usd = 5.0
         let cfg = RokoConfig::from_toml(toml).expect("parse");
         assert_eq!(cfg.agent.default_model, "claude-opus-4-6");
         assert_eq!(cfg.agent.default_effort, "high");
+        assert_eq!(cfg.agent.temperament, Temperament::Balanced);
 
         let imp = cfg.agent.roles.get("implementer").expect("implementer");
         assert_eq!(imp.role.as_deref(), Some("code_implementer"));
         assert_eq!(imp.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(imp.effort.as_deref(), Some("max"));
+        assert_eq!(imp.temperament, Some(Temperament::Exploratory));
         assert_eq!(
             imp.tools.as_deref(),
             Some(&["read_file".to_string(), "git-*".to_string()][..])
@@ -3542,10 +4534,18 @@ turn_budget_usd = 5.0
                 .and_then(|routing| routing.force_backend.as_deref()),
             Some("claude")
         );
+        assert_eq!(
+            cfg.agent.temperament_for_role("implementer"),
+            Temperament::Exploratory
+        );
 
         let arch = cfg.agent.roles.get("architect").expect("architect");
         assert_eq!(arch.model.as_deref(), Some("claude-opus-4-6"));
         assert!((arch.turn_budget_usd.expect("budget") - 5.0).abs() < f32::EPSILON);
+        assert_eq!(
+            cfg.agent.temperament_for_role("architect"),
+            Temperament::Balanced
+        );
         assert_eq!(
             arch.effective_budget(),
             Some(AgentBudget {
@@ -3980,6 +4980,12 @@ port = 3000
         assert!(example.contains("[budget]"));
         assert!(example.contains("[conductor]"));
         assert!(example.contains("[learning]"));
+        assert!(example.contains("[demurrage]"));
+        assert!(example.contains("[attention]"));
+        assert!(example.contains("[immune]"));
+        assert!(example.contains("[temporal]"));
+        assert!(example.contains("[goals]"));
+        assert!(example.contains("[energy]"));
         assert!(example.contains("[tui]"));
         assert!(example.contains("[serve]"));
         assert!(example.contains("[serve.auth]"));
@@ -4579,5 +5585,214 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         assert!(!parse_bool_env("no"));
         assert!(!parse_bool_env("off"));
         assert!(!parse_bool_env(""));
+    }
+
+    #[test]
+    fn interpolate_vars_expands_env_references() {
+        let env_fn = |key: &str| -> Option<String> {
+            match key {
+                "API_KEY" => Some("sk-secret-123".to_string()),
+                "BASE_URL" => Some("https://api.example.com".to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(interpolate_vars("${API_KEY}", &env_fn), "sk-secret-123");
+        assert_eq!(
+            interpolate_vars("Bearer ${API_KEY}", &env_fn),
+            "Bearer sk-secret-123"
+        );
+        assert_eq!(
+            interpolate_vars("${BASE_URL}/v1", &env_fn),
+            "https://api.example.com/v1"
+        );
+        // Missing var expands to empty string.
+        assert_eq!(interpolate_vars("${MISSING_VAR}", &env_fn), "");
+        // No ${} means no change.
+        assert_eq!(interpolate_vars("plain text", &env_fn), "plain text");
+    }
+
+    #[test]
+    fn interpolate_env_vars_with_resolves_provider_strings() {
+        let env_fn = |key: &str| -> Option<String> {
+            match key {
+                "MY_KEY" => Some("resolved-key".to_string()),
+                "MY_URL" => Some("https://resolved.example.com".to_string()),
+                _ => None,
+            }
+        };
+        let mut providers = HashMap::new();
+        providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: Some("${MY_URL}/v1".to_string()),
+                api_key_env: Some("${MY_KEY}".to_string()),
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: None,
+                max_concurrent: None,
+            },
+        );
+        RokoConfig::interpolate_env_vars_with(&mut providers, &env_fn);
+        let p = &providers["test"];
+        assert_eq!(
+            p.base_url.as_deref(),
+            Some("https://resolved.example.com/v1")
+        );
+        assert_eq!(p.api_key_env.as_deref(), Some("resolved-key"));
+    }
+
+    #[test]
+    fn resolve_file_secrets_reads_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret_path = dir.path().join("api_key");
+        std::fs::write(&secret_path, "  file-secret-value  \n").expect("write secret");
+
+        let mut config = RokoConfig::default();
+        let mut headers = HashMap::new();
+        headers.insert(
+            "authorization_file".to_string(),
+            secret_path.display().to_string(),
+        );
+        config.providers.insert(
+            "test".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::OpenAiCompat,
+                base_url: None,
+                api_key_env: None,
+                command: None,
+                args: None,
+                timeout_ms: None,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
+                extra_headers: Some(headers),
+                max_concurrent: None,
+            },
+        );
+        config.resolve_file_secrets();
+        let p = &config.providers["test"];
+        let resolved = p.extra_headers.as_ref().expect("headers");
+        // The `_file` key is resolved to its base key.
+        assert_eq!(
+            resolved.get("authorization").map(String::as_str),
+            Some("file-secret-value")
+        );
+        assert!(!resolved.contains_key("authorization_file"));
+    }
+
+    // ─── ConfigChangeReport tests ─────────────────────────────────────
+
+    #[test]
+    fn classify_changes_detects_hot_reloadable_budget_change() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.budget.max_plan_usd += 5.0;
+        let report = current.classify_changes(&proposed);
+        assert!(report.has_changes());
+        assert!(!report.needs_restart());
+        assert!(report.hot_reloaded.contains(&"budget"));
+        assert!(report.requires_restart.is_empty());
+    }
+
+    #[test]
+    fn classify_changes_detects_restart_required_agent_change() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.agent.default_model = "claude-opus-4-6".into();
+        let report = current.classify_changes(&proposed);
+        assert!(report.has_changes());
+        assert!(report.needs_restart());
+        assert!(report.requires_restart.contains(&"agent"));
+    }
+
+    #[test]
+    fn classify_changes_no_changes_yields_empty_report() {
+        let config = RokoConfig::default();
+        let report = config.classify_changes(&config);
+        assert!(!report.has_changes());
+        assert_eq!(report.changed_count(), 0);
+    }
+
+    #[test]
+    fn classify_changes_emits_budget_increase_warning() {
+        let current = RokoConfig::default();
+        let mut proposed = current.clone();
+        proposed.budget.max_plan_usd = current.budget.max_plan_usd + 100.0;
+        let report = current.classify_changes(&proposed);
+        assert!(!report.warnings.is_empty());
+        assert!(report.warnings[0].contains("max_plan_usd"));
+    }
+
+    // ─── SubscriptionTrigger tests ────────────────────────────────────
+
+    #[test]
+    fn subscription_trigger_cron_roundtrip() {
+        let trigger = SubscriptionTrigger::Cron {
+            schedule: "*/30 * * * *".into(),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "cron");
+    }
+
+    #[test]
+    fn subscription_trigger_file_watch_roundtrip() {
+        let trigger = SubscriptionTrigger::FileWatch {
+            paths: vec!["src/".into(), "tests/".into()],
+            extensions: vec!["rs".into()],
+            recursive: true,
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "file_watch");
+    }
+
+    #[test]
+    fn subscription_trigger_webhook_roundtrip() {
+        let trigger = SubscriptionTrigger::Webhook {
+            event: "github.pull_request.*".into(),
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, parsed);
+        assert_eq!(trigger.kind(), "webhook");
+    }
+
+    #[test]
+    fn subscription_config_with_trigger_config_parses() {
+        let toml_str = r#"
+            template = "pr-review"
+            trigger = "github.pull_request.*"
+            debounce_ms = 500
+            [trigger_config]
+            type = "cron"
+            schedule = "*/5 * * * *"
+        "#;
+        let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.template, "pr-review");
+        assert_eq!(config.debounce_ms, 500);
+        assert!(config.trigger_config.is_some());
+        match config.trigger_config.unwrap() {
+            SubscriptionTrigger::Cron { schedule } => {
+                assert_eq!(schedule, "*/5 * * * *");
+            }
+            _ => panic!("expected Cron trigger"),
+        }
+    }
+
+    #[test]
+    fn subscription_config_without_trigger_config_parses() {
+        let toml_str = r#"
+            template = "reviewer"
+            trigger = "github:push"
+        "#;
+        let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.trigger_config.is_none());
+        assert_eq!(config.debounce_ms, 0);
     }
 }

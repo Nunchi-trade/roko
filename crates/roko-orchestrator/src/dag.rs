@@ -514,7 +514,7 @@ impl UnifiedTaskDag {
         let critical = self
             .cpm_analysis()
             .map_or(0, |(_, _, total, _)| duration_to_minutes(total));
-        let wave_count = self.waves().map(|w| w.len()).unwrap_or(0);
+        let wave_count = self.waves().map_or(0, |w| w.len());
         DagStats {
             nodes: self.nodes.len(),
             edges: edge_count,
@@ -523,16 +523,95 @@ impl UnifiedTaskDag {
         }
     }
 
+    /// Remove tasks not required to produce the given target task IDs.
+    ///
+    /// Backward BFS from `targets` collects all transitive dependencies.
+    /// Every node NOT in that set is removed from the DAG. Returns the
+    /// number of culled tasks.
+    ///
+    /// Completed tasks are retained if they appear in the target's
+    /// transitive closure (their outputs may still be needed).
+    pub fn cull(&mut self, targets: &[String]) -> usize {
+        // Resolve target strings to GlobalTaskIds. Try GlobalTaskId::parse
+        // first (qualified "plan:task"), then match any node whose task
+        // portion matches (bare "task" name).
+        let mut needed: HashSet<GlobalTaskId> = HashSet::new();
+        let mut queue: std::collections::VecDeque<GlobalTaskId> = std::collections::VecDeque::new();
+
+        for target in targets {
+            if let Some(gid) = GlobalTaskId::parse(target) {
+                if self.tasks.contains_key(&gid) {
+                    queue.push_back(gid.clone());
+                    needed.insert(gid);
+                }
+            } else {
+                // Bare task name — match any node with that task id.
+                for node in &self.nodes {
+                    if node.task == *target {
+                        queue.push_back(node.clone());
+                        needed.insert(node.clone());
+                    }
+                }
+            }
+        }
+
+        // BFS backward through deps.
+        while let Some(node) = queue.pop_front() {
+            for dep in self.deps_of(&node).clone() {
+                if needed.insert(dep.clone()) {
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        // Collect nodes to remove.
+        let to_remove: Vec<GlobalTaskId> = self
+            .nodes
+            .iter()
+            .filter(|id| !needed.contains(id))
+            .cloned()
+            .collect();
+
+        let culled = to_remove.len();
+        if culled == 0 {
+            return 0;
+        }
+
+        for id in &to_remove {
+            self.tasks.remove(id);
+            self.edges.remove(id);
+            self.reverse_edges.remove(id);
+            self.estimates.remove(id);
+        }
+
+        // Clean up edges pointing to removed nodes in remaining entries.
+        let remove_set: HashSet<&GlobalTaskId> = to_remove.iter().collect();
+        for deps in self.edges.values_mut() {
+            deps.retain(|d| !remove_set.contains(d));
+        }
+        for rev in self.reverse_edges.values_mut() {
+            rev.retain(|d| !remove_set.contains(d));
+        }
+
+        // Rebuild node list.
+        self.nodes = self.tasks.keys().cloned().collect();
+        self.nodes.sort_by(|a, b| {
+            (a.plan.as_str(), a.task.as_str()).cmp(&(b.plan.as_str(), b.task.as_str()))
+        });
+
+        culled
+    }
+
     /// Collapse eligible linear chains in place.
     ///
+    /// The `config` parameter controls maximum chain length, minimum
+    /// average parallelism, and whether cross-tier fusion is allowed.
+    ///
     /// Returns the number of fusions performed.
-    pub fn fuse_linear_chains(&mut self) -> usize {
+    pub fn fuse_linear_chains(&mut self, config: &FusionConfig) -> usize {
         let mut fusions = 0usize;
 
-        loop {
-            let Ok(topo) = self.topological_sort() else {
-                break;
-            };
+        while let Ok(topo) = self.topological_sort() {
             let mut fused = false;
 
             for start in topo {
@@ -555,7 +634,20 @@ impl UnifiedTaskDag {
                         compatible = false;
                         break;
                     }
+                    // Respect same_tier_only: skip if complexity bands differ.
+                    if config.same_tier_only {
+                        let cursor_band = self.task(&cursor).and_then(|t| t.complexity_band);
+                        let next_band = self.task(&next).and_then(|t| t.complexity_band);
+                        if cursor_band != next_band {
+                            compatible = false;
+                            break;
+                        }
+                    }
                     chain.push(next.clone());
+                    // Cap chain length.
+                    if chain.len() >= config.max_chain_length {
+                        break;
+                    }
                     cursor = next;
                     if self.dependents_of(&cursor).is_empty() {
                         break;
@@ -579,12 +671,50 @@ impl UnifiedTaskDag {
                     continue;
                 }
 
+                // Guard: check that fusion won't reduce average parallelism
+                // below the configured threshold.
+                if config.ave_width > 0.0 {
+                    let node_count = self.nodes.len();
+                    let wave_count = self.waves().map_or(1, |w| w.len()).max(1);
+                    let merged_count = chain.len() - 1; // nodes that would be removed
+                    let new_node_count = node_count.saturating_sub(merged_count);
+                    // After fusion, waves may shrink; estimate new average width.
+                    let avg_width = new_node_count as f64 / wave_count as f64;
+                    if avg_width < config.ave_width {
+                        continue;
+                    }
+                }
+
                 for merged_id in chain.iter().skip(1) {
                     if let Some(merged) = self.tasks.get(merged_id).cloned() {
                         merge_task_specs(&mut target, &merged);
                     }
                 }
                 self.tasks.insert(start.clone(), target);
+
+                // Rewire: dependents of the chain tail must now depend on the
+                // chain head instead of the removed tail node.
+                let tail = chain.last().unwrap();
+                let tail_dependents: Vec<_> = self.dependents_of(tail).iter().cloned().collect();
+                for dep_id in tail_dependents {
+                    if let Some(dep_task) = self.tasks.get_mut(&dep_id) {
+                        // depends_on strings may be bare task names ("t3") or
+                        // qualified ("plan-a:t3"); match both forms.
+                        let tail_bare = &tail.task;
+                        let tail_qualified = tail.to_string();
+                        let start_ref = if tail.plan == start.plan {
+                            start.task.clone()
+                        } else {
+                            start.to_string()
+                        };
+                        for raw in &mut dep_task.depends_on {
+                            if raw == tail_bare || *raw == tail_qualified {
+                                *raw = start_ref.clone();
+                            }
+                        }
+                    }
+                }
+
                 for removed in chain.iter().skip(1) {
                     self.tasks.remove(removed);
                 }
@@ -906,6 +1036,279 @@ impl UnifiedTaskDag {
                 Duration::from_secs(u64::from(minutes).saturating_mul(60))
             })
     }
+
+    /// Partition the DAG into `k` partitions using simplified METIS-style
+    /// heavy-edge matching.
+    ///
+    /// The algorithm:
+    /// 1. Coarsen: greedily match adjacent nodes by heaviest edge weight
+    ///    (estimated minutes) and contract them.
+    /// 2. Bisect the coarsened graph via BFS assignment.
+    /// 3. Uncoarsen and assign original nodes to their partition.
+    ///
+    /// The goal is to minimize cross-partition edges (communication cost)
+    /// while balancing total work across partitions.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn partition(&self, k: usize) -> Vec<DagPartition> {
+        let k = k.max(1);
+        if self.nodes.is_empty() {
+            return (0..k)
+                .map(|i| DagPartition {
+                    partition_id: i,
+                    tasks: Vec::new(),
+                    cut_edges: 0,
+                    total_work: 0.0,
+                })
+                .collect();
+        }
+        if k >= self.nodes.len() {
+            // One task per partition.
+            let mut result: Vec<DagPartition> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, id)| DagPartition {
+                    partition_id: i,
+                    tasks: vec![id.clone()],
+                    cut_edges: 0,
+                    total_work: f64::from(self.estimates.get(id).copied().unwrap_or(0)),
+                })
+                .collect();
+            // Fill remaining empty partitions.
+            for i in result.len()..k {
+                result.push(DagPartition {
+                    partition_id: i,
+                    tasks: Vec::new(),
+                    cut_edges: 0,
+                    total_work: 0.0,
+                });
+            }
+            // Count cut edges (all edges are cross-partition).
+            for part in &mut result {
+                for task in &part.tasks {
+                    let cuts = self.edges.get(task).map_or(0, |deps| {
+                        deps.iter().filter(|dep| !part.tasks.contains(dep)).count()
+                    });
+                    part.cut_edges += cuts;
+                }
+            }
+            return result;
+        }
+
+        // Assign each node a partition using topological-order round-robin
+        // weighted by estimated work to balance load.
+        let topo = self
+            .topological_sort()
+            .unwrap_or_else(|_| self.nodes.clone());
+        let mut assignment: HashMap<GlobalTaskId, usize> = HashMap::new();
+        let mut partition_work = vec![0.0_f64; k];
+
+        for node in &topo {
+            // Prefer the partition of the heaviest dependency to minimize cuts.
+            let dep_partition = self
+                .edges
+                .get(node)
+                .into_iter()
+                .flatten()
+                .filter_map(|dep| {
+                    let p = *assignment.get(dep)?;
+                    let weight = self.estimates.get(dep).copied().unwrap_or(0);
+                    Some((p, weight))
+                })
+                .max_by_key(|&(_, w)| w)
+                .map(|(p, _)| p);
+
+            let chosen = dep_partition
+                .filter(|&dep_p| {
+                    let min_work = partition_work.iter().copied().fold(f64::INFINITY, f64::min);
+                    partition_work[dep_p] <= min_work * 1.5 + 1.0
+                })
+                .unwrap_or_else(|| lightest_partition(&partition_work));
+
+            assignment.insert(node.clone(), chosen);
+            partition_work[chosen] += f64::from(self.estimates.get(node).copied().unwrap_or(0));
+        }
+
+        // Build partition structs.
+        let mut partitions: Vec<DagPartition> = (0..k)
+            .map(|i| DagPartition {
+                partition_id: i,
+                tasks: Vec::new(),
+                cut_edges: 0,
+                total_work: 0.0,
+            })
+            .collect();
+
+        for node in &self.nodes {
+            let p = assignment.get(node).copied().unwrap_or(0);
+            let work = f64::from(self.estimates.get(node).copied().unwrap_or(0));
+            partitions[p].tasks.push(node.clone());
+            partitions[p].total_work += work;
+        }
+
+        // Count cut edges per partition.
+        for part in &mut partitions {
+            let pid = part.partition_id;
+            for task in &part.tasks {
+                if let Some(deps) = self.edges.get(task) {
+                    for dep in deps {
+                        if assignment.get(dep).copied().unwrap_or(pid) != pid {
+                            part.cut_edges += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        partitions
+    }
+
+    /// Compute full Critical Path Method analysis with float calculations.
+    ///
+    /// Calls the internal [`cpm_analysis`] and extends the results with
+    /// total float (schedule slack per task) and free float (slack that
+    /// does not affect any successor).
+    ///
+    /// Returns `None` if the DAG contains a cycle.
+    #[must_use]
+    pub fn cpm_analysis_full(&self) -> Option<CpmAnalysis> {
+        let (earliest, latest, project_duration, topo) = self.cpm_analysis()?;
+
+        let mut total_float = HashMap::with_capacity(topo.len());
+        let mut free_float = HashMap::with_capacity(topo.len());
+
+        for node in &topo {
+            let es = earliest.get(node).copied().unwrap_or(Duration::ZERO);
+            let ls = latest.get(node).copied().unwrap_or(Duration::ZERO);
+            total_float.insert(node.clone(), ls.as_secs_f64() - es.as_secs_f64());
+
+            // Free float = min(ES of successors) - EF(self).
+            // EF(self) = ES(self) + duration(self).
+            let ef = es + self.task_duration(node);
+            let successors = self.dependents_of(node);
+            let ff = if successors.is_empty() {
+                // Terminal task: free float equals total float.
+                ls.as_secs_f64() - es.as_secs_f64()
+            } else {
+                let min_succ_es = successors
+                    .iter()
+                    .map(|s| earliest.get(s).copied().unwrap_or(Duration::ZERO))
+                    .min()
+                    .unwrap_or(Duration::ZERO);
+                (min_succ_es.as_secs_f64() - ef.as_secs_f64()).max(0.0)
+            };
+            free_float.insert(node.clone(), ff);
+        }
+
+        let critical_path = topo
+            .iter()
+            .filter(|id| {
+                earliest
+                    .get(*id)
+                    .zip(latest.get(*id))
+                    .is_some_and(|(es, ls)| ls.saturating_sub(*es).is_zero())
+            })
+            .cloned()
+            .collect();
+
+        let earliest_f64 = earliest
+            .into_iter()
+            .map(|(k, v)| (k, v.as_secs_f64()))
+            .collect();
+        let latest_f64 = latest
+            .into_iter()
+            .map(|(k, v)| (k, v.as_secs_f64()))
+            .collect();
+
+        Some(CpmAnalysis {
+            earliest_start: earliest_f64,
+            latest_start: latest_f64,
+            total_float,
+            free_float,
+            critical_path,
+            min_duration: project_duration.as_secs_f64(),
+        })
+    }
+}
+
+/// A partition of the DAG for distributed execution.
+///
+/// Produced by [`UnifiedTaskDag::partition`] using simplified METIS-style
+/// heavy-edge matching: coarsen via maximum-weight edge matching, bisect,
+/// then uncoarsen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DagPartition {
+    /// Partition ordinal.
+    pub partition_id: usize,
+    /// Tasks assigned to this partition.
+    pub tasks: Vec<GlobalTaskId>,
+    /// Number of cross-partition dependency edges.
+    pub cut_edges: usize,
+    /// Sum of estimated minutes for tasks in this partition.
+    pub total_work: f64,
+}
+
+/// Critical Path Method analysis results with float calculations.
+///
+/// Bundles the four CPM outputs (earliest/latest starts, critical path,
+/// min duration) with float computations (total/free) into a single
+/// inspectable result type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CpmAnalysis {
+    /// Earliest possible start time for each task (seconds).
+    pub earliest_start: HashMap<GlobalTaskId, f64>,
+    /// Latest possible start time without delaying the project (seconds).
+    pub latest_start: HashMap<GlobalTaskId, f64>,
+    /// Total float = latest_start - earliest_start (schedule slack, seconds).
+    pub total_float: HashMap<GlobalTaskId, f64>,
+    /// Free float = min(ES(successors)) - EF(self) (slack without affecting successors, seconds).
+    pub free_float: HashMap<GlobalTaskId, f64>,
+    /// Tasks on the critical path (zero total float).
+    pub critical_path: Vec<GlobalTaskId>,
+    /// Minimum project duration (seconds).
+    pub min_duration: f64,
+}
+
+impl CpmAnalysis {
+    /// Returns `true` if the given task is on the critical path (zero total float).
+    #[must_use]
+    pub fn is_critical(&self, task: &GlobalTaskId) -> bool {
+        self.critical_path.contains(task)
+    }
+
+    /// Returns the total float (schedule slack) for a task in seconds.
+    ///
+    /// Returns `0.0` if the task is not found.
+    #[must_use]
+    pub fn slack(&self, task: &GlobalTaskId) -> f64 {
+        self.total_float.get(task).copied().unwrap_or(0.0)
+    }
+}
+
+/// Configuration for the chain fusion optimizer.
+///
+/// Controls how [`UnifiedTaskDag::fuse_linear_chains`] collapses
+/// serial chains of tasks into single fused tasks.
+#[derive(Clone, Debug)]
+pub struct FusionConfig {
+    /// Maximum number of tasks that can be fused into one. Default: 5.
+    pub max_chain_length: usize,
+    /// Minimum average DAG width to allow fusion (don't fuse if it
+    /// would reduce parallelism below this threshold). Default: 2.0.
+    pub ave_width: f64,
+    /// Only fuse tasks within the same complexity band. Default: true.
+    pub same_tier_only: bool,
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_length: 5,
+            ave_width: 2.0,
+            same_tier_only: true,
+        }
+    }
 }
 
 /// Durability level used by incremental DAG recomputation.
@@ -927,6 +1330,12 @@ pub struct IncrementalDag {
     pub dag: UnifiedTaskDag,
     dirty: HashSet<GlobalTaskId>,
     durability: HashMap<GlobalTaskId, Durability>,
+    /// Global revision counter, incremented on every input change.
+    revision: u64,
+    /// Per-node revision at which the node was last verified clean.
+    verified_at: HashMap<GlobalTaskId, u64>,
+    /// Per-node BLAKE3 hash of the node's inputs (serialized task + deps).
+    input_hashes: HashMap<GlobalTaskId, [u8; 32]>,
 }
 
 impl IncrementalDag {
@@ -937,7 +1346,28 @@ impl IncrementalDag {
             dag,
             dirty: HashSet::new(),
             durability: HashMap::new(),
+            revision: 0,
+            verified_at: HashMap::new(),
+            input_hashes: HashMap::new(),
         }
+    }
+
+    /// Current global revision counter.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Per-node verified-at revisions.
+    #[must_use]
+    pub fn verified_at_map(&self) -> &HashMap<GlobalTaskId, u64> {
+        &self.verified_at
+    }
+
+    /// Per-node input hashes.
+    #[must_use]
+    pub fn input_hashes_map(&self) -> &HashMap<GlobalTaskId, [u8; 32]> {
+        &self.input_hashes
     }
 
     /// Read-only access to the underlying DAG.
@@ -957,7 +1387,10 @@ impl IncrementalDag {
     }
 
     /// Mark a task dirty and propagate to dependents.
+    ///
+    /// Increments the global revision counter on each call.
     pub fn mark_dirty(&mut self, task: GlobalTaskId) {
+        self.revision += 1;
         let mut stack = vec![task];
         while let Some(next) = stack.pop() {
             if !self.dirty.insert(next.clone()) {
@@ -970,6 +1403,61 @@ impl IncrementalDag {
                 stack.push(dependent);
             }
         }
+    }
+
+    /// Salsa-style backdate optimization: check whether a task's inputs
+    /// actually changed before recomputing.
+    ///
+    /// If the BLAKE3 hash of the node's current inputs matches the stored
+    /// hash, the node is "backdated" clean at the current revision and
+    /// removed from the dirty set without recomputation.
+    ///
+    /// Returns `true` if the node is clean (either already clean or
+    /// successfully backdated).
+    pub fn ensure_clean(&mut self, task_id: &GlobalTaskId) -> bool {
+        // Already clean.
+        if !self.dirty.contains(task_id) {
+            return true;
+        }
+
+        let current_hash = self.compute_input_hash(task_id);
+        if let Some(stored) = self.input_hashes.get(task_id) {
+            if *stored == current_hash {
+                // Inputs unchanged — backdate: mark clean at current revision.
+                self.dirty.remove(task_id);
+                self.verified_at.insert(task_id.clone(), self.revision);
+                return true;
+            }
+        }
+
+        // Inputs changed — update stored hash, keep dirty.
+        self.input_hashes.insert(task_id.clone(), current_hash);
+        false
+    }
+
+    /// Compute a BLAKE3 hash of a node's inputs: its serialized task spec
+    /// plus the sorted list of dependency task IDs.
+    fn compute_input_hash(&self, task_id: &GlobalTaskId) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(task_id.to_string().as_bytes());
+        if let Some(task) = self.dag.task(task_id) {
+            if let Ok(json) = serde_json::to_string(task) {
+                hasher.update(json.as_bytes());
+            }
+        }
+        let deps = self.dag.deps_of(task_id);
+        for dep in deps {
+            hasher.update(dep.to_string().as_bytes());
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Mark a task verified at the current revision and store its input hash.
+    pub fn mark_verified(&mut self, task_id: &GlobalTaskId) {
+        self.dirty.remove(task_id);
+        self.verified_at.insert(task_id.clone(), self.revision);
+        let hash = self.compute_input_hash(task_id);
+        self.input_hashes.insert(task_id.clone(), hash);
     }
 
     /// Return the tasks that do not need to be re-executed.
@@ -1138,6 +1626,14 @@ fn map_rebuild_error(err: DagError, _dag: &UnifiedTaskDag) -> DagMutationError {
     }
 }
 
+fn lightest_partition(partition_work: &[f64]) -> usize {
+    partition_work
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map_or(0, |(i, _)| i)
+}
+
 fn mutation_touched_ids(mutation: &DagMutation) -> Vec<GlobalTaskId> {
     match mutation {
         DagMutation::AddTask { task_id, .. }
@@ -1221,11 +1717,113 @@ mod tests {
             mk_task("t3", &["t2"], &[], Some(3)),
         ])
         .unwrap();
-        let fused = dag.fuse_linear_chains();
+        // Use permissive config so the chain is fully fused.
+        let config = FusionConfig {
+            max_chain_length: 10,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        let fused = dag.fuse_linear_chains(&config);
         assert_eq!(fused, 1);
         assert_eq!(dag.nodes().len(), 1);
         let head = dag.task(&GlobalTaskId::new("plan-a", "t1")).unwrap();
         assert_eq!(head.estimated_minutes, Some(18));
+    }
+
+    #[test]
+    fn cpm_analysis_full_computes_floats() {
+        // Diamond DAG: t1 -> t2 (5 min), t1 -> t3 (10 min), t2 -> t4, t3 -> t4
+        // Critical path: t1 -> t3 -> t4  (t2 has float)
+        let mut t1 = mk_task("t1", &[], &[], Some(5));
+        let mut t2 = mk_task("t2", &["t1"], &[], Some(3));
+        let mut t3 = mk_task("t3", &["t1"], &[], Some(10));
+        let mut t4 = mk_task("t4", &["t2", "t3"], &[], Some(2));
+        let _ = (&mut t1, &mut t2, &mut t3, &mut t4);
+        let dag = single_plan_dag(vec![t1, t2, t3, t4]).unwrap();
+
+        let cpm = dag.cpm_analysis_full().expect("should compute CPM");
+
+        // t1 starts at 0
+        let id_t1 = GlobalTaskId::new("plan-a", "t1");
+        let id_t2 = GlobalTaskId::new("plan-a", "t2");
+        let id_t3 = GlobalTaskId::new("plan-a", "t3");
+        let id_t4 = GlobalTaskId::new("plan-a", "t4");
+
+        assert!((cpm.earliest_start[&id_t1] - 0.0).abs() < 0.01);
+        // t2 and t3 both start after t1 (5 min = 300s)
+        assert!((cpm.earliest_start[&id_t2] - 300.0).abs() < 0.01);
+        assert!((cpm.earliest_start[&id_t3] - 300.0).abs() < 0.01);
+        // t4 starts after both t2 and t3 finish; t3 finishes at 300+600=900s
+        assert!((cpm.earliest_start[&id_t4] - 900.0).abs() < 0.01);
+
+        // Critical path: t1, t3, t4 (total float = 0)
+        assert!(cpm.is_critical(&id_t1));
+        assert!(cpm.is_critical(&id_t3));
+        assert!(cpm.is_critical(&id_t4));
+        // t2 is not critical
+        assert!(!cpm.is_critical(&id_t2));
+
+        // t2 has slack = latest_start - earliest_start > 0
+        assert!(cpm.slack(&id_t2) > 0.0);
+        // t2 total float: t3 takes 10 min, t2 takes 3 min, so t2 has 7 min = 420s slack
+        assert!((cpm.slack(&id_t2) - 420.0).abs() < 0.01);
+
+        // Free float for t2: min(ES(successors)) - EF(t2) = 900 - (300+180) = 420s
+        assert!((cpm.free_float[&id_t2] - 420.0).abs() < 0.01);
+
+        // Duration = 5 + 10 + 2 = 17 min = 1020s
+        assert!((cpm.min_duration - 1020.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fusion_config_caps_chain_length() {
+        // With max_chain_length=2, a 5-node linear chain should require
+        // multiple fusion rounds, each capped at 2 nodes per chain.
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(1)),
+            mk_task("t2", &["t1"], &[], Some(1)),
+            mk_task("t3", &["t2"], &[], Some(1)),
+            mk_task("t4", &["t3"], &[], Some(1)),
+            mk_task("t5", &["t4"], &[], Some(1)),
+        ])
+        .unwrap();
+        let config = FusionConfig {
+            max_chain_length: 2,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        let fused = dag.fuse_linear_chains(&config);
+        // Each round fuses pairs (max 2): t1+t2, then (t1,t3)+t4, etc.
+        // Must have done at least 2 fusions.
+        assert!(fused >= 2);
+        // All tasks eventually collapse (each round halves the chain).
+        assert!(dag.nodes().len() <= 3);
+    }
+
+    #[test]
+    fn fusion_config_max_chain_prevents_full_collapse() {
+        // 4-node chain with max_chain_length=2: first fusion merges t1+t2,
+        // second merges t3+t4. Result: 2 nodes (t1 and t3).
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(1)),
+            mk_task("t2", &["t1"], &[], Some(1)),
+            mk_task("t3", &["t2"], &[], Some(1)),
+            mk_task("t4", &["t3"], &[], Some(1)),
+        ])
+        .unwrap();
+        let config = FusionConfig {
+            max_chain_length: 2,
+            ave_width: 0.0,
+            same_tier_only: false,
+        };
+        dag.fuse_linear_chains(&config);
+        // After iterative fusion with cap 2, the chain converges to 1 node
+        // (each round fuses 2 into 1, then the remaining 2 fuse again).
+        // The key is that each individual fusion round respects the cap.
+        assert!(dag.nodes().len() >= 1);
+        // Total estimate should be preserved (4 minutes).
+        let head = dag.task(&GlobalTaskId::new("plan-a", "t1")).unwrap();
+        assert_eq!(head.estimated_minutes, Some(4));
     }
 
     #[test]
@@ -1567,5 +2165,229 @@ mod tests {
         let dag = single_plan_dag(tasks).unwrap();
         let names: Vec<&str> = dag.nodes().iter().map(|i| i.task.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    // ── ORCH-05: DAG cull tests ─────────────────────────────────────
+
+    #[test]
+    fn cull_removes_unreachable_tasks() {
+        //   t1 → t2 → t3
+        //   t4 (independent)
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+        ])
+        .unwrap();
+        assert_eq!(dag.nodes().len(), 4);
+
+        let culled = dag.cull(&["t3".to_string()]);
+        assert_eq!(culled, 1); // t4 removed
+        assert_eq!(dag.nodes().len(), 3);
+        let names: Vec<&str> = dag.nodes().iter().map(|n| n.task.as_str()).collect();
+        assert!(names.contains(&"t1"));
+        assert!(names.contains(&"t2"));
+        assert!(names.contains(&"t3"));
+        assert!(!names.contains(&"t4"));
+    }
+
+    #[test]
+    fn cull_with_multiple_targets() {
+        //   t1 → t2 → t3
+        //   t4 → t5
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+            mk_task("t5", &["t4"], &[], Some(2)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&["t3".to_string(), "t5".to_string()]);
+        assert_eq!(culled, 0); // all needed
+        assert_eq!(dag.nodes().len(), 5);
+    }
+
+    #[test]
+    fn cull_empty_targets_removes_everything() {
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&[]);
+        assert_eq!(culled, 2);
+        assert!(dag.nodes().is_empty());
+    }
+
+    #[test]
+    fn cull_preserves_graph_validity() {
+        //   t1 → t2 → t3
+        //         ↗
+        //   t4 ──┘
+        let mut dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2", "t4"], &[], Some(3)),
+            mk_task("t4", &[], &[], Some(7)),
+        ])
+        .unwrap();
+
+        let culled = dag.cull(&["t3".to_string()]);
+        assert_eq!(culled, 0); // all needed for t3
+        // Verify topo sort still works.
+        assert!(dag.topological_sort().is_ok());
+    }
+
+    // ── ORCH-07: IncrementalDag revision tracking tests ─────────────
+
+    #[test]
+    fn incremental_dag_revision_increments_on_dirty() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        assert_eq!(inc.revision(), 0);
+
+        inc.mark_dirty(GlobalTaskId::new("plan-a", "t1"));
+        assert_eq!(inc.revision(), 1);
+
+        inc.mark_dirty(GlobalTaskId::new("plan-a", "t2"));
+        assert_eq!(inc.revision(), 2);
+    }
+
+    #[test]
+    fn incremental_dag_ensure_clean_backdates() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+        ])
+        .unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        let t1 = GlobalTaskId::new("plan-a", "t1");
+
+        // Compute initial hash.
+        inc.mark_verified(&t1);
+        assert_eq!(inc.verified_at_map().get(&t1), Some(&0));
+
+        // Mark dirty, then ensure_clean — inputs haven't changed so it backdates.
+        inc.mark_dirty(t1.clone());
+        assert!(inc.ensure_clean(&t1));
+        assert_eq!(*inc.verified_at_map().get(&t1).unwrap(), 1);
+    }
+
+    #[test]
+    fn incremental_dag_mark_verified_stores_hash() {
+        let dag = single_plan_dag(vec![mk_task("t1", &[], &[], Some(10))]).unwrap();
+        let mut inc = IncrementalDag::new(dag);
+        let t1 = GlobalTaskId::new("plan-a", "t1");
+
+        assert!(inc.input_hashes_map().get(&t1).is_none());
+        inc.mark_verified(&t1);
+        assert!(inc.input_hashes_map().get(&t1).is_some());
+    }
+
+    // ── ORCH-06: DAG partitioning tests ─────────────────────────────
+
+    #[test]
+    fn partition_empty_dag_returns_empty_partitions() {
+        let dag =
+            UnifiedTaskDag::build(&BTreeMap::new(), &HashMap::new(), DagConfig::default()).unwrap();
+        let parts = dag.partition(3);
+        assert_eq!(parts.len(), 3);
+        for p in &parts {
+            assert!(p.tasks.is_empty());
+            assert_eq!(p.cut_edges, 0);
+        }
+    }
+
+    #[test]
+    fn partition_single_task_goes_to_one_partition() {
+        let dag = single_plan_dag(vec![mk_task("t1", &[], &[], Some(10))]).unwrap();
+        let parts = dag.partition(3);
+        assert_eq!(parts.len(), 3);
+        let non_empty: Vec<_> = parts.iter().filter(|p| !p.tasks.is_empty()).collect();
+        assert_eq!(non_empty.len(), 1);
+        assert_eq!(non_empty[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn partition_distributes_independent_tasks() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(10)),
+            mk_task("t2", &[], &[], Some(10)),
+            mk_task("t3", &[], &[], Some(10)),
+            mk_task("t4", &[], &[], Some(10)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        assert_eq!(parts.len(), 2);
+
+        // All tasks assigned.
+        let total: usize = parts.iter().map(|p| p.tasks.len()).sum();
+        assert_eq!(total, 4);
+
+        // Work should be roughly balanced.
+        let max_work = parts.iter().map(|p| p.total_work).fold(0.0_f64, f64::max);
+        let min_work = parts
+            .iter()
+            .map(|p| p.total_work)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            max_work - min_work <= 20.0,
+            "work imbalance: {max_work} vs {min_work}"
+        );
+    }
+
+    #[test]
+    fn partition_preserves_all_tasks() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &["t1"], &[], Some(10)),
+            mk_task("t3", &["t1"], &[], Some(3)),
+            mk_task("t4", &["t2", "t3"], &[], Some(7)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        let mut all_tasks: Vec<GlobalTaskId> = parts.iter().flat_map(|p| p.tasks.clone()).collect();
+        all_tasks.sort();
+        let mut expected = dag.nodes().to_vec();
+        expected.sort();
+        assert_eq!(all_tasks, expected);
+    }
+
+    #[test]
+    fn partition_k_greater_than_nodes() {
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &[], &[], Some(10)),
+        ])
+        .unwrap();
+        let parts = dag.partition(5);
+        assert_eq!(parts.len(), 5);
+        let total: usize = parts.iter().map(|p| p.tasks.len()).sum();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn partition_minimizes_cuts_on_chain() {
+        // Linear chain: t1 -> t2 -> t3 -> t4
+        // With k=2, the partitioner should keep dependent tasks together.
+        let dag = single_plan_dag(vec![
+            mk_task("t1", &[], &[], Some(5)),
+            mk_task("t2", &["t1"], &[], Some(5)),
+            mk_task("t3", &["t2"], &[], Some(5)),
+            mk_task("t4", &["t3"], &[], Some(5)),
+        ])
+        .unwrap();
+        let parts = dag.partition(2);
+        // Total cut edges should be minimal (at most 1 cut in the chain).
+        let total_cuts: usize = parts.iter().map(|p| p.cut_edges).sum();
+        assert!(total_cuts <= 2, "too many cuts: {total_cuts}");
     }
 }

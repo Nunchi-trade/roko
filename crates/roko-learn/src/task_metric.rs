@@ -205,6 +205,33 @@ pub struct ParseResult {
     pub total_lines: usize,
 }
 
+/// Tolerant JSONL reader for [`TaskMetric`] records.
+///
+/// This complements [`MetricsWriter`] for call sites that want a small
+/// type-driven read surface instead of directly invoking
+/// [`parse_metrics_jsonl`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MetricsReader;
+
+impl MetricsReader {
+    /// Parse JSONL text into task metrics, skipping corrupted lines.
+    #[must_use]
+    pub fn parse_str(text: &str) -> ParseResult {
+        parse_metrics_jsonl(text)
+    }
+
+    /// Parse UTF-8 JSONL bytes into task metrics.
+    ///
+    /// Invalid UTF-8 yields an empty result rather than aborting the caller.
+    #[must_use]
+    pub fn parse_bytes(bytes: &[u8]) -> ParseResult {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => Self::parse_str(text),
+            Err(_) => ParseResult::default(),
+        }
+    }
+}
+
 /// Parse JSONL text into `TaskMetric` records.
 ///
 /// Empty lines are silently skipped. Lines that fail to parse increment

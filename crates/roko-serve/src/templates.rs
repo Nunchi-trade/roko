@@ -515,6 +515,190 @@ const fn default_max_turns() -> u32 {
     20
 }
 
+// ─── Built-in agent templates ────────────────────────────────────────────
+
+/// Built-in template: automated PR code review.
+pub fn pr_review_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "pr-review".into(),
+        description: "Automated code review for pull requests. Reads diff, leaves inline comments, and produces a summary.".into(),
+        model: "sonnet".into(),
+        role: "reviewer".into(),
+        system_prompt: concat!(
+            "You are a thorough code reviewer. ",
+            "Review the pull request at {{repo}}#{{pr_number}}. ",
+            "Focus on correctness, performance, and maintainability. ",
+            "Leave inline comments for specific issues and a summary comment with your overall assessment. ",
+            "Be constructive and specific.",
+        ).into(),
+        max_turns: 15,
+        output_format: TemplateOutputFormat::Markdown,
+        mcp_servers: vec!["github".into()],
+        allowed_tools: vec![],
+        denied_tools: vec!["write_file".into(), "edit_file".into(), "bash".into()],
+        experiment: None,
+    }
+}
+
+/// Built-in template: code implementation from task description.
+pub fn code_implementer_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "code-implementer".into(),
+        description: "Implements a coding task: reads requirements, writes code, runs tests, iterates until gates pass.".into(),
+        model: "sonnet".into(),
+        role: "implementer".into(),
+        system_prompt: concat!(
+            "You are an expert software engineer. ",
+            "Implement the task described below. ",
+            "Read the relevant code, make changes, run tests, and iterate until all gates pass. ",
+            "Follow the project's coding conventions. ",
+            "Task: {{task_description}}",
+        ).into(),
+        max_turns: 30,
+        output_format: TemplateOutputFormat::None,
+        mcp_servers: vec![],
+        allowed_tools: vec![],
+        denied_tools: vec![],
+        experiment: None,
+    }
+}
+
+/// Built-in template: automatic plan generation from PRD.
+pub fn auto_plan_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "auto-plan".into(),
+        description: "Generates an implementation plan with tasks from a PRD document.".into(),
+        model: "sonnet".into(),
+        role: "planner".into(),
+        system_prompt: concat!(
+            "You are a technical planner. ",
+            "Read the PRD at {{prd_path}} and generate an implementation plan. ",
+            "Break the work into concrete, testable tasks with clear acceptance criteria. ",
+            "Order tasks by dependency. Estimate complexity per task.",
+        )
+        .into(),
+        max_turns: 10,
+        output_format: TemplateOutputFormat::Toml,
+        mcp_servers: vec![],
+        allowed_tools: vec![],
+        denied_tools: vec!["write_file".into(), "edit_file".into(), "bash".into()],
+        experiment: None,
+    }
+}
+
+/// Built-in template: gate failure remediation.
+pub fn gate_fixer_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "gate-fixer".into(),
+        description: "Fixes code that failed gate validation (compile errors, test failures, clippy warnings).".into(),
+        model: "sonnet".into(),
+        role: "implementer".into(),
+        system_prompt: concat!(
+            "You are a debugging specialist. ",
+            "The following gate check failed:\n{{gate_output}}\n\n",
+            "Diagnose the root cause, apply the minimal fix, and verify the gate passes. ",
+            "Do not refactor unrelated code.",
+        ).into(),
+        max_turns: 20,
+        output_format: TemplateOutputFormat::None,
+        mcp_servers: vec![],
+        allowed_tools: vec![],
+        denied_tools: vec![],
+        experiment: None,
+    }
+}
+
+/// Built-in template: document lifecycle (meeting notes to PRD).
+pub fn doc_lifecycle_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "doc-lifecycle".into(),
+        description: "Transforms meeting notes or rough ideas into structured PRD documents."
+            .into(),
+        model: "sonnet".into(),
+        role: "scribe".into(),
+        system_prompt: concat!(
+            "You are a technical writer. ",
+            "Transform the following notes into a structured PRD document:\n{{notes}}\n\n",
+            "Include: problem statement, proposed solution, acceptance criteria, ",
+            "non-goals, and open questions. Use clear, concise language.",
+        )
+        .into(),
+        max_turns: 10,
+        output_format: TemplateOutputFormat::Markdown,
+        mcp_servers: vec![],
+        allowed_tools: vec![],
+        denied_tools: vec!["bash".into(), "run_tests".into()],
+        experiment: None,
+    }
+}
+
+/// Built-in template: deployment notification via Slack.
+pub fn slack_notify_template() -> AgentTemplate {
+    AgentTemplate {
+        name: "slack-notify".into(),
+        description: "Posts deployment status notifications to a Slack channel.".into(),
+        model: "haiku".into(),
+        role: "operator".into(),
+        system_prompt: concat!(
+            "You are a deployment notifier. ",
+            "Post a concise deployment summary to the {{channel}} Slack channel. ",
+            "Include: service name, version, environment, status, and any notable changes. ",
+            "Keep messages under 200 words.",
+        )
+        .into(),
+        max_turns: 3,
+        output_format: TemplateOutputFormat::None,
+        mcp_servers: vec!["slack".into()],
+        allowed_tools: vec![],
+        denied_tools: vec![
+            "write_file".into(),
+            "edit_file".into(),
+            "bash".into(),
+            "run_tests".into(),
+        ],
+        experiment: None,
+    }
+}
+
+/// All built-in template factory functions.
+pub const BUILTIN_TEMPLATE_FACTORIES: &[fn() -> AgentTemplate] = &[
+    pr_review_template,
+    code_implementer_template,
+    auto_plan_template,
+    gate_fixer_template,
+    doc_lifecycle_template,
+    slack_notify_template,
+];
+
+/// Return all built-in templates as a vector.
+pub fn builtin_templates() -> Vec<AgentTemplate> {
+    BUILTIN_TEMPLATE_FACTORIES
+        .iter()
+        .map(|factory| factory())
+        .collect()
+}
+
+impl TemplateRegistry {
+    /// Seed the registry with built-in templates.
+    ///
+    /// Built-in templates are loaded with lowest priority: if a user-defined
+    /// template with the same name already exists, the built-in is skipped.
+    pub fn seed_builtins(&mut self) {
+        for template in builtin_templates() {
+            if !self.templates.contains_key(&template.name) {
+                self.templates.insert(template.name.clone(), template);
+            }
+        }
+    }
+
+    /// Scan template directories and then seed builtins.
+    pub fn scan_with_builtins(&mut self) -> TemplateLoadReport {
+        let report = self.scan();
+        self.seed_builtins();
+        report
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +721,7 @@ mod tests {
                 command: "npx".to_string(),
                 args: vec![],
                 env: HashMap::new(),
+                ..Default::default()
             }],
         };
         std::fs::write(
@@ -714,5 +899,87 @@ mcp_servers = ["github", "missing-server"]
 
         let default = TemplateRegistry::render_prompt(&template, &HashMap::new());
         assert_eq!(default, "You are a reviewer.");
+    }
+
+    // ─── Built-in template tests ─────────────────────────────────────────
+
+    #[test]
+    fn builtin_templates_have_unique_names() {
+        let templates = builtin_templates();
+        let mut seen = HashSet::new();
+        for template in &templates {
+            assert!(
+                seen.insert(&template.name),
+                "duplicate builtin template name: {}",
+                template.name
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_templates_pass_validation() {
+        // Provide a set of "configured" MCP servers so templates requiring
+        // MCP servers (pr-review, slack-notify) don't fail validation.
+        let configured: HashSet<String> =
+            ["github", "slack"].iter().map(|s| s.to_string()).collect();
+        for template in builtin_templates() {
+            let result = template.validate(Some(&template.name), Some(&configured));
+            assert!(
+                result.is_ok(),
+                "builtin template '{}' failed validation: {:?}",
+                template.name,
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_templates_count() {
+        assert_eq!(builtin_templates().len(), 6, "expected 6 builtin templates");
+    }
+
+    #[test]
+    fn seed_builtins_does_not_overwrite_user_templates() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let workdir = tempdir.path();
+        let mut registry = TemplateRegistry::new(workdir.to_path_buf());
+
+        // Manually insert a user template with the same name as a builtin.
+        let user_template = AgentTemplate {
+            name: "pr-review".into(),
+            description: "User's custom PR review".into(),
+            model: "opus".into(),
+            role: "reviewer".into(),
+            system_prompt: "Custom prompt.".into(),
+            max_turns: 5,
+            output_format: TemplateOutputFormat::Markdown,
+            mcp_servers: vec![],
+            allowed_tools: vec![],
+            denied_tools: vec![],
+            experiment: None,
+        };
+        registry.templates.insert("pr-review".into(), user_template);
+
+        registry.seed_builtins();
+
+        // The user's template should not be overwritten.
+        let pr_review = registry.get("pr-review").unwrap();
+        assert_eq!(pr_review.description, "User's custom PR review");
+        assert_eq!(pr_review.model, "opus");
+    }
+
+    #[test]
+    fn pr_review_template_denies_mutation_tools() {
+        let template = pr_review_template();
+        assert!(template.denied_tools.contains(&"write_file".to_string()));
+        assert!(template.denied_tools.contains(&"edit_file".to_string()));
+        assert!(template.denied_tools.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn code_implementer_template_has_full_access() {
+        let template = code_implementer_template();
+        assert!(template.denied_tools.is_empty());
+        assert!(template.allowed_tools.is_empty());
     }
 }

@@ -111,7 +111,7 @@ pub struct CFactorComponents {
     pub knowledge_integration_rate: f64,
     /// How strongly agent templates specialize by task category.
     #[serde(default)]
-    pub task_diversity_coverage: f64,
+    pub hdc_diversity: f64,
     /// Speed at which divergent approaches reach a shared conclusion.
     #[serde(default)]
     pub convergence_velocity: f64,
@@ -119,7 +119,7 @@ pub struct CFactorComponents {
     pub turn_taking_equality: f64,
     /// Normalized reference rate for completed dependency outputs.
     #[serde(default)]
-    pub social_sensitivity: f64,
+    pub social_perceptiveness: f64,
 }
 
 /// Regression alert for a C-Factor drop against a trailing history window.
@@ -153,10 +153,10 @@ impl Default for CFactorComponents {
             first_try_rate: 0.0,
             knowledge_growth: 0.0,
             knowledge_integration_rate: 0.0,
-            task_diversity_coverage: 0.0,
+            hdc_diversity: 0.0,
             convergence_velocity: 0.0,
             turn_taking_equality: 0.0,
-            social_sensitivity: 0.0,
+            social_perceptiveness: 0.0,
         }
     }
 }
@@ -246,19 +246,19 @@ struct TaskAggregate {
 ///   metadata
 /// - `knowledge_integration_rate` from confirmation chains emitted by Neuro
 ///   distillation
-/// - `task_diversity_coverage` from the association between agent template and
+/// - `hdc_diversity` from the association between agent template and
 ///   task category (specialization vs overlap)
 /// - `convergence_velocity` from knowledge agreement across agents
 /// - `turn_taking_equality` from the Gini coefficient of per-plan agent
 ///   contribution counts
-/// - `social_sensitivity` from the fraction of `prior_output` context
+/// - `social_perceptiveness` from the fraction of `prior_output` context
 ///   sections that were referenced in the agent's output
 #[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn compute_cfactor(
     episodes: &[Episode],
     window: Duration,
-    social_sensitivity: f64,
+    social_perceptiveness: f64,
     knowledge_integration_rate: f64,
     convergence_velocity: f64,
 ) -> CFactor {
@@ -330,7 +330,7 @@ pub fn compute_cfactor(
 
     let gate_pass_rate = ratio(passed_tasks, total_tasks);
     let first_try_rate = ratio(first_try_tasks, total_tasks);
-    let task_diversity_coverage = compute_task_diversity_coverage(&filtered);
+    let hdc_diversity = compute_hdc_diversity(&filtered);
 
     let (avg_cost_per_successful_task, avg_duration_per_successful_task) =
         if successful_tasks.is_empty() {
@@ -403,7 +403,7 @@ pub fn compute_cfactor(
     let knowledge_integration_rate = knowledge_integration_rate.clamp(0.0, 1.0);
     let convergence_velocity = convergence_velocity.clamp(0.0, 1.0);
     let turn_taking_equality = compute_turn_taking_equality(&filtered);
-    let social_sensitivity = social_sensitivity.clamp(0.0, 1.0);
+    let social_perceptiveness = social_perceptiveness.clamp(0.0, 1.0);
 
     let overall = (gate_pass_rate * 0.23
         + cost_efficiency * 0.15
@@ -412,11 +412,11 @@ pub fn compute_cfactor(
         + first_try_rate * 0.18
         + knowledge_growth * 0.08
         + knowledge_integration_rate * 0.07
-        + task_diversity_coverage * 0.11)
+        + hdc_diversity * 0.11)
         * 0.9
         + convergence_velocity * 0.05
         + turn_taking_equality * 0.05
-        + social_sensitivity * 0.05;
+        + social_perceptiveness * 0.05;
 
     let pathologies = detect_pathologies(
         &filtered
@@ -435,10 +435,10 @@ pub fn compute_cfactor(
             first_try_rate,
             knowledge_growth,
             knowledge_integration_rate,
-            task_diversity_coverage,
+            hdc_diversity,
             convergence_velocity,
             turn_taking_equality,
-            social_sensitivity,
+            social_perceptiveness,
         },
         agent_contributions: Vec::new(),
         pathologies,
@@ -448,7 +448,7 @@ pub fn compute_cfactor(
     snapshot.agent_contributions = compute_agent_contributions(
         &filtered,
         computed_at,
-        social_sensitivity,
+        social_perceptiveness,
         knowledge_integration_rate,
         convergence_velocity,
         snapshot.overall,
@@ -472,7 +472,7 @@ pub fn trend_arrow(history: &[CFactor], window: Duration) -> &'static str {
         .iter()
         .filter(|snapshot| snapshot.computed_at >= cutoff)
         .collect();
-    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+    snapshots.sort_by_key(|s| s.computed_at);
 
     let Some(first) = snapshots.first() else {
         return "→";
@@ -511,7 +511,7 @@ pub fn detect_cfactor_regression(
         .iter()
         .filter(|snapshot| snapshot.computed_at >= cutoff)
         .collect();
-    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+    snapshots.sort_by_key(|s| s.computed_at);
 
     let Some(current) = snapshots.last().copied() else {
         return None;
@@ -903,7 +903,7 @@ fn turn_taking_equality_for_counts(counts: Vec<u64>) -> f64 {
     (1.0 - gini).clamp(0.0, 1.0)
 }
 
-fn compute_task_diversity_coverage(episodes: &[&Episode]) -> f64 {
+fn compute_hdc_diversity(episodes: &[&Episode]) -> f64 {
     let mut joint_counts: HashMap<(String, String), u64> = HashMap::new();
     let mut template_counts: HashMap<String, u64> = HashMap::new();
     let mut category_counts: HashMap<String, u64> = HashMap::new();
@@ -1103,7 +1103,7 @@ fn episode_new_knowledge_entries(episode: &Episode) -> usize {
 fn compute_agent_contributions(
     filtered: &[&Episode],
     computed_at: DateTime<Utc>,
-    social_sensitivity: f64,
+    social_perceptiveness: f64,
     knowledge_integration_rate: f64,
     convergence_velocity: f64,
     overall: f64,
@@ -1136,7 +1136,7 @@ fn compute_agent_contributions(
             compute_cfactor_from_filtered(
                 &remaining,
                 computed_at,
-                social_sensitivity,
+                social_perceptiveness,
                 knowledge_integration_rate,
                 convergence_velocity,
             )
@@ -1164,7 +1164,7 @@ fn compute_agent_contributions(
 fn compute_cfactor_from_filtered(
     filtered: &[&Episode],
     computed_at: DateTime<Utc>,
-    social_sensitivity: f64,
+    social_perceptiveness: f64,
     knowledge_integration_rate: f64,
     convergence_velocity: f64,
 ) -> CFactor {
@@ -1214,7 +1214,7 @@ fn compute_cfactor_from_filtered(
 
     let gate_pass_rate = ratio(passed_tasks, total_tasks);
     let first_try_rate = ratio(first_try_tasks, total_tasks);
-    let task_diversity_coverage = compute_task_diversity_coverage(filtered);
+    let hdc_diversity = compute_hdc_diversity(filtered);
 
     let (avg_cost_per_successful_task, avg_duration_per_successful_task) =
         if successful_tasks.is_empty() {
@@ -1287,7 +1287,7 @@ fn compute_cfactor_from_filtered(
     let knowledge_integration_rate = knowledge_integration_rate.clamp(0.0, 1.0);
     let convergence_velocity = convergence_velocity.clamp(0.0, 1.0);
     let turn_taking_equality = compute_turn_taking_equality(filtered);
-    let social_sensitivity = social_sensitivity.clamp(0.0, 1.0);
+    let social_perceptiveness = social_perceptiveness.clamp(0.0, 1.0);
 
     let overall = (gate_pass_rate * 0.23
         + cost_efficiency * 0.15
@@ -1296,11 +1296,11 @@ fn compute_cfactor_from_filtered(
         + first_try_rate * 0.18
         + knowledge_growth * 0.08
         + knowledge_integration_rate * 0.07
-        + task_diversity_coverage * 0.11)
+        + hdc_diversity * 0.11)
         * 0.9
         + convergence_velocity * 0.05
         + turn_taking_equality * 0.05
-        + social_sensitivity * 0.05;
+        + social_perceptiveness * 0.05;
 
     CFactor {
         overall: overall.clamp(0.0, 1.0),
@@ -1312,10 +1312,10 @@ fn compute_cfactor_from_filtered(
             first_try_rate,
             knowledge_growth,
             knowledge_integration_rate,
-            task_diversity_coverage,
+            hdc_diversity,
             convergence_velocity,
             turn_taking_equality,
-            social_sensitivity,
+            social_perceptiveness,
         },
         agent_contributions: Vec::new(),
         pathologies: detect_pathologies(
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(cfactor.components.speed > 0.8);
         assert!(cfactor.components.knowledge_growth > 0.0);
         assert!((cfactor.components.knowledge_integration_rate - 0.0).abs() < 1e-9);
-        assert!((cfactor.components.social_sensitivity - 0.0).abs() < 1e-9);
+        assert!((cfactor.components.social_perceptiveness - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1498,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn computes_task_diversity_coverage_from_template_category_alignment() {
+    fn computes_hdc_diversity_from_template_category_alignment() {
         let mut episodes = Vec::new();
 
         for suffix in ["a", "b"] {
@@ -1527,7 +1527,7 @@ mod tests {
             0.0,
             0.0,
         );
-        assert!((cfactor.components.task_diversity_coverage - 1.0).abs() < 1e-9);
+        assert!((cfactor.components.hdc_diversity - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1648,16 +1648,16 @@ mod tests {
         assert!((cfactor.components.first_try_rate - 1.0).abs() < 1e-9);
         assert!((cfactor.components.knowledge_growth - 0.0).abs() < 1e-9);
         assert!((cfactor.components.turn_taking_equality - 0.0).abs() < 1e-9);
-        assert!((cfactor.components.social_sensitivity - 0.0).abs() < 1e-9);
+        assert!((cfactor.components.social_perceptiveness - 0.0).abs() < 1e-9);
     }
 
     #[test]
-    fn social_sensitivity_is_captured_in_overall_score() {
+    fn social_perceptiveness_is_captured_in_overall_score() {
         let episodes = vec![episode_at("task-1", 1, 10.0, 1_000, true)];
         let baseline = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.0, 0.0, 0.0);
         let cfactor = compute_cfactor(&episodes, Duration::from_secs(24 * 60 * 60), 0.8, 0.0, 0.0);
 
-        assert!((cfactor.components.social_sensitivity - 0.8).abs() < 1e-9);
+        assert!((cfactor.components.social_perceptiveness - 0.8).abs() < 1e-9);
         assert!(cfactor.overall > baseline.overall);
     }
 

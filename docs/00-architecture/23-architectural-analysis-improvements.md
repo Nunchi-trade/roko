@@ -1,37 +1,60 @@
 # Architectural Coherence Analysis and Improvements
 
-> **Abstract:** A comprehensive analysis of Roko's Synapse Architecture — the six verb traits,
-> five-layer taxonomy, three cognitive speeds, universal Engram type, and cognitive cross-cuts —
-> evaluated against modern research in cognitive architectures (SOAR, ACT-R, LIDA), trait-based
-> systems (Scala typeclasses, Haskell type classes), category theory (functors, monoids, natural
-> transformations), and active inference (Free Energy Principle, VERSES Genius). This document
-> identifies architectural strengths, coherence gaps, layer violations, edge cases, and
-> proposes improvements grounded in academic literature.
+> **Abstract:** A comprehensive analysis of Roko's current architecture as a v1 snapshot and
+> its v2 rewrite path: the six-operator snapshot, five-layer taxonomy, three cognitive speeds,
+> Engram/Pulse split, two mediums (durable Engram and ephemeral Pulse), two fabrics (Substrate
+> and Bus), and cognitive cross-cuts — evaluated against modern research in cognitive
+> architectures (SOAR, ACT-R, LIDA), trait-based systems (Scala typeclasses, Haskell type
+> classes), category theory (functors, monoids, natural transformations), and active inference
+> (Free Energy Principle, VERSES Genius). This document identifies architectural strengths,
+> coherence gaps, layer violations, rewrite boundaries, and proposes improvements grounded in
+> academic literature. See also `tmp/refinements/01-critique-one-noun.md`,
+> `tmp/refinements/03-bus-as-first-class.md`,
+> `tmp/refinements/04-operators-generalized.md`,
+> `tmp/refinements/21-from-scratch-redesigns.md`, and
+> [01-naming-and-glossary.md](./01-naming-and-glossary.md).
 
-> **Implementation**: Analysis (informing future architectural decisions)
+> **Implementation**: Analysis (informing future architectural decisions, including from-scratch sequencing)
+> See also `tmp/refinements/20-modularity-composability.md` for the dep graph rewrite boundary.
+
+> **Reality check**: The cleanup direction in this chapter is useful, but
+> `roko-bus`, `roko-hdc`, and `roko-spi` are proposed target crates, not current
+> workspace members. Today the event bus lives in runtime code, HDC lives in
+> `roko-primitives`, and the extension story is still centered on built-in tools,
+> MCP integrations, and the narrow `roko-plugin` SDK.
 
 **Date**: 2026-04-12
 **Methodology**: Read all 24 architecture docs, all 22 section INDEX files, STATUS/QUICKSTART/COMPARISON,
-analyzed actual Cargo.toml dependency graphs across all 28 crates, read trait definitions in code
-(`roko-core/src/traits.rs`), and surveyed recent literature.
+analyzed actual Cargo.toml dependency graphs across the workspace, read trait definitions in code
+(`roko-core/src/traits.rs`), and surveyed recent literature across the current
+36-workspace-member repo.
 
 ---
 
 ## 1. Executive Summary
 
-Roko's Synapse Architecture is **remarkably coherent**. The "one noun, six verbs" model holds
-up under scrutiny: all 131 trait implementations across the codebase fit cleanly into the six
-traits, with only minor awkwardness at the boundaries. The five-layer taxonomy has **one
-confirmed dependency violation** (roko-conductor L3/L4 → roko-learn L2/Cross-cut) and **six
-unclassified crates**. The three cognitive speeds map cleanly to all three primary domains
-(coding, chain, research). The Engram type is genuinely universal, with edge cases that are
-handled by existing extension mechanisms (`Kind::Custom`, `Body::Json`, `tags`).
+Roko's current architecture is **remarkably coherent** as a v1 snapshot, but the current shape
+is not the endpoint. The architecture docs now need to treat the two-medium, two-fabric kernel
+as the v2 rewrite path: Engram and Pulse moving through Substrate and Bus. The five-layer
+taxonomy has **one confirmed dependency violation** (`roko-conductor` L3/L4 → `roko-learn`
+L2/Cross-cut) and **six unclassified crates**. The three cognitive speeds map cleanly to all
+three primary domains (coding, chain, research). The current Engram model is genuinely
+universal, with edge cases that are handled by existing extension mechanisms (`Kind::Custom`,
+`Body::Json`, `tags`).
+
+REF01 is the diagnostic bridge for that shift: it shows that the old "one noun, six verbs"
+mnemonic still captures the durable half of the system, but it no longer explains live traffic,
+the bus, or the boundary cases that this analysis documents below.
 
 Key findings:
-1. **Six traits are sufficient.** No 7th trait is needed. Two boundary operations (signal
-   transformation, telemetry emission) can be expressed as degenerate Composer and Policy.
-2. **One dependency violation exists.** `roko-conductor` → `roko-learn` breaks the L3→L2 rule.
-   Fixable by extracting an interface trait into L0.
+1. **The current operator set is coherent, but v2 planning changes the question.** The
+   from-scratch kernel rewrite in REF21 is the clean path once Pulse and Bus semantics are
+   first-class.
+2. **One dependency violation exists, and the Bus story dissolves it.** `roko-conductor` →
+   `roko-learn` breaks the L3→L2 rule only because circuit-breaker state was modeled as a direct
+   learning dependency. The Bus-first fix routes that state through `gate.verdict.emitted` and
+   `gate.failure.rate` topics on the kernel `Bus` trait, so `roko-conductor` and `roko-learn`
+   stay decoupled at compile time.
 3. **Category theory provides formal grounding.** The pipeline is a composition of morphisms;
    Score is a monoid; cross-cuts are endofunctors. These aren't metaphors — they're structural
    properties that guarantee composability.
@@ -59,39 +82,43 @@ UI/API boundary code (`roko-cli/src/tui/`, `roko-serve/src/routes/`), none in co
 
 ### 2.2 Boundary Operations
 
-Three operations sit at the boundary of the trait model:
+Three operations sit at the boundary of the trait model, and REF04 shows that they are better
+understood as `Datum`-aware operators rather than special cases:
 
 | Operation | Current Implementation | Fit Quality |
 |---|---|---|
-| **Signal transformation** (e.g., summarize, translate) | `Composer::compose(&[single], &Budget::UNLIMITED, ...)` | Adequate. Budget parameter is unused but harmless. |
-| **Telemetry emission** (metrics, traces) | `Policy::decide(&[], ctx)` returning metric Engrams | Adequate. Empty stream input is awkward but functional. |
-| **Batch verification** (verify N signals at once) | Loop calling `Gate::verify` N times | Adequate. External loop is standard; batch Gate would be premature optimization. |
+| **Engram transformation** (e.g., summarize, translate) | `Composer::compose(&[Datum], &Budget, &dyn Scorer, ctx)` | Adequate. Composer can ingest either medium, so the same path can absorb mixed Engram/Pulse context without inventing a separate boundary abstraction. |
+| **Telemetry emission** (metrics, traces) | `Policy::decide(&[Pulse], ctx)` returning `PolicyOutputs` | Better fit. Policy is intentionally Pulse-native, so live telemetry and reactive follow-ups can emit both Pulses and Engrams directly instead of masquerading as an empty Engram slice. |
+| **Batch verification** (verify N Engrams at once) | Loop calling `Gate::verify` N times, or `Gate::verify_stream(&[Pulse], ctx)` for stream windows | Adequate. Gate keeps the durable Engram path while also supporting stream verification over Pulses when the boundary is temporal rather than stored. |
 
-### 2.3 Could There Be a 7th Trait?
+The trait boundary now lines up with the medium split: `Datum` covers polymorphic Scorer and
+Composer inputs; Router gains a native Pulse-selection path beside its durable Engram path;
+`Gate::verify_stream` covers verification over Pulse windows; `Policy::decide(&[Pulse], ctx)`
+and `PolicyOutputs` make stream reaction explicit; and the Bus handles Pulse transport while
+Substrate remains the storage path for Engrams. REF01 treats that boundary as evidence for the
+two mediums and two fabrics reframing rather than as a harmless quirk.
 
-**Candidate: Transform** — `fn transform(signal: &Signal, ctx: &Context) -> Signal`
+### 2.3 When a rewrite beats incremental refactor
 
-A dedicated Transform trait would capture 1:1 Signal→Signal mappings without budget or stream
-semantics. Examples: summarize text, translate language, extract structured data.
+The interesting question is no longer whether the current trait count can be defended; it is
+whether the kernel assumptions should be rewritten cleanly. Incremental refactor wins when the
+changed assumption is local, the interface surface is already large, and the new capability can
+be layered without changing the medium model.
 
-**Arguments for:**
-- Cleaner API for 1:1 transformations (no meaningless budget parameter)
-- Semantic clarity: "transform" is a distinct cognitive operation from "compose"
+REF21 argues the opposite here. The current design collapses durable and ephemeral traffic into
+one surface, but the v2 path wants two mediums moving through two fabrics: Engram and Pulse over
+Substrate and Bus. That is a kernel-level assumption, so stretching the old shape would leave
+the architecture split between old and new mental models.
 
-**Arguments against:**
-- Parsimony: 6 traits → 720 orderings; 7 traits → 5,040 orderings. Combinatorial explosion.
-- Degenerate Composer handles it: `Composer::compose(&[x], &Budget::UNLIMITED, ...)` works.
-- Cognitive load: "one noun, six verbs" is a powerful mnemonic.
-
-**Verdict: Keep six.** The benefit of parsimony outweighs the API awkwardness. The mnemonic
-is valuable for onboarding and architectural reasoning. If a future domain produces dozens of
-budget-free, stream-free transforms, reconsider.
+The from-scratch list in `tmp/refinements/21-from-scratch-redesigns.md` spells out the heuristic,
+the five candidates, and the sequencing. In this doc's framing, the kernel rewrite is the first
+v2 move, not a late optimization.
 
 ### 2.4 Could Traits Be Merged?
 
 | Candidate Merge | Argument For | Argument Against | Verdict |
 |---|---|---|---|
-| Scorer + Router | Both evaluate signals | Router has `feedback()` (stateful); Scorer is stateless and pure | **No merge** |
+| Scorer + Router | Both evaluate candidates | Router has `feedback()` (stateful); Scorer is stateless and pure | **No merge** |
 | Gate + Scorer | Both assess quality | Gate is async (external I/O); Scorer is sync (pure computation). Gate returns Verdict with rich evidence; Scorer returns Score. | **No merge** |
 | Policy + Gate | Both examine outputs | Policy is reactive (many→many, no verdict); Gate is verificatory (one→Verdict). Fundamentally different cardinalities. | **No merge** |
 | Scorer + Gate | Could merge into "Assessor" | Different output types, different execution models, different layer assignments | **No merge** |
@@ -103,7 +130,7 @@ stateless, input cardinality, output type, and layer assignment.
 
 | System | Number of Core Abstractions | Roko Equivalent |
 |---|---|---|
-| **CoALA** (Sumers et al. 2023) | 5 memories + 3 action types | Roko's 6 traits subsume CoALA's decomposition |
+| **CoALA** (Sumers et al. 2023) | 5 stores + 3 action types | Roko's 6 traits subsume CoALA's decomposition |
 | **LIDA** (Franklin et al. 2016) | Codelets (perception, attention, action, learning) | Each codelet type maps to a trait implementation |
 | **Google multi-agent patterns** (2025) | 3 execution primitives (sequential, loop, parallel) | Orchestrator composes trait calls in these patterns |
 | **Agent Design Pattern Catalogue** (arXiv:2405.10467) | 18 patterns | Patterns compose from trait implementations; not a competing decomposition |
@@ -124,13 +151,27 @@ a Rust trait system: fine enough for meaningful composition, coarse enough for h
 
 ### 3.1 Dependency Audit
 
-Full Cargo.toml analysis across all 28 crates:
+Full Cargo.toml analysis across the workspace shows a mostly clean layer story, but the dep
+graph still has a few pressure points that should be treated as architectural signals rather
+than isolated mistakes.
+
+#### 3.1.1 Current-state audit
 
 **Clean layers (no violations):**
-- **L0** (roko-core, roko-fs, roko-std, bardo-runtime, bardo-primitives): Zero upward deps.
+- **L0** (kernel core, filesystem substrate, standard runtime, runtime support, vector-symbolic primitives): Zero upward deps.
 - **L1** (roko-agent, roko-index, roko-lang-*): Depend only on L0. One dev-dependency exception.
 - **L2** (roko-compose, roko-learn): Depend on L0 and L1. Clean.
 - **L4** (roko-cli, roko-orchestrator): Depend on all layers. Expected for entry points.
+
+**Current-state coupling findings:**
+- `roko-agent` does not have a runtime dependency on `roko-learn`; the relationship is a
+  dev-dependency in tests. The real live layering pressure is the conductor/learn boundary,
+  not agent runtime code reaching into learning internals.
+- `roko-cli` imports from almost everything. Some of that is legitimate for the main entry point, but some of it is accidental coupling that makes the binary look flatter than the architecture really is.
+- `roko-fs` and `roko-std` are too loosely separated in the docs and their surrounding imports. The storage/runtime boundary is correct in spirit, but the present shape does not make it crisp enough.
+- HDC still leaks through `roko-primitives` in places where a focused `roko-hdc` boundary would be cleaner.
+- `roko-compose` still keeps templates too close to the compose engine. That makes role/template growth harder than it should be.
+- There is no `roko-bus` crate yet, so bus behavior still lives inside runtime code instead of having its own kernel-level boundary.
 
 **Violations:**
 
@@ -141,22 +182,30 @@ Full Cargo.toml analysis across all 28 crates:
 
 ### 3.2 The roko-conductor Violation
 
-**Root cause**: `roko-conductor` imports learning types for circuit breaker state tracking.
-The Conductor needs to know about historical failure rates (a learning concern) to make
-circuit breaker decisions (a harness concern).
+**Root cause**: `roko-conductor` imports learning types for circuit-breaker state tracking.
+The Conductor needs to react to failure-rate Pulses, but the current implementation reaches
+across into `roko-learn` instead of consuming the shared transport primitive and topic boundary.
 
-**Fix**: Extract a `HealthMetrics` trait into `roko-core` (L0):
+**Bus-first fix**: publish the circuit-breaker facts on the kernel `Bus` as topics and let both
+subsystems subscribe to the same live stream:
 
-```rust
-// In roko-core/src/traits.rs
-pub trait HealthMetrics: Send + Sync {
-    fn failure_rate(&self, gate: &str, window: Duration) -> f32;
-    fn avg_latency(&self, gate: &str, window: Duration) -> Duration;
-}
-```
+- `gate.verdict.emitted` carries the gate result from the verification path.
+- `gate.failure.rate` carries the learned failure-rate Pulse that `roko-conductor` needs.
 
-Then `roko-conductor` depends on `&dyn HealthMetrics` (L0 trait), and `roko-learn` implements
-it. The dependency flows downward.
+That dissolves the layer violation without introducing a separate `HealthMetrics` trait in
+`roko-core`. `roko-conductor` depends on the `Bus` trait and a `TopicFilter`; `roko-learn`
+publishes the learned rate as a Pulse; `Gate` can verify Pulse windows directly; `Router` can
+select among live Pulse candidates; and `Composer` can fold mixed `Datum` inputs when the
+conductor needs a synthesized control packet rather than a stored episode. The compile-time
+dependency between `roko-conductor` and `roko-learn` disappears because the shared contract is
+now the Bus fabric and its topics, not a direct crate dependency or a bespoke trait object.
+
+REF03 and REF04 together are the load-bearing reframing for this section: the architecture
+already contains two mediums and two fabrics, so the conductor problem belongs in topic routing,
+Datum-aware operator boundaries, and Pulse stream handling rather than in a bespoke health
+interface.
+
+REF20 sharpens that conclusion one level further: this is not just a local fix, it is the kind of dependency-audit failure that becomes trivial once the target dep graph moves bus behavior into `roko-bus` and makes the conductor consume topics instead of learning internals.
 
 ### 3.3 Unclassified Crates
 
@@ -167,11 +216,25 @@ Six crates need formal layer assignment:
 | `roko-neuro` | **Cross-cut** | Bridges L0-L2 for knowledge; inject via `&dyn Substrate` |
 | `roko-daimon` | **Cross-cut** | No upward deps (only roko-core); inject via PAD trait object |
 | `roko-dreams` | **Cross-cut** | Bridges Neuro + Daimon at Delta frequency |
-| `roko-golem` | **Phase 2+ umbrella** | Contains Daimon and Dreams code pending dissolution |
+| legacy umbrella crate | **Phase 2+ umbrella** | Contains Daimon and Dreams code pending dissolution |
 | `roko-chain` | **L1 Domain Plugin** | Analogous to roko-agent for chain domain |
 | `roko-plugin` | **L1 Framework** | Plugin SDK extending the tool/agent system |
 
-### 3.4 Layer Taxonomy Completeness
+### 3.4 Proposed Target Dep Graph
+
+REF20 proposes a clean rewrite boundary for the dep graph rather than another round of ad hoc
+coupling repairs. The target shape below is proposed, not present in the current workspace:
+
+- `roko-core` stays the shared type-and-trait nucleus.
+- `roko-bus` would become the kernel transport crate for Bus traits, topics, and in-process broadcast primitives.
+- `roko-hdc` would become the focused hyperdimensional computing crate instead of leaking HDC through `roko-primitives`.
+- `roko-spi` would hold the extension SPI so plugins do not need to depend on kernel crates directly.
+- `roko-std` splits into `roko-defaults` and `roko-tools`.
+- `roko-compose` splits into `roko-compose-core` and `roko-templates`.
+
+That target graph makes the kernel boundary explicit: storage, transport, hyperdimensional primitives, and plugin surface are separate crates; implementations sit below them; composition and templates are no longer coupled as one package. In analysis terms, this is the clean rewrite boundary that the current dep graph is trying to imply but has not yet made real.
+
+### 3.5 Layer Taxonomy Completeness
 
 The five layers map cleanly to Beer's VSM:
 
@@ -243,7 +306,7 @@ output feeds the next speed's input, creating the autocatalytic loop described i
 
 ---
 
-## 5. Analysis D: Engram/Signal Universality
+## 5. Analysis D: Engram Universality and Edge Cases
 
 ### 5.1 What the Universal Type Handles Well
 
@@ -261,9 +324,9 @@ output feeds the next speed's input, creating the autocatalytic loop described i
 
 | Edge Case | Problem | Current Handling | Adequacy |
 |---|---|---|---|
-| **Large binary blobs** (e.g., model weights) | Signal struct held in memory | `Body::Bytes` exists but no streaming | Adequate for current use; streaming needed at scale |
+| **Large binary blobs** (e.g., model weights) | Engram struct held in memory | `Body::Bytes` exists but no streaming | Adequate for current use; streaming needed at scale |
 | **Structured multi-part data** (e.g., PR with title + body + files) | Single Body can't hold structured parts | `Body::Json` with nested structure | Adequate but verbose |
-| **Cross-signal relationships** (e.g., "this gate verdict is about that agent output") | Lineage is a Vec of parent hashes | Lineage + tags (`"target_id": hash`) | Adequate |
+| **Cross-Engram relationships** (e.g., "this gate verdict is about that agent output") | Lineage is a Vec of parent hashes | Lineage + tags (`"target_id": hash`) | Adequate |
 | **Real-time streaming data** (e.g., live price feed) | Engram is a snapshot, not a stream | Create new Engrams per tick with Decay::TTL | Adequate; TTL handles ephemerality |
 | **Confidential data** (e.g., API keys in context) | Provenance.tainted exists but no encryption | Taint flag + scrub policy | Adequate for current threat model |
 
@@ -271,11 +334,11 @@ output feeds the next speed's input, creating the autocatalytic loop described i
 
 The Agent Data Protocol (arXiv:2510.24702) addresses exactly the same problem: universal data
 representation for agent systems. ADP unifies all agent data into Trajectory objects composed of
-Actions (API, code, message) and Observations (text, web).
+Actions (API calls, code execution, text exchange) and Observations (text, web).
 
 | Dimension | ADP | Roko Engram |
 |---|---|---|
-| **Universal type** | Trajectory | Signal/Engram |
+| **Universal type** | Trajectory | Engram |
 | **Identity** | Sequential index | Content-addressed (BLAKE3 hash) |
 | **Quality assessment** | None | 4-axis Score (confidence, novelty, utility, reputation) |
 | **Temporal dynamics** | None | Four Decay variants (None, HalfLife, TTL, Ebbinghaus) |
@@ -289,26 +352,26 @@ universal type reduces integration complexity from multiplicative to additive.
 
 ### 5.4 VSA/HDC Algebraic Extension
 
-The existing `bardo-primitives` crate provides 10,240-bit Hyperdimensional Computing vectors.
+The vector-symbolic primitives crate provides 10,240-bit Hyperdimensional Computing vectors.
 These could extend the Engram with algebraic operations:
 
 ```rust
 // Potential extension: Engram algebraic operations
-impl Signal {
+impl Engram {
     /// Bind two Engrams: creates an association (XOR in HDC space)
-    pub fn bind(&self, other: &Signal) -> Signal { /* ... */ }
+    pub fn bind(&self, other: &Engram) -> Engram { /* ... */ }
 
     /// Bundle Engrams: creates a superposition (majority vote in HDC space)
-    pub fn bundle(engrams: &[Signal]) -> Signal { /* ... */ }
+    pub fn bundle(engrams: &[Engram]) -> Engram { /* ... */ }
 
     /// Permute: creates a sequential ordering (cyclic shift in HDC space)
-    pub fn permute(&self, position: usize) -> Signal { /* ... */ }
+    pub fn permute(&self, position: usize) -> Engram { /* ... */ }
 }
 ```
 
-This would make Signal a proper Vector Symbolic Architecture element, enabling compositional
-knowledge representation directly at the type level. Currently, HDC operations exist in
-`bardo-primitives` but are not exposed on the Signal struct.
+This would make Engram a proper Vector Symbolic Architecture element, enabling compositional
+knowledge representation directly at the type level. Currently, HDC operations exist in the
+vector-symbolic primitives crate but are not exposed on the Engram struct.
 
 **Reference**: Kleyko, D. et al. (2022). "A Survey on Hyperdimensional Computing."
 Artificial Intelligence Review 56.
@@ -363,15 +426,15 @@ VCG tiebreaker) ensures this commutativity by defining a canonical resolution or
 
 ### 7.1 The Engram Category (Eng)
 
-**Objects**: Types in the pipeline — `Vec<Signal>`, `Signal`, `Score`, `Selection`, `Verdict`
+**Objects**: Types in the pipeline — `Vec<Engram>`, `Engram`, `Score`, `Selection`, `Verdict`
 
 **Morphisms**: Trait operations, parameterized by `Context`:
-- `query_ctx : 1 → Vec<Signal>` (Substrate)
-- `score_ctx : Signal → Score` (Scorer)
-- `select_ctx : Vec<Signal> → Option<Selection>` (Router)
-- `compose_ctx : (Vec<Signal>, Budget) → Signal` (Composer)
-- `verify_ctx : Signal → Verdict` (Gate)
-- `decide_ctx : Vec<Signal> → Vec<Signal>` (Policy)
+- `query_ctx : 1 → Vec<Engram>` (Substrate)
+- `score_ctx : Engram → Score` (Scorer)
+- `select_ctx : Vec<Engram> → Option<Selection>` (Router)
+- `compose_ctx : (Vec<Engram>, Budget) → Engram` (Composer)
+- `verify_ctx : Engram → Verdict` (Gate)
+- `decide_ctx : Vec<Engram> → Vec<Engram>` (Policy)
 
 **Identity morphisms**: NoOp implementations (NoOpScorer, NoOpRouter, NoOpComposer, etc.)
 
@@ -484,7 +547,7 @@ pub struct CompetitiveRouter {
 }
 
 impl Router for CompetitiveRouter {
-    fn select(&self, candidates: &[Signal], ctx: &Context) -> Option<Selection> {
+    fn select(&self, candidates: &[Engram], ctx: &Context) -> Option<Selection> {
         // 1. Each scorer independently scores all candidates
         let score_matrix: Vec<Vec<Score>> = self.scorers.iter()
             .map(|s| candidates.iter().map(|c| s.score(c, ctx)).collect())
@@ -498,7 +561,7 @@ impl Router for CompetitiveRouter {
             .max_by_key(|c| c.members.len())?;
 
         // 4. Inner router selects from the winning coalition's candidates
-        let coalition_candidates: Vec<Signal> = winning_coalition.top_candidates
+        let coalition_candidates: Vec<Engram> = winning_coalition.top_candidates
             .iter()
             .filter_map(|&idx| candidates.get(idx).cloned())
             .collect();
@@ -521,7 +584,7 @@ that broadcasts its content to all subsystems.
 **Current state**: Gate returns binary pass/fail Verdict. Learning uses the boolean.
 
 **Proposal**: Use the Gate's confidence score (verdict.score ∈ [0,1]) as a continuous
-learning signal, not just the boolean:
+learning feedback value, not just the boolean:
 
 ```rust
 // After gate verification in loop_tick
@@ -537,10 +600,10 @@ let outcome = Outcome {
 };
 router.feedback(&outcome);
 
-// Active inference: high surprise → generate learning signal
+// Active inference: high surprise → generate a learning update
 if verdict.score < 0.3 {
     // High prediction error → create insight for Neuro
-    let insight = Signal::builder()
+    let insight = Engram::builder()
         .kind(Kind::Insight)
         .body(Body::Json(json!({
             "gate": verdict.gate,
@@ -555,7 +618,7 @@ if verdict.score < 0.3 {
 
 **Theoretical basis**: Active inference (Friston 2010) frames verification as free energy
 minimization. The Gate's confidence score is a direct measure of prediction error. Using it
-as a continuous learning signal (not binary) enables gradient-based model updating.
+as a continuous learning feedback value (not binary) enables gradient-based model updating.
 
 **Integration**: This enhancement modifies `loop_tick` behavior but preserves its signature.
 All existing trait implementations continue to work.
@@ -623,9 +686,9 @@ of how many Gamma ticks produced how many outcomes.
 
 | Aspect | Documentation | Code | Impact |
 |---|---|---|---|
-| **Data type name** | "Engram" | `Signal` | None (documented in 01-naming-and-glossary.md) |
+| **Data type name** | "Engram" | current kernel struct name | None (see 01-naming-and-glossary.md) |
 | **Score axes** | 7 (4 stable + 3 extended) | 4 (confidence, novelty, utility, reputation) | Medium — documentation overpromises |
-| **Attestation field** | Specified in Engram docs | Not in Signal struct | Low — Phase 2+ feature |
+| **Attestation field** | Specified in Engram docs | Not in current kernel struct | Low — Phase 2+ feature |
 | **Conductor layer** | Documented as L3 or L4 | Depends on roko-learn (L2) — actual layer unclear | Medium — layer violation |
 
 ### 9.3 `roko-fs` Layer Assignment
@@ -665,8 +728,25 @@ persistent storage of Engrams, which is the canonical L0 responsibility.
 | # | Improvement | Effort | Impact |
 |---|---|---|---|
 | 9 | CompetitiveRouter (LIDA-inspired, Section 8.1) | Large | More robust attention/selection |
-| 10 | VSA/HDC operations on Signal struct (Section 5.4) | Large | Compositional knowledge representation |
+| 10 | VSA/HDC operations on Engram struct (Section 5.4) | Large | Compositional knowledge representation |
 | 11 | Formal category theory verification of pipeline laws | Large | Mathematical guarantees of composability |
+
+### 10.4 From-scratch rewrite candidates as the v2 path
+
+REF21 is the alternative to indefinite incremental patching. Use it when the design embeds the
+wrong assumption, the interface surface is small enough to restabilize, and the new shape unlocks
+capabilities that the current architecture cannot reach cleanly.
+
+For this codebase, the decisive assumption is the medium model. The v2 path is the from-scratch
+kernel rewrite that separates Engram from Pulse and places both on the right fabrics: Substrate
+for storage and Bus for transport. Once that foundation is in place, the remaining candidates
+sequence naturally: substrate after kernel, then learning and composition, then gates if the
+incremental path still leaves too much surface tension.
+
+Terminology follows [01-naming-and-glossary.md](./01-naming-and-glossary.md).
+
+Read `tmp/refinements/21-from-scratch-redesigns.md` for the full candidate list, the rewrite
+heuristic, and the week-by-week sequencing.
 
 ---
 
@@ -728,18 +808,24 @@ persistent storage of Engrams, which is the canonical L0 responsibility.
 
 ## 12. Conclusion
 
-Roko's Synapse Architecture is architecturally sound and theoretically well-grounded. The
-six-trait model handles all current operations with only minor boundary awkwardness. The
-five-layer taxonomy is clean with one fixable dependency violation. The three cognitive speeds
-are a genuine innovation extending classical dual-process theory. The Engram type is truly
-universal, validated by comparison to the Agent Data Protocol.
+Roko's current architecture is architecturally sound and theoretically well-grounded as v1, but
+it should no longer be read as the final shape. The current operator model handles the present
+surface with only minor boundary awkwardness, while REF21 defines the v2 rewrite path around the
+two-medium/two-fabric kernel. The five-layer taxonomy is clean with one fixable dependency
+violation. The three cognitive speeds are a strong compositional design claim that extends
+classical dual-process theory. The Engram model is still universal, validated by comparison to
+the Agent Data Protocol.
 
 The architecture's deepest strength is its **categorical composability**: the pipeline is a
-morphism composition, Score is a monoid, and cross-cuts are endofunctors. These aren't
-decorative analogies — they are structural properties that guarantee that new trait
-implementations will compose correctly with existing code.
+morphism composition, Score is a monoid, and cross-cuts are endofunctors. Those properties are
+exactly why incremental refactor works for some improvements and why a from-scratch kernel
+rewrite is justified for the ones that invert the medium model.
 
 The most impactful improvement would be **gradient gate feedback** (Section 8.2), which
 connects Roko's existing Gate pipeline to active inference's prediction-error minimization
 framework, enabling continuous learning from every verification attempt rather than binary
-pass/fail signals.
+pass/fail outputs.
+
+Read together, the §2.2 telemetry boundary and the §3.2 conductor violation are the strongest
+signals in this analysis that the kernel wants the two-medium / two-fabric vocabulary from
+`tmp/refinements/01-critique-one-noun.md`, not just a renamed durable record.

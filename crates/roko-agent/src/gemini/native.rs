@@ -358,6 +358,7 @@ impl GeminiNativeAgent {
                 raw_finish_reason,
                 ..Default::default()
             },
+            ..Default::default()
         })
     }
 }

@@ -4,9 +4,30 @@
 > every data flow, trait usage, configuration dependency, and missing integration point.
 > This document is the architectural X-ray — it shows how the system's subsystems actually
 > connect, where they should connect but don't, and what new connections would produce the
-> highest leverage improvement.
+> highest leverage improvement. The earlier engine/event-bus proposal is documented here as a
+> target-state kernel `Bus` trait at L0 beside `Substrate`, with `Topic`, `TopicFilter`, and
+> bounded replay as the coordination vocabulary. In current code, `EventBus<E>` is the live
+> transport surface; the generalized `Bus` trait and typed `StateHub` projection layer remain
+> planned. REF26 adds `StateHub` as the target-state projection layer between transport +
+> storage and consumer surfaces, so Interfaces consume named projections instead of bespoke
+> fanout paths. See
+> also `tmp/refinements/03-bus-as-first-class.md`,
+> `tmp/refinements/26-statehub-rearchitecture.md`,
+> and [22-statehub-projection-layer](../12-interfaces/22-statehub-projection-layer.md),
+> `tmp/refinements/09-phase-2-implications.md`,
+> [34-synergy-integration-map](./34-synergy-integration-map.md),
+> `tmp/refinements/31-synergy-integration-map.md`, and
+> [01-naming-and-glossary.md](./01-naming-and-glossary.md).
+
+> REF31 adds a separate primitive-level synergy map for the ten load-bearing primitives
+> (Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics, c-factor,
+> replication ledger, and plugin SPI). This section stays at the section-to-section layer:
+> it answers which docs, crates, and subsystems depend on each other, while the synergy map
+> answers which primitives reinforce each other and why the moat comes from interaction density.
 
 > **Implementation**: Reference
+
+> **Reality marker:** `EventBus<E>` is the shipping transport mechanism. References in this chapter to the promoted `Bus` trait, `Pulse` topics, `TopicFilter`, bounded replay, and typed StateHub projections describe target-state integration surfaces unless a row explicitly says they are already wired. Entries marked `[target-state]` depend on those planned surfaces or on other unbuilt primitives.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: All 22 topic INDEX files, [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md), [05-learning/13-8-missing-feedback-loops](../05-learning/13-8-missing-feedback-loops.md), [16-heartbeat/00-coala-9-step-pipeline](../16-heartbeat/00-coala-9-step-pipeline.md)
@@ -43,6 +64,43 @@ map covers all pairwise relationships between these 22 sections.
 | 19 | Deployment | (build/ops) | Packaging, Docker, WASM, daemon | Infrastructure |
 | 20 | Technical Analysis | `roko-oracle` (planned) | Prediction, calibration, domain oracles | L2/L3 |
 | 21 | References | (docs only) | Master citation index | Documentation |
+
+### 1.1 REF09 Overlay: Phase-2 Systems on the Same Kernel
+
+REF09 removes the need to treat Chain, Dreams, Coordination, Heartbeat, and the HTTP control
+plane as special architecture branches. In the target-state two-fabric model they are standard
+Bus and Substrate consumers or backends:
+
+| Subsystem | Durable side | Live side | Net effect |
+|---|---|---|---|
+| Chain | `ChainSubstrate` stores and queries on-chain Engrams | `ChainBus` maps chain logs into `chain.*` Pulses `[target-state]` | Chain consumers stop polling chain state just to notice fresh work `[target-state]` |
+| Dreams | Substrate scan remains the complete consolidation source | Bus subscription to `substrate.engram.stored` wakes Delta work reactively `[target-state]` | Delta-speed can be threshold-triggered instead of fixed polling `[target-state]` |
+| Coordination | Pheromones persist as Engrams in shared Substrates `[target-state]` | `mesh.pheromone.deposited` and related Pulses alert nearby agents `[target-state]` | Stigmergy becomes literal storage plus transport rather than custom plumbing `[target-state]` |
+| Heartbeat | Tick history may still persist as Engrams when needed | `HeartbeatPolicy` publishes `heartbeat.{gamma,theta,delta}.tick` Pulses `[target-state]` | Clock consumers subscribe by topic instead of importing a scheduler `[target-state]` |
+| Interfaces | REST and query APIs hydrate StateHub projections from Substrate while Bus topics feed live deltas `[target-state]` | WebSocket and SSE stream the same typed projections to TUI, web, audit, and analytics consumers `[target-state]` | `roko-serve` becomes a StateHub consumer bridge rather than a custom fanout path `[target-state]` |
+
+This overlay is the architecture-level summary of `tmp/refinements/09-phase-2-implications.md`.
+
+---
+
+### 1.2 Section-Level vs Primitive-Level Mapping
+
+This chapter maps section-level dependencies: it shows how documentation sections, crates,
+configuration surfaces, and missing integrations relate at the subsystem boundary.
+
+By contrast, [34-synergy-integration-map](./34-synergy-integration-map.md) and
+`tmp/refinements/31-synergy-integration-map.md` map primitive-level synergies. That chapter
+tracks how load-bearing primitives reinforce one another inside the architecture, including
+the ten-node matrix and the named interactions such as Demurrage × HDC and
+Heuristic × Pulse × Bus.
+
+Where this chapter references `Bus`, `Pulse`, `TopicFilter`, or projection contracts, read them
+as target-state wrappers around today's `EventBus<E>` and bespoke fanout paths unless a specific
+integration is explicitly marked as wired.
+
+Use this chapter when you need to answer "what depends on what across sections?" Use the
+synergy map when you need to answer "which primitives compose into the moat, and what
+mechanisms make the composition compounding?"
 
 ---
 
@@ -180,37 +238,61 @@ graph TB
     style DREAMS fill:#49a,stroke:#333
 ```
 
-### 3.3 Engram Flow Taxonomy
+### 3.3 Datum Flow Taxonomy
 
-Every inter-section data flow carries Engrams of specific Kinds. The complete Kind flow map:
+Cross-section exchange is documented here in the target-state two-medium vocabulary: durable
+Engrams in Substrate and ephemeral Pulses on the Bus. In current code, the durable Engram side
+is much more real than the named Pulse topic surface below. The map highlights the Phase-2 flows
+that REF09 clarifies.
 
-| Source Section | Engram Kind | Target Section(s) | Status |
-|---|---|---|---|
-| 01-Orchestration | `Kind::Plan`, `Kind::Task` | 02-Agents, 04-Verification | Wired |
-| 02-Agents | `Kind::AgentOutput` | 04-Verification, 05-Learning | Wired |
-| 02-Agents | `Kind::ToolCall`, `Kind::ToolResult` | 18-Tools, 11-Safety | Wired |
-| 03-Composition | `Kind::Prompt` | 02-Agents | Wired |
-| 04-Verification | `Kind::GateVerdict` | 01-Orchestration, 05-Learning | Wired |
-| 05-Learning | `Kind::Episode` | 06-Neuro, 10-Dreams | Partial |
-| 05-Learning | `Kind::Playbook` | 03-Composition | Partial |
-| 05-Learning | `Kind::Skill` | 03-Composition | Missing |
-| 06-Neuro | `Kind::Insight`, `Kind::Heuristic` | 03-Composition, 01-Orchestration | Partial |
-| 06-Neuro | `Kind::Warning` | 11-Safety, 03-Composition | Missing |
-| 06-Neuro | `Kind::AntiKnowledge` | 03-Composition, 01-Orchestration | Missing |
-| 07-Conductor | `Kind::Intervention` | 01-Orchestration | Wired |
-| 08-Chain | `Kind::Transaction` | 04-Verification, 14-Economy | Wired (chain path) |
-| 09-Daimon | `Kind::AffectState` | 03-Composition, 16-Heartbeat | Missing |
-| 10-Dreams | `Kind::DreamInsight` | 06-Neuro | Missing |
-| 13-Coordination | `Kind::Pheromone` | 06-Neuro, 01-Orchestration | Missing |
-| 15-Code Intelligence | `Kind::Symbol` | 03-Composition, 02-Agents | Missing |
-| 20-Tech Analysis | `Kind::Prediction` | 05-Learning, 16-Heartbeat | Partial |
+| Source Section | Datum | Fabric | Target Section(s) | Status |
+|---|---|---|---|---|
+| 01-Orchestration | `Kind::Plan`, `Kind::Task` | Substrate | 02-Agents, 04-Verification | Wired |
+| 02-Agents | `Kind::AgentOutput` | Substrate | 04-Verification, 05-Learning | Wired |
+| 02-Agents | `tool.call.started`, `tool.call.finished` Pulses | Bus | 11-Safety, 12-Interfaces | Partial `[target-state]` |
+| 04-Verification | `Kind::GateVerdict` | Substrate | 01-Orchestration, 05-Learning | Wired |
+| 04-Verification | `gate.verdict.emitted` Pulse | Bus | 05-Learning, 09-Daimon, 12-Interfaces | Partial `[target-state]` |
+| 05-Learning | `Kind::Episode` | Substrate | 06-Neuro, 10-Dreams | Partial |
+| 06-Neuro | `Kind::Insight`, `Kind::Heuristic` | Substrate | 03-Composition, 01-Orchestration | Partial |
+| 08-Chain | durable chain records via `ChainSubstrate` | Substrate | 04-Verification, 14-Economy, 13-Coordination | Proposed `[target-state]` |
+| 08-Chain | `chain.*` Pulses via `ChainBus` | Bus | 05-Learning, 07-Conductor, 12-Interfaces | Proposed `[target-state]` |
+| 10-Dreams | consolidated `Kind::Insight` / `Kind::Heuristic` | Substrate | 06-Neuro, 03-Composition | Proposed `[target-state]` |
+| 10-Dreams | `engram.promoted`, `neuro.insight.promoted` Pulses | Bus | 03-Composition, 06-Neuro, 12-Interfaces | Proposed `[target-state]` |
+| 13-Coordination | `Kind::Pheromone` | Substrate | 06-Neuro, 01-Orchestration, 08-Chain | Proposed `[target-state]` |
+| 13-Coordination | `mesh.pheromone.deposited` Pulse | Bus | 02-Agents, 03-Composition, 12-Interfaces | Proposed `[target-state]` |
+| 16-Heartbeat | optional tick or telemetry Engrams | Substrate | 05-Learning, 12-Interfaces | Planned `[target-state]` |
+| 16-Heartbeat | `heartbeat.gamma.tick`, `heartbeat.theta.tick`, `heartbeat.delta.tick` Pulses | Bus | 07-Conductor, 09-Daimon, 10-Dreams | Proposed `[target-state]` |
+| 20-Tech Analysis | `Kind::Prediction` | Substrate | 05-Learning, 16-Heartbeat | Partial |
+
+### 3.4 StateHub Projection Flows
+
+REF26 promotes StateHub from a TUI helper to the target-state consumer-facing projection layer that
+bridges transport and storage. The same typed projection can hydrate from durable Engrams,
+listen for Bus-delivered deltas, and serve multiple consumers without each surface inventing
+its own fanout path.
+
+| Flow | Source | StateHub role | Consumer examples | Status |
+|---|---|---|---|---|
+| Hydration | Substrate | Builds initial `State` for a named projection from durable history | TUI, web UI, audit log, analytics backend | Proposed `[target-state]` |
+| Live deltas | Bus | Folds topic-addressed Pulses into typed `Delta` updates | CLI, TUI, WebSocket, SSE, Grafana | Proposed `[target-state]` |
+| Query + subscribe | StateHub registry | Returns the current projection snapshot and a cursor for catch-up | `roko-cli`, `roko-serve`, external dashboards | Proposed `[target-state]` |
+| Fanout replacement | StateHub subscription API | Replaces per-surface bespoke state fanout with shared projection contracts | `12-Interfaces` surfaces and adapters | Proposed `[target-state]` |
+
+Canonical projection names come from `tmp/refinements/26-statehub-rearchitecture.md`, the
+projection-layer doc in [22-statehub-projection-layer](../12-interfaces/22-statehub-projection-layer.md),
+and the glossary in [01-naming-and-glossary.md](./01-naming-and-glossary.md). Examples include
+`cohort_health`, `active_tasks`, `gate_pipeline`, `recent_episodes`, `heuristic_library`,
+`bus_stats`, and `substrate_stats`.
 
 ---
 
 ## 4. Trait Usage Map
 
-The six Synapse traits (Substrate, Scorer, Gate, Router, Composer, Policy) are implemented
-across sections and consumed by other sections. This creates a compile-time dependency graph.
+The six Synapse traits are implemented across sections and consumed by other sections. The
+kernel `Bus` fabric described here is still target-state: current transport is `EventBus<E>`,
+while the generalized `Bus` trait and its topic/filter/replay surface remain planned. This
+creates a compile-time dependency graph for storage today and a narrower target-state graph for
+transport.
 
 ### 4.1 Trait Implementations by Section
 
@@ -219,7 +301,11 @@ across sections and consumed by other sections. This creates a compile-time depe
 | **Substrate** | 00-Architecture | `MemorySubstrate` | Wired |
 | **Substrate** | 06-Neuro | `NeuroStore` (as `FileSubstrate`) | Wired |
 | **Substrate** | 08-Chain | `ChainSubstrate` | Scaffold |
+| **Substrate** | 13-Coordination | `MeshSubstrate` | Proposed in REF09 as the shared durable mesh backend |
 | **Substrate** | 15-Code Intel | `SymbolSubstrate` | Missing |
+| **Bus** | 00-Architecture | `BroadcastBus` / `MemoryBus` | Planned `[target-state]`; current live transport is `EventBus<E>` |
+| **Bus** | 08-Chain | `ChainBus` | Proposed `[target-state]` in REF09 as the chain-log to topic adapter |
+| **Bus** | 13-Coordination | `MeshBus` | Proposed `[target-state]` in REF09 as the mesh transport backend |
 | **Scorer** | 00-Architecture | `RecencyScorer` | Wired |
 | **Scorer** | 03-Composition | `RelevanceScorer` | Wired |
 | **Scorer** | 06-Neuro | `KnowledgeScorer` (multi-factor) | Missing |
@@ -239,6 +325,7 @@ across sections and consumed by other sections. This creates a compile-time depe
 | **Policy** | 05-Learning | `PredictionPolicy` | Wired |
 | **Policy** | 13-Coordination | `CFactorPolicy` | Wired into prompt-time collective calibration guidance |
 | **Policy** | 10-Dreams | `DreamSchedulePolicy` | Missing |
+| **Policy** | 16-Heartbeat | `HeartbeatPolicy` | Proposed in REF09 as the publisher of heartbeat tick Pulses |
 | **Policy** | 13-Coordination | `PheromonePolicy` | Missing |
 
 ### 4.2 Trait Consumption by Section
@@ -250,8 +337,9 @@ across sections and consumed by other sections. This creates a compile-time depe
 | 03-Composition | Scorer, Substrate | 00, 06 |
 | 04-Verification | Gate (self), Substrate | 04, 00 |
 | 05-Learning | Scorer, Policy (self) | 00, 05 |
-| 12-Interfaces | Substrate (read-only) | 00, 06 |
+| 12-Interfaces | StateHub projections over Bus + Substrate `[target-state]` | 00, 06, 12 |
 | 16-Heartbeat | All six traits | 00, 03, 04, 05, 06, 07 |
+| 07-Conductor | Bus, Policy | 00, 05, 07 |
 
 ### 4.3 Trait Composition Chains
 
@@ -329,6 +417,10 @@ roko.toml (Section 00: Architecture)
 Missing integrations ranked by impact × feasibility. Impact measures how much the missing
 connection limits the system's self-improvement capability. Feasibility measures how much
 existing code can be reused.
+
+REF09 changes the shape of several entries: Chain, Dreams, Coordination, Heartbeat, and
+Interfaces no longer need bespoke side channels or new trait families. They reduce to
+StateHub projections, Bus topics, and backend swaps on the existing two-fabric kernel.
 
 | # | Missing Integration | From → To | Impact | Feasibility | LOC Est. | Tier |
 |---|---|---|---|---|---|---|
@@ -541,59 +633,71 @@ budget-fitted to the token limit.
 
 ## 7. Proposed New Connections
 
-### 7.1 Event Bus as Universal Dependency Inverter
+### 7.1 Bus as a First-Class Kernel Primitive
 
 **Research basis:** Zylos Research 2026 (Event-driven agent architectures), AutoGen v0.4
 (actor model), arXiv:2601.12560 (Agentic AI taxonomies).
 
 **Problem:** Currently, cross-section dependencies are implemented as direct function calls
-in `orchestrate.rs`. This creates a monolithic coordinator that must know about every
-subsystem. Adding a new cross-section connection requires modifying `orchestrate.rs`.
+in `orchestrate.rs`. That makes the coordinator the only place that knows how sections
+couple, which is exactly the compile-time coupling we want to remove.
 
-**Proposal:** Introduce an `EngineEventBus` with typed topic channels that subsystems
-publish to and subscribe from. The event bus inverts dependencies — subsystems do not
-import each other, they subscribe to event topics.
+**Proposal:** Promote the kernel `Bus` trait as the transport fabric for cross-section
+coordination. Subsystems publish and subscribe by `Topic` and `TopicFilter`; replay via
+`replay_since()` provides bounded catch-up from the Bus ring, so they do not import each
+other for live-state exchange. This is the same L0 Bus fabric described in
+[12-five-layer-taxonomy.md](./12-five-layer-taxonomy.md).
+
+> **Reality marker:** The codebase ships `EventBus<E>` today. The `Bus`/`Pulse`/`TopicFilter`
+> API below is a target-state transport sketch, not a description of the current live
+> implementation.
 
 ```rust
-/// Typed event topics for cross-section communication
-pub enum EventTopic {
-    TaskDispatched,         // 01 → 02, 05, 07, 09
-    AgentTurnCompleted,     // 02 → 04, 05, 11
-    GateVerdictEmitted,     // 04 → 01, 05, 06, 09
-    KnowledgeUpdated,       // 06 → 03, 10
-    AffectStateChanged,     // 09 → 01, 03, 16
-    DreamCycleCompleted,    // 10 → 06, 09
-    PheromoneEmitted,       // 13 → 01, 06
-    ConductorIntervention,  // 07 → 01
-    BudgetWarning,          // 05 → 01, 02
-    PredictionResolved,     // 20 → 05, 16
-}
+pub const TASK_DISPATCHED: &str = "task.dispatched";
+pub const AGENT_TURN_COMPLETED: &str = "agent.turn.completed";
+pub const GATE_VERDICT_EMITTED: &str = "gate.verdict.emitted";
+pub const GATE_FAILURE_RATE: &str = "gate.failure.rate";
+pub const KNOWLEDGE_UPDATED: &str = "knowledge.updated";
+pub const AFFECT_STATE_CHANGED: &str = "affect.state.changed";
+pub const DREAM_CYCLE_COMPLETED: &str = "dream.cycle.completed";
+pub const PHEROMONE_EMITTED: &str = "pheromone.emitted";
+pub const CONDUCTOR_INTERVENTION: &str = "conductor.intervention";
+pub const BUDGET_WARNING: &str = "budget.warning";
+pub const PREDICTION_RESOLVED: &str = "prediction.resolved";
 
-/// Engine event bus with typed subscriptions
-pub struct EngineEventBus {
-    subscribers: HashMap<EventTopic, Vec<Box<dyn EventHandler>>>,
-}
-
-impl EngineEventBus {
-    pub fn publish(&self, topic: EventTopic, engram: Engram) {
-        if let Some(handlers) = self.subscribers.get(&topic) {
-            for handler in handlers {
-                handler.handle(&engram);
-            }
-        }
-    }
-
-    pub fn subscribe(&mut self, topic: EventTopic, handler: Box<dyn EventHandler>) {
-        self.subscribers.entry(topic).or_default().push(handler);
-    }
+pub trait Bus {
+    async fn publish(&self, pulse: Pulse) -> Result<u64>;
+    async fn subscribe(&self, filter: TopicFilter) -> Result<BusReceiver>;
+    async fn replay_since(
+        &self,
+        since_seq: u64,
+        filter: &TopicFilter,
+    ) -> Result<Vec<Pulse>>;
 }
 ```
 
+The Bus trait is the kernel transport fabric counterpart to `Substrate`: `publish()` and
+`subscribe()` operate on topic-addressed Pulses, `TopicFilter` expresses the subscriber's
+routing contract, and `replay_since()` exposes bounded ring-buffer history for late joins
+or brief disconnects.
+
+**Bus-first wiring:**
+- `roko-gate` publishes `gate.verdict.emitted` on the L0 Bus trait after verification.
+- `roko-learn` publishes `gate.failure.rate` on the L0 Bus trait from rolling gate history.
+- `roko-conductor` subscribes to those topics and adjusts circuit-breaker state.
+- `roko-conductor` no longer imports learning types. The bespoke `roko-conductor` →
+  `roko-learn` coupling dissolves into Bus topics instead of a side interface.
+
 **Benefits:**
-- Adding M1-M20 becomes: register a subscriber, don't modify `orchestrate.rs`.
-- The event bus IS the cross-section integration map — `bus.subscribers` is inspectable.
-- Aligns with the Blackboard architecture pattern (arXiv:2507.01701).
-- The existing `signals.jsonl` becomes the durable backing store for the event bus.
+- Adding M1-M20 becomes: publish a topic and add a subscriber, not a coordinator import.
+- The Bus fabric is inspectable through topics, `TopicFilter`, and bounded replay, so the
+  integration map becomes executable rather than implicit.
+- Topic-driven decoupling keeps live coordination in `Bus`, while durable state still lives
+  in `Substrate`.
+- Topic filters and bounded replay make the transport fabric observable without turning it
+  into persistence.
+- This matches the Blackboard-style indirect coordination pattern without inventing another
+  interface surface.
 
 **Estimated LOC:** ~200 for the bus infrastructure, then each missing integration (M1-M20)
 becomes ~20-40 LOC instead of the current 40-200 LOC estimates.
@@ -628,50 +732,69 @@ pub enum ProvenanceDimension {
 an optional `dimension: Option<ProvenanceDimension>` field. Existing code continues to work
 (field defaults to `None`); new cross-section flows tag their dimension.
 
-### 7.3 Dreams as Off-Loop Projection Builder
+### 7.3 Dreams as a Two-Fabric Consolidation Consumer
 
-**Research basis:** arXiv:2507.03724 (MemOS lifecycle model), event sourcing literature.
+**Research basis:** arXiv:2507.03724 (MemOS lifecycle model), consolidation literature, and
+`tmp/refinements/09-phase-2-implications.md`.
 
-**Problem:** The Dreams subsystem is designed as a separate process that runs during idle time.
-But it needs access to the same episode log that the learning subsystem writes to. Currently,
-there is no protocol for Dreams to "catch up" on episodes it hasn't processed.
+**Problem:** Dreams is currently described like a polling-only background loop. That misses the
+Bus side of the two-fabric kernel and makes Delta-speed look fixed-cadence when it should be
+threshold-triggered by fresh durable work.
 
-**Proposal:** Treat Dreams as an event log projection — a background consumer that maintains
-a cursor into `episodes.jsonl` and processes episodes in order, emitting consolidated
-knowledge back to NeuroStore.
+**Proposal:** Treat Dreams as a two-input subsystem:
+
+- a **Substrate scan** remains the source of completeness for replay and consolidation
+- a **Bus subscription** to `substrate.engram.stored` provides the wake-up and bounded catch-up
+
+> **Reality marker:** The Substrate side is closer to current reality than the Bus-triggered
+> wake-up path. The `Pulse`-driven flow below is target-state.
 
 ```rust
 pub struct DreamProjection {
-    /// Last processed episode offset (persisted to .roko/learn/dream-cursor.json)
-    cursor: u64,
-    /// Accumulated episodes since last consolidation
-    pending_episodes: Vec<Episode>,
-    /// Consolidation trigger threshold
-    min_episodes_for_nrem: usize,  // default: 20
+    /// Last durable point fully scanned in the Substrate.
+    last_scan_cursor: Option<ContentHash>,
+    /// Recent storage Pulses that suggest new consolidation work is available.
+    wake_buffer: Vec<Pulse>,
+    /// Threshold of fresh durable items before Delta work starts.
+    min_new_engrams: usize,
 }
 
 impl DreamProjection {
-    /// Process new episodes from the log
-    pub fn catch_up(&mut self, episode_log: &EpisodeLog) -> Vec<ConsolidatedKnowledge> {
-        let new_episodes = episode_log.read_from(self.cursor);
-        self.pending_episodes.extend(new_episodes);
-        self.cursor = episode_log.latest_offset();
-
-        if self.pending_episodes.len() >= self.min_episodes_for_nrem {
-            let consolidated = self.run_nrem_cycle();
-            self.pending_episodes.clear();
-            consolidated
-        } else {
-            vec![]
+    pub async fn on_pulse(&mut self, pulse: Pulse) {
+        if pulse.topic == "substrate.engram.stored" {
+            self.wake_buffer.push(pulse);
         }
+    }
+
+    pub async fn maybe_run_delta(
+        &mut self,
+        substrate: &dyn Substrate,
+        bus: &dyn Bus,
+    ) -> Result<()> {
+        if self.wake_buffer.len() < self.min_new_engrams {
+            return Ok(());
+        }
+
+        let candidates = substrate.query(self.scan_query()).await?;
+        let consolidated = self.run_consolidation(candidates).await?;
+
+        for engram in consolidated {
+            substrate.put(engram.clone()).await?;
+            bus.publish(Pulse::new("engram.promoted")).await?;
+        }
+
+        self.wake_buffer.clear();
+        Ok(())
     }
 }
 ```
 
 **Integration points:**
-- `orchestrate.rs` calls `dream_projection.catch_up()` when an agent idle period begins.
-- Consolidated knowledge feeds into NeuroStore (closing the Dreams → Neuro gap, M7).
-- The cursor file enables crash recovery — Dreams picks up where it left off.
+- Dreams subscribes to `substrate.engram.stored` for reactivity but still scans Substrate for completeness.
+- Consolidated `Kind::Insight` and `Kind::Heuristic` Engrams persist through Substrate.
+- Promotion Pulses such as `engram.promoted` and `neuro.insight.promoted` let Neuro,
+  Composition, and Interfaces react without re-querying.
+- Delta-speed remains slower than Gamma and Theta, but it no longer implies fixed polling.
 
 ### 7.4 Compiled Dependency Graph
 
@@ -689,8 +812,8 @@ can be validated:
 /// The dependency graph is checked at build time.
 pub struct CrateManifest {
     pub section: Section,
-    pub produces: &'static [EventTopic],
-    pub consumes: &'static [EventTopic],
+    pub produces: &'static [&'static str],
+    pub consumes: &'static [&'static str],
     pub trait_impls: &'static [SynapseTrait],
     pub trait_deps: &'static [SynapseTrait],
 }
@@ -698,8 +821,8 @@ pub struct CrateManifest {
 // In roko-gate/src/lib.rs:
 pub const MANIFEST: CrateManifest = CrateManifest {
     section: Section::Verification,
-    produces: &[EventTopic::GateVerdictEmitted],
-    consumes: &[EventTopic::AgentTurnCompleted],
+    produces: &[GATE_VERDICT_EMITTED],
+    consumes: &[AGENT_TURN_COMPLETED],
     trait_impls: &[SynapseTrait::Gate],
     trait_deps: &[SynapseTrait::Substrate],
 };
@@ -707,7 +830,9 @@ pub const MANIFEST: CrateManifest = CrateManifest {
 
 A build script or test can then verify that every consumed topic has at least one producer,
 and every trait dependency has at least one implementation. This makes the dependency matrix
-in Section 2 executable rather than documentary.
+in Section 2 executable rather than documentary. For the target-state Bus-specific pieces, `TopicFilter`
+describes the subscriber's routing contract and the Bus ring provides bounded replay via
+`replay_since()`.
 
 ---
 
@@ -883,10 +1008,10 @@ read, but Dreams does not yet have a cursor-based catch-up mechanism (see Propos
 | M5: Neuro→Composition (full) | 06→03 | ~90 | Knowledge types exist |
 | M15: AntiKnowledge→Composition | 06→03 | ~35 | Part of M5 |
 | M8: Code Intel→Composition | 15→03 | ~120 | roko-index exists |
-| M9: Conductor→Routing (direct) | 07→05 | ~45 | SystemLoadSnapshot exists |
+| M9: Conductor→Routing (Bus topics) | 07→05 | ~45 | SystemLoadSnapshot exists |
 | M10: Experiments→Static | 05→00 | ~90 | ExperimentStore exists |
 | M11: Orchestration→Daimon | 01→09 | ~40 | Needs M1 first |
-| Event Bus infrastructure | All | ~200 | Enables all future M-items |
+| Bus infrastructure | All | ~200 | Enables all future M-items |
 | **Tier 2 Total** | | **~620** | |
 
 ### Tier 3: Full Cognitive Loop (enables Dreams and meta-cognition)
@@ -913,8 +1038,8 @@ read, but Dreams does not yet have a cursor-based catch-up mechanism (see Propos
 
 ### Grand Total: ~2,070 LOC to wire all 20 missing integrations
 
-This is approximately 1.2% of the current codebase (~177K LOC). The highest-leverage
-investments are Tier 1 (~310 LOC) and the Event Bus infrastructure (~200 LOC), which together
+This is approximately 1.2% of the current codebase (~322K LOC). The highest-leverage
+investments are Tier 1 (~310 LOC) and the Bus infrastructure (~200 LOC), which together
 would unlock 5 missing connections and make all remaining connections cheaper to wire.
 
 ---
@@ -927,7 +1052,7 @@ in Section 05 are a subset of the missing integrations identified here. The mapp
 | Feedback Loop | Integration Map Item | Sections | Additional Scope |
 |---|---|---|---|
 | Loop 1: Health→Routing | (Already wired) | 05↔05 | — |
-| Loop 2: Conductor→Routing | M9 | 07→05 | Extended to include load→scheduling |
+| Loop 2: Conductor→Routing | M9 | 07→05 | Extended to include load→scheduling over Bus topics |
 | Loop 3: Section→Scaffold | (New: M-Section) | 05→03 | Part of M5 (Neuro→Composition) |
 | Loop 4: Failure→Replanning | M3 | 04→01 | Extended with Daimon feedback (M11) |
 | Loop 5: Skills→Prompts | M4 | 05→03 | Extended with HDC cross-domain transfer |
@@ -973,12 +1098,12 @@ Total expected zero-dependency pairs: ~180 (39% of the 462-pair space).
 | arXiv:2509.13978 | Workflow provenance: four dimensions (dataflow, control, telemetry, scheduling) inform Section 7.2 |
 | arXiv:2604.05150 (Compiled AI) | Compiled dependency graph: build-time validation of cross-section wiring (Section 7.4) |
 | arXiv:2505.07087 | Cognitive design patterns: catalog of cross-cutting patterns from classical architectures |
-| Zylos Research 2026 | Event-driven agent architecture: blackboard + event sourcing combination (Section 7.1) |
+| Zylos Research 2026 | Event-driven agent architecture: blackboard + Bus topic routing combination (Section 7.1) |
 | arXiv:2507.01701 | Blackboard architecture for multi-agent LLM systems |
 | Conant & Ashby 1970 | Good Regulator Theorem: the dependency map must be a model of the system it regulates |
-| Ashby 1956 | Law of Requisite Variety: the event bus must have at least as many topic types as there are distinct cross-section interaction modes |
+| Ashby 1956 | Law of Requisite Variety: the Bus must have at least as many topic types as there are distinct cross-section interaction modes |
 | Beer 1972 | Viable System Model: the conductor (System 3*) must have monitoring channels to every operational subsystem |
-| Grassé 1959 | Stigmergy: indirect coordination through shared state (the event bus IS the stigmergic medium) |
+| Grassé 1959 | Stigmergy: indirect coordination through shared state (the Bus fabric is the stigmergic medium) |
 
 ---
 
@@ -986,6 +1111,7 @@ Total expected zero-dependency pairs: ~180 (39% of the 462-pair space).
 
 - [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) — The three cross-cuts and their interaction model
 - [23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) — Coherence analysis and gap identification
+- [34-synergy-integration-map](./34-synergy-integration-map.md) — Primitive-level synergy matrix and named interactions
 - [05-learning/13-8-missing-feedback-loops](../05-learning/13-8-missing-feedback-loops.md) — The eight feedback loops (subset of this map)
 - [16-heartbeat/00-coala-9-step-pipeline](../16-heartbeat/00-coala-9-step-pipeline.md) — The per-tick cross-section traversal
 - [16-heartbeat/01-universal-loop-mapping](../16-heartbeat/01-universal-loop-mapping.md) — Trait-to-step mapping

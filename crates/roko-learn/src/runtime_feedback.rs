@@ -106,6 +106,8 @@ pub struct LearningPaths {
     pub cascade_router_json: PathBuf,
     /// Prompt experiment store JSON.
     pub experiments_json: PathBuf,
+    /// Operator-facing summary of concluded experiment winners.
+    pub experiment_winners_json: PathBuf,
     /// Adaptive gate thresholds JSON.
     pub gate_thresholds_json: PathBuf,
     /// Per-subsystem local reward functions JSON.
@@ -131,6 +133,7 @@ impl LearningPaths {
             cfactor_jsonl: root.join("c-factor.jsonl"),
             cascade_router_json: root.join("cascade-router.json"),
             experiments_json: root.join("experiments.json"),
+            experiment_winners_json: root.join("experiment-winners.json"),
             gate_thresholds_json: root.join("gate-thresholds.json"),
             local_rewards_json: root.join("local-rewards.json"),
             section_effects_json: root.join("section-effects.json"),
@@ -385,6 +388,8 @@ impl LearningRuntime {
         let section_effectiveness =
             SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
 
+        sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
+
         Ok(Self {
             paths,
             episode_logger,
@@ -447,6 +452,8 @@ impl LearningRuntime {
         let local_rewards = load_local_rewards(&paths.local_rewards_json);
         let section_effectiveness =
             SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
+
+        sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
 
         Ok(Self {
             paths,
@@ -920,6 +927,11 @@ impl LearningRuntime {
             if let Err(e) = store.save(&self.paths.experiments_json) {
                 eprintln!("[learn] experiment store save failed: {e}");
             }
+            if let Err(e) =
+                sync_experiment_winner_artifact(&self.paths.experiment_winners_json, &store)
+            {
+                eprintln!("[learn] experiment winner artifact save failed: {e}");
+            }
             drop(store);
             if static_table_updated && let Err(e) = self.save_cascade_router() {
                 eprintln!("[learn] cascade router save failed after experiment conclusion: {e}");
@@ -1027,8 +1039,10 @@ impl LearningRuntime {
                 roko_core::BehavioralState::Engaged,
             ),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         if episode
             .extra
@@ -1129,6 +1143,20 @@ fn compute_reward_with_latency(
     };
     let sla_ms = 120_000.0;
     compute_routing_reward_v2(pass_rate, normalized_cost, observed_latency_ms, sla_ms)
+}
+
+fn sync_experiment_winner_artifact(path: &Path, store: &ExperimentStore) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let winners = store.winner_summaries();
+    let json = serde_json::to_vec_pretty(&winners)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 fn latency_model_slug(event: &AgentEfficiencyEvent) -> &str {
@@ -1478,7 +1506,7 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
     let mut knowledge_records = read_knowledge_records(&knowledge_path).await?;
     let confirmation_records = read_knowledge_records(&confirmations_path).await?;
     knowledge_records.extend(confirmation_records);
-    let social_sensitivity = social_sensitivity_from_attribution(
+    let social_perceptiveness = social_perceptiveness_from_attribution(
         &attribution_records,
         Duration::from_secs(7 * 24 * 60 * 60),
     );
@@ -1495,7 +1523,7 @@ async fn compute_cfactor_snapshot(learn_root: &Path) -> Result<CFactor, Learning
     Ok(compute_cfactor(
         &episodes,
         Duration::from_secs(7 * 24 * 60 * 60),
-        social_sensitivity,
+        social_perceptiveness,
         knowledge_integration_rate,
         convergence_velocity,
     ))
@@ -1524,7 +1552,7 @@ async fn read_context_attribution_records(
     Ok(out)
 }
 
-fn social_sensitivity_from_attribution(
+fn social_perceptiveness_from_attribution(
     records: &[ContextAttributionRecord],
     window: Duration,
 ) -> f64 {
@@ -2075,7 +2103,7 @@ mod tests {
     }
 
     #[test]
-    fn social_sensitivity_uses_prior_output_attributions() {
+    fn social_perceptiveness_uses_prior_output_attributions() {
         let now = Utc::now();
         let records = vec![
             ContextAttributionRecord {
@@ -2095,7 +2123,7 @@ mod tests {
             },
         ];
 
-        let score = social_sensitivity_from_attribution(&records, Duration::from_secs(60));
+        let score = social_perceptiveness_from_attribution(&records, Duration::from_secs(60));
         assert!((score - 0.5).abs() < 1e-9);
     }
 
@@ -2181,8 +2209,10 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         for _ in 0..60 {
             router.record_observation(&ctx, "claude-sonnet-4-20250514", 0.9, true);
@@ -2311,8 +2341,10 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         assert_eq!(
             runtime.cascade_router().route(&before_ctx).primary.slug,
@@ -2344,6 +2376,14 @@ mod tests {
             })
             .await
             .unwrap();
+
+        let winner_artifact = std::fs::read_to_string(&runtime.paths().experiment_winners_json)
+            .expect("experiment winners artifact");
+        let winner_summaries: Vec<roko_core::ExperimentWinnerSummary> =
+            serde_json::from_str(&winner_artifact).expect("winner summary json");
+        assert_eq!(winner_summaries.len(), 1);
+        assert_eq!(winner_summaries[0].experiment_id, "model-routing-exp");
+        assert_eq!(winner_summaries[0].winner_variant_id, "haiku");
 
         before_ctx.iteration = 1;
         assert_eq!(
@@ -2398,6 +2438,9 @@ mod tests {
             last_applied: None,
             created_at: Utc::now(),
             source_episodes: vec![],
+            balance: 1.0,
+            demurrage_rate: 0.01,
+            last_decay_at_ms: Utc::now().timestamp_millis(),
         };
         runtime.playbook_rules.upsert(rule.clone()).unwrap();
         runtime.playbook_rules.save().unwrap();
@@ -2519,8 +2562,10 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
         let selected = runtime
             .cascade_router()
@@ -2560,8 +2605,10 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         };
 
         let recorded = runtime.record_conductor_intervention(

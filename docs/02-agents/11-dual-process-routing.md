@@ -449,7 +449,7 @@ pub struct MetaRoutingPolicy {
 }
 
 impl MetaRouter {
-    pub fn route(&self, task: &Signal, ctx: &RoutingContext) -> ModelSelection {
+    pub fn route(&self, task: &Engram, ctx: &RoutingContext) -> ModelSelection {
         // 1. Check if task matches a known heuristic pattern
         if let Some(model) = self.heuristic.try_route(task) {
             if self.policy.heuristic_confidence_threshold <= self.heuristic.confidence(task) {

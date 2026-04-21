@@ -11,19 +11,22 @@ use std::path::Path;
 use thiserror::Error;
 
 pub mod compat;
+pub mod hot_reload;
 pub mod presets;
 pub mod schema;
 
 // Re-exports for ergonomic use.
+pub use crate::temperament::Temperament;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
 pub use schema::{
-    AgentBudget, AgentConfig, AgentRoleToggles, AgentThresholds, BudgetConfig,
-    CURRENT_SCHEMA_VERSION, ConductorConfig, GatesConfig, LearningConfig, PrdConfig, ProjectConfig,
+    AgentBudget, AgentConfig, AgentRoleToggles, AgentThresholds, AttentionConfig, BudgetConfig,
+    CURRENT_SCHEMA_VERSION, ConductorConfig, DemurrageConfig, EnergyConfig, GatesConfig,
+    GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig, PrdConfig, ProjectConfig,
     RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
     RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig,
-    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, TuiConfig, WatcherConfig,
-    WatcherPathConfig,
+    ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig, SubscriptionTrigger, TemporalConfig,
+    TuiConfig, WatcherConfig, WatcherPathConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.
@@ -51,6 +54,12 @@ pub enum LoadConfigError {
 ///
 /// Missing files fall back to `RokoConfig::default()` so callers can start a
 /// daemon in an uninitialized workspace.
+///
+/// After parsing, two secret-resolution passes run automatically:
+///   1. `${VAR}` interpolation — expands environment variable references in
+///      provider config strings.
+///   2. `*_file` resolution — reads secrets from file paths in `extra_headers`
+///      whose keys end with `_file`.
 pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
     let path = workdir.join("roko.toml");
     if !path.exists() {
@@ -61,8 +70,15 @@ pub fn load_config(workdir: &Path) -> Result<RokoConfig, LoadConfigError> {
         path: path.clone(),
         source,
     })?;
-    toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
-        path: path.clone(),
-        source,
-    })
+    let mut config: RokoConfig =
+        toml::from_str(&text).map_err(|source| LoadConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+
+    // Secret resolution passes.
+    config.interpolate_env_vars();
+    config.resolve_file_secrets();
+
+    Ok(config)
 }

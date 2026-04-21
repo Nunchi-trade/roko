@@ -2,11 +2,16 @@
 
 > **Abstract:** Roko implements dual-process cognition inspired by Kahneman's System 1/
 > System 2 (Kahneman 2011) and CLARION's dual-level architecture (Sun 2002). Three
-> inference tiers — T0 (no LLM), T1 (fast model), T2 (full model) — are routed via
-> active inference: the agent's own uncertainty determines how much compute to invest.
-> This document specifies the tier model, the Expected Free Energy (EFE) formula that
-> drives routing, the 16 T0 probes, and how uncertainty emerges from the architecture
-> rather than being manually configured.
+> inference tiers -- T0 (no LLM), T1 (fast model), T2 (full model) -- are routed by
+> an active-inference-inspired target-state loop: operators would publish `prediction.*`
+> Pulses, later `outcome.*` Pulses would close the loop, and `prediction.error.*` Pulses
+> would drive calibration updates. The near-term engineering mechanism is simpler:
+> expectation/outcome records per operator, with calibration updates on mismatch. This
+> document specifies the tier model, the Expected Free Energy (EFE) formula that informs
+> routing, the 16 T0 probes, and how uncertainty emerges from the architecture rather
+> than being manually configured.
+> See also [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md)
+> and [Naming Map and Glossary](01-naming-and-glossary.md).
 
 
 > **Implementation**: Shipping
@@ -52,8 +57,12 @@ This cascade ensures that compute is invested proportionally to difficulty.
 
 ## 2. Active Inference and Expected Free Energy
 
-The routing between tiers is NOT a manual threshold — it emerges from active inference.
-The agent's own uncertainty determines how much compute to invest.
+The routing between tiers should not depend only on fixed manual thresholds. The target-state
+theory behind that is active inference, but the near-term engineering mechanism is smaller:
+operators keep expectation/outcome records, then update calibration when reality diverges from
+the expectation. In the more ambitious Bus-driven design, operators would emit
+`prediction.*` Pulses, reality would answer with `outcome.*` Pulses, and a calibration policy
+would turn the mismatch into update Pulses.
 
 ### 2.1 The EFE Formula
 
@@ -79,23 +88,48 @@ Where:
 | Large surprise, unknown territory | Unknown | High (much to learn) | High (uncertain) | T2 |
 | High stakes, low confidence | Low (risky) | High | High | T2 |
 
-The key insight: EFE provides a **zero-hyperparameter** routing criterion. The agent does
-not need manually-tuned thresholds for "when to use GPT-4 vs Haiku." Instead, the agent's
-internal uncertainty — as measured by prediction accuracy, confidence trends, and novelty
-signals — naturally drives the escalation decision.
+The key insight: EFE provides a principled routing criterion. The agent should not need a large
+bag of hand-tuned "when to use GPT-4 vs Haiku" switches. Instead, uncertainty -- as measured by
+prediction accuracy, confidence trends, and novelty Pulses -- should drive the escalation
+decision. In practice this remains an approximation, not a proof that all routing can be reduced
+to one scalar.
+
+In the target-state Bus implementation, this becomes observable and joinable:
+
+1. An operator would publish a `prediction.*` Pulse before acting.
+2. A later `outcome.*` Pulse would record what actually happened.
+3. A calibration policy would join the two by lineage and publish `prediction.error.*`.
+4. The operator would consume the update and adjust its internal state.
 
 ### 2.3 Practical Approximation
 
 Computing exact EFE over a full generative model is intractable. Roko approximates it:
 
-1. **Prediction accuracy** from the CalibrationTracker: declining accuracy → high epistemic
+1. **Prediction accuracy** from the calibration stream: declining accuracy -> high epistemic
    value → escalate
 2. **Confidence from Score**: low confidence on recent outputs → high uncertainty → escalate
 3. **Novelty from Score**: high novelty in observations → high epistemic value → escalate
 4. **Daimon arousal**: high arousal (the agent is "surprised") → escalate
 
-These signals combine in the CascadeRouter to produce a tier decision without explicit EFE
-computation.
+These topic families combine in the CascadeRouter to produce a tier decision without explicit EFE
+computation. In the target-state design, the Bus does the bookkeeping; the tier router consumes the calibrated result.
+
+### 2.4 Per-operator calibration
+
+Operators that make discrete, measurable choices benefit most from this loop, especially the
+Router and other components with clear expectation/outcome pairs. Universal operator prediction
+remains a target-state aspiration, not a first-pass requirement. Where the signal is clean,
+each operator can publish its own prediction topic family, receive a matching outcome family,
+and consume `prediction.error.*` updates through a calibration policy.
+
+| Operator | Prediction topic | Outcome topic | Update policy |
+|---|---|---|---|
+| Scorer | `prediction.scorer.*` | `outcome.scorer.*` | Calibration curves per axis, then `scorer.weights.updated` |
+| Router | `prediction.router.*` | `outcome.router.*` | Contextual bandit / route weights update |
+| Composer | `prediction.composer.*` | `outcome.composer.*` | Template EMA and template bandit |
+| Gate | `prediction.gate.*` | `outcome.gate.*` | Threshold EMA from verdict outcomes |
+| Policy | `prediction.policy.*` | `outcome.policy.*` | Per-policy calibration from metric Pulses |
+| Substrate | `prediction.substrate.*` | `outcome.substrate.*` | Tier promotion and retrieval calibration |
 
 ---
 
@@ -189,7 +223,7 @@ LLM-era architectures that inform specific mechanisms:
 
 The mapping between cognitive architecture and behavior is not fixed — it varies by agent
 "temperament." The Daimon's PAD (Pleasure-Arousal-Dominance) vector modulates the T0→T1→T2
-escalation thresholds:
+escalation thresholds, and recent `prediction.error.*` Pulses feed that state:
 
 | Temperament | Effect on Routing |
 |---|---|
@@ -199,8 +233,8 @@ escalation thresholds:
 | **Low dominance** (cautious) | Requires T2 confirmation for any significant action |
 
 This creates agents with distinct "personalities" without any explicit personality
-programming — the behavior emerges from the interaction between the Daimon's state and the
-routing logic.
+programming — the behavior emerges from the interaction between the Daimon's state, the
+prediction-error stream, and the routing logic.
 
 ---
 
@@ -210,7 +244,7 @@ routing logic.
 |---|---|
 | Kahneman 2011, Thinking, Fast and Slow | Dual-process theory: System 1 (fast, automatic) / System 2 (slow, deliberate). |
 | Sun 2002, Duality of the Mind, Erlbaum | CLARION: dual-level cognitive architecture (explicit + implicit). |
-| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives attention and action. |
+| Friston 2010, Nature Reviews Neuroscience 11(2) | Free Energy Principle: prediction error drives attention and action; Roko uses it as theory, while the engineering path is expectation/outcome records with calibration updates. |
 | Chen et al. 2023 (arXiv:2305.05176) | FrugalGPT: cascade routing for cost-efficient LLM use. |
 | Sumers et al. 2023 (arXiv:2309.02427) | CoALA: cognitive architecture framework for language agents. |
 | Anderson 1983, The Architecture of Cognition | ACT-R: production system cognitive architecture. |
@@ -225,11 +259,13 @@ routing logic.
 
 ## Current Status and Gaps
 
-- **Implemented**: `InferenceTier` enum (T0/T1/T2) in `bardo-primitives`. Operating
+- **Implemented**: `InferenceTier` enum (T0/T1/T2) in the legacy crate path `bardo-primitives`. Operating
   frequency → inference tier mapping. CascadeRouter with confidence-based cascade.
 - **Wired**: Tier routing in the orchestrator via CascadeRouter.
+- **Target-state**: `prediction.*`, `outcome.*`, and `prediction.error.*` Pulses form the richer calibration surface for active inference.
+- **Near-term mechanism**: expectation/outcome records and operator-local calibration loops are enough to ship useful routing and learning behavior before universal Bus-wide prediction is wired.
 - **Gap**: The 16 T0 probes are specified but not all implemented as a unified probe system.
-- **Gap**: EFE is approximated via confidence/novelty/arousal, not computed directly.
+- **Gap**: Exact EFE is still approximated via confidence/novelty/arousal, but the prediction/outcome loop is the implementation path.
 
 ---
 
@@ -238,4 +274,6 @@ routing logic.
 - [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) — The loop where tier routing happens
 - [10-three-cognitive-speeds.md](10-three-cognitive-speeds.md) — Gamma/Theta/Delta frequencies
 - [13-cognitive-cross-cuts.md](13-cognitive-cross-cuts.md) — Daimon PAD drives escalation
+- [01-naming-and-glossary.md](01-naming-and-glossary.md) — Canonical two-medium / two-fabric vocabulary
+- [tmp/refinements/10-self-learning-cybernetic-loops.md](../../tmp/refinements/10-self-learning-cybernetic-loops.md) — Predict/publish/correct/update loop and per-operator calibration
 - [17-design-principles-and-frontier-summary.md](17-design-principles-and-frontier-summary.md) — T0 probes as innovation #1

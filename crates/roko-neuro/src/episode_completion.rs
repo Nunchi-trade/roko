@@ -36,11 +36,8 @@ async fn distill_episode(workdir: PathBuf, episode: Episode) -> Result<()> {
         .distill(&episodes)
         .await
         .context("distill completed episode")?;
-    if entries.is_empty() {
-        return Ok(());
-    }
 
-    let store = KnowledgeStore::for_workdir(workdir);
+    let store = KnowledgeStore::for_workdir(&workdir);
     task::spawn_blocking(move || -> Result<()> {
         for entry in entries {
             store.add(entry)?;

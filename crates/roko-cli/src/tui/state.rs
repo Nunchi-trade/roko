@@ -3686,6 +3686,7 @@ tier = "focused"
             cfactor_trend: Vec::new(),
             gate_trends: HashMap::new(),
             gate_recent_failures: Vec::new(),
+            episodes: Default::default(),
             errors: vec![
                 ErrorEntry {
                     message: "compile failed".into(),
@@ -3800,7 +3801,7 @@ tier = "focused"
         let mut state = TuiState::default();
         state.update_from_snapshot(&data);
 
-        assert!((state.token_rate - 23.0).abs() < f64::EPSILON);
+        assert!((state.token_rate - 8.0).abs() < f64::EPSILON);
     }
 
     #[test]

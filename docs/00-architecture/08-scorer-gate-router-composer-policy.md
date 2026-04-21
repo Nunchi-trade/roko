@@ -1,292 +1,393 @@
 # Scorer, Gate, Router, Composer, Policy — The Five Operational Traits
 
-> **Abstract:** This document provides detailed specifications for the five non-Substrate
-> Synapse traits. Each trait is described with its complete Rust signature, design rationale,
-> key implementations, and role in the cognitive loop. The Substrate trait is covered
-> separately in [07-substrate-trait.md](07-substrate-trait.md).
+> **Abstract:** This document specifies the five non-fabric operators after REF04. Roko's
+> kernel is two mediums (`Engram`, `Pulse`) moving through two fabrics (`Substrate`, `Bus`),
+> with six operators acting on them. The five operators here generalize over `Datum` or Pulse
+> streams where appropriate; the fabric traits remain explicit. See
+> `tmp/refinements/04-operators-generalized.md` for the canonical proposal,
+> `tmp/refinements/08-code-sketches.md` for illustrative Rust, and
+> [01-naming-and-glossary.md](./01-naming-and-glossary.md) for the authoritative terminology.
 
+> **Reading order:** Start with [06-synapse-traits.md](./06-synapse-traits.md) for the
+> two-medium / two-fabric kernel framing, then [07-substrate-trait.md](./07-substrate-trait.md)
+> and [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) for the fabric contracts.
 
-> **Implementation**: Shipping
+> **Implementation status**: Target-state operator design. Current operators still accept
+> `&[Engram]` directly in today's codebase. The `Pulse`/`Bus` model and `Datum`-based
+> generalization documented here are planned migration targets rather than uniformly shipped
+> APIs.
 
 ---
 
-## 1. Scorer — Rate Engrams
+## Kernel Framing
 
-The Scorer trait rates Engrams along multi-dimensional axes (see
-[03-score-7-axis-appraisal.md](03-score-7-axis-appraisal.md)). Scorers are pure functions
-of `(Engram, Context)` — no side effects, no I/O, no state mutation.
+REF04 keeps the existing operator vocabulary but generalizes its signatures as a target-state
+operator model for the runtime:
 
-### 1.1 Trait Signature
+- `Engram` is the durable medium.
+- `Pulse` is the ephemeral medium.
+- `Substrate` is the storage fabric.
+- `Bus` is the transport fabric.
+- `Scorer`, `Gate`, `Router`, `Composer`, and `Policy` are the five non-fabric operators.
+
+The kernel story is therefore not "one noun, six verbs." It is two mediums, two fabrics, six
+operators. This document covers the five non-fabric operators; `Substrate` and `Bus` are
+specified in their own deep-dive docs.
+
+### Revised Trait Table
+
+The recommended operator surface is:
+
+| Trait | Role | Input | Output | Medium |
+|---|---|---|---|---|
+| `Scorer` | Rate an item along multi-axis criteria | `Datum<'_>` or monomorphic `&Engram` / `&Pulse` | `Score` | Either |
+| `Gate` | Verify against external reality | `&Engram` or `&[Pulse]` | `Verdict` persisted as an Engram | Either -> Engram |
+| `Router` | Choose among candidates | `&[Engram]` or `&[Pulse]` | `Option<Selection>` | Either |
+| `Composer` | Combine many inputs under a budget | `&[Datum<'_>]`, `&Budget`, `&dyn Scorer` | `Engram` | Either -> Engram |
+| `Policy` | React to streams and outcomes | `&[Pulse]` | `PolicyOutputs` | Pulse -> Either |
+
+The fabric siblings around those operators are:
+
+- `Substrate`: persists and queries durable `Engram` records.
+- `Bus`: publishes, subscribes, and replays live `Pulse` traffic through `Topic` and
+  `TopicFilter`.
+
+That is the complete kernel grammar for this layer of the architecture: six operations plus two
+fabric traits.
+
+### Datum - Shared Surface For Either Medium
+
+> **Implementation status**: `Datum` is a target-state abstraction. Current operators accept
+> `&[Engram]` directly. The medium-polymorphic `Datum` wrapper is planned but not yet
+> implemented.
+
+Operators that can work polymorphically use `Datum`:
 
 ```rust
-pub trait Scorer: Send + Sync {
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score;
-    fn name(&self) -> &'static str { "unnamed_scorer" }
+pub enum Datum<'a> {
+    Engram(&'a Engram),
+    Pulse(&'a Pulse),
+}
+
+impl Datum<'_> {
+    pub fn kind(&self) -> &Kind { /* ... */ }
+    pub fn body(&self) -> &Body { /* ... */ }
+    pub fn tags(&self) -> Option<&BTreeMap<String, String>> { /* ... */ }
+    pub fn created_at_ms(&self) -> i64 { /* ... */ }
 }
 ```
 
-### 1.2 Key Implementations
+`Datum` is intentionally small. It does not hide whether a caller is dealing with durable or
+ephemeral material; it just gives operators a common dispatch surface when the same logical
+operation applies to either medium.
 
-| Scorer | What It Measures | Primary Axis |
-|---|---|---|
-| `RelevanceScorer` | Semantic match to current goal (via Context.goal) | confidence |
-| `RecencyScorer` | How recent the Engram is | confidence (decreasing with age) |
-| `ReputationScorer` | Author's historical track record | reputation |
-| `CatalyticScorer` | How many downstream Engrams this enabled | utility |
-| `KeywordOverlapScorer` | Keyword match between Engram and query | confidence |
-| `ToolRelevanceScorer` | How relevant a tool is to the current task | confidence |
-| `CompositeScorer` | Weighted combination of multiple Scorers | all axes |
+The practical rule is:
 
-### 1.3 Composition
+- use `&Engram` when only the durable path makes sense
+- use `&Pulse` or `&[Pulse]` when the operator is reacting to live traffic
+- use `Datum` when a single operator needs to accept either medium without introducing a new
+  trait family
 
-Multiple Scorers compose into a pipeline via `CompositeScorer`, which applies weighted
-combinations using Score arithmetic (addition for evidence aggregation, multiplication for
-modifier application).
+## 1. Scorer — Rate Engrams
 
-### 1.4 Scorer as Parameter
+Most scorers are still naturally Engram-first. REF04's change is that live traffic can be scored
+without pretending it is already stored.
 
-The Composer trait takes `&dyn Scorer` as an argument, enabling the same Composer to produce
-different outputs based on which scoring function is injected. This is the key composition
-point between L2 (Scaffold) scoring and L2 context assembly.
+```rust
+pub trait Scorer: Send + Sync {
+    fn score_engram(&self, e: &Engram, ctx: &Context) -> Score;
 
----
+    fn score_pulse(&self, p: &Pulse, ctx: &Context) -> Score {
+        let synthetic = Engram::from_pulse_synthetic(p);
+        self.score_engram(&synthetic, ctx)
+    }
+
+    fn score(&self, datum: Datum<'_>, ctx: &Context) -> Score {
+        match datum {
+            Datum::Engram(e) => self.score_engram(e, ctx),
+            Datum::Pulse(p) => self.score_pulse(p, ctx),
+        }
+    }
+
+    fn name(&self) -> &'static str;
+}
+```
+
+This shape preserves the fast path:
+
+- Engram-oriented scorers implement `score_engram` only.
+- Pulse-aware scorers override `score_pulse` when transport-native behavior matters.
+- Callers that want one entry point use `score(Datum)`.
+
+Typical Pulse-aware uses include scoring stream chunks for drift, conductor health Pulses for
+distress prioritization, and webhook Pulses for triage before graduation.
 
 ## 2. Gate — Verify Against Ground Truth
 
-The Gate trait verifies Engrams against external reality. Gates are the bridge between the
-agent's internal representations and the external world.
-
-### 2.1 Trait Signature
+Gate remains the verification operator. The durable Engram path stays primary; the new capability
+is stream verification over a Pulse window.
 
 ```rust
 #[async_trait]
 pub trait Gate: Send + Sync {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict;
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict;
+
+    async fn verify_stream(&self, pulses: &[Pulse], ctx: &Context) -> Verdict {
+        let synthetic = Engram::from_pulses(pulses);
+        self.verify(&synthetic, ctx).await
+    }
+
     fn name(&self) -> &str;
 }
 ```
 
-### 2.2 Verdict Structure
+The key invariant does not change: a `Verdict` is still a durable audit artifact. Even when a
+Gate verifies a live window, the result persists as an Engram so the audit DAG remains durable.
 
-```rust
-pub struct Verdict {
-    pub passed: bool,           // binary result
-    pub reason: String,         // human-readable explanation
-    pub gate: String,           // which gate rendered this
-    pub score: f32,             // [0..1] numeric score
-    pub detail: Option<String>, // stdout, error output, diagnostic
-    pub test_count: Option<TestCount>, // structured test results
-    pub error_digest: Option<String>,  // unique errors with file/line
-    pub duration_ms: u64,       // wall-clock time
-}
-```
+Stream-gates exist for cases where the truth criterion is temporal rather than already stored:
 
-The `is_mostly_passing()` method classifies failed verdicts with high pass rates (>90% of
->20 tests passing) — useful for Policies that need to distinguish "a few tests regressed"
-from "compilation is broken."
+- `BudgetGate` watches `agent.tokens.used` over a window.
+- `SafetyGate` watches `safety.approval.requested` for concurrency or sequencing violations.
+- `LivenessGate` watches `agent.msg.chunk` timing and trips on silence.
 
-### 2.3 The 11-Gate Pipeline
-
-The `roko-gate` crate implements a multi-rung gate pipeline:
-
-| Rung | Gate | Async? | What It Checks |
-|---|---|---|---|
-| 1 | `CompileGate` | Yes | Does `cargo build` succeed? |
-| 2 | `TestGate` | Yes | Does `cargo test` pass? |
-| 3 | `ClippyGate` | Yes | Does `cargo clippy` pass? |
-| 4 | `DiffGate` | Yes | Are file changes within expected bounds? |
-| 5 | `FormatGate` | Yes | Is `cargo fmt --check` clean? |
-| 6 | `SchemaGate` | No | Does the output match expected JSON schema? |
-| 7 | `JudgeGate` | Yes | LLM-as-judge quality assessment |
-| 8 | `SimulationGate` | Yes | Transaction simulation via `eth_call` |
-| 9 | `BalanceGate` | Yes | Are balances within expected bounds? |
-| 10 | `ContentGate` | No | Does content match expected patterns? |
-| 11 | `CustomGate` | Yes | Domain-specific verification |
-
-### 2.4 Adaptive Thresholds
-
-Gate thresholds adapt via exponential moving average (EMA) per rung:
-
-```
-new_threshold = α × observed_pass_rate + (1 - α) × old_threshold
-```
-
-This prevents overly strict gates from blocking all progress and overly lenient gates from
-missing regressions. Thresholds persist in `.roko/learn/gate-thresholds.json`.
-
----
+Most existing gates remain unchanged because the default `verify_stream` path materializes a
+synthetic Engram and reuses the durable verification logic.
 
 ## 3. Router — Select Among Alternatives
 
-The Router trait selects one Engram from a set of candidates and learns from outcomes.
-
-### 3.1 Trait Signature
+Router still chooses among alternatives and learns from outcomes. REF04 adds a native Pulse path
+for transport-side routing decisions.
 
 ```rust
 pub trait Router: Send + Sync {
-    fn select(&self, candidates: &[Signal], ctx: &Context) -> Option<Selection>;
+    fn select_engram(&self, candidates: &[Engram], ctx: &Context) -> Option<Selection>;
+
+    fn select_pulse(&self, candidates: &[Pulse], ctx: &Context) -> Option<Selection> {
+        None
+    }
+
     fn feedback(&self, outcome: &Outcome);
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 ```
 
-### 3.2 The feedback() Learning Loop
+That split is deliberate:
 
-The `feedback()` method is what makes Routers self-improving. After a selection is acted
-upon, the Outcome (success, reward, cost, latency) updates the Router's internal model:
+- durable selection still covers "which episode or exemplar applies"
+- Pulse routing covers "which reviewer should receive this approval request" or "which agent
+  should receive this ready task"
 
-```
-select(candidates, ctx) → Selection
-    ↓ (act on selection)
-outcome observed → Outcome { success, reward, cost, latency_ms }
-    ↓
-feedback(outcome) → internal model updated
-    ↓ (next time)
-select(candidates, ctx) → better Selection
-```
-
-### 3.3 Key Implementations
-
-| Router | Algorithm | Learns From |
-|---|---|---|
-| `StaticRouter` | Deterministic (config-driven) | Nothing — fixed |
-| `LinUCBRouter` | Contextual bandit (LinUCB) | Reward + context features |
-| `CascadeRouter` | Multi-stage: confidence → UCB → cost | Reward + cost |
-| `WeightedRouter` | Softmax over Scorer outputs | Scorer weights (fixed) |
-| `EpsilonGreedyBandit` | ε-greedy with decay | Reward |
-
-### 3.4 CascadeRouter Detail
-
-The CascadeRouter implements the FrugalGPT cascade pattern (Chen et al. 2023,
-arXiv:2305.05176):
-
-1. **Confidence check**: If the cheap model's confidence exceeds threshold, use it
-2. **UCB exploration**: If uncertain, use LinUCB to select among models
-3. **Cost-aware**: Factor in token cost and latency to the reward signal
-
-The CascadeRouter persists its state to `.roko/learn/cascade-router.json` and improves with
-every task completion.
-
----
+The default `None` on `select_pulse` keeps durable-only routers unchanged until a subsystem has a
+real live-routing need.
 
 ## 4. Composer — Combine Under Budget
 
-The Composer trait assembles multiple Engrams into a single new Engram under resource
-constraints.
-
-### 4.1 Trait Signature
+Composer remains the bounded assembly operator. The output is still durable; the input set can
+now contain either medium.
 
 ```rust
 pub trait Composer: Send + Sync {
     fn compose(
         &self,
-        signals: &[Signal],
+        inputs: &[Datum<'_>],
         budget: &Budget,
         scorer: &dyn Scorer,
         ctx: &Context,
-    ) -> Result<Signal>;
+    ) -> Result<Engram>;
 
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 }
 ```
 
-### 4.2 Budget Constraints
+This matches the architectural boundary exactly:
 
-```rust
-pub struct Budget {
-    pub max_tokens: Option<usize>,   // token count cap
-    pub max_signals: Option<usize>,  // input count cap
-    pub max_bytes: Option<usize>,    // output size cap
-    pub max_wall_ms: Option<u64>,    // wall-clock time cap
-}
-```
+- composition may need stored episodes plus the last N stream chunks
+- scoring and budget logic still apply across the whole candidate set
+- the result remains an `Engram` because composed artifacts are durable records
 
-### 4.3 Key Implementations
+Representative uses:
 
-| Composer | What It Assembles | Budget Dimensions |
-|---|---|---|
-| `PromptComposer` | Prompt sections → complete prompt | max_tokens |
-| `ContextComposer` | Code files + docs → context pack | max_tokens, max_signals |
-| `SystemPromptBuilder` | 6-layer role templates → system prompt | max_tokens |
-| `PlanComposer` | Task descriptions → execution plan | max_signals |
-
-### 4.4 The SystemPromptBuilder
-
-The most complex Composer implementation. Assembles system prompts from six layers:
-
-1. **Role description** — what the agent is
-2. **Task context** — what it's working on
-3. **Tool inventory** — what tools are available
-4. **Safety rules** — what it must not do
-5. **Knowledge** — relevant heuristics and rules from Neuro
-6. **History** — recent episode summaries
-
-Each layer is scored for relevance and included under the token budget. The builder uses
-templates from `roko-compose/src/templates/` specific to each agent role.
-
----
+- `LiveContextComposer` builds prompt context from both Substrate retrieval and recent Bus
+  traffic
+- `TelemetryRollupComposer` consolidates a minute of transport Pulses into a summary Engram
+- `PromptComposer` keeps the old durable-only path by passing `Datum::Engram` wrappers
 
 ## 5. Policy — React to Streams
 
-The Policy trait watches Engram streams and produces reactive interventions.
+> **Implementation status**: The `Policy` shape below is the REF04 target contract. Current
+> policy implementations are still Engram-first in today's codebase; stream-reactive `Pulse`
+> inputs remain planned migration work.
 
-### 5.1 Trait Signature
+Policy is the most consequential signature change in REF04. Reactive logic naturally consumes
+Pulses, not retrospective slices of stored Engrams.
 
 ```rust
 pub trait Policy: Send + Sync {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal>;
-    fn name(&self) -> &str;
+    fn decide(&self, stream: &[Pulse], ctx: &Context) -> PolicyOutputs;
+    fn name(&self) -> &'static str;
+}
+
+pub struct PolicyOutputs {
+    pub pulses: Vec<Pulse>,
+    pub engrams: Vec<Engram>,
 }
 ```
 
-### 5.2 Key Implementations
+`PolicyOutputs` makes the reaction step explicit:
 
-| Policy | Trigger | Emits |
-|---|---|---|
-| `CircuitBreakerPolicy` | Repeated gate failures | Pause/stop Engrams |
-| `EpisodeLogPolicy` | Agent turn completion | Episode Engrams |
-| `PheromonePolicy` | Market state changes | Pheromone Engrams |
-| `HeartbeatPolicy` | Timer tick | Heartbeat metric Engrams |
-| `AlertPolicy` | Tool health degradation | ToolHealthDegraded Engrams |
-| `EfficiencyPolicy` | Turn completion | Efficiency metric Engrams |
-| `ConductorPolicy` | Multiple signals | Conductor decisions |
+- publish new Pulses on the Bus for immediate downstream reactions
+- persist Engrams for summaries, graduations, metrics, or durable decisions
 
-### 5.3 Policy in the Loop
+This is the architectural fix for the long-standing mismatch where a policy wanted to react to
+live changes but the signature implied it was consuming stored artifacts.
 
-Policy runs in step 8 (ADAPT) of the cognitive loop — after the gate verdict, after
-persistence, the Policy examines what just happened and emits reactions. Reactions are
-themselves Engrams, stored in the Substrate, and visible to subsequent loop ticks.
+Common examples:
 
----
+- `EpisodePolicy` subscribes to `substrate.engram.stored` filtered to episode kinds and emits
+  summary Engrams or follow-on Pulses
+- `CircuitBreakerPolicy` watches `gate.verdict.emitted` and publishes failure-rate or pause
+  Pulses
+- `HeartbeatPolicy` publishes `heartbeat.tick` Pulses at Gamma, Theta, and Delta cadence
+- `MetricPolicy` publishes `metric.*` Pulses and graduates summaries on a cadence
+
+Policy is the only breaking trait migration in this batch. The others are additive.
+
+## 6. REF08 Sketches: Operator Signatures In Motion
+
+> **Implementation status**: The examples in this section describe post-migration behavior.
+> They are architectural sketches, not uniformly shipped APIs.
+
+REF04 gives the operator surface. REF08 shows how that surface behaves in code once live
+transport is explicit. The snippets below are illustrative excerpts rather than the full sketch;
+use `tmp/refinements/08-code-sketches.md` when you want the end-to-end Rust.
+
+### 6.1 Policy outputs drive the Bus directly
+
+The key operational point is that a reactive policy now consumes Pulse traffic and can emit both
+ephemeral follow-on work and durable records in one pass:
+
+```rust
+pub struct PolicyOutputs {
+    pub pulses: Vec<Pulse>,
+    pub engrams: Vec<Engram>,
+}
+
+pub struct PlanRevisionPolicy<B: Bus> {
+    bus: std::sync::Arc<B>,
+    threshold: usize,
+    failures: parking_lot::Mutex<std::collections::HashMap<String, usize>>,
+}
+```
+
+REF08's `PlanRevisionPolicy` subscribes to `gate.verdict.emitted`, counts consecutive failures,
+and publishes `plan.revision.requested` once a task crosses threshold. That is the clearest
+worked example of the revised `Policy` contract: watch live Pulses, react on the Bus, and
+graduate durable artifacts only when lineage or audit value matters.
+
+### 6.2 Bus mediation dissolves cross-layer imports
+
+The same sketch resolves the old conductor-layer violation by replacing a direct dependency with
+topic-mediated transport:
+
+```rust
+pub struct CircuitBreaker<B: Bus> {
+    bus: std::sync::Arc<B>,
+    threshold: f32,
+    current_rate: std::sync::atomic::AtomicU32,
+}
+```
+
+In the REF08 sketch, a learning-side policy publishes `gate.failure.rate`, while conductor
+subscribes and emits `conductor.circuit.tripped` when the threshold is crossed. No operator
+signature changes for that migration; the fix comes from using `Bus`, `Pulse`, `Topic`, and
+`TopicFilter` as the kernel boundary instead of reaching across layers for private types.
+
+### 6.3 The bridge for durable-first callers
+
+REF08 also sketches the migration bridge for durable-first subsystems:
+
+```rust
+impl Engram {
+    pub fn to_pulse(&self, topic: Topic, seq: u64, source: PulseSource) -> Pulse {
+        Pulse {
+            seq,
+            topic,
+            kind: self.kind.clone(),
+            body: self.body.clone(),
+            emitted_at_ms: self.created_at_ms,
+            source,
+            lineage_hint: Some(self.id.clone()),
+            trace_id: None,
+        }
+    }
+}
+```
+
+That bridge lets a `Substrate.put()` implementation publish `substrate.engram.stored` after a
+successful durable write. Existing durable workflows can therefore cross the cutover through a
+Bus topic instead of a temporary trait fork.
 
 ## Academic Foundations
 
-| Citation | Contribution |
-|---|---|
-| Chen et al. 2023 (arXiv:2305.05176) | FrugalGPT: cascade routing pattern. Foundation for CascadeRouter. |
-| Li et al. 2010 | LinUCB: contextual bandit for recommendation. Algorithm behind LinUCBRouter. |
-| Auer et al. 2002, Machine Learning 47(2-3) | UCB1: finite-time regret bounds for multi-armed bandits. Theoretical basis for exploration. |
-| Scherer 2001, Applied AI 15 | Appraisal theory: multi-dimensional evaluation. Theoretical basis for Scorer design. |
-| Ousterhout 2018, A Philosophy of Software Design | Deep modules with simple interfaces. Each trait is a deep module. |
-
----
+REF04 does not introduce a new research basis for these traits; it tightens the operator grammar
+so the documented signatures match the target two-medium / two-fabric architecture. For
+the broader theoretical background, use [06-synapse-traits.md](./06-synapse-traits.md),
+[09-universal-cognitive-loop.md](./09-universal-cognitive-loop.md), and
+[23-architectural-analysis-improvements.md](./23-architectural-analysis-improvements.md).
 
 ## Current Status and Gaps
 
-- **Scorer**: Implemented in `roko-std` (KeywordOverlapScorer, ToolRelevanceScorer) and
-  `roko-learn` (FormatBandit as scoring-adjacent). CompositeScorer partially implemented.
-- **Gate**: 11 gates in `roko-gate` (200 tests). Adaptive thresholds wired.
-- **Router**: CascadeRouter, LinUCBRouter, EpsilonGreedyBandit in `roko-learn` (101 tests).
-  StaticRouter in `roko-std`.
-- **Composer**: SystemPromptBuilder in `roko-compose` (23 tests). PromptComposer in
-  `roko-compose`.
-- **Policy**: Efficiency events, episode logging wired in orchestrate.rs. Conductor policies
-  in `roko-conductor`.
+REF04 changes signatures, not the operator count.
 
----
+The audit argument remains intact:
+
+- no seventh non-fabric operation is required
+- the awkward cases were medium mismatches, not missing operator categories
+- the real architectural additions are the second medium (`Pulse`) and second fabric (`Bus`)
+
+So the right statement is not "invent more verbs." It is "generalize the verbs that already
+exist so they accept the correct medium."
+
+The main implementation gap after this documentation pass is migration sequencing:
+
+- `Scorer`, `Gate`, `Router`, and `Composer` can evolve additively.
+- `Policy` is the only breaking signature change in the batch.
+- Bus/topic bridges such as `substrate.engram.stored` carry existing durable-first workflows
+  through the cutover.
+
+## Default Method Strategy And Migration
+
+The recommended implementation strategy is deliberately conservative:
+
+- monomorphic `_engram` and `_pulse` entry points exist where performance matters
+- a `Datum` dispatcher sits on top as a thin convenience layer
+- default implementations use "convert and recurse" so single-medium implementations get the
+  other path for free at a small cost
+
+Per-trait migration cost is small except for `Policy`:
+
+| Trait | Before | After | Migration shape |
+|---|---|---|---|
+| `Scorer` | `score(&Engram, &Context)` | add `score_pulse`, `score(Datum)` | additive |
+| `Gate` | `verify(&Engram, &Context)` | add `verify_stream(&[Pulse], &Context)` | additive |
+| `Router` | `select(&[Engram], &Context)` | add `select_pulse(&[Pulse], ...)` | additive |
+| `Composer` | `compose(&[Engram], ...)` | `compose(&[Datum], ...)` | additive wrapper at call sites |
+| `Policy` | `decide(&[Engram], ctx) -> Vec<Engram>` | `decide(&[Pulse], ctx) -> PolicyOutputs` | breaking; use a shim during migration |
+
+The canonical migration shim is a bridge that subscribes to `substrate.engram.stored`, converts
+relevant durable writes into a Pulse stream, and lets Engram-oriented policy implementations
+delete themselves only after the last caller has moved.
 
 ## Cross-References
 
-- [06-synapse-traits.md](06-synapse-traits.md) — Trait overview
-- [07-substrate-trait.md](07-substrate-trait.md) — Substrate in depth
-- [09-universal-cognitive-loop.md](09-universal-cognitive-loop.md) — How these traits compose
+- [06-synapse-traits.md](./06-synapse-traits.md) gives the top-level "two mediums, two fabrics,
+  six operators" framing.
+- [07-substrate-trait.md](./07-substrate-trait.md) defines the durable storage fabric.
+- [07b-bus-transport-fabric.md](./07b-bus-transport-fabric.md) defines the Bus, `Topic`, and
+  `TopicFilter`.
+- [09-universal-cognitive-loop.md](./09-universal-cognitive-loop.md) shows how these operators
+  plug into the current loop framing; REF05 retells that loop in seven steps.
+- `tmp/refinements/04-operators-generalized.md` is the canonical source for this signature
+  generalization.
+- `tmp/refinements/08-code-sketches.md` is the canonical source for the illustrative Rust
+  migration sketches referenced here.

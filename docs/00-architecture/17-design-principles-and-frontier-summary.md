@@ -1,21 +1,36 @@
 # Design Principles and Frontier Innovation Summary
 
 > **Abstract:** Roko is guided by seven design principles (P1-P7) that constrain architectural
-> decisions and prevent feature drift. Beyond these principles, fourteen frontier innovations
-> — capabilities no competitor has — emerge naturally from the Synapse Architecture's
-> composable trait system. This document enumerates the design principles, summarizes each
-> frontier innovation, and shows how the innovations interconnect to form an autocatalytic
-> improvement system.
+> decisions and prevent feature drift. REF19 reframes the capability list as a net-new
+> innovations catalog with an explicit split between primitive innovations and composed
+> innovations. This document preserves the design principles, then explains which capabilities
+> are genuinely primitive, which are integrations of prior art, and why the moat comes from
+> the composition across Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage,
+> heuristics/falsifiers, c-factor, the replication ledger, and the plugin SPI. See
+> [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md)
+> for the refinement note that drove this rewrite.
 
 
-> **Implementation**: Shipping
+> **Implementation**: Mixed
+
+> **Reality check**: This document mixes shipping architecture with target-state
+> frontier claims. Shipping today: Engram/Substrate, the six kernel traits, the
+> runtime event bus in its current concrete form, HDC primitives, multi-backend
+> orchestration, the gate pipeline, episode logging, and the TUI. Research
+> hypotheses or planned primitives: `Pulse`, demurrage, heuristics with explicit
+> falsifiers as a shared commons, replication ledger, worldview clusters, and
+> the full plugin SPI.
+>
+> **Actual edge today**: the competitive edge is the working Rust product
+> surface, not the full future frontier catalog.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [00-vision-and-thesis](./00-vision-and-thesis.md), [06-synapse-traits](./06-synapse-traits.md), [12-five-layer-taxonomy](./12-five-layer-taxonomy.md)
 **Key sources**:
-- `/Users/will/dev/nunchi/roko/refactoring-prd/09-innovations.md` — All 14 frontier innovations
+- `/Users/will/dev/nunchi/roko/refactoring-prd/09-innovations.md` — Historical source for the older frontier list
 - `/Users/will/dev/nunchi/roko/refactoring-prd/00-overview.md` — Design principles, overview
 - `/Users/will/dev/nunchi/roko/bardo-backup/prd/00-vision/05-manifesto.md` — Original manifesto (7 principles)
+- `[tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md)` — REF19 source note for the net-new catalog
 
 ---
 
@@ -23,20 +38,25 @@
 
 Design principles are the immune system of an architecture — they prevent bad decisions
 before they are made. Roko's seven principles (P1 through P7) were extracted from the
-patterns that made the original 108K-LOC Mori codebase succeed and the patterns that made
-it fail. Each principle is a hard constraint: if a proposed change violates a principle, it
-is rejected regardless of its other merits.
+patterns that made the original pre-refactor codebase succeed and the patterns that made it
+fail. Each principle is a hard constraint: if a proposed change violates a principle, it is
+rejected regardless of its other merits.
 
-The fourteen frontier innovations are capabilities that no competing agent framework provides.
-They are not aspirational features — each is a specific mechanism grounded in academic
-research with a concrete implementation path through the existing Synapse Architecture. What
-makes them "blue ocean" is that they emerge from architectural decisions that competitors
-have not made: the trait-based composition system, the content-addressed Engram type, the
-HDC encoding layer, the on-chain verification path, and the affect-driven cognitive
-architecture.
+The net-new catalog is intentionally split into primitive and composed innovations so the
+document does not blur architectural primitives with higher-level capability surfaces. The
+primitive layer names the kernel invariants; the composed layer shows how those invariants,
+plus prior art, produce the surfaces that matter operationally.
 
 This document serves as both a design guide (what principles govern decisions) and a
-capability catalog (what Roko can do that nobody else can).
+capability catalog (what is genuinely net-new, what is primitive, and what is composed).
+
+### Status framing
+
+| Category | What belongs here today |
+|---|---|
+| **Shipping** | Engram/Substrate, the six kernel traits, the current concrete event bus, HDC primitives, gate pipeline, multi-backend orchestration, episode logging, TUI |
+| **Research hypotheses / target-state** | Pulse, demurrage, falsifier commons, replication ledger, worldview clusters, full plugin SPI |
+| **Prior art integrations** | Many higher-level compositions such as T0 probes, VCG attention, predictive foraging, and cross-domain resonance |
 
 ---
 
@@ -175,264 +195,88 @@ and taint propagation provide full observability without requiring additional in
 
 ## 2. The Fourteen Frontier Innovations
 
-These are capabilities that no competing agent framework provides. Each emerges from the
-Synapse Architecture's composable design — they are not bolted on but grow naturally from
-the architectural choices.
+REF19 replaces the older frontier list with a tighter distinction: some items are target-state
+primitive innovations, meaning proposed architectural primitives or invariants; others are
+integrated innovations, meaning composed capabilities built from those primitives plus prior
+art. That split matters because it keeps the novelty claim honest. See
+[tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md)
+for the source note.
 
 ### 2.1 Summary Table
 
-| # | Innovation | What It Does | Why Nobody Else Has It | Roko's Structural Advantage |
+| # | Primitive innovation | What is net-new here | Closest prior art | Why it matters |
 |---|---|---|---|---|
-| 1 | **16 T0 Probes** | 80% of ticks cost zero LLM | Requires domain-agnostic probe framework | Extensible `Vec<Box<dyn Probe>>` |
-| 2 | **VCG Attention Auction** | Optimal context allocation via truthful bidding | Requires multi-subsystem architecture | 6 traits = 6+ bidding subsystems |
-| 3 | **Somatic Landscape** | Emotional fast-path decisions via k-d tree | Requires affect engine + spatial indexing | Daimon PAD + persistent somatic markers |
-| 4 | **Hypnagogia Engine** | Solves Alpha Convergence Problem via creative divergence | Requires dream engine + episodic memory + HDC | Dreams + Neuro + HDC recombination |
-| 5 | **31.6× Collective Calibration** | Network learning scales as sqrt(N) | Requires on-chain verified outcomes | Korai chain + Gate verdicts |
-| 6 | **Predictive Foraging** | Self-correcting knowledge retrieval | Requires prediction tracking + external verification | Scorer + Gate feedback loop |
-| 7 | **x402 Micropayments** | Self-funding agents | Requires chain + wallet + identity | Korai + ERC-8004 + roko-chain |
-| 8 | **Forensic AI** | Cryptographic causal replay of agent decisions | Requires content-addressed lineage | Engram BLAKE3 + lineage DAG |
-| 9 | **EvoSkills** | Self-evolving skill libraries via adversarial verification | Requires isolated verifier + cross-model transfer | Gate isolation + skill library |
-| 10 | **ADAS** | Meta-agent architecture search — agents that design agents | Requires composable trait system | 6 traits as search dimensions |
-| 11 | **Cognitive Kernel Primitives** | OS-level abstractions for agent cognition | Requires clean kernel abstraction | Synapse Architecture = cognitive kernel |
-| 12 | **Cross-Domain Insight Resonance** | Structural analogy detection across domains in nanoseconds | Requires HDC + multi-domain operation | 10,240-bit HDC vectors + domain-agnostic core |
-| 13 | **Generative Interfaces (A2UI)** | Agents create their own UI | Requires generative UI framework + design system | ROSEDUST design language + Spectre |
-| 14 | **Knowledge Futures Market** | On-chain escrow for committed knowledge production | Requires chain + micropayments + verification | Korai + x402 + Gate pipeline |
+| 1 | **Engram / Pulse / Bus / Substrate split** | A clean separation between durable record, ephemeral transport, transport fabric, and storage fabric. | Event sourcing, actor systems, message buses, hexagonal architecture | This gives the kernel a stable vocabulary and boundary model for both durability and live traffic. |
+| 2 | **HDC fingerprint** | A deterministic 10,240-bit fingerprint on each Engram for similarity, clustering, consensus, and analogy. | Hyperdimensional computing, sparse distributed memory, embedding search | Semantic locality becomes a first-class runtime primitive instead of a side index. |
+| 3 | **Demurrage** | A continuous holding cost on idle Engrams with reinforcement for useful reuse and retrieval. | Gesell demurrage, forgetting curves, memory decay models | The durable medium stays selective instead of turning into dead weight. |
+| 4 | **Heuristics / falsifiers commons** | Heuristics live with explicit falsifiers, recalibration, and exportable calibration history. | Scientific method, calibration logs, prediction markets | Belief revision becomes auditable and shared across deployments instead of local and informal. |
+| 5 | **c-factor** | A cohort-process scalar learned from Bus and Substrate evidence, not declared by fiat. | Collective-intelligence research, team-process metrics | Group quality becomes measurable and actionable without collapsing into a single hard objective. |
+| 6 | **Replication ledger** | A durable record of replications, failures, and outcome conditions for claims and heuristics. | Provenance graphs, experimental registries, audit logs | Later agents inherit tested knowledge instead of starting from scratch. |
+| 7 | **Plugin SPI** | A stable plugin service provider interface for extensions, domain surfaces, and local workflows. | Rust trait-based plugins, ports/adapters, extension-point design | The architecture stays open without becoming configuration soup. |
 
 ### 2.2 Innovation Details
 
-#### Innovation 1: 16 T0 Probes (Zero-Cost Cognitive Probes)
+| # | Integrated innovation | Built from | Closest prior art | Why it matters |
+|---|---|---|---|---|
+| 1 | **16 T0 Probes** | Probe registry + router + budgets + prediction-error aggregation | Cascade routing, FrugalGPT-style model selection | Zero-LMM-cost ticks become the default, not the exception. |
+| 2 | **VCG Attention Auction** | Budgeting + competing subsystems + truthful allocation | Vickrey-Clarke-Groves auctions, attention economics | Context allocation becomes explicit and testable instead of ad hoc. |
+| 3 | **Somatic Landscape** | PAD/self-model + HDC neighborhood search + strategy memory | Somatic marker hypothesis, nearest-neighbor decision support | Affect becomes a routing signal rather than a cosmetic state label. |
+| 4 | **Hypnagogia Engine** | HDC recall + episodic recombination + guarded partial completions | Dormio-style hypnagogia research, creative recombination systems | It forces divergent hypothesis generation when single-model convergence would flatten alpha. |
+| 5 | **Predictive Foraging** | Heuristics + falsifiers + retrieval prediction + stopping rules | Marginal Value Theorem, information foraging theory | Retrieval becomes self-correcting and budget-aware. |
+| 6 | **Collective calibration loop** | c-factor + replication ledger + verified outcomes + shared heuristics | Calibration tracking, team learning loops | The system learns from each cohort instead of resetting at deployment boundaries. |
+| 7 | **Forensic AI** | Engram lineage + Bus history + Gate verdicts + replay tooling | Audit trails, causal reconstruction, provenance systems | Decisions can be replayed with the evidence that actually existed at the time. |
+| 8 | **EvoSkills / ADAS family** | Plugin SPI + gates + replication ledger + trait search | Adversarial skill verification, meta-agent architecture search | Skills and architectures can improve through selection pressure instead of manual curation alone. |
+| 9 | **Cross-Domain Insight Resonance** | HDC fingerprint + heuristic commons + diverse evidence | Analogy engines, HDC similarity search | Structural similarity across domains becomes a low-latency capability. |
+| 10 | **Generative Interfaces (A2UI)** | Plugin SPI + design system + runtime descriptions | Schema-driven UI generation, generated admin surfaces | Agents can expose usable interfaces without hand-built screens for every workflow. |
+| 11 | **Knowledge Futures Market** | Replication ledger + plugin SPI + chain settlement + verified delivery | Prediction markets, escrowed work contracts | Research demand can be directed toward verifiable output instead of vague planning. |
 
-At every gamma tick (~5-15 seconds), 16 deterministic probes run with zero LLM cost. Each
-probe is a pure function: `fn probe(state: &EngineState) -> f32`. Combined via weighted sum
-into a prediction error scalar:
-
-```
-error < 0.2  → T0 (suppress, no LLM)     ~80% of ticks
-error < 0.6  → T1 (fast model, shallow)   ~15% of ticks
-error ≥ 0.6  → T2 (full model, deep)      ~5% of ticks
-```
-
-Probes are organized by domain:
-- **Blockchain domain** (8 probes): Price delta, TVL delta, position health, gas spike,
-  credit balance, RSI, MACD, circuit breaker.
-- **Coding domain** (6 probes): Build health, test regression, complexity drift, dependency
-  risk, coverage delta, error rate.
-- **Universal** (2 probes): World model drift, causal consistency.
-
-New domains add probes by implementing the probe function signature. The probe registry is
-`Vec<Box<dyn Probe>>` — users compose whatever probe set matches their domain.
-
-**Citation**: FrugalGPT (Chen et al. 2023, arXiv:2305.05176) demonstrated that cascade
-architectures can achieve up to 98% cost reduction while matching top-model quality.
-
-#### Innovation 2: VCG Attention Auction
-
-When multiple subsystems compete for the limited context window, a Vickrey-Clarke-Groves
-(VCG) auction allocates tokens optimally:
-
-```
-bid(section_i) = expected_value × urgency × affect_weight
-```
-
-Each winner pays the second-highest bid (VCG truthfulness guarantee). "Payment" is deducted
-from the subsystem's attention budget for the next tick.
-
-Eight subsystems bid: Neuro (knowledge entries), Daimon (affect context), iteration memory
-(past failures), code intelligence (symbols, types), playbook rules (heuristics), research
-artifacts (analyses), task context (PRD sections), and oracle predictions (calibration).
-
-**Citation**: VCG mechanism (Vickrey 1961, Clarke 1971, Groves 1973). Applied to attention
-allocation following the attention economics framework in context engineering.
-
-#### Innovation 3: Somatic Landscape
-
-Damasio's (1994) somatic marker hypothesis implemented as a k-d tree over an 8-dimensional
-strategy space:
-
-```rust
-pub struct SomaticLandscape {
-    tree: KdTree<f64, SomaticMarker, 8>,
-}
-
-pub struct SomaticMarker {
-    pub strategy_coords: [f64; 8],
-    pub valence: f64,           // -1 to +1
-    pub intensity: f64,         // 0 to 1
-    pub episodes: Vec<ContentHash>,
-}
-```
-
-Before acting, the agent queries nearest neighbors: positive valence → confidence (T1),
-negative valence → caution (T2). Mandatory 15% contrarian retrieval (Bower 1981) prevents
-emotional echo chambers.
-
-The 8 dimensions are domain-configurable. Coding agents default to: complexity, risk,
-novelty, confidence, time_pressure, scope, reversibility, dependency_depth. Chain agents
-substitute: volatility, exposure, liquidity, correlation, leverage, time_horizon,
-slippage_risk, counterparty_risk.
-
-#### Innovation 4: Hypnagogia Engine
-
-Solves the Alpha Convergence Problem: all agents using the same LLM produce identical
-analyses, so alpha converges to zero. The hypnagogia engine forces divergence through unique
-episodic recombination — each agent is "differently haunted" (Derrida 1993) by its own
-experiential traces.
-
-Four components:
-
-| Component | Role | Implementation |
-|---|---|---|
-| **Thalamic Gate** | Redirects attention inward | HDC anti-correlated retrieval (lowest similarity to recent episodes) |
-| **Executive Loosener** | Relaxes constraints for creative association | Temperature annealing: T=1.3-1.5 ideation, T=0.3-0.5 evaluation |
-| **Dali Interrupt** | Captures partial insights before convergence | Stop completions at 50-100 tokens, collect 3-5 fragments per hypothesis |
-| **Homuncular Observer** | Filters noise from genuine insight | Structured evaluation: novelty > 0.5, relevance > 0.3, coherence > 0.4 |
-
-Cost: ~2 LLM calls + 15-25 partial completions at ~50 tokens each ≈ 2,000-4,000 tokens
-≈ $0.01 per hypnagogia session.
-
-**Citations**: Lacaux et al. 2021, Science Advances 7(50) (83% success on hidden rule
-discovery during N1). MIT Dormio (Haar Horowitz 2020/2023, 43% creativity boost).
-Derrida 1993. Boden 2004, "The Creative Mind".
-
-#### Innovation 5: 31.6× Collective Calibration
-
-> **Caveat**: Nunchi-derived heuristic, not a published theorem. Requires empirical validation.
-
-Solo: `accuracy(t) = 1 - 1/sqrt(t)`. Collective (N agents): `accuracy(t) = 1 - 1/sqrt(N×t)`.
-At N=1,000: sqrt(1000) ≈ 31.6× faster calibration (theoretical upper bound, independence
-assumed).
-
-Mechanism: Every falsifiable prediction is verified by an external oracle (compiler, test
-suite, chain state). Residuals feed a CalibrationTracker that aggregates per (model,
-task_category). On Korai, all agents read the collective's calibration; new agents inherit it.
-
-See [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) for full details.
-
-#### Innovation 6: Predictive Foraging
-
-Every knowledge retrieval is a falsifiable prediction: the agent predicts the outcome before
-executing, then compares against the actual result. Residuals feed an arithmetic corrector
-(~50 nanoseconds per correction, no LLM). Combined with Charnov's Marginal Value Theorem
-(1976) for an optimal stopping rule on context retrieval.
-
-**Citations**: Charnov 1976 (Marginal Value Theorem). Pirolli & Card 1999 (Information
-Foraging Theory applied to information retrieval).
-
-#### Innovation 7: x402 Micropayments
-
-Integration of Coinbase's x402 protocol (now Linux Foundation, with AWS, Visa, Mastercard,
-Stripe) for autonomous agent micropayments: per-API-call billing at <$0.001 per transaction,
-sub-second USDC settlement on Base.
-
-Economic cycle: Agent posts validated insight to Korai → earns KORAI → converts to USDC →
-pays for inference → produces output → user pays agent → reinvests → cycle accelerates.
-
-#### Innovation 8: Forensic AI (Causal Replay)
-
-When an agent action causes harm, Roko can replay the exact decision context: which Engrams
-were in the Substrate, which Scores were computed, which Router selected which candidate,
-which Composer assembled context, which Gate verified output, which Policy fired. Every step
-is content-addressed — replay is cryptographically verifiable.
-
-Maps to regulatory requirements: EU AI Act (Article 14), SEC/CFTC trading reconstruction,
-HIPAA audit trails, SOX financial controls.
-
-#### Innovation 9: EvoSkills (Self-Evolving Skill Libraries)
-
-Skills evolve through adversarial verification (EvoSkills, April 2026):
-
-```
-Round 1: Generate skill bundles from episodes
-Round 2: Isolated Surrogate Verifier generates independent test assertions
-Round 3: Skills that pass verification get promoted
-Round 4: Failed skills get mutated and retried
-Round 5: Cross-pollination between agents' skill libraries
-Baseline: 32% → Round 5: 75% (surpasses human-curated by round 3)
-```
-
-Cross-model transfer: Skills evolved with one model transfer to six other models with
-+35 to +44 percentage point gains.
-
-#### Innovation 10: ADAS (Meta-Agent Architecture Search)
-
-Hu et al. (ICLR 2025): A meta-agent iteratively programs new agent architectures in code.
-Results: +14% on ARC Challenge, +13.6 F1 on reading comprehension, +14.4% on math versus
-hand-designed agents. Discovered agents transfer across dissimilar domains.
-
-Integration with Roko: The meta-agent explores the space of (Substrate, Scorer, Gate,
-Router, Composer, Policy) implementations and discovers novel compositions that outperform
-human-designed configurations.
-
-#### Innovation 11: Cognitive Kernel Primitives
-
-OS-level abstractions for agent cognition:
-
-1. **Cognitive Namespaces**: Isolated knowledge spaces with explicit, auditable cross-namespace
-   channels.
-2. **Cognitive Signals**: Typed interrupts (Pause, Resume, Reprioritize, InjectContext,
-   Escalate, Cooldown, Explore, Shutdown) that alter agent behavior without killing the
-   process.
-3. **Cognitive Scheduling**: Allocates reasoning resources by
-   `priority = urgency × expected_value × (1/cognitive_cost)`.
-4. **Engram Syscalls**: Every meaningful action passes through `Policy.decide()` for
-   permit/deny/modify/log.
-
-#### Innovation 12: Cross-Domain Insight Resonance
-
-HDC-powered structural analogy detection across domains:
-
-```
-Coding:    BIND(high_complexity, more_review)
-Chain:     BIND(high_volatility, more_caution)
-Research:  BIND(contradictory_sources, more_verification)
-
-All three share: BIND(high_uncertainty, more_verification)
-Hamming similarity > threshold (0.526) → alert
-```
-
-False positive rate at threshold 0.526: < 1% against 100K vocabulary (Bonferroni-corrected).
-Detection time: nanoseconds (pure Hamming distance computation on 10,240-bit vectors).
-
-**Citations**: Kanerva 2009, Cognitive Computation 1(2). Plate 2003, Holographic Reduced
-Representation. Kleyko et al. 2022, Artificial Intelligence Review.
-
-#### Innovation 13: Generative Interfaces (A2UI)
-
-Agents describe UI needs as structured JSONL → frameworks render automatically. Generated
-interfaces inherit the ROSEDUST design system for visual consistency. Each agent's UI
-includes its Spectre (procedurally generated creature) as a persistent visual anchor.
-
-#### Innovation 14: Knowledge Futures Market
-
-> **Implementation status**: P3 feature (Tier 6, deferred).
-
-A novel financial primitive on Korai: research agents publish Knowledge Futures ("I will
-produce analysis X within 24 hours"), operations agents purchase futures (funding the
-research agent's inference costs), and escrow releases upon verified delivery. Creates a
-predictive market for knowledge production.
+The honest reading is that the integrated items are mostly compositions. Their novelty is not
+that each subpiece is unprecedented in isolation; their novelty is that the same architecture
+can wire them together so the outputs of one become the inputs of the next.
 
 ---
 
 ## 3. Innovation Interconnection Map
 
-The innovations form an autocatalytic network — each feeds into others:
+The moat is not any one primitive innovation by itself. The moat is the composition across
+Engram, Pulse, Bus, Substrate, HDC fingerprint, demurrage, heuristics/falsifiers, c-factor,
+the replication ledger, and the plugin SPI. Those pieces reinforce one another:
 
-| Innovation | Feeds Into | Via |
+REF31 turns that composition claim into an explicit architecture artifact: see
+[34-synergy-integration-map](./34-synergy-integration-map.md) and
+[tmp/refinements/31-synergy-integration-map.md](../../tmp/refinements/31-synergy-integration-map.md)
+for the 10-primitive matrix and the named mechanisms behind this moat framing.
+
+| Primitive / invariant | Composed capability it enables | Moat effect |
 |---|---|---|
-| T0 Probes (1) | Tier Router → VCG Auction (2) | Prediction error drives tier selection, tier drives context budget |
-| VCG Auction (2) | Context Assembly → LLM Execution | Optimal context → better LLM output |
-| Somatic Landscape (3) | Tier Router (1) + Skill Selection (9) | Emotional fast-path biases model and skill choice |
-| Hypnagogia (4) | Neuro Store → Cross-Domain Resonance (12) | Novel hypotheses expand knowledge for cross-domain detection |
-| Collective Calibration (5) | Predictive Foraging (6) → T0 Probes (1) | Better calibration → more accurate probes → higher T0 suppression |
-| Predictive Foraging (6) | Calibration (5) + Context Selection (2) | Better predictions → better context choices |
-| x402 Micropayments (7) | Knowledge Market (14) + Self-funding | Economic substrate enables agent-as-business |
-| Forensic AI (8) | Compliance → Enterprise adoption | Regulatory pre-compliance enables regulated industries |
-| EvoSkills (9) | Skill Library → ADAS (10) | Evolved skills become search targets for meta-architecture |
-| ADAS (10) | New trait compositions → All innovations | Meta-search discovers novel compositions of all capabilities |
-| Cognitive Kernel (11) | All layers — foundational infrastructure | Namespaces, signals, scheduling underpin all other innovations |
-| Cross-Domain Resonance (12) | Knowledge → Hypnagogia (4) → Novel hypotheses | Cross-domain insights seed creative divergence |
-| Generative Interfaces (13) | User adoption → More agents → Calibration (5) | Accessible interfaces attract users, growing the network |
-| Knowledge Futures (14) | Directed research → Knowledge → All innovations | Market directs compute toward highest-value knowledge production |
+| Engram / Pulse / Bus / Substrate | Forensic AI, live coordination, durable replay | Separating durable record from ephemeral transport makes the system auditable without freezing runtime traffic. |
+| HDC fingerprint | Somatic Landscape, Hypnagogia, Cross-Domain Insight Resonance | Similarity becomes a shared computation surface instead of a bespoke index in each feature. |
+| Demurrage | Predictive Foraging, memory hygiene, selective persistence | The durable medium stays live, which prevents the commons from turning into dead weight. |
+| Heuristics / falsifiers | Collective calibration, VCG routing, EvoSkills | Learned rules stay falsifiable, exportable, and revisable instead of becoming folklore. |
+| c-factor | Shared calibration, cohort-aware routing, team diagnostics | Group process becomes measurable and transportable across deployments. |
+| Replication ledger | Reuse of verified claims, failure replay, evidence inheritance | Every deployment can start from accumulated evidence rather than from scratch. |
+| Plugin SPI | Domain extensions, ADAS search space, user-specific workflows | The platform remains open-ended without giving up architectural control. |
+
+The structural lesson from REF19 is that competitors can copy a feature surface, but they do
+not automatically inherit the linked primitives that make the surface self-reinforcing. The
+two-mediums / two-fabrics kernel matters here: `Engram` and `Pulse` separate durable record
+from ephemeral transport; `Substrate` and `Bus` separate storage from transport; the seven-step
+loop then reuses those primitives on every turn so learning, verification, persistence, and
+broadcast compound instead of resetting.
+
+P1 keeps the system compositional, P2 and P7 make it auditable, P3 keeps accumulation bounded,
+P4 and P5 keep memory durable but selective, and P6 keeps the policy layer able to model
+itself well enough to exploit the evidence the loop returns. That is why the moat is a curve
+of reinforcement, not a single feature claim.
+
+### 3.1 Structural Moat Synthesis
+
+The moat thesis in
+[tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md)
+still applies, but REF19 sharpens it: architectural coherence, a heuristic commons, a plugin
+ecosystem, a replication ledger, and kernel-level correctness are not separate advantages.
+They are the same advantage viewed at different scales. Each one makes the next one easier to
+build, verify, and retain.
 
 ---
 
@@ -440,22 +284,26 @@ The innovations form an autocatalytic network — each feeds into others:
 
 Each innovation has different validation requirements:
 
-| Innovation | Validation Status | What Would Validate It |
+| Innovation | Validation status | What would validate it |
 |---|---|---|
-| 16 T0 Probes | Theoretical | Measure T0 suppression rate on real workloads (target: >70%) |
-| VCG Attention Auction | Algorithm specified | A/B test: VCG vs. fixed-priority context selection |
-| Somatic Landscape | Cited foundations | A/B test: agents with vs. without somatic markers |
-| Hypnagogia | Cited foundations | Generate hypotheses, have domain experts evaluate genuine vs. spurious |
-| 31.6× Calibration | Heuristic model | Run 100+ agents on Daeji testnet, measure actual speedup vs. solo |
-| Predictive Foraging | Specified | Measure prediction accuracy improvement over time |
-| x402 Micropayments | Protocol exists | Integration test on Base testnet |
-| Forensic AI | Architecture supports it | Construct causal replay for a real incident, verify completeness |
-| EvoSkills | Published results | Replicate EvoSkills within Roko's Gate pipeline |
-| ADAS | Published results (ICLR 2025) | Run ADAS meta-search over Synapse trait compositions |
-| Cognitive Kernel | Specified | Stress-test namespace isolation, signal handling |
-| Cross-Domain Resonance | Theoretical | Generate cross-domain insights, measure false positive rate |
-| Generative Interfaces | Specified | Build prototype A2UI renderer with ROSEDUST |
-| Knowledge Futures | Deferred (P3) | Depends on Korai chain deployment |
+| Engram / Pulse / Bus / Substrate split | Core architecture | Round-trip fidelity across live transport, durable storage, replay, and graduation boundaries. |
+| HDC fingerprint | Implemented in primitives | Similarity search quality, collision behavior, and clustering usefulness on real Engrams. |
+| Demurrage | Specified and partially wired | Retention curves that keep useful knowledge live while trimming dead weight. |
+| Heuristics / falsifiers commons | Specified | Falsifier closure rates, calibration improvement, and reuse across deployments. |
+| c-factor | Specified | Correlation with cohort outcome quality without becoming a gaming target. |
+| Replication ledger | Architecture supports it | A complete record of replications, failures, and provenance-linked outcomes. |
+| Plugin SPI | Specified | Stable third-party extension loading with clear capability boundaries. |
+| 16 T0 Probes | Theoretical/spec'd | Measure T0 suppression rate on real workloads. |
+| VCG Attention Auction | Algorithm specified | A/B test: VCG vs. fixed-priority context selection. |
+| Somatic Landscape | Cited foundations | A/B test: agents with vs. without somatic markers. |
+| Hypnagogia Engine | Cited foundations | Generate hypotheses and have domain experts score genuine vs. spurious novelty. |
+| Predictive Foraging | Specified | Measure prediction accuracy and retrieval efficiency over time. |
+| Collective calibration loop | Heuristic model | Compare calibration speed and transfer across cohorts and deployments. |
+| Forensic AI | Architecture supports it | Reconstruct a real incident from the ledger and verify completeness. |
+| EvoSkills / ADAS | Published results | Replicate the improvement loop inside the Gate pipeline. |
+| Cross-Domain Insight Resonance | Theoretical | Generate cross-domain insights and measure false positive rate. |
+| Generative Interfaces | Specified | Build a prototype A2UI renderer with the design system. |
+| Knowledge Futures Market | Deferred (P3) | Depends on Korai chain deployment. |
 
 ---
 
@@ -474,8 +322,9 @@ Each Synapse trait passes the Parnas test:
 - `Router` hides the selection algorithm (static, bandit, cascade)
 - `Composer` hides the assembly strategy (template, VCG auction, priority queue)
 
-The danger is "interface leakage" — when the `Signal` type exposes internal representation
-details through the trait interface, coupling all traits through the shared type.
+The danger is "interface leakage" — when a shared `Datum` shape exposes internal
+representation details through the trait interface, coupling all traits through one
+overloaded representation.
 
 ### 5.2 Module Depth (Ousterhout 2018)
 
@@ -520,7 +369,7 @@ higher-kinded types or effect polymorphism, the Synapse traits could be reframed
 
 The Synapse Architecture naturally implements this pattern:
 - **Functional core** (pure, immutable): Scorer, Router, Composer, Policy — all operate on
-  immutable `Signal` values and return new values. No I/O, no state mutation.
+  immutable `Datum` inputs and return new values. No I/O, no state mutation.
 - **Imperative shell** (effectful): Substrate (persistence), Agent dispatch (LLM calls) —
   the only impure operations.
 
@@ -595,9 +444,9 @@ no core changes needed.
 **Rejected**: Adding verification at the end of a pipeline as an optional step that can be
 skipped for speed.
 
-**Roko's design**: P2 places verification at Step 6 of the 9-step loop — structurally central,
-not appendable. Gate verdicts are Engrams in the lineage DAG; skipping them leaves an audit
-gap that is visible to any DAG traversal.
+**Roko's design**: P2 places verification in the seven-step loop as a load-bearing phase,
+not an appendable afterthought. Gate verdicts are Engrams in the lineage DAG; skipping them
+leaves an audit gap that is visible to any DAG traversal.
 
 ---
 
@@ -633,29 +482,39 @@ gap that is visible to any DAG traversal.
 ## Current Status and Gaps
 
 - **Design principles (P1-P7)**: Documented and enforced in architectural review. Not
-  formally encoded as automated checks (a linter for principle violations would be useful).
-- **T0 Probes**: Specified but not implemented. The probe registry (`Vec<Box<dyn Probe>>`)
+  formally encoded as automated checks; a linter for principle violations would be useful.
+- **Engram / Pulse / Bus / Substrate split**: `Engram` and `Substrate` ship. The current event
+  bus exists in runtime code, but `Pulse` and a generic kernel `Bus` trait are target-state.
+- **HDC fingerprint**: HDC primitives ship, but there is not yet an HDC fingerprint field on
+  every `Engram`.
+- **Demurrage**: Target-state only. Standard decay exists; the demurrage model does not.
+- **Heuristics / falsifiers commons**: Target-state only. Shared falsifier-aware calibration is
+  not yet a live runtime surface.
+- **c-factor**: Partial. It exists as a routing/coordination signal, but not yet at the full
+  scope described here.
+- **Replication ledger**: Not yet built as a first-class runtime subsystem.
+- **Plugin SPI**: Target-state. The current `roko-plugin` crate is a narrow event-source and
+  feedback SDK, not the full multi-tier extension platform described above.
+- **16 T0 Probes**: Specified but not implemented. The probe registry (`Vec<Box<dyn Probe>>`)
   is straightforward; individual probes need domain-specific implementations.
-- **VCG Auction**: Specified with bid computation formulas. Not yet wired into the shipping
-  Composer. Current context selection uses score-based ranking.
+- **VCG Attention Auction**: Specified with bid computation formulas. Not yet wired into the
+  shipping Composer; current context selection uses score-based ranking.
 - **Somatic Landscape**: `roko-daimon` has PAD vector and behavioral states. The k-d tree
   somatic landscape is specified but not built.
-- **Hypnagogia**: Specified in `roko-dreams` as scaffold. Not shipping.
-- **31.6× Calibration**: Heuristic model only. Requires Korai chain for validation.
+- **Hypnagogia Engine**: Specified in `roko-dreams` as scaffold. Not shipping.
 - **Predictive Foraging**: CalibrationTracker specified in `roko-learn`. Prediction
-  registration wired; foraging stopping rule not yet implemented.
-- **x402**: Protocol integration path identified. Not yet implemented.
+  registration is wired; the stopping rule is not yet implemented.
+- **Collective calibration loop**: Heuristic model only. Requires broader verified-outcome
+  infrastructure before it can become a stable system behavior.
 - **Forensic AI**: Content-addressed lineage DAG exists. Causal replay tooling (`roko replay`)
-  exists for simple cases. Full forensic reconstruction not yet built.
-- **EvoSkills**: Skill library exists in `roko-learn`. Adversarial verification loop not
-  yet implemented.
-- **ADAS**: Not started. Depends on stable trait compositions.
-- **Cognitive Kernel**: Cognitive signals partially implemented (SIGPAUSE in conductor).
-  Namespaces and scheduling not yet built.
-- **Cross-Domain Resonance**: HDC vectors built in `roko-primitives`. Cross-domain detection
-  not yet wired.
-- **Generative Interfaces**: Specified. Depends on ROSEDUST design system (not yet built).
-- **Knowledge Futures**: P3 feature. Deferred.
+  exists for simple cases. Full forensic reconstruction is not yet built.
+- **EvoSkills / ADAS**: Skill-library evolution and meta-search are still not fully wired.
+  Both depend on stable trait compositions and stronger verifier isolation.
+- **Cross-Domain Insight Resonance**: HDC vectors are built in `roko-primitives`. Cross-domain
+  detection is not yet wired.
+- **Generative Interfaces**: Specified. Depends on the ROSEDUST design system, which is not
+  yet fully built.
+- **Knowledge Futures Market**: Deferred as a P3 feature. Depends on Korai chain deployment.
 
 ---
 
@@ -664,9 +523,10 @@ gap that is visible to any DAG traversal.
 - See [00-vision-and-thesis](./00-vision-and-thesis.md) for the core thesis underlying these principles
 - See [04-decay-variants](./04-decay-variants.md) for P5 (Decay as Feature) details
 - See [05-provenance-and-attestation](./05-provenance-and-attestation.md) for P4 (Content-Addressed) and P7 (Observable) details
-- See [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for T0/T1/T2 tier routing (Innovation 1)
-- See [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for Daimon (P6), Dreams (Innovation 4), and Neuro
-- See [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) for Innovation 5 (31.6× Calibration) details
-- See [16-autocatalytic-and-cybernetics](./16-autocatalytic-and-cybernetics.md) for the autocatalytic improvement theory
-- See topic [08-chain](../08-chain/INDEX.md) for Korai chain and on-chain innovations (7, 8, 14)
+- See [11-dual-process-and-active-inference](./11-dual-process-and-active-inference.md) for T0/T1/T2 tier routing and probe logic
+- See [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) for Daimon, Dreams, and Neuro
+- See [14-c-factor-collective-intelligence](./14-c-factor-collective-intelligence.md) for c-factor, collective calibration, and heuristic learning
+- See [16-autocatalytic-and-cybernetics](./16-autocatalytic-and-cybernetics.md) for the autocatalytic improvement theory and feedback loops
+- See topic [08-chain](../08-chain/INDEX.md) for chain settlement, ledgered verification, and knowledge-market primitives
 - See topic [10-dreams](../10-dreams/INDEX.md) for Hypnagogia and Dreams engine details
+- See [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md) for the REF19 primitive/composed split

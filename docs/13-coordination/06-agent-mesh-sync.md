@@ -3,11 +3,14 @@
 > **Layer**: L0 Runtime (connection lifecycle, event bus), L1 Framework (transport backends,
 > protocol definition)
 >
-> **Synapse traits**: `Substrate` (the Agent Mesh as a distributed store), `Policy` (reactive
-> behavior on received messages)
+> **Synapse traits**: `Bus` (MeshBus for Pulses), `Substrate` (MeshSubstrate as a distributed
+> store), `Policy` (reactive behavior on received messages)
 >
 > **Prerequisites**: `03-digital-pheromones.md` (what gets transported),
 > `05-pheromone-scope.md` (Mesh scope definition)
+
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
 
 
 > **Implementation**: Specified
@@ -16,10 +19,11 @@
 
 ## Overview
 
-The Agent Mesh (renamed from "Styx" in the legacy architecture) is Roko's peer-to-peer
-connectivity layer for Mesh-scope pheromone propagation, collective knowledge sharing, and
-morphogenetic coordination signals. It provides transport between agents in a Collective
-(renamed from "Clade") without requiring a centralized message broker.
+The Agent Mesh is Roko's peer-to-peer connectivity layer for Mesh-scope pheromone
+propagation, collective knowledge sharing, and morphogenetic coordination signals. In the
+two-fabric model it is not a separate trait family: MeshBus carries Pulses and MeshSubstrate
+replicates Engrams. It provides transport between agents in a Collective without requiring a
+centralized relay broker.
 
 The Agent Mesh supports three co-equal transport mechanisms:
 
@@ -48,10 +52,11 @@ forward for offline agents, and ERC-8004 for discovery and identity binding.
 
 ### EventFabric as Integration Point
 
-Regardless of transport, all messages converge on the EventFabric — Roko's internal event bus.
-A pheromone arriving via WebSocket and the same pheromone arriving via Iroh produce identical
-events. Consumers (NeuroStore ingestion, context assembly, morphogenetic coordinator) never
-know which transport delivered a message.
+Regardless of transport, all messages converge on the Bus projection layer. A pheromone
+arriving via WebSocket and the same pheromone arriving via Iroh produce identical Pulses on
+topics such as `mesh.pheromone.deposited`. Durable Engrams land in MeshSubstrate; consumers
+(NeuroStore ingestion, context assembly, morphogenetic coordinator) never need to know which
+transport delivered the signal.
 
 Deduplication happens at the ingestion boundary via version vectors (`{agent_id → last_seen_seq}`). If a pheromone arrives via both WebSocket and Iroh, the second arrival is silently dropped.
 
@@ -66,9 +71,10 @@ This connection works from behind any NAT, firewall, or restrictive network — 
 outbound HTTPS connection on port 443. No inbound ports, no tunnels, no port forwarding.
 
 The WebSocket connection serves as a bidirectional channel for ALL Mesh traffic: collective
-sync, pheromone updates, knowledge exchange, event relay, and TUI event forwarding. This
-multiplexed design minimizes connection overhead while supporting the full range of Mesh
-services.
+sync, pheromone updates, knowledge exchange, Bus relay, and TUI forwarding. In the
+two-fabric model it is one backend for MeshBus Pulses, while MeshSubstrate handles durable
+Engram replication. This multiplexed design minimizes connection overhead while supporting the
+full range of Mesh services.
 
 ### Connection Registry
 
@@ -120,7 +126,7 @@ pheromone signals deposited by daytime agents when it boots in the morning.
 |-------------|-----------|---------|
 | `PheromoneSync` | Server -> Agent | Batch of pheromone Engrams from Collective peers |
 | `PheromoneImmediate` | Server -> Agent | High-priority pheromone (Threat, high-intensity Anomaly) |
-| `PheromoneDelta` | Agent -> Server | New pheromone deposits for relay to Collective |
+| `PheromoneDelta` | Agent -> Server | New pheromone deposits for relay to Collective and Bus publication |
 | `KnowledgeSync` | Bidirectional | NeuroStore entries promoted to Mesh scope |
 | `MorphogeneticBroadcast` | Agent -> Server -> Peers | Role vector and specialization signals |
 | `VersionVector` | Agent -> Server | Sequence numbers for dedup and delta computation |
@@ -344,18 +350,21 @@ roughly 500,000 pheromone exchanges per day through the relay -- well above norm
 
 ### Pheromone Propagation via iroh-gossip
 
-Each `(domain, regime)` pair gets a gossip topic. Topic IDs are deterministic:
+Each `(domain, regime)` pair gets a gossip topic. Topic IDs are deterministic, and the same
+transport also carries Bus topics such as `mesh.pheromone.deposited`:
 
 ```
 TopicId = blake3::hash(format!("roko/pheromone/{domain}/{regime}"))
 ```
 
 The topic set is bounded: domains × regimes ≈ 50 topics maximum. Agents subscribe only to
-topics for domains they operate in, preventing unnecessary message delivery.
+topics for domains they operate in, preventing unnecessary pulse delivery. MeshBus reuses
+the same topology to fan out Pulses while MeshSubstrate keeps the durable record.
 
 `PheromoneDeposit` messages are serialized (postcard encoding) and broadcast via
 `sender.broadcast()`. Decay is computed locally by each agent based on the deposit timestamp —
-no coordination needed. The existing exponential decay formula applies unchanged.
+no coordination needed. The existing exponential decay formula applies unchanged. The
+`mesh.pheromone.deposited` topic is the Bus-facing announcement for the same deposit.
 
 When gossip receivers fall behind (`Event::Lagged`), the message is dropped and logged at WARN
 level. Pheromone loss is acceptable -- signals are fuzzy by nature, and a lost pheromone will
@@ -591,7 +600,7 @@ events invalidate the cache entry immediately, avoiding stale data between poll 
 | Service | WebSocket | Iroh | Notes |
 |---------|-----------|------|-------|
 | Collective sync | Store-and-forward for offline agents | Direct QUIC streams | Iroh preferred, WS fallback |
-| Pheromone propagation | Central fan-out from Mesh server | iroh-gossip per topic | Gossip scales better |
+| Pheromone propagation | Central fan-out from Mesh server | iroh-gossip per topic | MeshBus fans out Pulses; MeshSubstrate persists Engrams |
 | Knowledge exchange | Relay | iroh-blobs (content-addressed) | Iroh preferred |
 | Bloom oracle | Server-side cache | Gossip broadcast | Iroh for Collective, WS for ecosystem |
 | Causal graph federation | Relay | Gossip | Iroh preferred |
@@ -1030,3 +1039,5 @@ monthly_budget = 10.00     # Max USDC per month
 - `05-pheromone-scope.md` — Scope model (Local, Mesh, Global)
 - `08-permissioned-subnets.md` — Private Mesh scopes
 - `09-stigmergy-scaling.md` — How the transport layer scales
+- `../../tmp/refinements/09-phase-2-implications.md` — Phase 2+ Bus/Substrate split for Mesh, Dreams, coordination, and heartbeat
+- `../00-architecture/01-naming-and-glossary.md` — Glossary for Bus, Pulse, MeshBus, and MeshSubstrate

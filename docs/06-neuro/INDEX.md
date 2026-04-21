@@ -1,6 +1,12 @@
 # Neuro — Cognitive Knowledge Layer
 
-> Neuro (`roko-neuro`) is the agent's persistent, tiered, HDC-indexed knowledge system. It classifies knowledge by type (Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge), validates it through four tiers (Transient → Working → Consolidated → Persistent), encodes it as 10,240-bit hyperdimensional computing vectors for sub-millisecond similarity search, and decays it over time using Ebbinghaus forgetting curves. Neuro is a semantic wrapper around the Synapse Architecture's Substrate trait — it adds knowledge-specific logic on top of generic Engram storage.
+> Neuro (`roko-neuro`) is the agent's persistent, tiered knowledge system. Shipping pieces include `KnowledgeEntry`, `KnowledgeKind`, `KnowledgeStore`, `Distiller`, tier progression, and HDC-backed encoding/query support in parts of the stack. The broader design in this topic treats universal per-Engram fingerprints, demurrage/balance freshness, and worldview-aware heuristic memory as target-state extensions rather than fully implemented behavior.
+> REF14 contributes useful direction here, but the near-term layer is heuristic calibration and contradiction tracking around existing knowledge structures, not a finished worldview stack.
+>
+> **Implementation status**
+> - **Shipping**: typed knowledge entries, tier progression, distillation, storage, and partial HDC-backed retrieval/encoding.
+> - **Target-state**: richer heuristic calibration, explicit contradiction/falsifier records, and worldview-aware organization.
+> - **Deferred**: demurrage/balance freshness as the primary memory model and worldview cold-tier preservation.
 
 **Part of**: [Roko PRD](../INDEX.md)
 **Status**: Written
@@ -11,9 +17,9 @@
 
 ## Abstract
 
-Neuro is the cognitive knowledge layer of the Roko agent framework. While episode logs capture raw agent turns and Dreams drives offline consolidation, Neuro is the subsystem that transforms experience into **durable, typed, validated, searchable knowledge**. Every piece of knowledge an agent retains passes through Neuro's classification, validation, encoding, and decay pipeline.
+Neuro is the cognitive knowledge layer of the Roko agent framework. While episode logs capture raw agent turns and Dreams drives offline consolidation, Neuro is the subsystem that transforms experience into **durable, typed, validated, searchable knowledge**. Every piece of knowledge an agent retains passes through Neuro's classification, validation, encoding, and freshness pipeline; the balance-bearing demurrage model described in some design docs is deferred.
 
-The subsystem was originally called "Grimoire" (now Neuro) in the legacy Bardo (now Roko) architecture. The rename reflects a shift from mystical framing to neuroscience-inspired terminology, aligned with the research traditions that underpin Neuro's design: Complementary Learning Systems theory (McClelland et al. 1995), Ebbinghaus forgetting curves (1885), hyperdimensional computing (Kanerva 2009, Kleyko et al. 2022), somatic markers (Damasio 1994), and hippocampal replay (Mattar & Daw 2018).
+Neuro is framed as a neuroscience-inspired durable knowledge layer, aligned with the research traditions that underpin its design: Complementary Learning Systems theory (McClelland et al. 1995), Ebbinghaus forgetting curves (1885), hyperdimensional computing (Kanerva 2009, Kleyko et al. 2022), somatic markers (Damasio 1994), and hippocampal replay (Mattar & Daw 2018).
 
 Neuro spans all five architectural layers (L0 Runtime through L4 Orchestration) via trait objects and callback interfaces. It is one of three cognitive cross-cuts (alongside Daimon for motivation/affect and Dreams for offline consolidation) that are injected into the system at multiple points, never hardcoded to a single layer.
 
@@ -23,19 +29,19 @@ Neuro spans all five architectural layers (L0 Runtime through L4 Orchestration) 
 
 | # | Sub-doc | What it covers |
 |---|---|---|
-| 00 | [Vision and Grimoire Rename](./00-vision-and-grimoire-rename.md) | Neuro's architectural position, the rename from Grimoire, dissolution of roko-golem, design principles |
+| 00 | [Vision and Rename History](./00-vision-and-grimoire-rename.md) | Neuro's architectural position, rename history, legacy umbrella-crate dissolution, design principles |
 | 01 | [Six Knowledge Types](./01-six-knowledge-types.md) | Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge — definitions, examples, Rust types |
 | 02 | [Four Validation Tiers](./02-four-validation-tiers.md) | Transient (0.1×), Working (0.5×), Consolidated (1.0×), Persistent (5.0×) — promotion/demotion mechanics |
 | 03 | [Type Half-Lives](./03-type-half-lives.md) | Base half-life rationale for each type (7d–365d), Ebbinghaus model, current code constants |
-| 04 | [HDC/VSA Foundations](./04-hdc-vsa-foundations.md) | BSC algebra, D=10,240, capacity bounds, SIMD performance, Johnson-Lindenstrauss |
+| 04 | [HDC/VSA Foundations](./04-hdc-vsa-foundations.md) | BSC algebra, 10,240-bit fingerprints, capacity bounds, SIMD performance, consensus currency |
 | 05 | [HDC Operations](./05-hdc-operations.md) | Bind (XOR), Bundle (majority vote), Permute (cyclic shift), Similarity (Hamming) — Rust implementation |
-| 06 | [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md) | Text→BSC encoding pipeline, role-filler bindings, three-tier search, structured queries |
-| 07 | [Ebbinghaus Decay with Tier](./07-ebbinghaus-decay-with-tier.md) | Full decay formula, worked examples, GC schedule, reinforcement mechanics |
+| 06 | [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md) | Default encoder, per-Engram fingerprints, role-filler bindings, similarity, consensus, analogy |
+| 07 | [Demurrage with Tier Shaping](./07-ebbinghaus-decay-with-tier.md) | Target-state demurrage/balance freshness, Ebbinghaus rate shaping, freeze/thaw, HDC novelty reinforcement |
 | 08 | [Cross-Domain HDC Transfer](./08-cross-domain-hdc-transfer.md) | Structural analogy detection, abstract role vectors, insight resonance, analogical reasoning |
 | 09 | [False Positive Math](./09-false-positive-math.md) | Threshold selection (0.526), Bonferroni correction, Johnson-Lindenstrauss validation |
-| 10 | [Knowledge Query API](./10-knowledge-query-api.md) | NeuroStore trait, KnowledgeStore JSONL backend, ContextAssembler, integration points |
+| 10 | [Knowledge Query API](./10-knowledge-query-api.md) | NeuroStore trait, fingerprint queries, KnowledgeStore JSONL backend, ContextAssembler |
 | 11 | [AntiKnowledge Challenge](./11-antiknowledge-challenge.md) | Challenge mechanism, refutation warnings, epistemic parasite detection, Price equation |
-| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Episodes→Insights→Heuristics→PLAYBOOK.md, D1/D2/D3 stages, TierProgression struct |
+| 12 | [4-Tier Distillation Pipeline](./12-4-tier-distillation-pipeline.md) | Current distillation pipeline plus target-state heuristic calibration, contradiction handling, worldview clustering, and HDC novelty extensions |
 | 13 | [Somatic Integration](./13-somatic-integration.md) | SomaticLandscape k-d tree, PAD vector, mood-congruent retrieval, 15% contrarian |
 | 14 | [Library of Babel](./14-library-of-babel.md) | Cross-collective knowledge, 5 inflow channels, confidence discounting, publishing policies |
 | 15 | [Knowledge Backup/Restore](./15-knowledge-backup-restore.md) | 4-step BACKUP→DELETE→CREATE→RESTORE, replacing succession, mesh sharing |
@@ -65,6 +71,12 @@ This topic connects to:
 - [Topic 11: Safety](../11-safety/INDEX.md) — Knowledge ingestion safety (quarantine → consensus → sandbox → adopt)
 - [Topic 13: Coordination](../13-coordination/INDEX.md) — Agent Mesh connectivity for cross-agent knowledge sync
 - [Topic 15: Code Intelligence](../15-code-intelligence/INDEX.md) — roko-index uses HDC for code symbol fingerprinting
+- [Naming Map and Glossary](../00-architecture/01-naming-and-glossary.md) — canonical architecture terminology, including Engram, demurrage, and HDC vocabulary
+- [04-decay-variants](../00-architecture/04-decay-variants.md) — architecture-side retention model
+- [18-decay-tier-matrix](../00-architecture/18-decay-tier-matrix.md) — tier progression and cold-storage calibration
+- [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) — full HDC fingerprint proposal reflected in this chapter
+- [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) — demurrage refinement reflected in this chapter
+- [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) — heuristic calibration, falsifiers, and worldview clustering reflected in this chapter
 
 ---
 
@@ -95,11 +107,11 @@ This topic connects to:
 
 ## Current Status and Implementation Gaps
 
-**Core knowledge system**: The `KnowledgeEntry`, `KnowledgeKind`, and `NeuroStore` trait are implemented. The JSONL storage backend (`KnowledgeStore`) is functional with decay, GC, and optional HDC indexing. The distillation pipeline (`Distiller`, `TierProgression`) provides three-stage episode→insight→heuristic→playbook progression.
+**Core knowledge system**: The `KnowledgeEntry`, `KnowledgeKind`, and `NeuroStore` trait are implemented. The JSONL storage backend (`KnowledgeStore`) is functional with decay, GC, and HDC indexing support, and the distillation pipeline (`Distiller`, `TierProgression`) provides episode→insight→heuristic→playbook progression. The docs in this topic also describe a broader demurrage/balance model, but that part remains deferred.
 
-**HDC subsystem**: The `HdcVector` (10,240-bit BSC) is fully implemented with all four operations, deterministic seeding, serde, and rkyv zero-copy support. Code symbol fingerprinting is implemented in `roko-index`.
+**HDC subsystem**: The `HdcVector` (10,240-bit BSC) is fully implemented with all four operations, deterministic seeding, serde, and rkyv zero-copy support. The docs model every Engram as carrying a first-class fingerprint, but in current code HDC support is partial rather than universal. Code symbol fingerprinting is implemented in `roko-index`.
 
-**Key gaps**: The foundational refactor items are now in place: `KnowledgeEntry` has tiers plus emotional provenance, the PRD-native knowledge kinds are present, `ContextAssembler` is implemented in `roko-neuro`, ingest persists HDC vectors, CausalLinks now carry directional HDC encodings, Neuro's local context allocator now uses auction-style budget selection plus mood-congruent scoring, direct somatic re-ranking, and a contrarian affect slice, and `PromptComposer` now runs a shared bidder-aware cross-subsystem auction over composed prompt sections with PAD urgency / affect modulation and diagnostic externality payments. Daimon now also owns a real 8D `SomaticLandscape`, config-backed strategy-space registration, and a shared strategy-space computer for routing-time affective bias, runtime somatic events, dream-time depotentiation, and role-aware non-coding projection. The remaining gaps are the higher-order features: exact welfare-maximizing/fair VCG settlement, broader consolidation policy, fuller active inference, true domain-native extractors, and cross-domain resonance.
+**Key gaps**: The foundational refactor items are now in place: `KnowledgeEntry` has tiers plus emotional provenance, the PRD-native knowledge kinds are present, `ContextAssembler` is implemented in `roko-neuro`, ingest persists HDC fingerprints, CausalLinks now carry directional HDC encodings, Neuro's local context allocator now uses auction-style budget selection plus mood-congruent scoring, direct somatic re-ranking, and a contrarian affect slice, and `PromptComposer` now runs a shared bidder-aware cross-subsystem auction over composed prompt sections with PAD urgency / affect modulation and diagnostic externality payments. Daimon now also owns a real 8D `SomaticLandscape`, config-backed strategy-space registration, and a shared strategy-space computer for routing-time affective bias, runtime somatic events, dream-time depotentiation, and role-aware non-coding projection. The remaining gaps are the higher-order features: exact welfare-maximizing/fair VCG settlement, broader consolidation policy, fuller active inference, true domain-native extractors, and cross-domain resonance.
 
 **Recommended priority**: (1) deepen the shared auction into fuller VCG pricing and bidder coverage, (2) add true domain-native strategy-space extractors on top of the role-aware projection, (3) expand active-inference scoring, (4) add cross-domain resonance, (5) deepen the HDC stack with codebooks and multi-stage search.
 
@@ -117,15 +129,15 @@ See [16-current-status-and-gaps.md](./16-current-status-and-gaps.md) for the com
   - `refactoring-prd/03-cognitive-subsystems.md` (Neuro §1, Daimon §2, Dreams §3)
   - `refactoring-prd/04-knowledge-and-mesh.md` (Knowledge Architecture, Korai, Agent Mesh, Backup/Restore)
   - `refactoring-prd/09-innovations.md` (Somatic Landscape, Cross-Domain Resonance, False Positive Math, VCG)
-  - `bardo-backup/prd/04-memory/` (00-overview, 01-grimoire, 01b-memetic, 01c-hdc, 02-emotional, 06-economy, 09-safety, 13-library-of-babel)
-  - `bardo-backup/prd/shared/` (hdc-vsa, hdc-applications, hdc-fingerprints)
-  - `bardo-backup/tmp/mori-refactor/` (09-memory-and-knowledge, 12-cognitive-architecture)
-  - `bardo-backup/tmp/agent-chain/` (04-hdc, 05-knowledge-layer, 15-dynamic-context-assembly)
+  - historical archive: `bardo-backup/prd/04-memory/` (00-overview, 01-grimoire, 01b-memetic, 01c-hdc, 02-emotional, 06-economy, 09-safety, 13-library-of-babel)
+  - historical archive: `bardo-backup/prd/shared/` (hdc-vsa, hdc-applications, hdc-fingerprints)
+  - historical archive: `bardo-backup/tmp/mori-refactor/` (09-memory-and-knowledge, 12-cognitive-architecture)
+  - historical archive: `bardo-backup/tmp/agent-chain/` (04-hdc, 05-knowledge-layer, 15-dynamic-context-assembly)
   - `crates/roko-neuro/src/` (lib.rs, knowledge_store.rs, distiller.rs, tier_progression.rs, context.rs)
-  - `crates/bardo-primitives/src/hdc.rs`
+  - `crates/roko-primitives/src/hdc.rs`
   - `crates/roko-index/src/hdc.rs`
   - `crates/roko-learn/src/hdc_clustering.rs`
-  - `crates/roko-golem/src/grimoire.rs` (dissolved placeholder)
+  - legacy crate path: `crates/roko-golem/src/grimoire.rs` (dissolved placeholder)
 - **Decisions requiring judgment**:
   - The refactoring-prd specifies 6 types while the code has 7 variants. Sub-doc 01 documents both and proposes reconciliation (keep all, add missing).
   - Warning (7d) is not yet in the enum; sub-doc 01 notes this gap and the overlap with Constraint.

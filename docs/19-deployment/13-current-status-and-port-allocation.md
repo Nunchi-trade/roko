@@ -22,7 +22,7 @@
 | Daemon mode (systemd) | **Designed** | Tier 3H | Same as launchd |
 | Fly.io deployment | **Not configured** | Tier 2 | Need fly.toml per service, deploy scripts |
 | WASM target | **Feature flags exist** | Tier 3H | Need end-to-end validation |
-| Edge target | **Designed** | P3 | Need edge build profile, validation |
+| Edge target | **Designed** | P3 | Need Cargo edge build profile (`[profile.edge]`), validation |
 | Subscription configuration | **Designed** | Tier 3H | Daemon mode |
 | Multi-repo coordination | **Designed** | Tier 3H | Daemon mode, subscription system |
 | Secret management (env vars) | **Working** | Tier 0 | None — roko-agent reads env vars |
@@ -146,7 +146,7 @@ These are designed but not in the near-term roadmap:
 | Item | Description |
 |---|---|
 | WASM validation | End-to-end WASM build, wasm-bindgen wrapper crate |
-| Edge build profile | Create `[profile.edge]`, measure binary size, example agent |
+| Cargo edge build profile | Create `[profile.edge]`, measure binary size, example agent |
 | Hedged requests | Implement dual-provider hedging with cost limits |
 | Playground infrastructure | Per-user Fly Machines, warm pool, landing page |
 | Content-addressed cache | LRU dedup cache for LLM responses |

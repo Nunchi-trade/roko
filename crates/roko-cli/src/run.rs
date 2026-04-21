@@ -61,7 +61,7 @@ impl RunReport {
 
 /// Run the universal loop once for `prompt_text` under `workdir`.
 ///
-/// - Opens (or creates) `workdir/.roko/signals.jsonl`.
+/// - Opens (or creates) `workdir/.roko/engrams.jsonl`.
 /// - Seeds a role + task `PromptSection`, composes them under the config's budget.
 /// - Invokes the configured agent backend.
 /// - Runs every gate in the config in declaration order; each gate sees the

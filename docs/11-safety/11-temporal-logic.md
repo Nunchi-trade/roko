@@ -267,7 +267,7 @@ impl TemporalMonitor {
     /// Process a batch of Engrams (one gamma tick's worth).
     /// Returns violation Engrams for any formulas that entered
     /// a rejecting state.
-    pub fn process(&mut self, engrams: &[Signal]) -> Vec<Signal> {
+    pub fn process(&mut self, engrams: &[Engram]) -> Vec<Engram> {
         let mut violations = Vec::new();
 
         for engram in engrams {
@@ -471,7 +471,7 @@ pub struct TemporalGate {
 
 #[async_trait]
 impl Gate for TemporalGate {
-    async fn verify(&self, engram: &Signal) -> Result<Verdict> {
+    async fn verify(&self, engram: &Engram) -> Result<Verdict> {
         let mut monitor = self.monitor.lock();
         let violations = monitor.process(&[engram.clone()]);
 
@@ -582,7 +582,7 @@ pub struct TemporalMonitor {
 }
 
 impl Policy for TemporalMonitor {
-    fn decide(&self, engrams: &[Signal]) -> Vec<Signal> {
+    fn decide(&self, engrams: &[Engram]) -> Vec<Engram> {
         let mut violations = Vec::new();
         for engram in engrams {
             for (automaton, state) in self.automata.iter().zip(self.states.iter_mut()) {

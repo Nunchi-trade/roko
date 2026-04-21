@@ -65,7 +65,7 @@ pub struct Conductor {
 }
 
 impl Policy for Conductor {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal> {
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         // 1. Check circuit breaker — tripped plans get Failed immediately
         // 2. Run all watchers — collect WatcherOutputs
         // 3. Apply intervention policy — worst severity wins
@@ -250,7 +250,7 @@ sequence executes:
    └─ If plan is tripped → return Fail immediately
 
 2. Run all 10 watchers against the signal stream
-   └─ Each watcher returns Vec<Signal> (empty = healthy)
+   └─ Each watcher returns Vec<Engram> (empty = healthy)
    └─ Collect all non-empty results as WatcherOutputs
 
 3. Apply intervention policy

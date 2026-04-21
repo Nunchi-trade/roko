@@ -23,8 +23,8 @@ around learned knowledge. A single Roko agent is useful. A thousand Roko agents 
 routing weights, skill libraries, and gate thresholds through conflict-free replicated data
 structures are something qualitatively different.
 
-**What exists today**: A working CLI agent with plan-execute-gate-learn loops, 18 crates,
-~177K LOC, and a pure-Rust core that has zero platform dependencies in its cognitive layer.
+**What exists today**: A working CLI agent with plan-execute-gate-learn loops, 36 workspace members,
+~322K LOC, and a pure-Rust core that has zero platform dependencies in its cognitive layer.
 
 **What this document describes**: The path from that single-target CLI to a universal agent
 runtime where the compilation target is a deployment detail and the intelligence compounds
@@ -742,4 +742,4 @@ without formal verification of the gate pipeline itself. Do not rush this.
 [EXECUTIVE-SUMMARY.md](EXECUTIVE-SUMMARY.md). For the full PRD corpus, see
 [INDEX.md](INDEX.md).*
 
-*2026-04-13 -- Roko v0.1 -- 18 crates -- 1,568 tests*
+*2026-04-13 -- Roko v0.1 -- 36 workspace members -- 3,761 tests*

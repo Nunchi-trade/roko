@@ -48,9 +48,13 @@
 
 pub mod affect;
 pub mod agent;
+/// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
+pub mod arbitration;
 pub mod attestation;
 pub mod body;
 pub mod build;
+/// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
+pub mod bus_backends;
 pub mod catalyst;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
@@ -59,14 +63,23 @@ pub mod conductor;
 pub mod config;
 pub mod context;
 pub mod dashboard_snapshot;
+pub mod datum;
 pub mod decay;
+pub mod demurrage;
+/// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
+pub mod domain_profile;
 pub mod engram;
 pub mod error;
+/// Forensic replay engine for causal decision reconstruction (SAFE-12).
+pub mod forensic;
 pub mod hash;
+/// Cognitive immune system -- quarantine, anomaly detection, incident linking.
+pub mod immune;
 pub mod kind;
 pub mod language;
 pub mod loop_tick;
 pub mod metric;
+pub mod namespace;
 pub mod obs;
 pub mod operating_frequency;
 pub mod phase;
@@ -74,6 +87,8 @@ pub mod polyglot;
 pub mod prediction;
 pub mod project;
 pub mod provenance;
+pub mod pulse;
+pub mod pulse_bus;
 pub mod query;
 pub mod score;
 pub mod secrets;
@@ -81,6 +96,7 @@ pub mod shutdown;
 pub mod signal_kinds;
 pub mod state_hub;
 pub mod task;
+pub mod temperament;
 pub mod tool;
 pub mod traits;
 pub mod verdict;
@@ -91,23 +107,42 @@ pub use agent::{
     ToolPermissions, TurnBudget, score_model_for_task, select_model_for_task,
     select_model_for_task_with_bonus,
 };
+pub use arbitration::{
+    ArbitrationConfig, ArbitrationOutcome, Arbitrator, Subsystem, SubsystemGuidance,
+};
 pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
 pub use body::Body;
 pub use build::{BuildCommand, BuildSystem};
+pub use bus_backends::{
+    BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
+};
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
-    ChatMessage, ContentBlock, ImageUrl, MessageContent, ToolCallFunction, ToolCallMessage,
+    ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
+    RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
+    ToolCallMessage, ToolChoice, Usage,
 };
-pub use conductor::ConductorDecision;
+pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use context::Context;
+pub use datum::Datum;
 pub use decay::Decay;
-pub use engram::{Engram, EngramBuilder};
+pub use demurrage::Demurrage;
+pub use domain_profile::{DomainProfile, TypedContext};
+pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
+pub use forensic::{
+    ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
+    ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
+};
 pub use hash::ContentHash;
+pub use immune::{
+    AnomalyScore, ImmuneResponse, IncidentLink, IncidentRelation, QuarantineDecision,
+    QuarantineEntry, QuarantineStatus, QuarantineVault, ResponseAction,
+};
 pub use kind::Kind;
 pub use language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
-pub use loop_tick::{TickOutcome, loop_tick};
+pub use loop_tick::{TickConfig, TickOutcome, loop_tick, loop_tick_with_config};
 pub use metric::{ConfigHash, Headlines, TaskMetric, compute_headlines};
 pub use operating_frequency::{
     OperatingFrequency, OperatingFrequencyAffect, OperatingFrequencyScheduleContext,
@@ -116,19 +151,30 @@ pub use operating_frequency::{
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{
-    PredictionCalibrationSource, PredictionCalibrationSummary, PredictionPolicy, PredictiveScorer,
+    AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
+    ChainQueryPayload, ChainTarget, ChangeContext, CodingMetric, CodingQueryPayload, CodingScope,
+    ExponentialMovingAverage, OperationsMetric, OperationsQueryPayload, Oracle, OracleDomain,
+    OracleQuery, PredictedValue, Prediction, PredictionAccuracy, PredictionCalibrationSource,
+    PredictionCalibrationSummary, PredictionInterval, PredictionOutcome, PredictionPolicy,
+    PredictionProvenance, PredictionStore, PredictiveScorer, QueryPayload, ResearchMetric,
+    ResearchQueryPayload, ResidualCorrector, SourceReference,
 };
 pub use project::{
     DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
     detect_from_files_with_cargo_toml,
 };
-pub use provenance::Provenance;
+pub use provenance::{
+    Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
+};
+pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
+pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
+pub use roko_primitives::HdcVector;
 pub use score::Score;
 pub use signal_kinds::*;
 pub use task::{
-    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight, TaskMeta,
-    TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
+    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
+    TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
 };
 // Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
@@ -138,7 +184,11 @@ pub use dashboard_snapshot::{
     DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
     TrendBucket, TrendBuckets,
 };
+pub use namespace::{
+    Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
+};
 pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
+pub use temperament::Temperament;
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
     FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,
@@ -148,5 +198,5 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

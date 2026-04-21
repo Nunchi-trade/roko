@@ -11,7 +11,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -22,15 +22,53 @@ use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier, NeuroStore};
 
 /// Default garbage-collection threshold for knowledge entries.
 pub const DEFAULT_GC_MIN_CONFIDENCE: f64 = 0.05;
+/// Minimum total query score an entry must exceed to be returned.
+pub const QUERY_SCORE_FLOOR: f64 = 0.0;
 /// Minimum retained confidence for AntiKnowledge entries.
 const ANTI_KNOWLEDGE_CONFIDENCE_FLOOR: f64 = 0.3;
 /// Multiplier applied when a knowledge entry has multiple independent sources.
 const CONFIRMATION_BOOST: f64 = 1.5;
+
+/// Death threshold: when recency factor falls below 1% of initial weight,
+/// the entry is considered "dead" and eligible for pruning.
+///
+/// Per spec (agent-chain-new/04-knowledge-layer.md): entries below 1% of
+/// initial weight enter the Death stage and should be pruned.
+pub const DEATH_THRESHOLD: f64 = 0.01;
+
+/// Confirmation decay adjustment factor.
+///
+/// Per spec: `weight(b) = initialWeight * 0.5^(age/halfLife) * (1 + confirmations * 0.1)`
+/// Each confirmation extends effective lifetime by 10%.
+const CONFIRMATION_DECAY_FACTOR: f64 = 0.1;
+
+/// Base confidence for resurrected entries (re-confirmed dead/frozen entries).
+///
+/// When an entry that was previously pruned or frozen is re-confirmed by a
+/// new episode, it is "resurrected" with this starter confidence and reset
+/// to Transient tier for re-validation.
+pub const RESURRECTION_CONFIDENCE: f64 = 0.6;
 /// Minimum number of shared tags for two entries to be considered similar.
 const MIN_TAG_OVERLAP: usize = 1;
 /// Minimum number of shared content keywords for two entries to be
 /// considered similar (applied when tag overlap meets the threshold).
 const MIN_KEYWORD_OVERLAP: usize = 2;
+#[cfg(feature = "hdc")]
+const HDC_SIMILARITY_BASELINE: f64 = 0.5;
+
+/// HDC similarity threshold at which an AntiKnowledge match logs a warning.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_WARN_THRESHOLD: f64 = 0.5;
+/// HDC similarity threshold at which a new entry's confidence is discounted.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_DISCOUNT_THRESHOLD: f64 = 0.7;
+/// HDC similarity threshold at which a new entry is rejected entirely.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_REJECT_THRESHOLD: f64 = 0.9;
+/// Confidence multiplier applied when a new entry conflicts with AntiKnowledge
+/// at the discount threshold.
+#[cfg(feature = "hdc")]
+const ANTI_KNOWLEDGE_DISCOUNT_FACTOR: f64 = 0.5;
 
 /// A record emitted when a newly ingested knowledge entry overlaps with
 /// an existing entry, indicating that an insight has been independently
@@ -51,7 +89,20 @@ pub struct KnowledgeConfirmationRecord {
     pub confirming_entry_id: String,
 }
 
-#[cfg(feature = "hdc")]
+/// A record of a conflict detected between a newly ingested entry and an
+/// existing AntiKnowledge entry. Emitted during `ingest()` for observability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AntiKnowledgeConflict {
+    /// ID of the new entry that conflicts with AntiKnowledge.
+    pub entry_id: String,
+    /// ID of the existing AntiKnowledge entry.
+    pub anti_knowledge_id: String,
+    /// HDC similarity score between the two entries.
+    pub similarity: f64,
+    /// Action taken: "warned", "discounted", or "rejected".
+    pub action: String,
+}
+
 const HDC_VECTOR_BYTES: usize = 1280;
 
 #[cfg(feature = "hdc")]
@@ -81,12 +132,211 @@ pub struct KnowledgeStats {
     pub total_entries: usize,
     /// Number of entries per semantic kind.
     pub kind_counts: BTreeMap<String, usize>,
+    /// Number of entries per validation tier.
+    pub tier_counts: BTreeMap<String, usize>,
+    /// Number of entries per source label.
+    pub source_counts: BTreeMap<String, usize>,
+    /// Number of AntiKnowledge entries.
+    pub anti_knowledge_count: usize,
     /// Mean confidence across all entries.
     pub average_confidence: Option<f64>,
     /// Oldest entry in the store, if any.
     pub oldest_entry: Option<KnowledgeEntry>,
     /// Newest entry in the store, if any.
     pub newest_entry: Option<KnowledgeEntry>,
+}
+
+/// Score breakdown for one knowledge query result.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeQueryBreakdown {
+    /// Keyword overlap between the query and the entry tags/content.
+    pub keyword_score: f64,
+    /// Confidence after anti-knowledge floors, confirmation boosts, and
+    /// emotional consolidation adjustments.
+    pub effective_confidence: f64,
+    /// Exponential freshness multiplier derived from effective half-life.
+    pub recency_factor: f64,
+    /// Retrieval multiplier derived from emotional congruence and intensity.
+    pub emotional_boost: f64,
+    /// Optional HDC similarity contribution when the `hdc` feature is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdc_similarity: Option<f64>,
+}
+
+/// One scored hit returned from the durable knowledge query path.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeQueryHit {
+    /// The matched entry.
+    pub entry: KnowledgeEntry,
+    /// Total score used for ranking.
+    pub total_score: f64,
+    /// Individual scoring components that contributed to `total_score`.
+    pub breakdown: KnowledgeQueryBreakdown,
+}
+
+/// Context assembly weights for scoring knowledge entries during retrieval (P1-59).
+///
+/// Per spec (agent-chain-new/07-context-assembly.md):
+/// - HDC similarity: 40%
+/// - Pheromone/keyword weight: 30%
+/// - Predictive Foraging utility: 20%
+/// - Freshness/recency: 10%
+///
+/// Also supports:
+/// - Cross-domain diversity bonus (P1-60): 10-20% bonus for entries from different domains
+/// - Three-tier injection (P1-61): Warning/Insight get priority, CausalLink/AntiKnowledge on-demand
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextAssemblyWeights {
+    /// Weight for HDC similarity score [0..1]. Default 0.40.
+    pub hdc_similarity: f64,
+    /// Weight for keyword/pheromone relevance [0..1]. Default 0.30.
+    pub keyword_relevance: f64,
+    /// Weight for predictive foraging utility [0..1]. Default 0.20.
+    pub pf_utility: f64,
+    /// Weight for freshness/recency [0..1]. Default 0.10.
+    pub freshness: f64,
+    /// Cross-domain diversity bonus [0..1]. Entries whose tags don't overlap
+    /// with the majority get this fractional boost. Default 0.15.
+    pub cross_domain_bonus: f64,
+    /// Whether to apply three-tier injection ordering.
+    pub tier_injection: bool,
+}
+
+impl Default for ContextAssemblyWeights {
+    fn default() -> Self {
+        Self {
+            hdc_similarity: 0.40,
+            keyword_relevance: 0.30,
+            pf_utility: 0.20,
+            freshness: 0.10,
+            cross_domain_bonus: 0.15,
+            tier_injection: true,
+        }
+    }
+}
+
+impl ContextAssemblyWeights {
+    /// Compute the weighted composite score for a knowledge entry.
+    ///
+    /// `keyword`: keyword/pheromone relevance score
+    /// `hdc`: HDC similarity score (0.0 if not available)
+    /// `recency`: freshness/recency factor
+    /// `utility`: predictive foraging utility (confidence_weight as proxy)
+    /// `is_cross_domain`: whether this entry is from a different domain than the query
+    pub fn composite(
+        &self,
+        keyword: f64,
+        hdc: f64,
+        recency: f64,
+        utility: f64,
+        is_cross_domain: bool,
+    ) -> f64 {
+        let base = self.hdc_similarity * hdc
+            + self.keyword_relevance * keyword
+            + self.pf_utility * utility
+            + self.freshness * recency;
+
+        if is_cross_domain {
+            base * (1.0 + self.cross_domain_bonus)
+        } else {
+            base
+        }
+    }
+
+    /// Sort knowledge entries by three-tier injection priority (P1-61).
+    ///
+    /// Tier 1 (compact inject): Warning, Insight — always included first
+    /// Tier 2 (relevant include): Heuristic, StrategyFragment — included if relevant
+    /// Tier 3 (on-demand): CausalLink, AntiKnowledge — included only when specifically needed
+    pub fn injection_tier(kind: KnowledgeKind) -> u8 {
+        match kind {
+            KnowledgeKind::Warning | KnowledgeKind::Insight => 1, // Always inject
+            KnowledgeKind::Heuristic | KnowledgeKind::StrategyFragment => 2, // If relevant
+            KnowledgeKind::CausalLink | KnowledgeKind::AntiKnowledge => 3, // On demand
+        }
+    }
+}
+
+/// Versioned header written as the first line of a backup JSONL file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupHeader {
+    /// Backup format version. Currently `1`.
+    pub version: u32,
+    /// When the backup was created.
+    pub created_at: DateTime<Utc>,
+    /// Number of entries in the backup.
+    pub entry_count: usize,
+    /// Path of the source knowledge store that was exported.
+    pub source_path: String,
+}
+
+/// Filter criteria for [`KnowledgeStore::export`].
+#[derive(Debug, Clone, Default)]
+pub struct ExportFilter {
+    /// Only export entries of these kinds. `None` means all kinds.
+    pub kinds: Option<Vec<KnowledgeKind>>,
+    /// Minimum confidence threshold.
+    pub min_confidence: Option<f64>,
+    /// Only export entries with at least one of these tags.
+    pub tags: Option<Vec<String>>,
+    /// Only export entries created after this timestamp.
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl ExportFilter {
+    fn matches(&self, entry: &KnowledgeEntry) -> bool {
+        if let Some(kinds) = &self.kinds {
+            if !kinds.contains(&entry.kind) {
+                return false;
+            }
+        }
+        if let Some(min) = self.min_confidence {
+            if entry.confidence < min {
+                return false;
+            }
+        }
+        if let Some(required_tags) = &self.tags {
+            if !required_tags.iter().any(|t| entry.tags.contains(t)) {
+                return false;
+            }
+        }
+        if let Some(since) = self.since {
+            if entry.created_at < since {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Options for [`KnowledgeStore::import`].
+#[derive(Debug, Clone)]
+pub struct ImportOptions {
+    /// Confidence multiplier applied to each imported entry (default 0.85).
+    pub confidence_discount: f64,
+    /// Whether to reset all imported entries to `KnowledgeTier::Transient`.
+    pub reset_tier: bool,
+    /// Label recorded in the `source` field of each imported entry.
+    pub source_label: String,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            confidence_discount: 0.85,
+            reset_tier: true,
+            source_label: "restore".to_owned(),
+        }
+    }
+}
+
+/// One similarity-ranked hit returned from the durable fingerprint query path.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct KnowledgeSimilarityHit {
+    /// The matched entry.
+    pub entry: KnowledgeEntry,
+    /// Raw Hamming similarity against the supplied fingerprint.
+    pub similarity: f32,
 }
 
 impl KnowledgeStore {
@@ -158,6 +408,24 @@ impl KnowledgeStore {
         self.ingest(vec![entry])
     }
 
+    /// NEURO-07: Append entries with source-channel confidence discounting.
+    ///
+    /// Each entry's confidence is multiplied by the channel's trust discount
+    /// before being ingested into the store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created, an entry
+    /// cannot be serialized, or the write fails.
+    pub fn ingest_with_source(
+        &self,
+        mut entries: Vec<KnowledgeEntry>,
+        channel: crate::SourceChannel,
+    ) -> Result<()> {
+        crate::apply_source_discount(&mut entries, channel);
+        self.ingest(entries)
+    }
+
     /// Append a batch of knowledge entries to the JSONL log.
     ///
     /// # Errors
@@ -169,13 +437,26 @@ impl KnowledgeStore {
             return Ok(());
         }
 
-        let entries = prepare_entries_for_ingest(entries);
-
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
         }
 
         let _guard = self.write_gate.lock();
+        let existing = self.read_all().unwrap_or_default();
+        let entries = dedupe_entries_for_ingest(prepare_entries_for_ingest(entries), &existing);
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // NEURO-04: Check new non-AntiKnowledge entries against existing
+        // AntiKnowledge entries using HDC similarity. Entries that are
+        // near-duplicates of refuted knowledge are rejected; moderate
+        // conflicts have their confidence discounted.
+        #[cfg(feature = "hdc")]
+        let entries = check_against_anti_knowledge(entries, &existing);
+        if entries.is_empty() {
+            return Ok(());
+        }
 
         let mut has_antiknowledge = false;
         for entry in &entries {
@@ -192,7 +473,7 @@ impl KnowledgeStore {
         }
 
         if has_antiknowledge {
-            let mut current = self.read_all()?;
+            let mut current = existing;
             current.extend(entries.iter().cloned());
 
             for anti in &entries {
@@ -217,8 +498,44 @@ impl KnowledgeStore {
         }
 
         // Detect confirmations by comparing new entries against existing ones.
-        let existing = self.read_all().unwrap_or_default();
         let confirmations = detect_confirmations(&existing, &entries);
+
+        // Apply tier promotions for confirmed entries.
+        if !confirmations.is_empty() {
+            let mut updated_existing = existing;
+            for confirmation in &confirmations {
+                if let Some(entry) = updated_existing
+                    .iter_mut()
+                    .find(|e| e.id == confirmation.confirmed_entry_id)
+                {
+                    entry.confirmation_count = entry.confirmation_count.saturating_add(1);
+
+                    // Add distinct context from the confirming entry's source episodes.
+                    if let Some(confirming) = entries
+                        .iter()
+                        .find(|e| e.id == confirmation.confirming_entry_id)
+                    {
+                        for ep in &confirming.source_episodes {
+                            if !entry.distinct_contexts.contains(ep) {
+                                entry.distinct_contexts.push(ep.clone());
+                            }
+                        }
+                    }
+
+                    // Auto-promote based on thresholds.
+                    match entry.tier {
+                        KnowledgeTier::Transient if entry.confirmation_count >= 2 => {
+                            entry.tier = KnowledgeTier::Working;
+                        }
+                        KnowledgeTier::Working if entry.distinct_contexts.len() >= 3 => {
+                            entry.tier = KnowledgeTier::Consolidated;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.rewrite_all(&updated_existing)?;
+        }
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -247,13 +564,72 @@ impl KnowledgeStore {
     /// Relevance is scored by keyword overlap in tags/content, multiplied
     /// by confidence, recency, and a 1.5× confirmation boost for entries
     /// backed by multiple independent episodes. When the `hdc` feature is
-    /// enabled, HDC similarity is added as an extra signal.
+    /// enabled, HDC similarity is added as an extra signal. Only entries with
+    /// `total_score > QUERY_SCORE_FLOOR` are returned.
     ///
     /// # Errors
     ///
     /// Returns an error if the backing file cannot be read.
     pub fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
-        self.query_filtered(topic, limit, |_| true)
+        Ok(self
+            .query_hits(topic, limit)?
+            .into_iter()
+            .map(|hit| hit.entry)
+            .collect())
+    }
+
+    /// Query the store by a serialized 10,240-bit fingerprint.
+    ///
+    /// Entries without a valid stored fingerprint are skipped. Results are
+    /// ranked by raw Hamming similarity and then by effective confidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `fingerprint` is not 1280 bytes long or the
+    /// backing file cannot be read.
+    pub fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSimilarityHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        ensure!(
+            fingerprint.len() == HDC_VECTOR_BYTES,
+            "knowledge fingerprints must be {HDC_VECTOR_BYTES} bytes, got {}",
+            fingerprint.len()
+        );
+
+        let entries = self.read_all()?;
+        let mut scored = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let similarity = similarity_against_entry(fingerprint, &entry)?;
+                Some(KnowledgeSimilarityHit { entry, similarity })
+            })
+            .collect::<Vec<_>>();
+
+        scored.sort_by(compare_similarity_hits);
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Query the store for scored hits relevant to `topic`.
+    ///
+    /// The current contract is:
+    ///
+    /// `total_score = keyword_score * effective_confidence * recency_factor * emotional_boost + hdc_similarity`
+    ///
+    /// where `hdc_similarity` is zero when the `hdc` feature is disabled or
+    /// the entry has no valid stored HDC vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_hits(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeQueryHit>> {
+        self.query_hits_filtered(topic, limit, |_| true)
     }
 
     /// Query the store for entries of a specific knowledge kind relevant to
@@ -273,15 +649,46 @@ impl KnowledgeStore {
         kind: KnowledgeKind,
         limit: usize,
     ) -> Result<Vec<KnowledgeEntry>> {
-        self.query_filtered(topic, limit, |entry| entry.kind == kind)
+        Ok(self
+            .query_kind_hits(topic, kind, limit)?
+            .into_iter()
+            .map(|hit| hit.entry)
+            .collect())
     }
 
-    fn query_filtered<F>(
+    /// Query the store for scored hits of a specific kind relevant to `topic`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_kind_hits(
+        &self,
+        topic: &str,
+        kind: KnowledgeKind,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeQueryHit>> {
+        self.query_hits_filtered(topic, limit, |entry| entry.kind == kind)
+    }
+
+    /// Filter all entries by their validation tier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn by_tier(&self, tier: KnowledgeTier) -> Result<Vec<KnowledgeEntry>> {
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .filter(|entry| entry.tier == tier)
+            .collect())
+    }
+
+    fn query_hits_filtered<F>(
         &self,
         topic: &str,
         limit: usize,
         mut include: F,
-    ) -> Result<Vec<KnowledgeEntry>>
+    ) -> Result<Vec<KnowledgeQueryHit>>
     where
         F: FnMut(&KnowledgeEntry) -> bool,
     {
@@ -294,31 +701,23 @@ impl KnowledgeStore {
         let topic_terms = tokenize(topic);
         let topic_norm = normalize(topic);
 
-        let mut scored: Vec<(f64, KnowledgeEntry)> = entries
+        let mut scored: Vec<KnowledgeQueryHit> = entries
             .into_iter()
             .filter_map(|entry| {
+                // NEURO-11: Frozen entries are excluded from hot queries.
+                if entry.frozen {
+                    return None;
+                }
                 if !include(&entry) {
                     return None;
                 }
-                let keyword_score = keyword_score(&entry, &topic_terms, &topic_norm);
-                let recency = recency_factor(&entry, now);
-                let confidence = effective_confidence(&entry);
-                let emotional = emotional_retrieval_boost(&entry);
-                let score = keyword_score * confidence * recency * emotional;
-
-                #[cfg(feature = "hdc")]
-                let score = score + hdc_similarity(&entry, topic);
-
-                (score > 0.0).then_some((score, entry))
+                score_entry_for_query(entry, &topic_terms, &topic_norm, topic, now)
             })
             .collect();
 
-        scored.sort_by(|left, right| compare_scores(left, right));
-        Ok(scored
-            .into_iter()
-            .take(limit)
-            .map(|(_, entry)| entry)
-            .collect())
+        scored.sort_by(compare_hit_scores);
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     /// Compute aggregate statistics over the current knowledge corpus.
@@ -334,6 +733,9 @@ impl KnowledgeStore {
         let entries = self.read_all()?;
         let total_entries = entries.len();
         let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut tier_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut source_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut anti_knowledge_count = 0usize;
         let mut confidence_sum = 0.0;
         let mut oldest_entry: Option<&KnowledgeEntry> = None;
         let mut newest_entry: Option<&KnowledgeEntry> = None;
@@ -342,6 +744,26 @@ impl KnowledgeStore {
             *kind_counts
                 .entry(knowledge_kind_label(entry.kind).to_owned())
                 .or_insert(0) += 1;
+
+            let tier_label = match entry.tier {
+                KnowledgeTier::Transient => "transient",
+                KnowledgeTier::Working => "working",
+                KnowledgeTier::Consolidated => "consolidated",
+                KnowledgeTier::Persistent => "persistent",
+            };
+            *tier_counts.entry(tier_label.to_owned()).or_insert(0) += 1;
+
+            if let Some(source) = entry.source.as_deref() {
+                let trimmed = source.trim();
+                if !trimmed.is_empty() {
+                    *source_counts.entry(trimmed.to_owned()).or_insert(0) += 1;
+                }
+            }
+
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                anti_knowledge_count += 1;
+            }
+
             confidence_sum += entry.confidence;
 
             if oldest_entry
@@ -367,10 +789,118 @@ impl KnowledgeStore {
         Ok(KnowledgeStats {
             total_entries,
             kind_counts,
+            tier_counts,
+            source_counts,
+            anti_knowledge_count,
             average_confidence,
             oldest_entry: oldest_entry.cloned(),
             newest_entry: newest_entry.cloned(),
         })
+    }
+
+    /// Export the knowledge store to a JSONL file with versioned backup header.
+    ///
+    /// Entries can be filtered by kind, minimum confidence, tags, and date.
+    /// Returns the number of entries exported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or the output cannot be
+    /// written.
+    pub fn export(&self, output: &Path, filter: &ExportFilter) -> Result<usize> {
+        let entries = self.read_all()?;
+        let filtered: Vec<_> = entries.into_iter().filter(|e| filter.matches(e)).collect();
+        let count = filtered.len();
+
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).context("create export directory")?;
+        }
+
+        let header = BackupHeader {
+            version: 1,
+            created_at: Utc::now(),
+            entry_count: count,
+            source_path: self.path.display().to_string(),
+        };
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(output)
+            .with_context(|| format!("create export file at {}", output.display()))?;
+
+        let header_line = serde_json::to_string(&header).context("serialize backup header")?;
+        writeln!(file, "{header_line}").context("write backup header")?;
+
+        for entry in &filtered {
+            let line = serde_json::to_string(entry).context("serialize knowledge entry")?;
+            writeln!(file, "{line}").context("write knowledge entry")?;
+        }
+
+        file.flush().context("flush export")?;
+        file.sync_all().context("sync export")?;
+
+        Ok(count)
+    }
+
+    /// Import knowledge entries from a versioned JSONL backup file.
+    ///
+    /// Restored entries are reset to [`KnowledgeTier::Transient`] and their
+    /// confidence is multiplied by the given discount factor (default 0.85)
+    /// per the backup/restore spec. The source label is recorded on each
+    /// imported entry.
+    ///
+    /// Returns the number of entries imported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, has an unsupported
+    /// version, or entries cannot be ingested.
+    pub fn import(&self, input: &Path, options: &ImportOptions) -> Result<usize> {
+        let file = File::open(input)
+            .with_context(|| format!("open import file at {}", input.display()))?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+
+        // Read and validate the header line.
+        let header_line = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("import file is empty"))?
+            .context("read import header")?;
+
+        let header: BackupHeader = serde_json::from_str(&header_line)
+            .context("parse backup header (is this a versioned backup file?)")?;
+
+        if header.version > 1 {
+            anyhow::bail!(
+                "unsupported backup version {} (this build supports version 1)",
+                header.version
+            );
+        }
+
+        let mut entries = Vec::new();
+        for line in lines {
+            let line = line.context("read import line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(mut entry) = serde_json::from_str::<KnowledgeEntry>(&line) {
+                if options.reset_tier {
+                    entry.tier = KnowledgeTier::Transient;
+                }
+                entry.confidence *= options.confidence_discount;
+                entry.source = Some(options.source_label.clone());
+                entries.push(entry);
+            }
+        }
+
+        let count = entries.len();
+        if !entries.is_empty() {
+            self.ingest(entries)?;
+        }
+
+        Ok(count)
     }
 
     /// Decay confidence for old entries using their configured half-life.
@@ -400,6 +930,11 @@ impl KnowledgeStore {
 
     /// Garbage-collect entries whose confidence falls below `min_confidence`.
     ///
+    /// NEURO-11: Entries below the balance floor are frozen instead of
+    /// deleted, preserving them for potential thawing later. Entries that
+    /// are *both* below the confidence threshold *and* already frozen are
+    /// permanently removed.
+    ///
     /// # Errors
     ///
     /// Returns an error if the store cannot be read or rewritten.
@@ -415,6 +950,363 @@ impl KnowledgeStore {
                     || effective_confidence(entry) >= threshold
             })
             .collect::<Vec<_>>();
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
+    /// NEURO-11: Garbage-collect entries with freeze-before-delete semantics.
+    ///
+    /// Entries below the confidence threshold are frozen into cold storage
+    /// instead of permanently deleted, provided they haven't been frozen
+    /// already. Entries that are *already frozen* and still below the
+    /// threshold are permanently removed. AntiKnowledge entries are always
+    /// preserved.
+    ///
+    /// Returns the number of entries permanently removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn gc_with_freeze(&self, min_confidence: f64) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let threshold = min_confidence.max(0.0);
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let mut entries = Vec::with_capacity(before_len);
+        for mut entry in before {
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                entries.push(entry);
+                continue;
+            }
+            let eff = effective_confidence(&entry);
+            if eff >= threshold {
+                entries.push(entry);
+                continue;
+            }
+            // Below threshold: freeze or remove.
+            if entry.frozen {
+                // Already frozen and still below threshold: permanently remove.
+                continue;
+            }
+            // First time below threshold: freeze into cold storage.
+            entry.frozen = true;
+            entries.push(entry);
+        }
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
+    /// Resurrect a frozen/dead entry by re-confirming it with fresh weight.
+    ///
+    /// Per spec (agent-chain-new/04-knowledge-layer.md): entries that drop below
+    /// 1% threshold enter the Death stage and are pruned. If they are later
+    /// re-confirmed by a new episode, they are "resurrected" with fresh weight
+    /// and reset to Transient tier for re-validation.
+    ///
+    /// Returns `true` if the entry was found and resurrected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn resurrect(&self, entry_id: &str, confirming_episode: &str) -> Result<bool> {
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut found = false;
+
+        for entry in &mut entries {
+            if entry.id == entry_id && entry.frozen {
+                // Resurrect: fresh confidence, reset tier, unfreeze.
+                entry.confidence = RESURRECTION_CONFIDENCE;
+                entry.tier = KnowledgeTier::Transient;
+                entry.frozen = false;
+                entry.balance = 1.0; // Fresh balance
+                entry.confirmation_count += 1;
+                if !entry
+                    .source_episodes
+                    .contains(&confirming_episode.to_string())
+                {
+                    entry.source_episodes.push(confirming_episode.to_string());
+                }
+                entry.created_at = Utc::now(); // Reset age for decay calculation
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(found)
+    }
+
+    /// Prune entries that have decayed below the death threshold (1% of initial weight).
+    ///
+    /// Unlike `gc()` which uses confidence directly, this checks the recency-adjusted
+    /// effective weight per the knowledge lifecycle spec.
+    ///
+    /// Returns the number of entries pruned (or frozen if using freeze semantics).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn prune_dead(&self) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let now = Utc::now();
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let mut entries = Vec::with_capacity(before_len);
+
+        for mut entry in before {
+            // AntiKnowledge is always preserved.
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                entries.push(entry);
+                continue;
+            }
+
+            if is_dead(&entry, now) {
+                if entry.frozen {
+                    // Already frozen and dead: permanent removal.
+                    continue;
+                }
+                // Freeze into cold storage (preserves for potential resurrection).
+                entry.frozen = true;
+            }
+            entries.push(entry);
+        }
+
+        let removed = before_len.saturating_sub(entries.len());
+        self.rewrite_all(&entries)?;
+        Ok(removed)
+    }
+
+    /// NEURO-10: Apply demurrage tax to all entries based on elapsed time
+    /// since their creation.
+    ///
+    /// Returns the number of entries that were taxed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn apply_demurrage(&self) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let now = Utc::now();
+        let mut entries = self.read_all()?;
+        let mut taxed = 0usize;
+        for entry in &mut entries {
+            let elapsed_hours =
+                now.signed_duration_since(entry.created_at).num_seconds() as f64 / 3600.0;
+            if elapsed_hours > 0.0 && entry.balance > 0.0 {
+                entry.apply_demurrage(elapsed_hours);
+                taxed += 1;
+            }
+        }
+        if taxed > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(taxed)
+    }
+
+    /// NEURO-10: Reinforce a specific entry by ID with the given signal.
+    ///
+    /// Returns `true` if the entry was found and reinforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn reinforce_entry(
+        &self,
+        entry_id: &str,
+        signal: crate::ReinforcementSignal,
+        novelty: f64,
+    ) -> Result<bool> {
+        let mut found = false;
+        self.update_entries(|entry| {
+            if entry.id == entry_id {
+                entry.reinforce(signal, novelty);
+                found = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// Score knowledge entries by prediction utility (P0-34).
+    ///
+    /// When a prediction resolves, entries that were in the context pack should
+    /// receive utility increments (if the prediction was accurate) or decrements
+    /// (if inaccurate). This shifts curation from popularity-based (confirmations)
+    /// to effectiveness-based (did these entries help agents succeed?).
+    ///
+    /// `context_entry_ids`: IDs of entries that were in the context pack when
+    ///   the prediction was made.
+    /// `prediction_accurate`: whether the prediction residual was within the
+    ///   predicted interval.
+    /// `accuracy_score`: scalar accuracy in [0.0, 1.0] (higher = better prediction).
+    ///
+    /// Returns the number of entries updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn score_prediction_utility(
+        &self,
+        context_entry_ids: &[String],
+        prediction_accurate: bool,
+        accuracy_score: f64,
+    ) -> Result<usize> {
+        if context_entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated = 0;
+
+        // Utility delta: positive for accurate predictions, negative for inaccurate.
+        // Scaled by accuracy_score so barely-accurate predictions give small bumps.
+        let delta = if prediction_accurate {
+            0.05 * accuracy_score.clamp(0.0, 1.0)
+        } else {
+            -0.03 * (1.0 - accuracy_score.clamp(0.0, 1.0))
+        };
+
+        for entry in &mut entries {
+            if context_entry_ids.contains(&entry.id) {
+                // Apply utility delta to confidence weight (not raw confidence).
+                // This preserves the original confidence while adjusting the
+                // retrieval priority based on demonstrated usefulness.
+                entry.confidence_weight = (entry.confidence_weight + delta).clamp(0.05, 2.0);
+
+                // Also bump/decay balance (the demurrage system's currency).
+                entry.balance = (entry.balance + delta * 2.0).clamp(0.0, 5.0);
+                updated += 1;
+            }
+        }
+
+        if updated > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(updated)
+    }
+
+    /// Increment catalytic scores for entries that helped create new knowledge (P1-58).
+    ///
+    /// Call this when new knowledge entries are created after a successful task.
+    /// `catalyst_entry_ids` are the IDs of entries that were in the context pack
+    /// when the task ran.
+    ///
+    /// Returns the number of entries whose catalytic score was incremented.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn increment_catalytic_scores(&self, catalyst_entry_ids: &[String]) -> Result<usize> {
+        if catalyst_entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated = 0;
+
+        for entry in &mut entries {
+            if catalyst_entry_ids.contains(&entry.id) {
+                entry.catalytic_score += 1;
+                updated += 1;
+            }
+        }
+
+        if updated > 0 {
+            self.rewrite_all(&entries)?;
+        }
+        Ok(updated)
+    }
+
+    /// Check if the knowledge network is autocatalytic (P1-58).
+    ///
+    /// An autocatalytic network is self-sustaining: entries on average enable
+    /// more than one new entry each. The threshold is configurable (default 1.5).
+    ///
+    /// Returns `(is_autocatalytic, avg_catalytic_score, entry_count)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn is_autocatalytic(&self, threshold: f64) -> Result<(bool, f64, usize)> {
+        let entries = self.read_all()?;
+        let active: Vec<_> = entries.iter().filter(|e| !e.frozen).collect();
+
+        if active.is_empty() {
+            return Ok((false, 0.0, 0));
+        }
+
+        let total_catalytic: f64 = active.iter().map(|e| e.catalytic_score as f64).sum();
+        let avg = total_catalytic / active.len() as f64;
+
+        Ok((avg >= threshold, avg, active.len()))
+    }
+
+    /// NEURO-11: Thaw a frozen entry, restoring a starter balance.
+    ///
+    /// Returns `true` if the entry was found, was frozen, and was thawed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn thaw_entry(&self, entry_id: &str, starter_balance: f64) -> Result<bool> {
+        let mut thawed = false;
+        self.update_entries(|entry| {
+            if entry.id == entry_id && entry.frozen {
+                entry.thaw(starter_balance);
+                thawed = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(thawed)
+    }
+
+    /// NEURO-11: Query frozen (cold-tier) entries, optionally filtered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing file cannot be read.
+    pub fn query_cold(&self, limit: usize) -> Result<Vec<KnowledgeEntry>> {
+        let entries = self.read_all()?;
+        let mut cold: Vec<_> = entries.into_iter().filter(|e| e.frozen).collect();
+        cold.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        cold.truncate(limit);
+        Ok(cold)
+    }
+
+    /// NEURO-08: Garbage-collect entries while preserving the last
+    /// representative of each worldview cluster.
+    ///
+    /// Uses tag-overlap clustering to group related entries. If all entries
+    /// in a cluster would be removed, the highest-confidence entry is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn gc_preserving_worldviews(
+        &self,
+        min_confidence: f64,
+        min_tag_overlap: usize,
+    ) -> Result<usize> {
+        let _guard = self.write_gate.lock();
+        let before = self.read_all()?;
+        let before_len = before.len();
+        let entries =
+            crate::gc_with_worldview_preservation(before, min_confidence, min_tag_overlap);
         let removed = before_len.saturating_sub(entries.len());
         self.rewrite_all(&entries)?;
         Ok(removed)
@@ -599,6 +1491,14 @@ impl NeuroStore for KnowledgeStore {
 
     fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>> {
         KnowledgeStore::query(self, topic, limit)
+    }
+
+    fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KnowledgeSimilarityHit>> {
+        KnowledgeStore::query_similar(self, fingerprint, limit)
     }
 
     fn ingest(&mut self, entries: Vec<KnowledgeEntry>) -> Result<()> {
@@ -789,6 +1689,23 @@ fn inferred_retention_tier(entry: &KnowledgeEntry) -> KnowledgeTier {
     }
 }
 
+fn compare_similarity_hits(
+    left: &KnowledgeSimilarityHit,
+    right: &KnowledgeSimilarityHit,
+) -> std::cmp::Ordering {
+    right
+        .similarity
+        .partial_cmp(&left.similarity)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            effective_confidence(&right.entry)
+                .partial_cmp(&effective_confidence(&left.entry))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
+        .then_with(|| left.entry.id.cmp(&right.entry.id))
+}
+
 #[cfg(feature = "hdc")]
 fn compare_hits(left: &MemoryHit, right: &MemoryHit) -> std::cmp::Ordering {
     right
@@ -854,6 +1771,12 @@ fn keyword_score(entry: &KnowledgeEntry, terms: &[String], topic_norm: &str) -> 
     score
 }
 
+/// Compute recency factor with confirmation-adjusted decay.
+///
+/// Per spec: `weight = initialWeight * 0.5^(age/halfLife) * (1 + confirmations * 0.1)`
+///
+/// Confirmations extend the effective lifetime — each independent confirmation
+/// adds 10% to the weight, rewarding knowledge that multiple episodes validate.
 fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
     let age = now
         .signed_duration_since(entry.created_at)
@@ -861,7 +1784,18 @@ fn recency_factor(entry: &KnowledgeEntry, now: DateTime<Utc>) -> f64 {
         .max(0) as f64
         / 86_400.0;
     let half_life = effective_half_life_days(entry);
-    0.5_f64.powf(age / half_life)
+    let base_decay = 0.5_f64.powf(age / half_life);
+    let confirmation_adjustment = 1.0 + entry.confirmation_count as f64 * CONFIRMATION_DECAY_FACTOR;
+    base_decay * confirmation_adjustment
+}
+
+/// Check if an entry has decayed below the death threshold.
+///
+/// Returns true if the entry's recency factor is below 1% of initial weight,
+/// indicating it should enter the Death stage per the knowledge lifecycle spec.
+pub fn is_dead(entry: &KnowledgeEntry, now: DateTime<Utc>) -> bool {
+    let factor = recency_factor(entry, now);
+    factor < DEATH_THRESHOLD
 }
 
 fn effective_half_life_days(entry: &KnowledgeEntry) -> f64 {
@@ -889,20 +1823,19 @@ fn confirmation_boost(entry: &KnowledgeEntry) -> f64 {
     }
 }
 
-fn compare_scores(
-    left: &(f64, KnowledgeEntry),
-    right: &(f64, KnowledgeEntry),
-) -> std::cmp::Ordering {
+fn compare_hit_scores(left: &KnowledgeQueryHit, right: &KnowledgeQueryHit) -> std::cmp::Ordering {
     right
-        .0
-        .partial_cmp(&left.0)
+        .total_score
+        .partial_cmp(&left.total_score)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| {
-            effective_confidence(&right.1)
-                .partial_cmp(&effective_confidence(&left.1))
+            right
+                .breakdown
+                .effective_confidence
+                .partial_cmp(&left.breakdown.effective_confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .then_with(|| right.1.created_at.cmp(&left.1.created_at))
+        .then_with(|| right.entry.created_at.cmp(&left.entry.created_at))
 }
 
 fn emotional_retrieval_boost(entry: &KnowledgeEntry) -> f64 {
@@ -911,6 +1844,20 @@ fn emotional_retrieval_boost(entry: &KnowledgeEntry) -> f64 {
 
 fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
     kind.as_str()
+}
+
+fn similarity_against_entry(fingerprint: &[u8], entry: &KnowledgeEntry) -> Option<f32> {
+    let stored = entry.hdc_vector.as_deref()?;
+    if stored.len() != HDC_VECTOR_BYTES {
+        return None;
+    }
+
+    let differing_bits = fingerprint
+        .iter()
+        .zip(stored.iter())
+        .map(|(left, right)| (left ^ right).count_ones())
+        .sum::<u32>();
+    Some(1.0 - (differing_bits as f32 / (HDC_VECTOR_BYTES * 8) as f32))
 }
 
 #[cfg(feature = "hdc")]
@@ -923,7 +1870,46 @@ fn hdc_similarity(entry: &KnowledgeEntry, topic: &str) -> f64 {
     };
     let entry_vec = HdcVector::from_bytes(&bytes);
     let topic_vec = KnowledgeHdcEncoder.encode_query(topic);
-    topic_vec.similarity(&entry_vec) as f64
+    (topic_vec.similarity(&entry_vec) as f64 - HDC_SIMILARITY_BASELINE).max(0.0)
+}
+
+fn score_entry_for_query(
+    entry: KnowledgeEntry,
+    topic_terms: &[String],
+    topic_norm: &str,
+    _topic: &str,
+    now: DateTime<Utc>,
+) -> Option<KnowledgeQueryHit> {
+    let keyword = keyword_score(&entry, topic_terms, topic_norm);
+    let recency = recency_factor(&entry, now);
+    let confidence = effective_confidence(&entry);
+    let emotional = emotional_retrieval_boost(&entry);
+
+    #[cfg(feature = "hdc")]
+    let hdc = {
+        let similarity = hdc_similarity(&entry, _topic);
+        (similarity > 0.0).then_some(similarity)
+    };
+    #[cfg(feature = "hdc")]
+    let hdc_contribution = hdc.unwrap_or(0.0);
+
+    #[cfg(not(feature = "hdc"))]
+    let hdc: Option<f64> = None;
+    #[cfg(not(feature = "hdc"))]
+    let hdc_contribution = 0.0;
+
+    let total = keyword * confidence * recency * emotional + hdc_contribution;
+    (total > QUERY_SCORE_FLOOR).then_some(KnowledgeQueryHit {
+        entry,
+        total_score: total,
+        breakdown: KnowledgeQueryBreakdown {
+            keyword_score: keyword,
+            effective_confidence: confidence,
+            recency_factor: recency,
+            emotional_boost: emotional,
+            hdc_similarity: hdc,
+        },
+    })
 }
 
 /// Compare two knowledge entries for topic-level similarity using tag
@@ -952,6 +1938,25 @@ fn entries_are_similar(existing: &KnowledgeEntry, new_entry: &KnowledgeEntry) ->
     let keyword_overlap = existing_keywords.intersection(&new_keywords).count();
 
     keyword_overlap >= MIN_KEYWORD_OVERLAP
+}
+
+fn dedupe_entries_for_ingest(
+    entries: Vec<KnowledgeEntry>,
+    existing: &[KnowledgeEntry],
+) -> Vec<KnowledgeEntry> {
+    let mut seen_ids = existing
+        .iter()
+        .filter(|entry| !entry.id.trim().is_empty())
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let id = entry.id.trim();
+            id.is_empty() || seen_ids.insert(id.to_string())
+        })
+        .collect()
 }
 
 /// Scan new entries against existing entries to find confirmations.
@@ -997,6 +2002,85 @@ fn detect_confirmations(
     confirmations
 }
 
+/// Check new non-AntiKnowledge entries against existing AntiKnowledge entries
+/// using HDC similarity. Returns the filtered/modified list of entries:
+/// - similarity > 0.9: entry rejected entirely
+/// - similarity > 0.7: entry confidence discounted by 0.5x
+/// - similarity > 0.5: warning logged
+#[cfg(feature = "hdc")]
+fn check_against_anti_knowledge(
+    entries: Vec<KnowledgeEntry>,
+    existing: &[KnowledgeEntry],
+) -> Vec<KnowledgeEntry> {
+    let anti_entries: Vec<_> = existing
+        .iter()
+        .filter(|e| e.kind == KnowledgeKind::AntiKnowledge)
+        .collect();
+
+    if anti_entries.is_empty() {
+        return entries;
+    }
+
+    // Pre-encode all AntiKnowledge entries.
+    let encoder = KnowledgeHdcEncoder;
+    let anti_vectors: Vec<_> = anti_entries
+        .iter()
+        .map(|e| (e, fingerprint_entry(e)))
+        .collect();
+
+    let mut result = Vec::with_capacity(entries.len());
+
+    for mut entry in entries {
+        if entry.kind == KnowledgeKind::AntiKnowledge {
+            result.push(entry);
+            continue;
+        }
+
+        let entry_vec = encoder.encode_entry(&entry);
+        let mut worst_similarity = 0.0_f64;
+        let mut worst_anti_id = String::new();
+
+        for (anti_entry, anti_vec) in &anti_vectors {
+            let sim = entry_vec.similarity(anti_vec) as f64;
+            if sim > worst_similarity {
+                worst_similarity = sim;
+                worst_anti_id = anti_entry.id.clone();
+            }
+        }
+
+        if worst_similarity > ANTI_KNOWLEDGE_REJECT_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "rejecting entry: near-duplicate of refuted AntiKnowledge"
+            );
+            continue; // reject
+        }
+
+        if worst_similarity > ANTI_KNOWLEDGE_DISCOUNT_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "discounting entry confidence: conflicts with AntiKnowledge"
+            );
+            entry.confidence *= ANTI_KNOWLEDGE_DISCOUNT_FACTOR;
+        } else if worst_similarity > ANTI_KNOWLEDGE_WARN_THRESHOLD {
+            tracing::warn!(
+                entry_id = %entry.id,
+                anti_knowledge_id = %worst_anti_id,
+                similarity = worst_similarity,
+                "potential conflict with AntiKnowledge"
+            );
+        }
+
+        result.push(entry);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,6 +2120,15 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         }
     }
 
@@ -1164,6 +2257,201 @@ mod tests {
     }
 
     #[test]
+    fn query_hits_expose_scoring_breakdown() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Rust async actors and memory stores",
+                &["rust", "async"],
+                0.9,
+                &["ep-a", "ep-b"],
+                now,
+            ))
+            .expect("add first");
+        store
+            .add(entry(
+                KnowledgeKind::Warning,
+                "k2",
+                "Retry loops can amplify flaky async tests",
+                &["testing"],
+                0.8,
+                &["ep-c"],
+                now - Duration::days(10),
+            ))
+            .expect("add second");
+
+        let hits = store.query_hits("rust async", 5).expect("query hits");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].entry.id, "k1");
+        assert!(hits[0].total_score > QUERY_SCORE_FLOOR);
+        assert!(hits[0].breakdown.keyword_score >= 2.0);
+        assert!(hits[0].breakdown.effective_confidence > hits[0].entry.confidence);
+        assert!(hits[0].breakdown.recency_factor > 0.9);
+    }
+
+    #[test]
+    fn query_kind_hits_filter_by_kind() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Prefer small async state machines",
+                &["async"],
+                0.9,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add insight");
+        store
+            .add(entry(
+                KnowledgeKind::StrategyFragment,
+                "k2",
+                "Break async migrations into small compileable steps",
+                &["async", "migration"],
+                0.95,
+                &["ep-b", "ep-c", "ep-d"],
+                now,
+            ))
+            .expect("add strategy fragment");
+
+        let hits = store
+            .query_kind_hits("async migration", KnowledgeKind::StrategyFragment, 5)
+            .expect("query kind hits");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.id, "k2");
+        assert_eq!(hits[0].entry.kind, KnowledgeKind::StrategyFragment);
+    }
+
+    #[test]
+    fn query_similar_ranks_by_hamming_similarity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut exact = entry(
+            KnowledgeKind::Insight,
+            "k-exact",
+            "Exact fingerprint match",
+            &["fingerprint"],
+            0.9,
+            &["ep-a"],
+            now,
+        );
+        exact.hdc_vector = Some(vec![0; HDC_VECTOR_BYTES]);
+
+        let mut close = entry(
+            KnowledgeKind::Insight,
+            "k-close",
+            "Close fingerprint match",
+            &["fingerprint"],
+            0.8,
+            &["ep-b"],
+            now,
+        );
+        let mut close_fp = vec![0; HDC_VECTOR_BYTES];
+        close_fp[0] = 0b0000_0011;
+        close.hdc_vector = Some(close_fp);
+
+        let mut far = entry(
+            KnowledgeKind::Insight,
+            "k-far",
+            "Far fingerprint match",
+            &["fingerprint"],
+            0.7,
+            &["ep-c"],
+            now,
+        );
+        far.hdc_vector = Some(vec![0xFF; HDC_VECTOR_BYTES]);
+
+        store.ingest(vec![far, close, exact]).expect("ingest");
+
+        let query = vec![0; HDC_VECTOR_BYTES];
+        let hits = store.query_similar(&query, 3).expect("query similar");
+
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].entry.id, "k-exact");
+        assert_eq!(hits[1].entry.id, "k-close");
+        assert_eq!(hits[2].entry.id, "k-far");
+        assert!(hits[0].similarity > hits[1].similarity);
+        assert!(hits[1].similarity > hits[2].similarity);
+    }
+
+    #[test]
+    fn query_similar_rejects_invalid_fingerprint_length() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+
+        let error = store
+            .query_similar(&[0_u8; 16], 1)
+            .expect_err("invalid fingerprint length should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("knowledge fingerprints must be 1280 bytes")
+        );
+    }
+
+    #[test]
+    fn ingest_skips_duplicate_ids() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+        let duplicate = entry(
+            KnowledgeKind::Insight,
+            "dup",
+            "Keep one durable copy",
+            &["dup"],
+            0.8,
+            &["ep-a"],
+            now,
+        );
+
+        store
+            .ingest(vec![duplicate.clone(), duplicate.clone()])
+            .expect("ingest duplicates");
+        store.add(duplicate).expect("add duplicate again");
+
+        let all = store.read_all().expect("read all");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "dup");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn hdc_only_unrelated_entries_do_not_clear_query_floor() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "Completely unrelated note about shell prompts",
+                &["misc"],
+                0.0,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add unrelated");
+
+        let hits = store
+            .query_hits("database migrations", 5)
+            .expect("query hits");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
     fn query_prefers_emotionally_reinforced_entries() {
         let tmp = TempDir::new().expect("tempdir");
         let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
@@ -1243,6 +2531,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -1404,6 +2701,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -1454,6 +2760,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti knowledge");
 
@@ -1494,6 +2809,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add oldest");
         store
@@ -1516,6 +2840,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add middle");
         store
@@ -1538,6 +2871,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add newest");
 
@@ -1784,6 +3126,15 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         };
 
         assert!(!entries_are_similar(&existing, &anti));
@@ -1967,6 +3318,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add tiered");
 
@@ -2001,11 +3361,597 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add persistent");
 
         let all = store.read_all().expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].tier, KnowledgeTier::Persistent);
+    }
+
+    #[test]
+    fn stats_includes_tier_and_source_counts() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        // Use low confidence so normalize_entry_tier does not auto-promote.
+        let mut e1 = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "something useful",
+            &["rust"],
+            0.5,
+            &["ep-a"],
+            now,
+        );
+        e1.tier = KnowledgeTier::Working;
+        e1.source = Some("local".to_owned());
+
+        let mut e2 = entry(
+            KnowledgeKind::AntiKnowledge,
+            "k2",
+            "do not retry on 5xx",
+            &["http"],
+            0.5,
+            &["ep-b"],
+            now,
+        );
+        e2.tier = KnowledgeTier::Working;
+
+        store.add(e1).expect("add");
+        store.add(e2).expect("add anti");
+
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.total_entries, 2);
+        assert_eq!(stats.anti_knowledge_count, 1);
+        assert_eq!(stats.tier_counts.get("working"), Some(&2));
+        assert_eq!(stats.source_counts.get("local"), Some(&1));
+    }
+
+    #[test]
+    fn export_import_roundtrip_with_confidence_discount() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "k1",
+            "important heuristic",
+            &["rust"],
+            0.5,
+            &["ep-a"],
+            now,
+        );
+        e.tier = KnowledgeTier::Consolidated;
+        store.add(e).expect("add");
+
+        // Export.
+        let backup_path = tmp.path().join("backup.jsonl");
+        let filter = ExportFilter::default();
+        let count = store.export(&backup_path, &filter).expect("export");
+        assert_eq!(count, 1);
+        assert!(backup_path.exists());
+
+        // Import into a fresh store.
+        let store2 = KnowledgeStore::new(tmp.path().join("neuro2").join("knowledge.jsonl"));
+        let options = ImportOptions {
+            confidence_discount: 0.85,
+            reset_tier: true,
+            source_label: "backup-test".to_owned(),
+        };
+        let imported = store2.import(&backup_path, &options).expect("import");
+        assert_eq!(imported, 1);
+
+        let all = store2.read_all().expect("read");
+        assert_eq!(all.len(), 1);
+        // Confidence should be discounted: 0.5 * 0.85 = 0.425.
+        assert!((all[0].confidence - 0.425).abs() < 0.01);
+        // Tier should be reset to Transient (low confidence won't trigger promotion).
+        assert_eq!(all[0].tier, KnowledgeTier::Transient);
+        // Source label should be recorded.
+        assert_eq!(all[0].source.as_deref(), Some("backup-test"));
+    }
+
+    #[test]
+    fn export_filter_by_kind_and_confidence() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let now = Utc::now();
+
+        store
+            .add(entry(
+                KnowledgeKind::Insight,
+                "k1",
+                "high confidence insight",
+                &["rust"],
+                0.9,
+                &["ep-a"],
+                now,
+            ))
+            .expect("add");
+        store
+            .add(entry(
+                KnowledgeKind::Warning,
+                "k2",
+                "low confidence warning",
+                &["rust"],
+                0.2,
+                &["ep-b"],
+                now,
+            ))
+            .expect("add");
+
+        let backup_path = tmp.path().join("filtered.jsonl");
+        let filter = ExportFilter {
+            kinds: Some(vec![KnowledgeKind::Insight]),
+            min_confidence: Some(0.5),
+            ..Default::default()
+        };
+        let count = store.export(&backup_path, &filter).expect("export");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn import_rejects_unsupported_version() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+
+        let bad_backup = tmp.path().join("bad.jsonl");
+        let header = BackupHeader {
+            version: 99,
+            created_at: Utc::now(),
+            entry_count: 0,
+            source_path: "test".to_owned(),
+        };
+        std::fs::write(&bad_backup, serde_json::to_string(&header).unwrap() + "\n").unwrap();
+
+        let result = store.import(&bad_backup, &ImportOptions::default());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported backup version")
+        );
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn anti_knowledge_check_rejects_near_duplicate() {
+        // When a new entry has very high HDC similarity to an existing
+        // AntiKnowledge entry, it should be filtered out.
+        let anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("old-insight".to_owned()),
+            refutation_evidence: Some("caused cascading failures".to_owned()),
+            source_episodes: vec!["ep-a".to_owned()],
+            tags: vec!["http".to_owned(), "retry".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+
+        // A near-identical entry that should be rejected.
+        let duplicate = KnowledgeEntry {
+            id: "new-1".to_owned(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.8,
+            confidence_weight: 1.0,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["http".to_owned(), "retry".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Transient,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+
+        // An unrelated entry that should pass through.
+        let unrelated = KnowledgeEntry {
+            id: "new-2".to_owned(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "PostgreSQL requires regular VACUUM for performance".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-c".to_owned()],
+            tags: vec!["postgres".to_owned(), "maintenance".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+            tier: KnowledgeTier::Transient,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+
+        let existing = vec![anti];
+        let new_entries = prepare_entries_for_ingest(vec![duplicate, unrelated]);
+
+        let result = check_against_anti_knowledge(new_entries, &existing);
+        // The near-duplicate should be rejected, leaving only the unrelated entry.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "new-2");
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn anti_knowledge_check_passes_antiknowledge_entries_through() {
+        // AntiKnowledge entries themselves should not be blocked by existing
+        // AntiKnowledge.
+        let existing_anti = KnowledgeEntry {
+            id: "anti-1".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff".to_owned(),
+            confidence: 0.9,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("old".to_owned()),
+            refutation_evidence: None,
+            source_episodes: vec!["ep-a".to_owned()],
+            tags: vec!["http".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+
+        let new_anti = KnowledgeEntry {
+            id: "anti-2".to_owned(),
+            kind: KnowledgeKind::AntiKnowledge,
+            source: None,
+            content: "Never retry failed HTTP 5xx requests without backoff -- updated".to_owned(),
+            confidence: 0.95,
+            confidence_weight: 1.0,
+            refuted_insight_id: Some("other".to_owned()),
+            refutation_evidence: None,
+            source_episodes: vec!["ep-b".to_owned()],
+            tags: vec!["http".to_owned()],
+            source_model: None,
+            model_generality: 1.0,
+            created_at: Utc::now(),
+            half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+            tier: KnowledgeTier::Working,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+
+        let existing = vec![existing_anti];
+        let new_entries = prepare_entries_for_ingest(vec![new_anti]);
+        let result = check_against_anti_knowledge(new_entries, &existing);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "anti-2");
+    }
+
+    // -----------------------------------------------------------------------
+    // NEURO-10: Demurrage balance model and reinforcement signals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reinforcement_bumps_balance() {
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            ..KnowledgeEntry::default()
+        };
+        let before = e.balance;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 0.0);
+        assert!(
+            e.balance > before,
+            "balance should increase after reinforcement"
+        );
+
+        // Novelty amplifies the bump.
+        let mid = e.balance;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 1.0);
+        let bump_with_novelty = e.balance - mid;
+        // Reset and do without novelty.
+        e.balance = mid;
+        e.reinforce(crate::ReinforcementSignal::Retrieved, 0.0);
+        let bump_without_novelty = e.balance - mid;
+        assert!(bump_with_novelty > bump_without_novelty);
+    }
+
+    #[test]
+    fn balance_capped_at_five() {
+        let mut e = KnowledgeEntry {
+            balance: 4.95,
+            ..KnowledgeEntry::default()
+        };
+        e.reinforce(crate::ReinforcementSignal::Surprised, 1.0);
+        assert!(e.balance <= 5.0, "balance must not exceed 5.0");
+    }
+
+    #[test]
+    fn demurrage_reduces_balance() {
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            ..KnowledgeEntry::default()
+        };
+        e.apply_demurrage(100.0);
+        assert!(e.balance < 1.0, "demurrage should reduce balance");
+        assert!(e.balance >= 0.0, "balance must not go negative");
+    }
+
+    #[test]
+    fn demurrage_does_not_go_negative() {
+        let mut e = KnowledgeEntry {
+            balance: 0.01,
+            ..KnowledgeEntry::default()
+        };
+        e.apply_demurrage(1_000_000.0);
+        assert_eq!(e.balance, 0.0);
+    }
+
+    #[test]
+    fn freshness_combines_balance_and_decay() {
+        let now = Utc::now();
+        let old = now - Duration::hours(24 * 30); // 30 days
+        let mut e = KnowledgeEntry {
+            balance: 1.0,
+            half_life_days: 30.0,
+            created_at: old,
+            ..KnowledgeEntry::default()
+        };
+        let fresh_high = e.freshness(now);
+        e.balance = 0.1;
+        let fresh_low = e.freshness(now);
+        assert!(fresh_high > fresh_low, "higher balance => higher freshness");
+    }
+
+    #[test]
+    fn reinforcement_signal_base_values_positive() {
+        for signal in &[
+            crate::ReinforcementSignal::Retrieved,
+            crate::ReinforcementSignal::Cited,
+            crate::ReinforcementSignal::Gated,
+            crate::ReinforcementSignal::Surprised,
+            crate::ReinforcementSignal::AgentQuoted,
+        ] {
+            assert!(
+                signal.base_value() > 0.0,
+                "{:?} must have positive base_value",
+                signal
+            );
+        }
+    }
+
+    #[test]
+    fn store_reinforce_entry() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "reinforce-me",
+            "test entry",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.balance = 0.5;
+        store.add(e).unwrap();
+
+        let found = store
+            .reinforce_entry("reinforce-me", crate::ReinforcementSignal::Gated, 0.2)
+            .unwrap();
+        assert!(found);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "reinforce-me").unwrap();
+        assert!(updated.balance > 0.5, "balance should have been bumped");
+    }
+
+    #[test]
+    fn store_apply_demurrage() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "demurrage-test",
+            "test entry",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now() - Duration::hours(100),
+        );
+        e.balance = 1.0;
+        store.add(e).unwrap();
+
+        let taxed = store.apply_demurrage().unwrap();
+        assert_eq!(taxed, 1);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "demurrage-test").unwrap();
+        assert!(updated.balance < 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // NEURO-11: Cold-tier freeze/thaw
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn freeze_and_thaw_entry() {
+        let mut e = KnowledgeEntry {
+            balance: 0.01,
+            ..KnowledgeEntry::default()
+        };
+        assert!(!e.frozen);
+        e.freeze();
+        assert!(e.frozen);
+        e.thaw(0.3);
+        assert!(!e.frozen);
+        assert!((e.balance - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn frozen_entries_excluded_from_hot_queries() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "frozen-entry",
+            "important knowledge about testing",
+            &["testing"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.frozen = true;
+        store.add(e).unwrap();
+
+        let results = store.query("testing", 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "frozen entries should not appear in hot queries"
+        );
+
+        let cold = store.query_cold(10).unwrap();
+        assert_eq!(
+            cold.len(),
+            1,
+            "frozen entries should appear in cold queries"
+        );
+        assert_eq!(cold[0].id, "frozen-entry");
+    }
+
+    #[test]
+    fn gc_with_freeze_freezes_low_confidence_entries() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+
+        let low = entry(
+            KnowledgeKind::Insight,
+            "low-conf",
+            "fading knowledge",
+            &["test"],
+            0.01,
+            &["ep1"],
+            Utc::now(),
+        );
+        store.add(low).unwrap();
+
+        let removed = store.gc_with_freeze(0.05).unwrap();
+        assert_eq!(removed, 0, "entry should be frozen, not removed");
+
+        let entries = store.read_all().unwrap();
+        let frozen_entry = entries.iter().find(|e| e.id == "low-conf").unwrap();
+        assert!(frozen_entry.frozen, "entry should have been frozen");
+    }
+
+    #[test]
+    fn gc_with_freeze_removes_already_frozen_below_threshold() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+
+        // Already frozen entry below confidence threshold.
+        let mut frozen = entry(
+            KnowledgeKind::Insight,
+            "already-frozen",
+            "old frozen knowledge",
+            &["test"],
+            0.01,
+            &["ep1"],
+            Utc::now(),
+        );
+        frozen.frozen = true;
+        store.add(frozen).unwrap();
+
+        let removed = store.gc_with_freeze(0.05).unwrap();
+        assert_eq!(
+            removed, 1,
+            "already-frozen entry below threshold should be permanently removed"
+        );
+    }
+
+    #[test]
+    fn store_thaw_entry() {
+        let dir = TempDir::new().unwrap();
+        let store = KnowledgeStore::for_roko_dir(dir.path());
+        let mut e = entry(
+            KnowledgeKind::Insight,
+            "thaw-me",
+            "frozen knowledge",
+            &["test"],
+            0.8,
+            &["ep1"],
+            Utc::now(),
+        );
+        e.frozen = true;
+        e.balance = 0.0;
+        store.add(e).unwrap();
+
+        let thawed = store.thaw_entry("thaw-me", 0.3).unwrap();
+        assert!(thawed);
+
+        let entries = store.read_all().unwrap();
+        let updated = entries.iter().find(|e| e.id == "thaw-me").unwrap();
+        assert!(!updated.frozen);
+        assert!((updated.balance - 0.3).abs() < f64::EPSILON);
     }
 }

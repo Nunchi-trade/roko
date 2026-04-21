@@ -691,9 +691,11 @@ impl Subscription {
         SubscriptionConfig {
             template: self.template.clone(),
             trigger: self.trigger.clone(),
+            trigger_config: None,
             filter: self.filter.clone(),
             concurrency_limit: self.concurrency_limit,
             cooldown_secs: self.cooldown_secs,
+            debounce_ms: 0,
             enabled: self.enabled,
         }
     }
@@ -1463,8 +1465,14 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                     let suggested_subscription =
                         Subscription::new(template_name.clone(), signal.kind.as_str());
                     tokio::spawn(async move {
-                        dispatch_agent(state, suggested_subscription, signal, dispatcher, repo_ctx)
-                            .await;
+                        Box::pin(dispatch_agent(
+                            state,
+                            suggested_subscription,
+                            signal,
+                            dispatcher,
+                            repo_ctx,
+                        ))
+                        .await;
                     });
                 }
                 Ok(None) => {}
@@ -1488,7 +1496,14 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
                 let sub_for_task = sub.clone();
                 let repo_ctx = repo_ctx.clone();
                 tokio::spawn(async move {
-                    dispatch_agent(state, sub_for_task.clone(), signal, dispatcher, repo_ctx).await;
+                    Box::pin(dispatch_agent(
+                        state,
+                        sub_for_task.clone(),
+                        signal,
+                        dispatcher,
+                        repo_ctx,
+                    ))
+                    .await;
                     sub_for_task.release_concurrency(&subscriptions);
                 });
             } else {
@@ -2583,13 +2598,12 @@ filter = { path = "src/*.rs" }
                         "-y".into(),
                         "@modelcontextprotocol/server-filesystem".into(),
                     ],
-                    env: Default::default(),
+                    ..Default::default()
                 },
                 McpServerConfig {
                     name: "git".into(),
                     command: "mcp-git".into(),
-                    args: Vec::new(),
-                    env: Default::default(),
+                    ..Default::default()
                 },
             ],
         };

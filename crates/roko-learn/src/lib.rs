@@ -31,9 +31,13 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::clone_on_copy,
+    clippy::collapsible_if,
+    clippy::collection_is_never_read,
     clippy::derivable_impls,
     clippy::doc_markdown,
     clippy::expect_used,
+    clippy::explicit_iter_loop,
+    clippy::float_cmp,
     clippy::if_not_else,
     clippy::implicit_hasher,
     clippy::items_after_statements,
@@ -43,7 +47,9 @@
     clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
     clippy::needless_borrow,
+    clippy::needless_collect,
     clippy::needless_continue,
     clippy::needless_pass_by_value,
     clippy::needless_range_loop,
@@ -53,25 +59,43 @@
     clippy::redundant_clone,
     clippy::redundant_closure,
     clippy::redundant_closure_for_method_calls,
+    clippy::return_self_not_must_use,
     clippy::significant_drop_tightening,
+    clippy::similar_names,
+    clippy::struct_field_names,
     clippy::suboptimal_flops,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::uninlined_format_args,
+    clippy::unnecessary_map_or,
     clippy::unused_self,
+    clippy::unwrap_used,
     clippy::use_self
 )]
 
 /// Active inference helpers for tier routing support.
 pub mod active_inference;
+/// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
+pub mod adas;
+/// HDC-based adversarial signal detection with attack prototype library (TA-10).
+pub mod adversarial;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
+/// Research-oriented bandit shells used to match the learning docs.
+pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
+/// Bayesian confidence updating using Beta-Binomial conjugate model (AS-07).
+pub mod bayesian_confidence;
 /// Budget tracking and enforcement guardrails for routing decisions.
 pub mod budget;
+/// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
+pub mod calibration_policy;
 pub mod cascade_router;
+/// Causal microstructure discovery: Granger causality, PC algorithm,
+/// and formal causal DAG construction from time series data (TA-08).
+pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
@@ -90,14 +114,22 @@ pub mod error_enrichment;
 pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.
 pub mod events;
+/// Forensic replay API for debugging failed tasks (GATE-07).
+pub mod forensic_replay;
 pub mod hdc_clustering;
 /// HDC fingerprint helpers for episode memory.
 pub mod hdc_fingerprint;
+/// Heuristic, worldview, and research-provenance shells for learning parity.
+pub mod heuristics;
+/// Kalman filter for online signal smoothing in oracle predictions (P2-10).
+pub mod kalman;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
 pub mod model_experiment;
 pub mod model_router;
+/// Domain-specific Oracle implementations (Chain, Coding, Research) and witness verification.
+pub mod oracles;
 pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
@@ -107,9 +139,25 @@ pub mod prompt_experiment;
 pub mod provider_health;
 pub mod quality_judge;
 pub mod regression;
+/// Typed reinforcement signal categories for the learning pipeline (AS-11).
+pub mod reinforce_kind;
+/// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
+pub mod research_pipeline;
+/// Evolutionary resonant pattern organisms with Lotka-Volterra dynamics,
+/// Price equation tracking, and HDC genomes (TA-09).
+pub mod resonant_patterns;
+/// Lookahead and calibration shells around the shipped cascade router.
+pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.
 pub mod routing_log;
 pub mod runtime_feedback;
 pub mod section_effect;
+/// Shapley-value attribution for fair credit distribution among agents (P1-08).
+pub mod shapley;
+/// Evolutionary signal population dynamics: replicator dynamics, Hebbian
+/// learning, and Fisher variance monitoring (TA-07).
+pub mod signal_metabolism;
 pub mod skill_library;
 pub mod task_metric;
+/// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
+pub mod verdict_scorer;

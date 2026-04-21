@@ -10,7 +10,8 @@
 //! Language provider:
 //! - [`TypeScriptLanguageProvider`]: parses ES module imports (`import ... from`,
 //!   `import '...'`), `CommonJS` `require('...')` calls, and extracts `function`,
-//!   `class`, `interface`, `type`, `const`, `enum`, and `export default` symbols.
+//!   `class`, `interface`, `type`, `const`, `enum`, and `export default`
+//!   symbols, including default-exported classes and functions.
 
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::unnecessary_literal_bound)]
@@ -173,7 +174,8 @@ impl BuildSystem for YarnBuildSystem {
 /// Uses line-by-line heuristic parsing to extract imports and symbol
 /// definitions. Handles ES module `import` statements, `CommonJS` `require()`
 /// calls, and top-level declarations (`function`, `class`, `interface`,
-/// `type`, `const`, `enum`, `export default`).
+/// `type`, `const`, `enum`, `export default`), including named
+/// `export default class` and `export default function` declarations.
 pub struct TypeScriptLanguageProvider;
 
 impl LanguageProvider for TypeScriptLanguageProvider {
@@ -470,9 +472,8 @@ fn parse_ts_visibility(s: &str) -> (Visibility, &str) {
         if let Some(after_declare) = after_export.strip_prefix("declare ") {
             return (Visibility::Public, after_declare.trim_start());
         }
-        // `export default` is handled separately
-        if after_export.starts_with("default ") {
-            return (Visibility::Public, rest);
+        if let Some(after_default) = after_export.strip_prefix("default ") {
+            return (Visibility::Public, after_default.trim_start());
         }
         (Visibility::Public, after_export)
     } else if let Some(after_declare) = rest.strip_prefix("declare ") {
@@ -844,6 +845,26 @@ function hello() {}
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "App");
         assert_eq!(syms[0].kind, SymbolKind::Module);
+        assert_eq!(syms[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extract_export_default_class() {
+        let lang = TypeScriptLanguageProvider;
+        let syms = lang.extract_symbols("export default class App {}\n");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "App");
+        assert_eq!(syms[0].kind, SymbolKind::Struct);
+        assert_eq!(syms[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn extract_export_default_function() {
+        let lang = TypeScriptLanguageProvider;
+        let syms = lang.extract_symbols("export default async function init() {}\n");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "init");
+        assert_eq!(syms[0].kind, SymbolKind::Function);
         assert_eq!(syms[0].visibility, Visibility::Public);
     }
 

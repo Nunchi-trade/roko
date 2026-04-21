@@ -99,7 +99,7 @@ network = "base"               # "base" | "base-sepolia" | "anvil"
 
 [chain.korai]
 # KORAI/DAEJI token configuration
-demurrage_rate = 0.01          # 1% annual demurrage
+demurrage_rate = 0.01          # 1% annual demurrage (planned)
 ```
 
 ### Hot-Reload Scope
@@ -221,6 +221,8 @@ roko resume                    # Resume from where it left off
 ```
 
 **Example**: Investigate unusual behavior, wait for market conditions to stabilize.
+
+REF23 adds a user-facing continuity rule above raw pause/resume mechanics: permissions and ambiguity decisions can be remembered within the current session, but that remembered state must remain session-scoped and explicitly clearable. `roko session forget` and `roko init --reset-permissions` therefore belong to the same lifecycle story as `pause` and `resume`, because they control what operational context carries forward when a user switches surfaces or resumes work later. See [../12-interfaces/21-user-ux-running-agents.md](../12-interfaces/21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
 
 ### Level 4: Restart (State-Preserving Disruption)
 

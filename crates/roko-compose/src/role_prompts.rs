@@ -7,19 +7,22 @@
 
 use crate::ContextChunk;
 use crate::PadState;
+use crate::budget::{Complexity, adjusted_budget_for};
 use crate::prompt::estimate_tokens;
 use crate::prompt::{PromptComposer, PromptSection};
-use crate::scorer::{ActiveInferenceScorer, SectionScorer};
+use crate::scorer::{GoalDirectedHeuristicScorer, SectionScorer};
 use crate::system_prompt_builder::SystemPromptBuilder;
 use crate::templates::RolePromptTemplate;
-use crate::templates::common::CONTEXT_LAYOUT_STANZA;
+use crate::templates::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
+use crate::templates::conductor::ConductorTemplate;
 use crate::templates::implementer::ImplementerTemplate;
 use crate::templates::integration::IntegrationTemplate;
 use crate::templates::quick::{QuickFixTemplate, QuickReviewerTemplate};
+use crate::templates::refactorer::RefactorerTemplate;
+use crate::templates::researcher::ResearcherTemplate;
 use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
-use crate::templates::task_impl::TaskImplTemplate;
 use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
 use roko_learn::playbook::Playbook;
@@ -173,6 +176,8 @@ pub struct RoleSystemPromptSpec {
     pub pheromones: Vec<ContextChunk>,
     /// Optional affect state used to tune tone and focus.
     pub affect_state: Option<PadState>,
+    /// Complexity band used for static per-layer budget shaping.
+    pub complexity: Complexity,
     /// Whether to include cache markers between stability tiers.
     pub cache_markers: bool,
 }
@@ -192,6 +197,7 @@ impl RoleSystemPromptSpec {
             relevant_playbooks: Vec::new(),
             pheromones: Vec::new(),
             affect_state: None,
+            complexity: Complexity::Standard,
             cache_markers: false,
         }
     }
@@ -245,6 +251,13 @@ impl RoleSystemPromptSpec {
         self
     }
 
+    /// Apply one complexity band to the shared role-budget profile.
+    #[must_use]
+    pub const fn with_complexity(mut self, complexity: Complexity) -> Self {
+        self.complexity = complexity;
+        self
+    }
+
     /// Enable cache-marker emission in the underlying builder.
     #[must_use]
     pub const fn with_cache_markers(mut self) -> Self {
@@ -286,6 +299,11 @@ impl RoleSystemPromptSpec {
             .with_tools(tool_allowlist_instructions(&self.tool_allowlist_csv))
             .with_anti_patterns(self.anti_patterns())
             .with_affect_state(self.affect_state);
+
+        if self.complexity != Complexity::Standard {
+            builder =
+                builder.with_budget_profile(adjusted_budget_for(self.role, self.complexity).budget);
+        }
 
         if let Some(registry) = section_effectiveness {
             builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
@@ -474,7 +492,7 @@ impl RoleSystemPromptSpec {
 
     fn composition_scorer(&self) -> Box<dyn Scorer> {
         if let Some(goal) = self.task_context.goal_text() {
-            Box::new(ActiveInferenceScorer::new(goal))
+            Box::new(GoalDirectedHeuristicScorer::new(goal))
         } else {
             Box::new(SectionScorer::new())
         }
@@ -486,10 +504,13 @@ impl RoleSystemPromptSpec {
 pub fn tool_allowlist_instructions(tools_csv: &str) -> String {
     let csv = tools_csv.trim();
     if csv.is_empty() {
-        "No hosted-backend tool allowlist was supplied. Use only the minimum tools required for the role."
-            .to_string()
+        format!(
+            "{MCP_TOOLS_STANZA}\nNo hosted-backend tool allowlist was supplied. Use only the minimum tools required for the role."
+        )
     } else {
-        format!("Claude tool allowlist: {csv}\n\nUse only the tools granted to your role.")
+        format!(
+            "{MCP_TOOLS_STANZA}\nClaude tool allowlist: {csv}\n\nUse only the tools granted to your role."
+        )
     }
 }
 
@@ -514,15 +535,9 @@ pub fn role_identity_for(role: AgentRole) -> String {
         }
         AgentRole::AutoFixer => QuickFixTemplate.role_identity().to_string(),
         AgentRole::IntegrationTester => IntegrationTemplate.role_identity().to_string(),
-        AgentRole::Refactorer => TaskImplTemplate.role_identity().to_string(),
-        AgentRole::Researcher => {
-            "You are a researcher. Gather context from docs and code to inform implementation."
-                .to_string()
-        }
-        AgentRole::Conductor => {
-            "You are the Conductor. Coordinate the work, surface risks, and keep the plan moving."
-                .to_string()
-        }
+        AgentRole::Refactorer => RefactorerTemplate.role_identity().to_string(),
+        AgentRole::Researcher => ResearcherTemplate.role_identity().to_string(),
+        AgentRole::Conductor => ConductorTemplate.role_identity().to_string(),
         other => format!(
             "You are an AI agent in the {} role. Complete your assigned task.",
             other.label()

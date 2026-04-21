@@ -71,6 +71,7 @@ fn minimal() -> RokoConfig {
             clippy_enabled: false,
             skip_tests: true,
             max_iterations: 1,
+            ..GatesConfig::default()
         },
         routing: RoutingConfig {
             fast_task_model: "claude-haiku-4-5".into(),
@@ -131,6 +132,7 @@ fn thorough() -> RokoConfig {
             clippy_enabled: true,
             skip_tests: false,
             max_iterations: 5,
+            ..GatesConfig::default()
         },
         routing: RoutingConfig {
             fast_task_model: "claude-sonnet-4-6".into(),

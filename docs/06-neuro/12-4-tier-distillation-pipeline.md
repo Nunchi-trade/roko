@@ -1,37 +1,50 @@
 # Four-Tier Distillation Pipeline
 
-> Episodes are distilled into Insights, Insights are promoted to Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files — a three-stage pipeline implementing Complementary Learning Systems theory.
+> Episodes are distilled into Insights, Insights are promoted into Heuristics, and validated Heuristics are compiled into human-readable PLAYBOOK.md files. Durable knowledge keeps its receipts today; explicit falsifier records, worldview history, and demurrage-governed freshness are target-state extensions described in this doc.
+>
+> **Implementation status**
+> - **Shipping**: episode distillation, `InsightRecord`, `HeuristicRule`, and playbook compilation in `roko-neuro`.
+> - **Target-state**: richer typed heuristics, explicit falsifier records, and worldview clustering.
+> - **Deferred**: demurrage/balance freshness as the governing model, worldview cold-tier preservation, and HDC novelty-weighted reinforcement.
 
-
-> **Implementation**: Built
-
-**Topic**: [Neuro — Cognitive Knowledge Layer](./INDEX.md)
+**Topic**: [Neuro - Cognitive Knowledge Layer](./INDEX.md)
 **Prerequisites**: [01-six-knowledge-types.md](./01-six-knowledge-types.md), [02-four-validation-tiers.md](./02-four-validation-tiers.md)
 **Key sources**:
 - `crates/roko-neuro/src/tier_progression.rs` (TierProgression, InsightRecord, HeuristicRule)
 - `crates/roko-neuro/src/distiller.rs` (DistillationBackend, Distiller)
 - `crates/roko-neuro/src/episode_completion.rs` (spawn_episode_distillation)
-- `refactoring-prd/03-cognitive-subsystems.md` §3 (Dreams produce knowledge promotions)
+- `docs/00-architecture/04-decay-variants.md` (retention model and Ebbinghaus shaping)
+- `docs/00-architecture/18-decay-tier-matrix.md` (tier matrix and graduation rules)
+- `docs/00-architecture/01-naming-and-glossary.md` (canonical Neuro vocabulary)
+- `../../tmp/refinements/11-hyperdimensional-substrate.md` (HDC fingerprint proposal)
+- `../../tmp/refinements/12-knowledge-demurrage.md` (demurrage refinement)
+- `../../tmp/refinements/14-worldview-validation.md` (heuristic calibration, falsifiers, worldview clustering)
 
 ---
 
 ## Abstract
 
-The distillation pipeline transforms raw agent experiences (episodes) into progressively more abstract and durable knowledge. It operates in three stages:
+The distillation pipeline turns raw agent experience into durable, inspectable knowledge. In the expanded target-state design, `Heuristic` is a first-class durable knowledge kind rather than a derived side effect. A heuristic stores a claim, preconditions, a prediction, calibration history, episode receipts, and lineage. Episodes feed evidence into that record, and later episodes either confirm it, violate it, refine it, or refute it.
 
-1. **D1: Episodes → Insights** — Pattern detection extracts observations from completed episodes
-2. **D2: Insights → Heuristics** — Clusters of 5+ confirmed Insights with ≥0.7 confidence are promoted to Heuristics
-3. **D3: Heuristics → PLAYBOOK.md** — Validated Heuristics are compiled into human-readable playbook files
+This chapter follows the refinement in `tmp/refinements/14-worldview-validation.md` and keeps the earlier HDC and demurrage changes in view. The shipping pipeline is narrower than that full design: it already promotes useful patterns and keeps receipts, while the richer falsifier, worldview, and demurrage layers remain target-state. The point is still to preserve what worked, preserve what was challenged, and make the difference explicit.
 
-This pipeline directly implements Complementary Learning Systems (CLS) theory (McClelland et al. 1995): fast episodic memory (episodes) consolidates into slow semantic memory (Insights, Heuristics, Playbooks) through repeated extraction and validation. Each stage increases abstraction, durability, and generalizability while decreasing specificity and recency.
+The pipeline still has three major stages:
+
+1. **D1: Episodes -> Insights** - extract observations, warnings, and receipts from completed episodes
+2. **D2: Insights -> Heuristics** - promote repeated patterns into durable heuristics with calibration and contradiction handling
+3. **D3: Heuristics -> PLAYBOOK.md** - compile validated heuristics into a human-readable playbook without deleting the underlying durable records
+
+This is CLS-style consolidation with more structure than a plain semantic memo. HDC fingerprints can keep the promotion path structural rather than textual where they are available. The deferred demurrage model would make durable knowledge earn its place through retrieval, citation, surprise, and gate survival. Worldviews are likewise a higher-order target-state cluster over heuristics rather than a current shipping object.
+
+See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md), [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md), [HDC Knowledge Encoding](./06-hdc-knowledge-encoding.md), [Temporal Knowledge Topology](../00-architecture/27-temporal-knowledge-topology.md), [04-decay-variants.md](../00-architecture/04-decay-variants.md), [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md), and [Naming and Glossary](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
-## Stage D1: Episodes → Insights
+## Stage D1: Episodes -> Insights
 
-### Episode Distillation
+### Episode distillation
 
-When an episode (a completed task run) finishes, the `spawn_episode_distillation` function triggers asynchronous extraction of knowledge candidates:
+When an episode finishes, `spawn_episode_distillation()` triggers asynchronous extraction of knowledge candidates:
 
 ```rust
 // From roko-neuro/src/episode_completion.rs (signature)
@@ -42,147 +55,182 @@ pub fn spawn_episode_distillation(
 ) -> JoinHandle<Result<()>>;
 ```
 
-The distillation runs on a background task to avoid blocking the agent's main execution loop.
+The distillation runs in the background so the agent's main execution loop stays responsive. D1 extracts the raw evidence that later becomes Insight receipts, heuristic receipts, or falsifier records.
 
-### The DistillationBackend Trait
+### DistillationBackend
 
 ```rust
 // From roko-neuro/src/distiller.rs
 pub trait DistillationBackend: Send + Sync {
-    /// Extract knowledge candidates from a completed episode.
     async fn distill(&self, episode: &Episode) -> Result<Vec<KnowledgeEntry>>;
 }
 ```
 
-The default implementation (`Distiller`) uses an LLM (Claude Haiku by default) to extract structured knowledge from episode transcripts. The LLM is prompted to identify:
+The default `Distiller` uses an LLM to extract structured knowledge from episode transcripts. The prompt asks for:
 
-- **Observations** that could become Insights
-- **Patterns** that could become Heuristics
-- **Dangers** that could become Warnings
-- **Contradictions** to existing knowledge that could become AntiKnowledge
+- observations that could become Insights
+- patterns that could become Heuristics or heuristic precursors
+- dangers that could become Warnings
+- contradictions to existing knowledge that could become AntiKnowledge or falsifiers
 
-The LLM response is parsed as structured JSON and converted to `KnowledgeEntry` objects.
+The LLM response is parsed as structured JSON and converted into `KnowledgeEntry` objects.
 
 ### InsightRecord
-
-The tier progression system uses `InsightRecord` to track extracted insights:
 
 ```rust
 // From roko-neuro/src/tier_progression.rs
 pub struct InsightRecord {
-    pub pattern: String,        // The observed pattern
-    pub support: usize,         // Number of episodes supporting this pattern
-    pub confidence: f64,        // Accumulated confidence
-    pub source_episodes: Vec<String>,  // Episode IDs that contributed
+    pub pattern: String,
+    pub support: usize,
+    pub confidence: f64,
+    pub source_episodes: Vec<String>,
 }
 ```
 
-**Minimum support**: An InsightRecord needs support from at least 3 episodes to be considered for D1 output. Single-episode observations are too noisy — they may reflect idiosyncratic circumstances rather than genuine patterns.
+An InsightRecord needs support from at least 3 episodes before it is considered stable enough for D1 output. Single-episode observations are often noise. The source episode list is important: it is the beginning of the receipt trail that later explains why a heuristic was ever trusted.
 
-### D1 Output
+### D1 output
 
-Distilled knowledge entries enter the NeuroStore at **Transient tier** with initial confidence based on the extraction confidence (typically 0.3–0.6). They must be validated through use before promotion.
+Distilled entries enter the NeuroStore at the Transient tier with initial confidence based on extraction confidence, typically 0.3-0.6. They also receive their HDC fingerprint at ingestion time and start carrying receipts back to the originating episodes so later calibration can point at concrete evidence instead of vague summary prose.
 
 ---
 
-## Stage D2: Insights → Heuristics
+## Stage D2: Insights -> Heuristics
 
-### Pattern Mining
+### Pattern mining
 
-The D2 stage uses the `PatternMiner` from `roko-learn` to identify clusters of related Insights that share a common pattern. The mining process:
+The D2 stage uses `PatternMiner` from `roko-learn` to identify clusters of related Insights that share a common pattern. The mining process is intentionally structural:
 
-1. **Collect** all Insights with confidence ≥ 0.5
-2. **Cluster** by HDC similarity (if vectors are available) or by tag overlap
-3. **Filter** clusters with ≥ 5 members and mean confidence ≥ 0.7
-4. **Extract** the common pattern from each qualifying cluster
+1. Collect all Insights with confidence >= 0.5
+2. Cluster by HDC fingerprint similarity using the per-Engram fingerprint field
+3. Filter clusters with at least 5 members and mean confidence >= 0.7
+4. Extract the common pattern from each qualifying cluster
+5. Emit a durable Heuristic record with calibration metadata and receipts
+
+The HDC fingerprint matters twice in the fuller design. First, it keeps D2 structural instead of lexical. Second, it can provide a novelty signal for a future balance-aware reinforcement model. That is also why a heuristic must keep receipts: the system should be able to point back to the concrete episode trail that made the heuristic worth keeping.
 
 ### HeuristicRule
 
 ```rust
 // From roko-neuro/src/tier_progression.rs
 pub struct HeuristicRule {
-    pub rule: String,           // The generalized rule
-    pub support: usize,         // Number of Insights supporting this rule
-    pub confidence: f64,        // Aggregated confidence
-    pub source_insights: Vec<String>,  // Insight IDs that contributed
+    pub rule: String,
+    pub support: usize,
+    pub confidence: f64,
+    pub source_insights: Vec<String>,
 }
 ```
 
-### Promotion Criteria
+`HeuristicRule` is the outward-facing summary. The durable knowledge object behind it is the `Heuristic` entry itself: claim, preconditions, prediction, calibration, lineage, and receipts. The distinction matters because playbooks should be views over durable heuristics, not the only place the rule survives.
+
+### Promotion criteria
 
 | Criterion | Threshold | Rationale |
 |---|---|---|
 | Minimum support | 5 Insights | Ensures the pattern is robust across multiple observations |
 | Minimum confidence | 0.7 | Ensures high reliability before promoting to a durable type |
 | Cross-validation | At least 2 distinct contexts | Prevents overfitting to a single scenario |
-| No contradictions | No active AntiKnowledge refuting the pattern | Prevents promoting contested knowledge |
+| No unresolved contradictions | No active falsifier or AntiKnowledge entry refuting the pattern | Prevents promoting contested knowledge |
+
+### Heuristic calibration
+
+Once a heuristic is promoted, it does not become static. Every later episode can reinforce, violate, or refine it:
+
+- Confirm - the heuristic predicted the right outcome in context
+- Violate - the heuristic predicted the wrong outcome and should lose weight
+- Refine - the heuristic was directionally right but too broad, so a narrower child heuristic should be spawned
+- Generalize - the heuristic worked in a broader context than expected, so the claim can be lifted upward
+- Refute - repeated contradictions should create an explicit falsifier record and cold-tier the contested version
+
+Calibration state stays attached to the heuristic as a first-class record. The important fields are trials, confirmations, violations, the confidence interval, and the episode receipts that justify each update. That is what lets users browse current belief state and see which heuristics are battle-tested versus still provisional.
 
 ### replay_heuristics()
-
-The tier progression system includes a `replay_heuristics()` method that re-evaluates existing Heuristics against new evidence:
 
 ```rust
 // From roko-neuro/src/tier_progression.rs (signature)
 pub fn replay_heuristics(&mut self) -> Result<Vec<HeuristicAdjustment>>;
 ```
 
-This method:
-1. Retrieves all current Heuristics
-2. Checks each against recent episodes for confirmation or contradiction
-3. Adjusts confidence up (confirmed) or down (contradicted)
-4. Returns a list of adjustments for logging
+Replay re-evaluates existing heuristics against new evidence. It:
 
-Replay runs during the Dreams cycle (offline consolidation) to avoid impacting online task execution.
+1. Retrieves all current heuristics
+2. Checks each against recent episodes for confirmation or contradiction
+3. Adjusts confidence up or down
+4. Returns adjustments for logging, including any child heuristics or falsifier records that should be created
+
+Replay runs during the Dreams cycle so it does not interfere with online task execution.
 
 ---
 
-## Stage D3: Heuristics → PLAYBOOK.md
+## Worldviews and cold tier preservation
 
-### Playbook Compilation
+Target-state: a worldview is a cluster of heuristics that repeatedly co-occur in successful episodes. The cluster is not manually declared; it is observed from the co-citation graph and from repeated episode overlap.
 
-The D3 stage compiles validated Heuristics into human-readable PLAYBOOK.md files:
+Worldviews matter because they let Neuro reason above a single heuristic:
+
+- A worldview bundles heuristics that tend to travel together
+- A worldview has a domain fingerprint that says where it applies
+- A worldview has a coherence score and an effectiveness score
+- A worldview can be preserved in a cold tier when it stops being active but still matters as a fallback
+
+Cold-tier preservation is important for two reasons. First, it prevents good but currently quiet worldviews from being forgotten just because another domain is active today. Second, it lets the router thaw a preserved worldview when the current task fingerprint matches again. That keeps the knowledge store plural by construction instead of collapsing into monoculture.
+
+The cold-tier rule in this design follows demurrage. That storage model is deferred, but the intent is clear: inactive worldviews would lose retrieval priority, not identity. Their receipts, calibration history, and lineage would remain valid even while they cool.
+
+---
+
+## Stage D3: Heuristics -> PLAYBOOK.md
+
+### Playbook compilation
+
+The D3 stage compiles validated heuristics into human-readable PLAYBOOK.md files:
 
 ```rust
 // From roko-neuro/src/tier_progression.rs
 pub struct PlaybookCompilation {
     pub title: String,
     pub rules: Vec<HeuristicRule>,
-    pub markdown: String,       // Rendered PLAYBOOK.md content
+    pub markdown: String,
 }
 ```
 
-### TierProgression Orchestrator
+Compiled playbooks are not exempt from retention pressure, but the current system uses existing decay/confidence behavior rather than the full demurrage economy described here. In the deferred design, each rule would keep earning balance through retrieval, citation, surprise, or gate survival. The heuristic record itself would remain in Neuro even if the playbook projection gets rewritten.
 
-The `TierProgression` struct orchestrates all three stages:
+### Freshness and balance
+
+Neuro treats playbook compilation as the beginning of a freshness contract, not the end of one:
+
+- Rules that are retrieved often keep their balance higher
+- Rules that are cited by other knowledge entries gain reinforcement faster
+- Rules that survive gates during real work keep the strongest balance
+- Rules that explain novel surprises earn the largest novelty-weighted boost
+- Rules that are never used eventually cool and stop dominating the playbook
+
+Heuristics themselves follow the same contract, but they carry more structure than a playbook line. Their receipts and calibration history let the store preserve a precise record of why the heuristic existed, what episodes supported it, and what later falsified it.
+
+### TierProgression orchestrator
 
 ```rust
 // From roko-neuro/src/tier_progression.rs
 pub struct TierProgression {
     knowledge_store: Arc<Mutex<KnowledgeStore>>,
-    pattern_miner: Arc<PatternMiner>,  // from roko-learn
+    pattern_miner: Arc<PatternMiner>,
 }
 
 impl TierProgression {
-    /// D1: Analyze episodes and extract InsightRecords.
     pub fn analyze(&self, episodes: &[Episode]) -> Result<Vec<InsightRecord>>;
-
-    /// D1 continued: Extract KnowledgeEntry Insights from InsightRecords.
     pub fn extract_insights(&self, records: Vec<InsightRecord>) -> Result<Vec<KnowledgeEntry>>;
-
-    /// D2: Promote clusters of Insights to HeuristicRules.
     pub fn promote_heuristics(&self) -> Result<Vec<HeuristicRule>>;
-
-    /// D3: Compile validated Heuristics into PLAYBOOK.md.
     pub fn compile_playbook(&self) -> Result<PlaybookCompilation>;
-
-    /// Replay: Re-evaluate existing Heuristics against new evidence.
     pub fn replay_heuristics(&mut self) -> Result<Vec<HeuristicAdjustment>>;
 }
 ```
 
-### Playbook Format
+The orchestrator keeps the pipeline cohesive, but the durable record is the heuristic itself. The playbook is the projection; the heuristic is the source of truth.
 
-Compiled playbooks are written as Markdown files at `.roko/neuro/PLAYBOOK.md`:
+### Playbook format
+
+Compiled playbooks are written as Markdown files at `.roko/neuro/PLAYBOOK.md`. A playbook is the user-facing surface, but the backing store remains heuristic-rich:
 
 ```markdown
 # Agent Playbook
@@ -191,23 +239,6 @@ Generated: 2026-04-10T22:00:00Z
 Rules: 12
 Source insights: 47
 Mean confidence: 0.82
-
-## Rust Development Rules
-
-### Rule 1: Always run clippy before committing
-- **Confidence**: 0.91
-- **Support**: 8 insights from 15 episodes
-- **Evidence**: Gate pass rate improved 23% when clippy was run pre-commit
-
-### Rule 2: Use tokio::time::pause() in async tests
-- **Confidence**: 0.85
-- **Support**: 5 insights from 9 episodes
-- **Evidence**: Flaky test rate dropped from 12% to 1% with time mocking
-
-## Error Handling Rules
-
-### Rule 3: Prefer concrete error types over Box<dyn Error>
-...
 ```
 
 ---
@@ -221,6 +252,7 @@ Episodes (raw agent turns)
 ┌─────────────────────────────────────────┐
 │  D1: Episode Distillation               │
 │  - LLM extracts observations            │
+│  - records receipts and contradiction traces
 │  - min_support = 3 episodes             │
 │  - Output: KnowledgeEntry (Insight)     │
 │  - Initial tier: Transient              │
@@ -229,28 +261,25 @@ Episodes (raw agent turns)
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  Validation through Use                  │
-│  - Agent retrieves entry, uses it       │
-│  - Gate checks outcome                  │
-│  - Positive → tier promotion + boost    │
-│  - Negative → tier demotion             │
-│  - Entries accumulate confirmations     │
+│  D2: Heuristic Calibration              │
+│  - HDC clusters repeated Insight sets   │
+│  - promote to durable Heuristic records  │
+│  - attach trials / confirmations / receipts
+│  - contradictions become falsifier records
 └─────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  D2: Insight → Heuristic Promotion      │
-│  - Cluster related Insights             │
-│  - min_support = 5 insights             │
-│  - min_confidence = 0.7                 │
-│  - Cross-validation required            │
-│  - Output: KnowledgeEntry (Heuristic)   │
-│  - Initial tier: Working or Consolidated│
+│  Worldview Clustering                   │
+│  - co-citation graph over heuristics     │
+│  - preserve hot and cold worldview sets  │
+│  - thaw when domain fingerprints match   │
+│  - keep receipts and calibration intact  │
 └─────────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────────┐
-│  D3: Heuristic → PLAYBOOK.md            │
+│  D3: Heuristic -> PLAYBOOK.md           │
 │  - Compile validated Heuristics         │
 │  - Render as human-readable Markdown    │
 │  - Output: .roko/neuro/PLAYBOOK.md      │
@@ -262,530 +291,35 @@ Episodes (raw agent turns)
 
 ## Integration with Dreams
 
-The distillation pipeline runs both online (after episode completion) and offline (during Dreams consolidation). The Dreams cycle (see topic [10-dreams](../10-dreams/INDEX.md)) drives the pipeline during idle time:
+The distillation pipeline runs both online after episode completion and offline during Dreams consolidation. The Dreams cycle (see topic [10-dreams](../10-dreams/INDEX.md)) drives the pipeline during idle time:
 
-1. **NREM Replay**: Re-process recent episodes (prioritized by Mattar-Daw utility formula)
-2. **Consolidation**: Run D1 and D2 on replayed episodes
-3. **Pruning**: Run decay + GC to remove stale knowledge
-4. **Playbook update**: Run D3 to recompile PLAYBOOK.md with new Heuristics
+1. NREM replay re-processes recent episodes, prioritized by the Mattar-Daw utility formula
+2. Consolidation runs D1 and D2 on replayed episodes, with D2 grouping by fingerprint similarity and updating heuristic calibration
+3. Target-state pruning charges demurrage, freezes cold knowledge, preserves cold-tier worldviews, and thaws only what is still earning balance
+4. Playbook update runs D3 to recompile PLAYBOOK.md with new heuristics while keeping the underlying durable records intact
 
-This mirrors the neuroscience of sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995).
-
----
-
-## Academic Foundations
-
-- McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). "Why there are complementary learning systems in the hippocampus and neocortex." *Psychological Review*, 102(3), 419–457.
-- Mattar, M. G., & Daw, N. D. (2018). "Prioritized memory access explains planning and hippocampal replay." *Nature Neuroscience*, 21, 1609–1617.
-- Lacaux, C., et al. (2021). "Sleep onset is a creative sweet spot." *Science Advances*, 7(50). (Creative insight during N1 sleep)
-- Wang, L., et al. (2024). "A Survey on Large Language Model Based Autonomous Agents." (Skill extraction patterns)
-
----
-
-## Implementation Details: D1 Warning Extraction
-
-### Automatic Warning extraction algorithm
-
-Warnings flag dangerous patterns that the agent should avoid. The D1 stage extracts Warnings from structural analysis of episode data, without requiring an LLM call.
-
-```rust
-/// Categories of automatically extracted Warnings.
-pub enum WarningCategory {
-    /// Gate failure pattern: repeated failures in the same area.
-    GateFailure,
-    /// Performance regression: slower execution over time.
-    PerformanceRegression,
-    /// Error pattern: same error recurring across episodes.
-    RecurringError,
-    /// Timeout pattern: tasks consistently hitting time limits.
-    TimeoutPattern,
-}
-
-/// Extract Warnings from a completed episode.
-///
-/// Scans the episode transcript for failure patterns and generates
-/// Warning-type KnowledgeEntry candidates.
-pub fn extract_warnings(episode: &Episode) -> Vec<KnowledgeEntry> {
-    let mut warnings = Vec::new();
-
-    // Pattern 1: Gate failures
-    for gate_result in &episode.gate_results {
-        if !gate_result.passed {
-            warnings.push(KnowledgeEntry {
-                id: format!("warn_{}", uuid::Uuid::new_v4()),
-                kind: KnowledgeKind::Warning,
-                content: format!(
-                    "Gate '{}' failed during task '{}': {}",
-                    gate_result.gate_name,
-                    episode.task_id,
-                    gate_result.failure_reason,
-                ),
-                confidence: 0.4,
-                source_episodes: vec![episode.id.clone()],
-                tags: vec![
-                    format!("gate:{}", gate_result.gate_name),
-                    format!("task:{}", episode.task_id),
-                ],
-                ..Default::default()
-            });
-        }
-    }
-
-    // Pattern 2: Excessive retries (>2 indicates a problem)
-    let retry_count = episode.turns.iter()
-        .filter(|t| t.is_retry)
-        .count();
-    if retry_count > 2 {
-        warnings.push(KnowledgeEntry {
-            id: format!("warn_{}", uuid::Uuid::new_v4()),
-            kind: KnowledgeKind::Warning,
-            content: format!(
-                "Task '{}' required {} retries. The approach may be unreliable.",
-                episode.task_id, retry_count,
-            ),
-            confidence: 0.3 + (retry_count as f64 * 0.05).min(0.3),
-            source_episodes: vec![episode.id.clone()],
-            tags: vec!["retries".to_string(), format!("task:{}", episode.task_id)],
-            ..Default::default()
-        });
-    }
-
-    warnings
-}
-```
-
-**Integration**: Call `extract_warnings()` inside `spawn_episode_distillation()`, alongside the LLM-based insight extraction. Warning extraction is deterministic and does not require an LLM call.
-
-### D2: HDC-based clustering algorithm
-
-The current D2 stage uses `PatternMiner`. HDC-based clustering provides a structural alternative that groups entries by role-filler similarity rather than text or tag overlap.
-
-```rust
-/// Cluster Insights by HDC vector similarity using k-medoids (PAM).
-pub struct HdcClusterer {
-    /// Minimum cluster size for Heuristic promotion. Default: 5.
-    pub min_cluster_size: usize,
-    /// Similarity threshold for cluster membership. Default: 0.53.
-    pub membership_threshold: f32,
-    /// Maximum number of clusters to produce. Default: 50.
-    pub max_clusters: usize,
-}
-
-impl Default for HdcClusterer {
-    fn default() -> Self {
-        Self {
-            min_cluster_size: 5,
-            membership_threshold: 0.53,
-            max_clusters: 50,
-        }
-    }
-}
-
-/// A cluster of related Insights.
-pub struct InsightCluster {
-    /// Centroid vector (bundle of all members).
-    pub centroid: HdcVector,
-    /// Member entry IDs.
-    pub members: Vec<String>,
-    /// Mean pairwise similarity within the cluster.
-    pub cohesion: f32,
-    /// Mean confidence of members.
-    pub mean_confidence: f64,
-}
-```
-
-**Algorithm**: k-medoids (PAM) over Hamming distance, with k estimated as `sqrt(n/2)` capped at `max_clusters`. Delegates to `roko-learn::hdc_clustering::k_medoids_pam()` which already operates on `HdcVector`.
-
-**Configuration parameters**:
-
-| Parameter | Default | Range | Notes |
-|---|---|---|---|
-| `min_cluster_size` | 5 | 3 - 10 | Smaller = more sensitive, more false promotions |
-| `membership_threshold` | 0.53 | 0.51 - 0.56 | Must be above noise floor (0.50) |
-| `max_clusters` | 50 | 10 - 200 | Caps compute cost |
-
-### Promotion criteria: cross-validation and AntiKnowledge check
-
-Two gates prevent premature promotion.
-
-**Cross-validation enforcement**:
-
-```rust
-/// Check that a cluster's members come from at least min_contexts distinct contexts.
-///
-/// A "context" = episode task type + domain. Prevents overfitting to one scenario.
-pub fn cross_validation_check(
-    cluster: &InsightCluster,
-    entries: &[KnowledgeEntry],
-    min_contexts: usize, // Default: 2
-) -> bool {
-    let contexts: HashSet<String> = cluster.members.iter()
-        .filter_map(|id| {
-            let entry = entries.iter().find(|e| e.id == *id)?;
-            entry.tags.iter()
-                .find(|t| t.starts_with("context:"))
-                .cloned()
-        })
-        .collect();
-
-    contexts.len() >= min_contexts
-}
-```
-
-**AntiKnowledge contradiction check**:
-
-```rust
-/// Check that no active AntiKnowledge entry contradicts this cluster's pattern.
-pub fn anti_knowledge_check(
-    cluster: &InsightCluster,
-    anti_entries: &[KnowledgeEntry],
-    threshold: f32, // Default: 0.526
-) -> bool {
-    for anti in anti_entries {
-        if anti.kind != KnowledgeKind::AntiKnowledge {
-            continue;
-        }
-        if let Some(anti_hv) = anti.hdc_vector.as_ref()
-            .and_then(|b| HdcVector::from_bytes(b)) {
-            if cluster.centroid.similarity(&anti_hv) > threshold {
-                return false; // Blocked
-            }
-        }
-    }
-    true
-}
-```
-
-**Full promotion gate**: Requires (1) >= 5 members, (2) mean confidence >= 0.7, (3) >= 2 distinct contexts, (4) no AntiKnowledge contradictions. All four must pass.
-
-### Dreams integration: distillation during idle time
-
-```rust
-/// Trigger mechanism for Dreams-driven distillation.
-pub struct DreamsDistillationTrigger {
-    /// Minimum idle time before Dreams activates. Default: 5 minutes.
-    pub idle_threshold: Duration,
-    /// Maximum episodes to replay per session. Default: 20.
-    pub max_replay_episodes: usize,
-    /// Whether to run D2 during Dreams. Default: true.
-    pub run_d2: bool,
-    /// Whether to run D3 during Dreams. Default: true.
-    pub run_d3: bool,
-}
-
-impl DreamsDistillationTrigger {
-    /// Execute a Dreams distillation session.
-    ///
-    /// Pipeline:
-    ///   1. Select episodes for replay (Mattar-Daw priority)
-    ///   2. Run D1 on each (extract Insights + Warnings)
-    ///   3. Run D2 (cluster Insights, promote Heuristics)
-    ///   4. Run decay + GC
-    ///   5. Run D3 (recompile PLAYBOOK.md)
-    pub async fn run(
-        &self,
-        tier_progression: &mut TierProgression,
-        episode_store: &EpisodeStore,
-    ) -> Result<DreamsReport> {
-        let episodes = episode_store.select_for_replay(self.max_replay_episodes)?;
-
-        let mut all_insights = Vec::new();
-        let mut all_warnings = Vec::new();
-        for episode in &episodes {
-            let insights = tier_progression.analyze(&[episode.clone()])?;
-            all_insights.extend(tier_progression.extract_insights(insights)?);
-            all_warnings.extend(extract_warnings(episode));
-        }
-
-        let new_heuristics = if self.run_d2 {
-            tier_progression.promote_heuristics()?
-        } else {
-            vec![]
-        };
-
-        let playbook = if self.run_d3 {
-            Some(tier_progression.compile_playbook()?)
-        } else {
-            None
-        };
-
-        Ok(DreamsReport {
-            episodes_replayed: episodes.len(),
-            insights_extracted: all_insights.len(),
-            warnings_extracted: all_warnings.len(),
-            heuristics_promoted: new_heuristics.len(),
-            playbook_updated: playbook.is_some(),
-        })
-    }
-}
-```
-
-**Trigger mechanism**: When no tasks have been dispatched for `idle_threshold` (default 5 minutes), Dreams activates and runs the distillation pipeline. Maximum duration: 30 seconds, to avoid blocking if a new task arrives.
-
-**Configuration parameters**:
-
-| Parameter | Default | Range | Notes |
-|---|---|---|---|
-| `idle_threshold` | 5 min | 1 - 30 min | Lower = more frequent Dreams |
-| `max_replay_episodes` | 20 | 5 - 100 | More = deeper consolidation |
-| Dreams max duration | 30 sec | 5 - 120 sec | Hard cap |
-
-### End-to-end test scenario
-
-**Setup**: 10 completed episodes involving Rust async code. 7 contain a gate failure related to `tokio::time` in tests. 3 succeed when using `tokio::time::pause()`.
-
-**D1 output** (expected):
-- 7 Warning entries (one per gate failure)
-- 2+ Insight entries: "tokio::time causes flaky tests" and "tokio::time::pause() stabilizes tests"
-
-**D2 output** (expected):
-- 1 cluster of 7+ Insights about tokio::time
-- Initial mean confidence ~0.47 (below 0.7, not yet promoted)
-- After 3 more confirming episodes push confidence to >= 0.7: Heuristic promoted
-- Cross-validation passes (contexts: "async-handler", "stream-processor", "rate-limiter")
-- AntiKnowledge check passes
-
-**D3 output** (expected):
-```markdown
-# Agent Playbook
-
-## Rust Async Testing Rules
-
-### Rule 1: Use tokio::time::pause() in async tests
-- **Confidence**: 0.72
-- **Support**: 10 insights from 10 episodes
-- **Evidence**: Flaky test rate dropped from 70% to 0% with time mocking
-```
-
-**Test assertions**:
-- D1 produces >= 7 Warnings and >= 2 Insights
-- D2 produces 1 cluster with >= 7 members
-- D2 does not promote until mean confidence >= 0.7
-- D3 produces valid Markdown with the promoted Heuristic
-- Cross-validation and AntiKnowledge checks pass
-
----
-
-## Distillation Quality Metrics
-
-### Measuring Distillation Effectiveness
-
-How do you know if the distillation pipeline is producing good knowledge? Five metrics, tracked over time:
-
-```rust
-/// Quality metrics for the distillation pipeline.
-///
-/// Computed per Dreams cycle and logged to `.roko/learn/distillation-quality.jsonl`.
-pub struct DistillationQualityReport {
-    /// Timestamp of this report.
-    pub timestamp: DateTime<Utc>,
-    /// D1 metrics: episode → insight extraction.
-    pub d1: D1Metrics,
-    /// D2 metrics: insight → heuristic promotion.
-    pub d2: D2Metrics,
-    /// D3 metrics: heuristic → playbook compilation.
-    pub d3: D3Metrics,
-    /// Overall pipeline health score (0.0 - 1.0).
-    pub pipeline_health: f64,
-}
-
-pub struct D1Metrics {
-    /// Extraction yield: insights extracted per episode. Target: 1.5-3.0.
-    pub extraction_yield: f64,
-    /// Survival rate: fraction of D1 outputs that survive to Working tier.
-    /// Target: 0.3-0.5. Below 0.2 = too many false patterns. Above 0.7 = too conservative.
-    pub survival_rate: f64,
-    /// Novelty rate: fraction of D1 outputs that are genuinely new
-    /// (not duplicates of existing entries). Target: > 0.5.
-    pub novelty_rate: f64,
-    /// Contradiction rate: fraction of D1 outputs that match existing AntiKnowledge.
-    /// Should be < 0.05 (distillation should not re-extract known-false patterns).
-    pub contradiction_rate: f64,
-}
-
-pub struct D2Metrics {
-    /// Cluster quality: mean intra-cluster HDC similarity. Target: > 0.54.
-    pub cluster_cohesion: f32,
-    /// Promotion rate: fraction of clusters that meet promotion criteria.
-    /// Target: 0.1-0.3. Below 0.05 = criteria too strict. Above 0.5 = too permissive.
-    pub promotion_rate: f64,
-    /// Cross-validation score: fraction of promoted heuristics from 2+ contexts.
-    /// Must be 1.0 (all promoted heuristics pass cross-validation by design).
-    pub cross_validation_score: f64,
-    /// Heuristic longevity: mean age (days) of heuristics before demotion.
-    /// Target: > 30 days. Short-lived heuristics indicate false promotions.
-    pub heuristic_mean_age_days: f64,
-}
-
-pub struct D3Metrics {
-    /// Playbook coverage: fraction of active heuristics included in PLAYBOOK.md.
-    /// Target: > 0.8.
-    pub playbook_coverage: f64,
-    /// Playbook actionability: fraction of playbook rules that have been
-    /// successfully applied in tasks since last compilation. Target: > 0.5.
-    pub playbook_actionability: f64,
-    /// Staleness: days since last PLAYBOOK.md update. Target: < 7 days.
-    pub days_since_update: f64,
-}
-```
-
-### Distillation Quality Thresholds
-
-| Metric | Healthy | Warning | Critical |
-|---|---|---|---|
-| D1 extraction yield | 1.5 - 3.0 | < 1.0 or > 5.0 | < 0.5 or > 10.0 |
-| D1 survival rate | 0.3 - 0.5 | < 0.2 or > 0.7 | < 0.1 or > 0.9 |
-| D1 contradiction rate | < 0.05 | 0.05 - 0.10 | > 0.10 |
-| D2 cluster cohesion | > 0.54 | 0.52 - 0.54 | < 0.52 |
-| D2 promotion rate | 0.1 - 0.3 | < 0.05 or > 0.5 | < 0.01 or > 0.8 |
-| D2 heuristic longevity | > 30 days | 14 - 30 days | < 14 days |
-| D3 playbook coverage | > 0.8 | 0.5 - 0.8 | < 0.5 |
-| D3 playbook actionability | > 0.5 | 0.3 - 0.5 | < 0.3 |
-
-**References**: Hinton, G. et al. (2015). "Distilling the Knowledge in a Neural Network." *NIPS Workshop*. Salimans, T. & Ho, J. (2022). "Progressive Distillation for Fast Sampling." *ICLR 2022*.
-
----
-
-## Distillation Scheduling
-
-### When and How Often to Distill
-
-Distillation is not free — LLM-based D1 extraction costs tokens, and D2/D3 consume CPU time for clustering and compilation. The scheduler balances freshness against cost.
-
-```rust
-/// Distillation scheduling policy.
-///
-/// Determines when each stage runs and how much budget to allocate.
-pub struct DistillationScheduler {
-    /// D1 scheduling: episode → insight extraction.
-    pub d1_policy: D1Policy,
-    /// D2 scheduling: insight → heuristic promotion.
-    pub d2_policy: D2Policy,
-    /// D3 scheduling: heuristic → playbook compilation.
-    pub d3_policy: D3Policy,
-    /// Global budget: maximum LLM tokens per hour for distillation.
-    pub hourly_token_budget: usize,
-    /// Current token usage in the current hour window.
-    pub tokens_used_this_hour: usize,
-}
-
-pub struct D1Policy {
-    /// Trigger: run D1 after each completed episode. Default: true.
-    /// When false, D1 runs only during Dreams cycles.
-    pub run_after_episode: bool,
-    /// Maximum episodes to batch before running D1. Default: 1.
-    /// Higher values amortize LLM cost but delay insight extraction.
-    pub batch_size: usize,
-    /// Minimum episode quality for D1. Default: 0.3.
-    /// Skip D1 for episodes that were trivial or failed completely.
-    pub min_episode_quality: f64,
-    /// Curriculum ordering: process easier episodes first. Default: true.
-    /// Based on Bengio et al. (2009) curriculum learning.
-    pub curriculum_ordering: bool,
-}
-
-pub struct D2Policy {
-    /// Minimum interval between D2 runs. Default: 6 hours.
-    pub min_interval: Duration,
-    /// Minimum new insights since last D2 run. Default: 10.
-    /// Don't run D2 if there aren't enough new insights to form clusters.
-    pub min_new_insights: usize,
-    /// Run during Dreams only. Default: true.
-    pub dreams_only: bool,
-}
-
-pub struct D3Policy {
-    /// Minimum interval between PLAYBOOK.md recompilation. Default: 24 hours.
-    pub min_interval: Duration,
-    /// Minimum new heuristics since last D3 run. Default: 3.
-    pub min_new_heuristics: usize,
-    /// Run during Dreams only. Default: true.
-    pub dreams_only: bool,
-}
-
-impl DistillationScheduler {
-    /// Check if D1 should run for a completed episode.
-    pub fn should_run_d1(&self, episode_quality: f64) -> bool {
-        self.d1_policy.run_after_episode
-            && episode_quality >= self.d1_policy.min_episode_quality
-            && self.tokens_used_this_hour < self.hourly_token_budget
-    }
-
-    /// Check if D2 should run (typically called from Dreams cycle).
-    pub fn should_run_d2(
-        &self,
-        last_d2: Option<DateTime<Utc>>,
-        new_insights_since_d2: usize,
-    ) -> bool {
-        let interval_ok = last_d2.map_or(true, |t| {
-            Utc::now() - t > chrono::Duration::from_std(self.d2_policy.min_interval)
-                .unwrap_or(chrono::Duration::hours(6))
-        });
-        interval_ok && new_insights_since_d2 >= self.d2_policy.min_new_insights
-    }
-}
-```
-
-### Curriculum-Ordered Distillation
-
-Inspired by Bengio et al. (2009) curriculum learning, D1 processes episodes in order of estimated difficulty:
-
-```
-Episode difficulty ≈ 1.0 - (gate_pass_count / total_gates)
-
-1. Easy episodes (high pass rate) are processed first → cleaner insights
-2. Hard episodes (many failures) are processed later → more nuanced insights
-3. Failed episodes (all gates failed) are processed last → primarily produce Warnings
-```
-
-This ordering improves D1 extraction quality because the distillation LLM builds up a context of established patterns from easy episodes before tackling ambiguous or failure-heavy ones.
-
-**Configuration parameters**:
-
-| Parameter | Default | Range | Notes |
-|---|---|---|---|
-| D1 batch size | 1 | 1 - 10 | Higher = fewer LLM calls, delayed extraction |
-| D1 min episode quality | 0.3 | 0.0 - 0.5 | Below 0.3 = trivial/failed episodes |
-| D2 min interval | 6 hours | 1 - 24 hours | Lower = more frequent but more CPU cost |
-| D2 min new insights | 10 | 3 - 50 | Lower = smaller clusters, less confident |
-| D3 min interval | 24 hours | 6 - 72 hours | Playbook recompiles are relatively cheap |
-| Hourly token budget | 50,000 | 10K - 500K | Controls distillation LLM cost |
-
-**References**: Bengio, Y. et al. (2009). "Curriculum Learning." *ICML 2009*. Furlanello, T. et al. (2018). "Born Again Neural Networks." *ICML 2018*.
-
-**Test criteria**:
-- D1 extraction yield in healthy range (1.5-3.0) for a test corpus of 10 episodes
-- D2 does not run before min_interval elapses
-- D2 does not run when new_insights < min_new_insights
-- D3 generates valid Markdown from promoted heuristics
-- Curriculum ordering: easy episodes processed before hard ones
-- Token budget respected: scheduler returns false when budget exceeded
-
----
-
-## Current Status and Gaps
-
-**Implemented**:
-- `DistillationBackend` trait and `Distiller` struct (LLM-based extraction)
-- `spawn_episode_distillation()` for async extraction
-- `TierProgression` struct with `analyze()`, `extract_insights()`, `promote_heuristics()`, `compile_playbook()`, `replay_heuristics()`
-- `InsightRecord`, `HeuristicRule`, `PlaybookCompilation` types
-- `PatternMiner` integration from `roko-learn`
-
-**Missing**:
-- Automatic Warning extraction in D1 (designed above; `extract_warnings()`)
-- HDC-based clustering in D2 (designed above; `HdcClusterer`)
-- Cross-validation enforcement in D2 (designed above; `cross_validation_check()`)
-- AntiKnowledge contradiction check before promotion (designed above; `anti_knowledge_check()`)
-- Dreams integration (designed above; `DreamsDistillationTrigger`)
-- End-to-end integration test (scenario above; not yet automated)
+This mirrors sleep consolidation: fast episodic learning during the day, slow semantic consolidation during sleep (McClelland et al. 1995). In Neuro terms, the deferred balance model would also re-check which entries are still earning their place and which should move to colder storage.
 
 ---
 
 ## Cross-References
 
-- See [01-six-knowledge-types.md](./01-six-knowledge-types.md) for the types produced at each stage
-- See [02-four-validation-tiers.md](./02-four-validation-tiers.md) for how tiers are assigned during promotion
-- See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for how ingested entries are stored and queried
-- See topic [10-dreams](../10-dreams/INDEX.md) for offline consolidation during Dreams
-- See topic [05-learning](../05-learning/INDEX.md) for the episode logging that feeds D1
+- See [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md) for the HDC fingerprint proposal that drives D2 clustering
+- See [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) for the demurrage model reflected in this doc
+- See [tmp/refinements/14-worldview-validation.md](../../tmp/refinements/14-worldview-validation.md) for the heuristic calibration, falsifier, and worldview-clustering refinement reflected here
+- See [04-hdc-vsa-foundations.md](./04-hdc-vsa-foundations.md) for the HDC algebra behind fingerprint similarity
+- See [06-hdc-knowledge-encoding.md](./06-hdc-knowledge-encoding.md) for the default encoder and per-Engram fingerprinting pipeline
+- See [10-knowledge-query-api.md](./10-knowledge-query-api.md) for the native similarity query surface
+- See [04-decay-variants.md](../00-architecture/04-decay-variants.md) for the architecture-side retention model
+- See [18-decay-tier-matrix.md](../00-architecture/18-decay-tier-matrix.md) for tier progression and cold-tier calibration
+- See [Naming and Glossary](../00-architecture/01-naming-and-glossary.md) for canonical Neuro terminology, including `Heuristic`, `Pulse`, `Bus`, and `Neuro`
+
+---
+
+## Academic Foundations
+
+- McClelland, J. L., McNaughton, B. L., & O'Reilly, R. C. (1995). "Why there are complementary learning systems in the hippocampus and neocortex." *Psychological Review*, 102(3), 419-457.
+- Mattar, M. G., & Daw, N. D. (2018). "Prioritized memory access explains planning and hippocampal replay." *Nature Neuroscience*, 21, 1609-1617.
+- Lacaux, C., et al. (2021). "Sleep onset is a creative sweet spot." *Science Advances*, 7(50). (Creative insight during N1 sleep)
+- Wang, L., et al. (2024). "A Survey on Large Language Model Based Autonomous Agents." (Skill extraction patterns)
+- Festinger, L. (1957). *A Theory of Cognitive Dissonance*. Stanford University Press.

@@ -249,13 +249,13 @@ pub trait ConductorLevel: Send + Sync {
     fn scope(&self) -> ConductorScope;
 
     /// Evaluate the signal stream and produce decisions.
-    fn evaluate(&self, stream: &[Signal], ctx: &Context) -> Vec<ConductorDecision>;
+    fn evaluate(&self, stream: &[Engram], ctx: &Context) -> Vec<ConductorDecision>;
 
     /// Accept parameter updates from the level above.
     fn accept_parameters(&mut self, params: &ParameterUpdate);
 
     /// Emit observations for the level above.
-    fn emit_observations(&self) -> Vec<Signal>;
+    fn emit_observations(&self) -> Vec<Engram>;
 }
 
 pub enum ConductorScope {

@@ -26,6 +26,15 @@ const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.7;
 const DEFAULT_PLAYBOOK_LIMIT: usize = 12;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
+const TIER_PROGRESSION_D1_SOURCE: &str = "tier-progression:d1";
+const TIER_PROGRESSION_D2_SOURCE: &str = "tier-progression:d2";
+const TIER_PROGRESSION_D3_SOURCE: &str = "tier-progression:d3";
+/// Number of passing verdicts required to promote one tier.
+pub const PROMOTION_SUCCESS_THRESHOLD: usize = 3;
+/// Number of failing verdicts required to demote one tier.
+pub const DEMOTION_FAILURE_THRESHOLD: usize = 2;
+/// Entry age multiplier that triggers an expiry review relative to half-life.
+pub const EXPIRY_REVIEW_HALF_LIFE_MULTIPLIER: f64 = 2.0;
 
 /// Summary of a recurring causal pattern observed in raw episodes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +75,76 @@ impl InsightRecord {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NEURO-12: Calibration types for heuristic falsification tracking.
+// ---------------------------------------------------------------------------
+
+/// Action taken when a heuristic is calibrated against new evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationAction {
+    /// Evidence supports the heuristic.
+    Confirm,
+    /// Evidence contradicts the heuristic.
+    Violate,
+    /// Evidence refines the heuristic's scope (narrowing).
+    Refine,
+    /// Evidence broadens the heuristic's applicability.
+    Generalize,
+    /// Evidence fully refutes the heuristic.
+    Refute,
+}
+
+impl CalibrationAction {
+    /// Human-readable label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::Violate => "violate",
+            Self::Refine => "refine",
+            Self::Generalize => "generalize",
+            Self::Refute => "refute",
+        }
+    }
+
+    /// Whether this action is considered negative evidence.
+    #[must_use]
+    pub const fn is_negative(self) -> bool {
+        matches!(self, Self::Violate | Self::Refute)
+    }
+}
+
+/// One calibration receipt tying an episode to an action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationReceipt {
+    /// Episode ID that provided the evidence.
+    pub episode_id: String,
+    /// Action taken.
+    pub action: CalibrationAction,
+    /// Millisecond timestamp of when the calibration occurred.
+    pub timestamp_ms: i64,
+}
+
+/// Record of a heuristic being contradicted by evidence.
+///
+/// Created when `replay_heuristics()` detects violations. Falsifiers
+/// provide an explicit audit trail for why a heuristic's confidence was
+/// reduced, rather than silently adjusting the score.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FalsifierRecord {
+    /// ID of the heuristic that was contradicted.
+    pub heuristic_id: String,
+    /// Episodes that provided the contradicting evidence.
+    pub contradicting_episodes: Vec<String>,
+    /// Whether this is a partial violation or full refutation.
+    pub action: CalibrationAction,
+    /// Brief description of what went wrong.
+    pub description: String,
+    /// Millisecond timestamp of when the falsifier was created.
+    pub created_at_ms: i64,
+}
+
 /// Actionable rule promoted from one or more insights.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeuristicRule {
@@ -95,6 +174,16 @@ pub struct HeuristicRule {
     /// How broadly the heuristic applies across models.
     #[serde(default = "default_model_generality")]
     pub model_generality: f64,
+    // NEURO-12: Calibration fields
+    /// Total number of trials (observations) for this heuristic.
+    #[serde(default)]
+    pub trials: usize,
+    /// Number of violations (contradictions) observed.
+    #[serde(default)]
+    pub violations: usize,
+    /// Calibration receipts tying episodes to actions.
+    #[serde(default)]
+    pub receipts: Vec<CalibrationReceipt>,
 }
 
 impl HeuristicRule {
@@ -130,6 +219,9 @@ pub struct TierProgressionReport {
     pub heuristics: Vec<HeuristicRule>,
     /// D3 output.
     pub playbook: PlaybookCompilation,
+    /// NEURO-12: Falsifier records generated during heuristic replay.
+    #[serde(default)]
+    pub falsifiers: Vec<FalsifierRecord>,
 }
 
 /// Result of evaluating whether a knowledge entry should change tier.
@@ -213,6 +305,7 @@ impl TierProgression {
             insights,
             heuristics,
             playbook,
+            falsifiers: Vec::new(),
         }
     }
 
@@ -244,10 +337,14 @@ impl TierProgression {
         let successes = verdicts.iter().filter(|verdict| verdict.passed).count();
         let failures = verdicts.len().saturating_sub(successes);
 
-        if successes >= 3 {
+        if successes >= PROMOTION_SUCCESS_THRESHOLD {
             return TierProgressionDecision::Promote(promote_tier(entry.tier));
         }
-        if failures >= 2 {
+        if failures >= DEMOTION_FAILURE_THRESHOLD {
+            // Persistent entries cannot be demoted without explicit deprecation.
+            if entry.tier == KnowledgeTier::Persistent && !entry.deprecated {
+                return TierProgressionDecision::NoChange;
+            }
             return TierProgressionDecision::Demote(demote_tier(entry.tier));
         }
         if entry_needs_expiry_review(entry) {
@@ -264,13 +361,19 @@ impl TierProgression {
     }
 
     /// Replay heuristics against the supplied episodes and revise confidence.
+    ///
+    /// NEURO-12: Also tracks calibration receipts on each heuristic and
+    /// emits falsifier records for heuristics with significant contradictions.
     pub fn replay_heuristics(&self, report: &mut TierProgressionReport, episodes: &[Episode]) {
+        let now_ms = Utc::now().timestamp_millis();
         let mut episode_success_by_id: HashMap<String, bool> = HashMap::new();
         for episode in episodes {
             episode_success_by_id
                 .entry(episode_source_id(episode).to_string())
                 .or_insert(episode.success);
         }
+
+        let mut falsifiers: Vec<FalsifierRecord> = Vec::new();
 
         for heuristic in &mut report.heuristics {
             let Some(_expected_success) = heuristic_expected_success(heuristic) else {
@@ -279,17 +382,23 @@ impl TierProgression {
 
             let mut supporting = 0usize;
             let mut contradicting = 0usize;
+            let mut contradicting_episodes: Vec<String> = Vec::new();
             for source_episode_id in &heuristic.source_episodes {
                 if let Some(&success) = episode_success_by_id.get(source_episode_id) {
-                    // Use actual episode success as the confirmation signal.
-                    // For corrective heuristics (expected_success == false),
-                    // continued failure means the corrective action isn't
-                    // working, so those episodes count as contradictions.
-                    if success {
+                    // NEURO-12: Record calibration receipt for each observation.
+                    let action = if success {
                         supporting += 1;
+                        CalibrationAction::Confirm
                     } else {
                         contradicting += 1;
-                    }
+                        contradicting_episodes.push(source_episode_id.clone());
+                        CalibrationAction::Violate
+                    };
+                    heuristic.receipts.push(CalibrationReceipt {
+                        episode_id: source_episode_id.clone(),
+                        action,
+                        timestamp_ms: now_ms,
+                    });
                 }
             }
 
@@ -298,11 +407,35 @@ impl TierProgression {
                 continue;
             }
 
+            // Update calibration counters.
+            heuristic.trials = heuristic.trials.saturating_add(total);
+            heuristic.violations = heuristic.violations.saturating_add(contradicting);
+
             let validation = supporting as f64 / total as f64;
             let adjustment = (validation - 0.5) * 0.2;
             heuristic.confidence = (heuristic.confidence + adjustment).clamp(0.0, 1.0);
+
+            // NEURO-12: Emit falsifier record when violations are significant.
+            if contradicting >= DEMOTION_FAILURE_THRESHOLD && !contradicting_episodes.is_empty() {
+                let action = if validation < 0.2 {
+                    CalibrationAction::Refute
+                } else {
+                    CalibrationAction::Violate
+                };
+                falsifiers.push(FalsifierRecord {
+                    heuristic_id: heuristic.id.clone(),
+                    contradicting_episodes,
+                    action,
+                    description: format!(
+                        "Heuristic '{}' contradicted in {contradicting}/{total} trials (validation {:.2})",
+                        heuristic.title, validation
+                    ),
+                    created_at_ms: now_ms,
+                });
+            }
         }
 
+        report.falsifiers.extend(falsifiers);
         report.heuristics.sort_by(compare_heuristics);
         report.playbook = self.compile_playbook(&report.heuristics, report.insights.len());
     }
@@ -413,8 +546,100 @@ impl TierProgression {
                 source_episodes: insight.source_episodes.clone(),
                 source_model: None,
                 model_generality: default_model_generality(),
+                trials: 0,
+                violations: 0,
+                receipts: Vec::new(),
             })
             .collect();
+
+        heuristics.sort_by(compare_heuristics);
+        heuristics
+    }
+
+    /// Promote validated insights into actionable heuristics using HDC
+    /// similarity-based clustering (NEURO-09).
+    ///
+    /// Instead of promoting each qualifying insight independently, this
+    /// method first fingerprints each insight, clusters similar insights
+    /// via k-medoids, and then promotes the cluster representative (the
+    /// medoid) as the canonical heuristic. The representative accumulates
+    /// the source episodes and confidence from all cluster members.
+    ///
+    /// Falls back to the non-clustered path when fewer than 2 insights
+    /// qualify or when the `hdc` clustering would produce degenerate
+    /// (single-member) clusters.
+    ///
+    /// Requires the `hdc` feature for `roko-primitives` access.
+    #[cfg(feature = "hdc")]
+    #[must_use]
+    pub fn promote_heuristics_clustered(&self, insights: &[InsightRecord]) -> Vec<HeuristicRule> {
+        let qualified: Vec<&InsightRecord> = insights
+            .iter()
+            .filter(|insight| {
+                insight.source_episodes.len() >= self.min_heuristic_support
+                    && insight.confidence >= self.min_confidence
+            })
+            .collect();
+
+        if qualified.len() < 2 {
+            return self.promote_heuristics(insights);
+        }
+
+        // Fingerprint each insight by hashing its summary text for HDC seeding.
+        let vectors: Vec<roko_primitives::HdcVector> = qualified
+            .iter()
+            .map(|insight| roko_primitives::HdcVector::from_seed(insight.summary().as_bytes()))
+            .collect();
+
+        // Determine cluster count: at most qualified.len()/2, at least 1.
+        let k = (qualified.len() / 2).max(1).min(qualified.len());
+        let config = roko_learn::hdc_clustering::KMedoidsConfig {
+            k,
+            max_iterations: 50,
+        };
+        let cluster_result = roko_learn::hdc_clustering::k_medoids(&vectors, &config);
+
+        let mut heuristics = Vec::new();
+        for cluster in &cluster_result.clusters {
+            // The medoid insight becomes the representative heuristic.
+            let representative = qualified[cluster.medoid_index];
+
+            // Merge source episodes and confidence from all cluster members.
+            let mut merged_episodes = BTreeSet::new();
+            let mut confidence_sum = 0.0;
+            for &member_idx in &cluster.members {
+                let member = qualified[member_idx];
+                for ep in &member.source_episodes {
+                    merged_episodes.insert(ep.clone());
+                }
+                confidence_sum += member.confidence;
+            }
+            let avg_confidence = confidence_sum / cluster.members.len().max(1) as f64;
+            let merged_confirmations = merged_episodes.len();
+
+            heuristics.push(HeuristicRule {
+                id: heuristic_id(representative),
+                insight_id: representative.id.clone(),
+                title: heuristic_title(representative),
+                when_clause: representative
+                    .antecedent
+                    .iter()
+                    .map(|action| humanize_action(action))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                then_clause: heuristic_then_clause(representative),
+                confidence: avg_confidence.clamp(0.0, 1.0),
+                confirmations: merged_confirmations,
+                first_seen_ms: representative.first_seen_ms,
+                last_seen_ms: representative.last_seen_ms,
+                source_episodes: merged_episodes.into_iter().collect(),
+                source_model: None,
+                model_generality: default_model_generality(),
+                trials: 0,
+                violations: 0,
+                receipts: Vec::new(),
+            });
+        }
 
         heuristics.sort_by(compare_heuristics);
         heuristics
@@ -463,7 +688,7 @@ impl From<&InsightRecord> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Insight,
-            source: None,
+            source: Some(TIER_PROGRESSION_D1_SOURCE.to_string()),
             content: value.summary(),
             confidence: value.confidence,
             confidence_weight: value.confidence,
@@ -483,6 +708,12 @@ impl From<&InsightRecord> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -492,7 +723,7 @@ impl From<&HeuristicRule> for KnowledgeEntry {
         Self {
             id: value.id.clone(),
             kind: KnowledgeKind::Heuristic,
-            source: None,
+            source: Some(TIER_PROGRESSION_D2_SOURCE.to_string()),
             content: value.summary(),
             confidence: value.confidence,
             confidence_weight: value.confidence,
@@ -512,6 +743,12 @@ impl From<&HeuristicRule> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -521,7 +758,7 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
         Self {
             id: format!("playbook:{:016x}", stable_hash(value.markdown.as_bytes())),
             kind: KnowledgeKind::StrategyFragment,
-            source: None,
+            source: Some(TIER_PROGRESSION_D3_SOURCE.to_string()),
             content: value.markdown.clone(),
             confidence: if value.rules.is_empty() { 0.0 } else { 1.0 },
             confidence_weight: if value.rules.is_empty() { 0.0 } else { 1.0 },
@@ -547,6 +784,12 @@ impl From<&PlaybookCompilation> for KnowledgeEntry {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         }
     }
 }
@@ -871,7 +1114,7 @@ fn demote_tier(current: KnowledgeTier) -> KnowledgeTier {
 fn entry_needs_expiry_review(entry: &KnowledgeEntry) -> bool {
     let half_life_days = entry.effective_half_life_days().max(0.1);
     let age_days = (Utc::now() - entry.created_at).num_seconds().max(0) as f64 / 86_400.0;
-    age_days >= half_life_days * 2.0
+    age_days >= half_life_days * EXPIRY_REVIEW_HALF_LIFE_MULTIPLIER
 }
 
 fn sorted_ids(ids: &BTreeSet<String>) -> Vec<String> {
@@ -1173,6 +1416,9 @@ mod tests {
                     source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
                     source_model: None,
                     model_generality: default_model_generality(),
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
                 HeuristicRule {
                     id: "heuristic-failure".to_string(),
@@ -1187,12 +1433,16 @@ mod tests {
                     source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
                     source_model: None,
                     model_generality: default_model_generality(),
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
             ],
             playbook: PlaybookCompilation {
                 markdown: String::new(),
                 rules: Vec::new(),
             },
+            falsifiers: Vec::new(),
         };
 
         let progression = TierProgression::default();
@@ -1236,6 +1486,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         };
         let verdicts = vec![
             GateVerdict::new("compile", true),
@@ -1274,6 +1530,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         };
         let verdicts = vec![
             GateVerdict::new("compile", false),
@@ -1311,6 +1573,12 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         };
 
         assert!(TierProgression::needs_expiry_review(&entry));
@@ -1319,5 +1587,220 @@ mod tests {
             TierProgressionDecision::ReviewExpiry
         );
         assert_eq!(TierProgression::evaluate_promotion(&entry, &[]), None);
+    }
+
+    #[test]
+    fn evaluate_tier_progression_returns_no_change_at_saturation_bounds() {
+        let persistent = KnowledgeEntry {
+            id: "entry-persistent".to_string(),
+            kind: KnowledgeKind::Insight,
+            source: None,
+            content: "Already saturated".to_string(),
+            confidence: 0.9,
+            confidence_weight: 0.9,
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: vec!["ep-1".to_string()],
+            tags: vec!["tier".to_string()],
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: 30.0,
+            tier: KnowledgeTier::Persistent,
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
+        };
+        let transient = KnowledgeEntry {
+            tier: KnowledgeTier::Transient,
+            ..persistent.clone()
+        };
+
+        let promote = vec![
+            GateVerdict::new("compile", true),
+            GateVerdict::new("test", true),
+            GateVerdict::new("lint", true),
+        ];
+        let demote = vec![
+            GateVerdict::new("compile", false),
+            GateVerdict::new("test", false),
+        ];
+
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&persistent, &promote),
+            TierProgressionDecision::Promote(KnowledgeTier::Persistent)
+        );
+        assert_eq!(
+            TierProgression::evaluate_tier_progression(&transient, &demote),
+            TierProgressionDecision::Demote(KnowledgeTier::Transient)
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // NEURO-12: Falsifier records and calibration
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn calibration_action_properties() {
+        assert!(CalibrationAction::Violate.is_negative());
+        assert!(CalibrationAction::Refute.is_negative());
+        assert!(!CalibrationAction::Confirm.is_negative());
+        assert!(!CalibrationAction::Refine.is_negative());
+        assert!(!CalibrationAction::Generalize.is_negative());
+    }
+
+    #[test]
+    fn replay_heuristics_populates_calibration_fields() {
+        let episodes = vec![
+            make_test_episode("ep-1", "trigger gate success and agent implementer", true),
+            make_test_episode("ep-2", "trigger gate success and agent implementer", true),
+            make_test_episode("ep-3", "trigger gate failure and agent implementer", false),
+            make_test_episode("ep-4", "trigger gate failure and agent implementer", false),
+        ];
+
+        let mut report = TierProgressionReport {
+            insights: Vec::new(),
+            heuristics: vec![
+                HeuristicRule {
+                    id: "h-success".to_string(),
+                    insight_id: "i-1".to_string(),
+                    title: "If trigger gate success then reuse path".to_string(),
+                    when_clause: "trigger gate success and agent implementer".to_string(),
+                    then_clause: "reuse this path as the default play".to_string(),
+                    confidence: 0.5,
+                    confirmations: 2,
+                    first_seen_ms: 1,
+                    last_seen_ms: 2,
+                    source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
+                },
+                HeuristicRule {
+                    id: "h-failure".to_string(),
+                    insight_id: "i-2".to_string(),
+                    title: "If trigger gate failure then add verification".to_string(),
+                    when_clause: "trigger gate failure and agent implementer".to_string(),
+                    then_clause: "add a verification step before proceeding".to_string(),
+                    confidence: 0.8,
+                    confirmations: 2,
+                    first_seen_ms: 3,
+                    last_seen_ms: 4,
+                    source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
+                    source_model: None,
+                    model_generality: default_model_generality(),
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
+                },
+            ],
+            playbook: PlaybookCompilation {
+                markdown: String::new(),
+                rules: Vec::new(),
+            },
+            falsifiers: Vec::new(),
+        };
+
+        let progression = TierProgression::default();
+        progression.replay_heuristics(&mut report, &episodes);
+
+        // h-success should have 2 trials (both supporting).
+        let h_success = report
+            .heuristics
+            .iter()
+            .find(|h| h.id == "h-success")
+            .unwrap();
+        assert!(h_success.trials >= 2);
+        assert_eq!(h_success.violations, 0);
+        assert!(!h_success.receipts.is_empty());
+        assert!(
+            h_success
+                .receipts
+                .iter()
+                .all(|r| r.action == CalibrationAction::Confirm)
+        );
+
+        // h-failure should have 2 trials (both contradicting), and generate a falsifier.
+        let h_failure = report
+            .heuristics
+            .iter()
+            .find(|h| h.id == "h-failure")
+            .unwrap();
+        assert!(h_failure.trials >= 2);
+        assert!(h_failure.violations >= 2);
+        assert!(
+            h_failure
+                .receipts
+                .iter()
+                .any(|r| r.action == CalibrationAction::Violate)
+        );
+
+        // Falsifier should be emitted for the contradicted heuristic.
+        assert!(
+            !report.falsifiers.is_empty(),
+            "should have falsifier records"
+        );
+        let falsifier = report
+            .falsifiers
+            .iter()
+            .find(|f| f.heuristic_id == "h-failure");
+        assert!(falsifier.is_some(), "should have falsifier for h-failure");
+        let f = falsifier.unwrap();
+        assert!(!f.contradicting_episodes.is_empty());
+        assert!(f.action.is_negative());
+    }
+
+    fn make_test_episode(id: &str, _description: &str, success: bool) -> Episode {
+        let mut ep = Episode::new("test-agent", "task-1");
+        ep.id = id.to_string();
+        ep.episode_id = id.to_string();
+        ep.model = "test-model".to_string();
+        ep.success = success;
+        ep
+    }
+
+    #[cfg(feature = "hdc")]
+    #[test]
+    fn clustered_promotion_merges_similar_insights() {
+        let episodes: Vec<Episode> = (0..10)
+            .map(|i| {
+                episode(
+                    &format!("ep-{i}"),
+                    "gate_failure",
+                    "Implementer",
+                    "compile",
+                    false,
+                    false,
+                )
+            })
+            .collect();
+
+        let progression = TierProgression::new(3, 0.5, 12);
+        let report = progression.analyze(&episodes);
+
+        if report.insights.is_empty() {
+            return; // Not enough data to test clustering.
+        }
+
+        let heuristics_flat = progression.promote_heuristics(&report.insights);
+        let heuristics_clustered = progression.promote_heuristics_clustered(&report.insights);
+
+        // Clustered should produce <= as many heuristics (clusters merge duplicates).
+        assert!(heuristics_clustered.len() <= heuristics_flat.len());
+
+        // Each clustered heuristic should have at least as many confirmations
+        // as the flat version since clusters merge sources.
+        if let Some(h) = heuristics_clustered.first() {
+            assert!(h.confirmations >= 1);
+            assert!(h.confidence > 0.0);
+        }
     }
 }

@@ -14,7 +14,7 @@ Every watcher implements the same trait:
 
 ```rust
 pub trait Policy: Send + Sync {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal>;
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
     fn name(&self) -> &str;
 }
 ```
@@ -576,7 +576,7 @@ pub struct PatternStage {
     /// Signal kind(s) this stage matches.
     match_kinds: Vec<Kind>,
     /// Predicate evaluated against the signal's tags and body.
-    predicate: Box<dyn Fn(&Signal) -> bool + Send + Sync>,
+    predicate: Box<dyn Fn(&Engram) -> bool + Send + Sync>,
     /// Quantifier: Exactly(n), AtLeast(n), Between(min, max).
     quantifier: Quantifier,
     /// Negation: if true, this stage matches the ABSENCE of the pattern.

@@ -17,6 +17,28 @@ The Roko TUI (Terminal User Interface) is a ratatui-based interactive dashboard 
 
 The TUI is designed as a **progressive disclosure** interface: the main layout shows the most critical information at a glance (agent list, plan status, system health), with detail panels that expand on focus. Users navigate between screens using keyboard shortcuts and tab selection. The system targets 60fps rendering with event batching to keep the interface responsive even during heavy agent activity.
 
+REF23 upgrades the TUI from read-mostly dashboard to interactive control surface. It should expose the same unified verb set as CLI, Chat, and Web, over the same live event stream and the same named sessions. See [21-user-ux-running-agents.md](./21-user-ux-running-agents.md) and [tmp/refinements/23-user-ux-running-agents.md](../../tmp/refinements/23-user-ux-running-agents.md).
+
+---
+
+## Unified Verbs in the TUI
+
+The TUI should render the shared verb set as keyboard-first actions rather than isolated screens:
+
+| Verb | TUI rendering |
+|---|---|
+| `ask` | Chat/input panel for a new single-turn request |
+| `plan` | Plans tab with propose-only flow and editable markdown |
+| `do` | Execute selected plan or task from the current view |
+| `watch` | Default live stream in the focused panel and status rail |
+| `inspect` | Detail drill-down for an episode, Engram, heuristic, or agent |
+| `replay` | Re-run a selected episode from Episodes or History |
+| `learn` | Heuristics and experiment views with curation actions |
+| `tune` | Threshold, config, and routing adjustments from keyboard-driven forms |
+| `connect` | Plugin, MCP, and provider setup from the same session context |
+
+The TUI-specific part is the binding model, not the vocabulary.
+
 ---
 
 ## Main Layout Diagram
@@ -91,6 +113,9 @@ Shows plan execution status:
 - `✓` — completed successfully
 - `✗` — failed
 - Running/done/failed counts
+- `x` executes the selected plan
+- `e` edits plan markdown in place
+- `p` pauses or resumes the selected plan or agent session
 
 ### Mesh Panel
 
@@ -105,6 +130,7 @@ Shows system health at a glance:
 - Total cost (today)
 - C-Factor value with trend arrow (↑↓→)
 - Provider health indicator
+- Active checkpoint banners when user approval is blocking progress
 
 ---
 
@@ -133,6 +159,7 @@ P:0.7  A:0.5  D:0.8
 ```
 - Current gate pipeline status with pass/fail/pending indicators
 - Ratchet history showing improvement trend
+- Threshold tuning and recent failure drill-down from the same panel
 
 ### Neuro Tier Display
 ```
@@ -151,6 +178,12 @@ Tests: 94% (pred: 90%) ✓
 ```
 - Active predictions with actual vs. predicted values
 - Calibration indicator (✓ if within tolerance)
+
+### Chat and Heuristics Actions
+
+REF23 adds two load-bearing interactive surfaces inside the TUI layout:
+- **Chat tab** — full-duplex chat with any running agent, including slash commands and inline artifacts
+- **Heuristics tab** — challenge, retire, or edit heuristics without leaving the session
 
 ---
 

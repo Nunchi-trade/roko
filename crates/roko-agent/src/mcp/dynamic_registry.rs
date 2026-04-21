@@ -26,6 +26,9 @@ pub struct DynamicToolRegistry {
     all_tools: Vec<ToolDef>,
 }
 
+/// Alias for the merged static + dynamic MCP tool registry described in docs.
+pub type MergedToolRegistry = DynamicToolRegistry;
+
 impl DynamicToolRegistry {
     /// Create a new registry backed by the given base tools.
     ///

@@ -28,9 +28,11 @@ use crate::http::ReqwestPoster;
 use crate::mcp::{DynamicToolRegistry, McpConfig, discover_mcp_tools};
 use crate::provider::{
     AgentCreationError, AgentOptions, ProviderAdapter, ProviderError, build_tool_dispatcher,
+    tool_limit_for_temperament, tool_loop_max_iterations,
 };
 use crate::tool_loop::backends::create_openai_compat_backend;
 use crate::tool_loop::{ToolLoop, ToolLoopAgent};
+use crate::translate::capability::cap_tools_for_profile;
 use crate::translate::{OpenAiTranslator, Translator};
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
@@ -285,6 +287,7 @@ fn add_mcp_tools_to_registry(registry: &mut DynamicToolRegistry, mcp_tools: Vec<
 }
 
 pub(crate) fn tool_registry_for_options(
+    model: &ModelProfile,
     options: &AgentOptions,
 ) -> Result<(Arc<dyn ToolRegistry>, Vec<ToolDef>), AgentCreationError> {
     let base = StaticToolRegistry::new();
@@ -318,6 +321,8 @@ pub(crate) fn tool_registry_for_options(
         })
         .cloned()
         .collect();
+    let mut tools = cap_tools_for_profile(model, tools);
+    tools.truncate(tool_limit_for_temperament(tools.len()));
 
     Ok((Arc::new(VecToolRegistry::from_tools(tools.clone())), tools))
 }
@@ -353,7 +358,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
         let agent_name = default_agent_name(model, options);
 
         if model.supports_tools {
-            let (registry, tools) = tool_registry_for_options(options)?;
+            let (registry, tools) = tool_registry_for_options(model, options)?;
             let resolver: Arc<dyn HandlerResolver> =
                 Arc::new(|name: &str| roko_std::tool::handlers::handler_for(name));
             let dispatcher = build_tool_dispatcher(registry, resolver);
@@ -364,7 +369,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             let backend = create_openai_compat_backend(&tool_loop_provider, model, poster)?;
 
             let tool_loop = ToolLoop::new(translator, dispatcher, backend)
-                .with_max_iterations(50)
+                .with_max_iterations(tool_loop_max_iterations(50))
                 .with_context_token_limit(
                     usize::try_from(model.context_window).unwrap_or(usize::MAX),
                 );
@@ -1048,6 +1053,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires functional MCP stdio subprocess; environment-sensitive"]
     async fn mcp_bridge_http() {
         let response = serde_json::json!({
             "id": "chatcmpl-test",
@@ -1157,7 +1163,7 @@ done
         let tools = parsed["tools"].as_array().expect("tools array");
 
         assert!(tools.iter().any(|tool| {
-            tool["function"]["name"].as_str() == Some("local__echo")
+            tool["function"]["name"].as_str() == Some("local.echo")
                 && tool["function"]["description"].as_str() == Some("Echo from MCP")
         }));
         assert!(

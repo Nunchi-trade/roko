@@ -21,7 +21,7 @@ const HDC_TAG: &str = "hdc_fingerprint";
 /// (no blocking). Writes serialize through a tokio `Mutex` around the log
 /// file, so concurrent `put`s are appended in order.
 pub struct FileSubstrate {
-    /// Directory containing `signals.jsonl`.
+    /// Directory containing `engrams.jsonl`.
     root: PathBuf,
     /// In-memory index: `ContentHash` → `Engram`.
     index: RwLock<HashMap<ContentHash, Engram>>,
@@ -35,7 +35,7 @@ pub struct FileSubstrate {
 impl FileSubstrate {
     /// Open (or create) a file substrate rooted at `root`.
     ///
-    /// Creates `root/signals.jsonl` if missing, and replays existing entries
+    /// Creates `root/engrams.jsonl` if missing, and replays existing entries
     /// into the in-memory index.
     ///
     /// # Errors
@@ -45,7 +45,7 @@ impl FileSubstrate {
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root).await?;
-        let log_path = root.join("signals.jsonl");
+        let log_path = root.join("engrams.jsonl");
 
         // Replay: read any existing entries into the in-memory index.
         let index = replay_log(&log_path).await?;
@@ -69,7 +69,7 @@ impl FileSubstrate {
     /// Path to the JSONL log file.
     #[must_use]
     pub fn log_path(&self) -> PathBuf {
-        self.root.join("signals.jsonl")
+        self.root.join("engrams.jsonl")
     }
 
     /// The root directory containing this substrate's storage.
@@ -88,7 +88,7 @@ impl FileSubstrate {
     pub async fn compact(&self) -> Result<()> {
         let snapshot: Vec<Engram> = self.index.read().values().cloned().collect();
         let log_path = self.log_path();
-        let tmp_path = self.root.join("signals.jsonl.tmp");
+        let tmp_path = self.root.join("engrams.jsonl.tmp");
 
         {
             let mut tmp = OpenOptions::new()
@@ -469,7 +469,7 @@ mod tests {
         }
         // Corrupt the log: append a partial / bad line.
         {
-            let log = tmp.path().join("signals.jsonl");
+            let log = tmp.path().join("engrams.jsonl");
             let mut f = OpenOptions::new().append(true).open(&log).await.unwrap();
             f.write_all(b"{partial_bad_json\n").await.unwrap();
             f.flush().await.unwrap();

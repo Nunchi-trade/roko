@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use roko_core::OperatingFrequency;
+use roko_core::{OperatingFrequency, TaskDomain};
 use roko_orchestrator::{ReplanStrategy, detect_cycle_nodes};
 use roko_std::denied_tools_for_role;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -84,6 +84,16 @@ pub struct TaskDef {
     pub max_retries: u32,
     /// Free-form acceptance criteria (legacy format, strings).
     pub acceptance: Vec<String>,
+    /// Work domain — controls gate selection and git policy.
+    pub domain: Option<TaskDomain>,
+}
+
+impl TaskDef {
+    /// Resolve the effective domain for this task: explicit > config default > None.
+    #[must_use]
+    pub fn effective_domain(&self, config_default: Option<&TaskDomain>) -> Option<TaskDomain> {
+        self.domain.clone().or_else(|| config_default.cloned())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +140,8 @@ struct TaskDefSerde {
     pub max_retries: u32,
     #[serde(default)]
     pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub domain: Option<TaskDomain>,
 }
 
 impl From<TaskDefSerde> for TaskDef {
@@ -157,6 +169,7 @@ impl From<TaskDefSerde> for TaskDef {
             timeout_secs: raw.timeout_secs,
             max_retries: raw.max_retries,
             acceptance: raw.acceptance,
+            domain: raw.domain,
         };
         task.apply_role_tool_defaults();
         task
@@ -1086,6 +1099,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
 
@@ -1129,6 +1143,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
     }
@@ -1158,6 +1173,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         assert_eq!(reactive.operating_frequency(), OperatingFrequency::Gamma);
 
@@ -1184,6 +1200,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         assert_eq!(reflective.operating_frequency(), OperatingFrequency::Delta);
 
@@ -1210,6 +1227,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         assert_eq!(
             deliberative.operating_frequency(),
@@ -1532,6 +1550,7 @@ depends_on = []
                 timeout_secs: 600,
                 max_retries: 3,
                 acceptance: vec![],
+                domain: None,
             });
         }
 
@@ -1598,6 +1617,7 @@ depends_on = ["other-plan:T3"]
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         let original = "Original task prompt";
         let error_msg = "compilation failed: undefined symbol";
@@ -1633,6 +1653,7 @@ depends_on = ["other-plan:T3"]
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            domain: None,
         };
         let original = "Original prompt";
         let long_error = "x".repeat(5000);

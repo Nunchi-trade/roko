@@ -12,17 +12,21 @@
 - `bardo-backup/prd/shared/hdc-applications.md` (episode compression, quality gates)
 - `refactoring-prd/03-cognitive-subsystems.md` §1 (HDC Encoding section)
 - `crates/roko-index/src/hdc.rs` (code symbol fingerprinting)
-- `crates/bardo-primitives/src/hdc.rs` (from_seed, text_fingerprint)
+- `crates/roko-primitives/src/hdc.rs` (from_seed, text_fingerprint)
+- `docs/00-architecture/02-engram-data-type.md` (first-class fingerprint field)
+- `docs/00-architecture/07-substrate-trait.md` (native similarity query surface)
+- `docs/00-architecture/27-temporal-knowledge-topology.md` (HDC clusters and tier progression)
+- `../../tmp/refinements/11-hyperdimensional-substrate.md` (canonical refinement source)
 
 ---
 
 ## Abstract
 
-Every `KnowledgeEntry` in Neuro can optionally carry an `hdc_vector` field — a 10,240-bit Binary Spatter Code vector that encodes the entry's semantic structure. This vector enables sub-millisecond similarity search without any external vector database: queries are matched against stored vectors by Hamming distance, a single XOR + POPCNT operation per comparison that completes in ~13 nanoseconds.
+Every Engram in Neuro carries a `fingerprint` field - a 10,240-bit Binary Spatter Code vector that encodes the record's semantic structure. The fingerprint is produced by a deterministic default encoder at insert time, so similarity search is native to the durable record rather than a side-table annotation. Queries are matched against stored fingerprints by Hamming distance, a single XOR + POPCNT operation per comparison that completes in ~13 nanoseconds.
 
-The encoding scheme uses HDC's algebraic operations to capture the **structure** of a knowledge entry — its type, domain, topic, tags, and content fingerprint — in a single fixed-size vector. Because HDC operations are compositional, the resulting vector preserves structural relationships: entries about the same topic in different domains will have moderate similarity, entries about the same topic in the same domain will have high similarity, and entries about unrelated topics will be quasi-orthogonal (similarity ≈ 0.5).
+The encoding scheme uses HDC's algebraic operations to capture the **structure** of an Engram - its kind, body, and tags in the default path, with room for kind-specific extensions - in a single fixed-size vector. Because HDC operations are compositional, the resulting vector preserves structural relationships: records about the same topic in different domains will have moderate similarity, records about the same topic in the same domain will have high similarity, and records about unrelated topics will be quasi-orthogonal (similarity ≈ 0.5).
 
-This document covers the encoding pipeline (text → concept vectors → role-filler bindings → bundled entry vector), the three-tier search strategy for large knowledge bases, and the current implementation in `roko-index/src/hdc.rs`.
+This document covers the encoding pipeline (default encoder -> concept vectors -> role-filler bindings -> bundled fingerprint), the three-tier search strategy for large knowledge bases, the consensus/analogy uses of HDC fingerprints, and the current implementation in `roko-primitives/src/hdc.rs`.
 
 ---
 
@@ -33,7 +37,7 @@ This document covers the encoding pipeline (text → concept vectors → role-fi
 The first step is mapping each concept (a word, phrase, tag, or structured identifier) to a deterministic hypervector. Roko uses `HdcVector::from_seed()` for this:
 
 ```rust
-// From bardo-primitives/src/hdc.rs
+// From roko-primitives/src/hdc.rs
 pub fn from_seed(seed: &[u8]) -> Self {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
     for &byte in seed {
@@ -142,9 +146,39 @@ fn encode_knowledge_entry(entry: &KnowledgeEntry) -> HdcVector {
     let tag_binding = role_tag.bind(&tag_bundle);
 
     // Final bundle
-    HdcVector::bundle(&[&kind_binding, &content_binding, &tag_binding])
+    HdcVector::bundle(&[
+        &kind_binding,
+        &content_binding,
+        &tag_binding,
+    ])
 }
 ```
+
+### Default encoder and specialization
+
+The default Engram encoder should remain deterministic and lightweight, while allowing kind-specific encoders to specialize the representation when needed:
+
+```rust
+pub trait HdcEncoder {
+    fn encode(&self, engram: &Engram) -> HdcVector;
+}
+
+pub struct DefaultEncoder;
+```
+
+The default path should:
+- hash canonical bytes for the Engram kind, body, and tags;
+- bind each attribute to a stable role vector;
+- bundle the resulting bindings into one fingerprint;
+- let kind-specific encoders extend the base representation with extra fields when needed without changing the storage contract.
+
+### What the fingerprint enables
+
+The fingerprint is not only for nearest-neighbor lookup. The same vector supports three higher-order behaviors:
+
+- **Consensus**: bundle the fingerprints of multiple candidate Engrams to check whether they converge on the same structure, even if the surface wording differs.
+- **Analogy**: bind role vectors and compare the resulting fingerprints across domains to find structural matches.
+- **Tier progression**: cluster similar Insight fingerprints before promotion, so the system promotes coherent neighborhoods of knowledge rather than isolated entries.
 
 ---
 
@@ -210,7 +244,7 @@ pub fn fingerprint_symbol(kind: SymbolKind, name: &str) -> HdcVector {
 
 ## Three-Tier Search Strategy
 
-For small knowledge bases (<100K entries), brute-force Hamming distance scan is fast enough (~1.3 ms at 100K entries). For larger collections (collective knowledge on the Korai chain, potentially millions of entries), a three-tier search strategy is used:
+For small knowledge bases (<100K entries), brute-force Hamming distance scan is fast enough (~1.3 ms at 100K entries). Because every Engram already carries its fingerprint, `query_similar` is always available; the three-tier search strategy is an optimization for larger collections (collective knowledge on the Korai chain, potentially millions of entries):
 
 ### Tier 1: Bloom Filter (Fast Reject)
 
@@ -245,7 +279,7 @@ The final candidates undergo full 10,240-bit Hamming distance comparison. The to
 | 100,000 | 1.3 ms | ~200 µs |
 | 1,000,000 | 13 ms | ~500 µs |
 
-The three-tier approach provides significant speedup for large knowledge bases while maintaining exact results (the final tier does full comparison on all surviving candidates).
+The three-tier approach provides significant speedup for large knowledge bases while maintaining exact results (the final tier does full comparison on all surviving candidates). It does not change the similarity contract; it only narrows the candidate set before the exact Hamming pass.
 
 ### On-Chain HDC Precompile
 
@@ -256,6 +290,24 @@ For knowledge stored on the Korai chain, the three-tier search is implemented as
 - Bloom filter index maintained by the precompile; updated on each block
 
 This is a custom Korai feature (not available on mainnet Ethereum) and is currently in the design phase. See topic [08-chain](../08-chain/INDEX.md) for details.
+
+### Similarity Query Contract
+
+The native query surface treats the fingerprint as the primary key for similarity:
+
+```rust
+pub trait HdcSimilarityStore {
+    fn query_similar(
+        &self,
+        fingerprint: &HdcVector,
+        limit: usize,
+    ) -> Result<Vec<(EngramHash, f32)>>;
+}
+```
+
+The returned score is similarity, not confidence. Confidence, decay, and tier still matter for ranking above the raw Hamming distance, but the vector match itself is the first-class signal.
+
+See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [Knowledge Query API](./10-knowledge-query-api.md), and [HDC/VSA Foundations](./04-hdc-vsa-foundations.md).
 
 ---
 
@@ -340,7 +392,7 @@ else:
 
 ### Trigger and integration
 
-Every `KnowledgeEntry` ingested into `NeuroStore` should carry an `hdc_vector`. Currently this field is `Option<Vec<u8>>` and often `None`. The automatic encoding pipeline fills it at ingestion time.
+Every Engram ingested into `NeuroStore` should carry a fingerprint. The automatic encoding pipeline fills it at ingestion time, and kind-specific encoders can refine the fingerprint when the record needs domain-specific structure.
 
 ```rust
 use crate::{HdcVector, ItemMemory, KnowledgeEntry, KnowledgeKind};
@@ -348,7 +400,7 @@ use crate::{HdcVector, ItemMemory, KnowledgeEntry, KnowledgeKind};
 /// Encodes knowledge entries into HDC vectors at ingestion time.
 ///
 /// Wired into NeuroStore::ingest() as a pre-processing step.
-/// If an entry already has an hdc_vector, this is a no-op.
+/// If an entry already has a fingerprint, this is a no-op.
 pub struct KnowledgeHdcEncoder {
     /// Role vector registry — maps role names to their deterministic HDC vectors.
     role_registry: ItemMemory,
@@ -460,9 +512,12 @@ impl NeuroStore {
     /// Ingest a knowledge entry, automatically computing its HDC vector
     /// if not already present.
     pub fn ingest(&mut self, mut entry: KnowledgeEntry) -> Result<()> {
-        if entry.hdc_vector.is_none() {
+        if entry.fingerprint.is_none() {
             let hv = self.encoder.encode(&entry);
-            entry.hdc_vector = Some(hv.to_bytes().to_vec());
+            entry.fingerprint = Some(HdcFingerprint {
+                vector: hv,
+                encoder_version: self.encoder.version(),
+            });
         }
         self.store(entry)
     }
@@ -526,8 +581,7 @@ impl NeuroStore {
 
         self.entries.iter().enumerate()
             .filter_map(|(idx, entry)| {
-                let hv = entry.hdc_vector.as_ref()?;
-                let entry_hv = HdcVector::from_bytes(hv)?;
+                let entry_hv = entry.fingerprint.as_ref()?.vector;
                 let sim = query.similarity(&entry_hv);
                 if sim > 0.526 {
                     Some((idx, sim))
@@ -594,8 +648,8 @@ Bundle multiple entries from the same episode into a single summary vector for f
 pub fn compress_episode(entries: &[&KnowledgeEntry]) -> Option<HdcVector> {
     let hvs: Vec<HdcVector> = entries.iter()
         .filter_map(|e| {
-            e.hdc_vector.as_ref()
-                .and_then(|bytes| HdcVector::from_bytes(bytes))
+            e.fingerprint.as_ref()
+                .map(|fp| fp.vector)
         })
         .collect();
 
@@ -900,7 +954,7 @@ impl ProvenanceChain {
 - `fingerprint_symbol()` in `roko-index` for code symbol encoding
 - Trigram-based name encoding in `roko-index`
 - Role vectors per `SymbolKind` in `roko-index`
-- `hdc_vector: Option<Vec<u8>>` field on `KnowledgeEntry`
+- `fingerprint: Option<HdcFingerprint>` field on `Engram`
 - Basic similarity comparison in `KnowledgeStore` (HDC `MemoryIndex` feature-gated)
 
 **Missing**:

@@ -10,6 +10,8 @@ use roko_core::tool::ToolCall;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::translate::SessionState;
+
 /// Serializable snapshot of a [`ToolLoop`](super::ToolLoop) mid-execution.
 ///
 /// Created by the loop when it stops for any reason other than
@@ -23,12 +25,15 @@ pub struct Checkpoint {
     pub tool_calls: Vec<ToolCall>,
     /// The full conversation message history at snapshot time.
     pub messages: Vec<serde_json::Value>,
+    /// Provider-issued session identifiers required to resume the conversation.
+    #[serde(default)]
+    pub session: SessionState,
 }
 
 impl Checkpoint {
     /// Create a new checkpoint from the loop's current state.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         iterations: usize,
         tool_calls: Vec<ToolCall>,
         messages: Vec<serde_json::Value>,
@@ -37,7 +42,15 @@ impl Checkpoint {
             iterations,
             tool_calls,
             messages,
+            session: SessionState::default(),
         }
+    }
+
+    /// Attach provider session continuity state to the checkpoint.
+    #[must_use]
+    pub fn with_session(mut self, session: SessionState) -> Self {
+        self.session = session;
+        self
     }
 
     /// Serialize to JSON bytes for persistence.
@@ -107,6 +120,7 @@ mod tests {
         assert_eq!(recovered.tool_calls.len(), 1);
         assert_eq!(recovered.tool_calls[0].name, "echo");
         assert_eq!(recovered.messages.len(), 2);
+        assert_eq!(recovered.session, SessionState::default());
     }
 
     #[test]

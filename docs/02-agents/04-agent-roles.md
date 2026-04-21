@@ -5,6 +5,8 @@
 > This document defines Roko's 28-role agent taxonomy, the per-role defaults
 > (backend, model tier, budget, permissions), and how roles compose into
 > agent types for different task categories.
+>
+> See also: `../../tmp/refinements/25-domain-specific-agents.md`.
 
 
 > **Implementation**: Shipping
@@ -27,6 +29,11 @@ Roles serve three purposes:
    that the CascadeRouter uses as a starting point before learning adjusts it.
 3. **Budget control** — Each role has a per-turn dollar ceiling (`TurnBudget`)
    that prevents runaway spending.
+
+Roles are the atomic building blocks for domain profiles. The six canonical
+profiles in `16-domain-profiles.md` assemble roles, tools, gates, and context
+shapes into installable bundles for coding, research, blockchain, data/ML,
+ops/SRE, and writing.
 
 ---
 
@@ -162,7 +169,7 @@ escalates from Sonnet to Opus, the budget is multiplied by 2.0x to account
 for the higher per-token cost. When it de-escalates to Haiku, the multiplier
 drops to 0.6x.
 
-The budget table is derived from the Mori agent roles specification
+The budget table is derived from the legacy Mori agent roles specification
 (`bardo-backup/tmp/mori-agents/03-agent-roles`), adjusted for current model
 pricing.
 
@@ -228,7 +235,32 @@ specialists handle implementation in their respective areas.
 
 Roles: (Future) chain-specific roles for multi-agent collaboration.
 
-Tracked as a Phase 2+ capability in `roko-golem`.
+Tracked as a Phase 2+ capability in legacy `roko-golem`.
+
+---
+
+## From Roles to Domain Profiles
+
+Roles answer "what persona should this turn use?" Domain profiles answer
+"what bundle should a deployment ship for this domain?" The relationship is:
+
+- Roles provide the per-turn defaults: model tier, budget, and permissions.
+- Domain profiles select the default role set and add task-specific tools,
+  gates, heuristics, templates, and memory shapes.
+- A single deployment can load multiple profiles, but the profile layer owns
+  the bundle composition rules.
+
+The canonical profile source is `16-domain-profiles.md`. That document also
+defines the shared `TypedContext` and `Custody` primitives used by multiple
+domains.
+
+Profile composition is intentionally additive:
+
+1. Merge tools by union unless a profile overrides an identical tool id.
+2. Stack gates unless a gate is explicitly scoped to a profile.
+3. Keep heuristics available to all installed profiles, then route by fit.
+4. Warn on role-name collisions so the operator resolves intent explicitly.
+5. Carry domain context as typed fields rather than free-form prose.
 
 ---
 
@@ -251,9 +283,9 @@ The role layer is populated from templates in
 describes its persona, constraints, and expected output format.
 
 Reference: `RoleSystemPromptSpec` in `orchestrate.rs` uses the
-6-layer builder with templates. See the Mori parity checklist for the
-1,253-item comparison between Mori's ~2K-token role prompts and Roko's
-current implementations.
+6-layer builder with templates. See the legacy Mori parity checklist for the
+1,253-item comparison between the legacy Mori prompts and Roko's current
+implementations.
 
 ---
 
@@ -289,6 +321,7 @@ The override hierarchy is:
 2. Refactoring PRD §05-agent-types — Agent role compositions, extensibility.
 3. Refactoring PRD §02-five-layers — Dual-Process Tier Router, Temperament
    Profiling table.
-4. `bardo-backup/tmp/mori-agents/03-agent-roles` — Original budget table.
+4. Legacy `bardo-backup/tmp/mori-agents/03-agent-roles` — Original budget
+   table.
 5. `crates/roko-compose/src/templates/` — Role-specific prompt templates.
 6. `crates/roko-agent/src/dispatcher/mod.rs:198` — Permission enforcement.

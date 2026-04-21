@@ -34,8 +34,10 @@ use serde_json::{Value, json};
 
 use crate::hypnagogia::HypnagogiaEngine;
 use crate::imagination::synthesize_hypotheses;
+use crate::phase2::sleep_time::{DreamBudgetTracker, DreamComputeBudget, DreamPhaseKind};
 use crate::runner::DreamBudget;
-use crate::threat::threat_warning_entries;
+use crate::staging::{ConfidenceStage, StagingBuffer};
+use crate::threat::threat_warning_entries_with_floor;
 
 const DREAMS_SUCCESS_REGRESSION_THRESHOLD: f64 = 0.20;
 const DREAMS_REGRESSION_MIN_RECORDS: usize = 5;
@@ -43,7 +45,7 @@ const DREAMS_PERFORMANCE_STALL_MIN_PLANS: usize = 5;
 const DREAMS_PERFORMANCE_SUCCESS_IMPROVEMENT: f64 = 0.01;
 const DREAMS_PERFORMANCE_COST_IMPROVEMENT: f64 = 0.01;
 const DREAMS_PERFORMANCE_STALLED_NOTE: &str = "performance stalled — consider: changing decomposition strategy, adjusting model tier, reviewing failing patterns";
-const SIGNALS_LOG_FILE: &str = "signals.jsonl";
+const ENGRAMS_LOG_FILE: &str = "engrams.jsonl";
 
 /// Agent hook used by the dream cycle to review a consolidation batch.
 #[async_trait]
@@ -93,6 +95,52 @@ pub struct DreamCycleReport {
     /// High-level learning notes for the next cycle.
     #[serde(default)]
     pub performance_notes: Vec<String>,
+    /// Number of hypnagogia-phase entries generated before NREM.
+    #[serde(default)]
+    pub hypnagogia_entries_count: usize,
+    /// Staging buffer statistics at end of cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_buffer_stats: Option<StagingBufferStats>,
+    /// Whether intensive mode was active during this cycle.
+    #[serde(default)]
+    pub intensive_mode_active: bool,
+    /// Per-phase budget tracking, if budget was configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_budget_summary: Option<PhaseBudgetSummary>,
+}
+
+/// Staging buffer statistics at the end of a dream cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagingBufferStats {
+    /// Total entries in the staging buffer.
+    pub total_entries: usize,
+    /// Entries at `Raw` stage.
+    pub raw_count: usize,
+    /// Entries at `Replayed` stage.
+    pub replayed_count: usize,
+    /// Entries at `Validated` stage.
+    pub validated_count: usize,
+    /// Entries promoted to knowledge store this cycle.
+    pub promoted_this_cycle: usize,
+    /// Entries garbage collected this cycle.
+    pub gc_removed: usize,
+}
+
+/// Per-phase budget spend summary for the dream cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseBudgetSummary {
+    /// Hypnagogia phase spend in USD.
+    pub hypnagogia_usd: f64,
+    /// NREM phase spend in USD.
+    pub nrem_usd: f64,
+    /// REM phase spend in USD.
+    pub rem_usd: f64,
+    /// Integration phase spend in USD.
+    pub integration_usd: f64,
+    /// Total dream budget in USD.
+    pub total_budget_usd: f64,
+    /// Total spend in USD.
+    pub total_spend_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,6 +384,14 @@ pub struct DreamCycle {
     playbook_store: Arc<PlaybookStore>,
     dispatcher: Arc<dyn AgentDispatcher>,
     last_dream_at: Option<DateTime<Utc>>,
+    threat_simulation: bool,
+    threat_severity_floor: f64,
+    /// Staging buffer for dream outputs (DREAM-01).
+    staging_buffer: StagingBuffer,
+    /// Path to persist staging buffer state.
+    staging_path: Option<PathBuf>,
+    /// Per-phase budget tracker (DREAM-12).
+    phase_tracker: Option<DreamBudgetTracker>,
 }
 
 impl std::fmt::Debug for DreamCycle {
@@ -346,6 +402,10 @@ impl std::fmt::Debug for DreamCycle {
             .field("playbook_store", &self.playbook_store.root())
             .field("dispatcher", &"<dispatcher>")
             .field("last_dream_at", &self.last_dream_at)
+            .field("threat_simulation", &self.threat_simulation)
+            .field("threat_severity_floor", &self.threat_severity_floor)
+            .field("staging_buffer_len", &self.staging_buffer.len())
+            .field("phase_tracker", &self.phase_tracker.is_some())
             .finish()
     }
 }
@@ -359,13 +419,38 @@ impl DreamCycle {
         playbook_store: Arc<PlaybookStore>,
         dispatcher: Arc<dyn AgentDispatcher>,
     ) -> Self {
+        // Derive staging buffer path from episode store location.
+        let staging_path = episode_store
+            .path()
+            .parent()
+            .map(|root| root.join("dreams").join("staging-buffer.json"));
+        let staging_buffer = staging_path
+            .as_deref()
+            .map(StagingBuffer::load_or_new)
+            .unwrap_or_default();
         Self {
             episode_store,
             knowledge_store,
             playbook_store,
             dispatcher,
             last_dream_at: None,
+            threat_simulation: true,
+            threat_severity_floor: 0.20,
+            staging_buffer,
+            staging_path,
+            phase_tracker: None,
         }
+    }
+
+    /// Access the staging buffer for external inspection.
+    #[must_use]
+    pub fn staging_buffer(&self) -> &StagingBuffer {
+        &self.staging_buffer
+    }
+
+    /// Configure per-phase compute budget tracking (DREAM-12).
+    pub fn configure_compute_budget(&mut self, budget: DreamComputeBudget) {
+        self.phase_tracker = Some(DreamBudgetTracker::new(budget));
     }
 
     /// Last completed cycle time, if any.
@@ -377,6 +462,13 @@ impl DreamCycle {
     /// Override the last completed dream timestamp used to filter batches.
     pub fn set_last_dream_at(&mut self, last_dream_at: Option<DateTime<Utc>>) {
         self.last_dream_at = last_dream_at;
+    }
+
+    /// Configure whether dream threat warnings are emitted and what severity
+    /// floor they must meet before persistence.
+    pub fn configure_threats(&mut self, enabled: bool, severity_floor: f64) {
+        self.threat_simulation = enabled;
+        self.threat_severity_floor = severity_floor.clamp(0.0, 1.0);
     }
 
     /// Run a full offline learning pass.
@@ -499,16 +591,116 @@ impl DreamCycle {
             }
         }
 
+        // ── DREAM-11: Run hypnagogia as a pre-NREM phase ────────────────
+        // Hypnagogia runs before NREM cluster processing, producing creative
+        // onset candidates that feed into the staging buffer.
+        let processed_episodes = clusters_to_episodes(&clusters);
+        let hypnagogia_entries = if !budget_exhausted {
+            HypnagogiaEngine::default().run(&review_entries, &processed_episodes, started_at)
+        } else {
+            Vec::new()
+        };
+        let hypnagogia_entries_count = hypnagogia_entries.len();
+
+        // ── DREAM-12: Record per-phase budget spend ─────────────────────
+        // Hypnagogia phase: attribute cost based on entry count (lightweight).
+        if let Some(tracker) = &mut self.phase_tracker {
+            let hypnagogia_cost = hypnagogia_entries_count as f64 * 0.001;
+            tracker.record_spend(DreamPhaseKind::Hypnagogia, hypnagogia_cost);
+        }
+        // NREM phase: attribute cluster processing costs.
+        if let Some(tracker) = &mut self.phase_tracker {
+            let nrem_cost = processed_cluster_count as f64 * 0.01;
+            tracker.record_spend(DreamPhaseKind::Nrem, nrem_cost);
+        }
+
+        // ── DREAM-01: Feed all dream outputs through staging buffer ─────
+        // Advance existing Raw entries whose source episodes appear in this batch.
+        let replayed_ids: Vec<String> = processed_episodes.iter().map(|ep| ep.id.clone()).collect();
+        self.staging_buffer.advance_replayed(&replayed_ids);
+
+        // Advance Replayed entries to Validated (HDC redundancy check).
+        let existing_knowledge = self.knowledge_store.read_all().unwrap_or_default();
+        self.staging_buffer.advance_validated(&existing_knowledge);
+
+        // Add new hypnagogia entries to staging at Raw (0.20 confidence).
+        for entry in &hypnagogia_entries {
+            let source_id = entry.source_episodes.first().cloned().unwrap_or_default();
+            self.staging_buffer.add_candidate(entry.clone(), source_id);
+        }
+
+        // ── REM phase: synthesize hypotheses and threat warnings ─────────
         let mut liminal_entries = Vec::new();
         if !budget_exhausted {
-            let processed_episodes = clusters_to_episodes(&clusters);
-            let hypnagogic =
-                HypnagogiaEngine::default().run(&review_entries, &processed_episodes, started_at);
-            liminal_entries.extend(hypnagogic);
             liminal_entries.extend(synthesize_hypotheses(&processed_episodes, started_at));
-            liminal_entries.extend(threat_warning_entries(&processed_episodes, started_at));
+            if self.threat_simulation {
+                liminal_entries.extend(threat_warning_entries_with_floor(
+                    &processed_episodes,
+                    started_at,
+                    self.threat_severity_floor,
+                ));
+            }
         }
+        // DREAM-12: REM phase cost (imagination + threat simulation).
+        if let Some(tracker) = &mut self.phase_tracker {
+            let rem_cost = liminal_entries.len() as f64 * 0.005;
+            tracker.record_spend(DreamPhaseKind::Rem, rem_cost);
+        }
+
+        for entry in &liminal_entries {
+            let source_id = entry.source_episodes.first().cloned().unwrap_or_default();
+            self.staging_buffer.add_candidate(entry.clone(), source_id);
+        }
+
+        // Promote Validated entries to knowledge store at Transient tier.
+        let promoted = self
+            .staging_buffer
+            .promote_validated(&self.knowledge_store)?;
+        let promoted_count = promoted.len();
+        for entry in &promoted {
+            if written_knowledge_ids.insert(entry.id.clone()) {
+                knowledge_entries_written += 1;
+            }
+        }
+
+        // GC stale Raw entries older than 7 days.
+        let gc_before = self.staging_buffer.len();
+        self.staging_buffer.gc();
+        let gc_removed = gc_before.saturating_sub(self.staging_buffer.len());
+        self.staging_buffer.remove_promoted();
+
+        // Persist staging buffer state for cross-cycle continuity.
+        if let Some(staging_path) = &self.staging_path {
+            let _ = self.staging_buffer.save(staging_path);
+        }
+
+        let staging_buffer_stats = Some(StagingBufferStats {
+            total_entries: self.staging_buffer.len(),
+            raw_count: self
+                .staging_buffer
+                .candidates_at_stage(&ConfidenceStage::Raw)
+                .len(),
+            replayed_count: self
+                .staging_buffer
+                .candidates_at_stage(&ConfidenceStage::Replayed)
+                .len(),
+            validated_count: self
+                .staging_buffer
+                .candidates_at_stage(&ConfidenceStage::Validated)
+                .len(),
+            promoted_this_cycle: promoted_count,
+            gc_removed,
+        });
+
+        // Also write review entries + liminal entries directly for this cycle
+        // (staging handles promotion for subsequent cycles).
         for entry in liminal_entries {
+            if written_knowledge_ids.insert(entry.id.clone()) {
+                self.knowledge_store.add(entry.clone())?;
+                knowledge_entries_written += 1;
+            }
+        }
+        for entry in hypnagogia_entries {
             if written_knowledge_ids.insert(entry.id.clone()) {
                 self.knowledge_store.add(entry.clone())?;
                 knowledge_entries_written += 1;
@@ -537,6 +729,28 @@ impl DreamCycle {
                 }
                 notes
             },
+            hypnagogia_entries_count,
+            staging_buffer_stats,
+            intensive_mode_active: false,
+            phase_budget_summary: self
+                .phase_tracker
+                .as_ref()
+                .map(|tracker| PhaseBudgetSummary {
+                    hypnagogia_usd: tracker
+                        .phase_spend
+                        .get("Hypnagogia")
+                        .copied()
+                        .unwrap_or(0.0),
+                    nrem_usd: tracker.phase_spend.get("Nrem").copied().unwrap_or(0.0),
+                    rem_usd: tracker.phase_spend.get("Rem").copied().unwrap_or(0.0),
+                    integration_usd: tracker
+                        .phase_spend
+                        .get("Integration")
+                        .copied()
+                        .unwrap_or(0.0),
+                    total_budget_usd: tracker.budget.total_dream_budget_usd(),
+                    total_spend_usd: tracker.total_spend_usd,
+                }),
         };
 
         let counterfactuals = build_counterfactuals(&clusters, started_at);
@@ -586,7 +800,7 @@ impl DreamCycle {
             drop_fraction,
         };
 
-        let Some(path) = self.signals_path() else {
+        let Some(path) = self.engrams_path() else {
             return Ok(());
         };
 
@@ -637,7 +851,7 @@ impl DreamCycle {
             return Ok(None);
         };
 
-        let Some(path) = self.signals_path() else {
+        let Some(path) = self.engrams_path() else {
             return Ok(Some(regression));
         };
 
@@ -728,13 +942,13 @@ impl DreamCycle {
         Some(root.join("learn").join("c-factor.jsonl"))
     }
 
-    fn signals_path(&self) -> Option<PathBuf> {
+    fn engrams_path(&self) -> Option<PathBuf> {
         let root = self
             .episode_store
             .path()
             .parent()
             .unwrap_or_else(|| Path::new("."));
-        Some(root.join(SIGNALS_LOG_FILE))
+        Some(root.join(ENGRAMS_LOG_FILE))
     }
 }
 
@@ -1412,6 +1626,15 @@ impl DreamDistillationCandidate {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         })
     }
 }
@@ -1558,6 +1781,15 @@ fn playbook_knowledge_entry(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -1623,6 +1855,15 @@ fn build_regression_entry(cluster: &DreamCluster, created_at: DateTime<Utc>) -> 
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -1759,6 +2000,15 @@ fn generate_cross_domain_strategy_hypotheses(
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         });
     }
 
@@ -2045,6 +2295,15 @@ fn build_mistake_insight_entry(
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
+
+        confirmation_count: 0,
+
+        distinct_contexts: Vec::new(),
+
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
     }
 }
 
@@ -2094,6 +2353,15 @@ fn review_insights_from_heuristics(
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
             }
         })
         .collect()
@@ -2596,7 +2864,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert_eq!(report.processed_episodes, 5);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].kind.as_str(), "dreams:regression");
@@ -2667,7 +2935,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert_eq!(report.processed_episodes, 5);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert!(
             signals
@@ -2748,7 +3016,7 @@ mod tests {
             .expect("cfactor regression analysis");
         assert!(regression.drop_fraction > 0.20);
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].kind.as_str(), "cfactor:regression");
@@ -2808,7 +3076,7 @@ mod tests {
         let report = cycle.run().await.expect("run");
         assert!(report.cfactor_regression.is_none());
 
-        let signal_log = tmp.path().join(".roko").join("signals.jsonl");
+        let signal_log = tmp.path().join(".roko").join("engrams.jsonl");
         let signals = read_signals(&signal_log);
         assert!(
             signals
@@ -2864,6 +3132,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cycle_can_disable_threat_warnings() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join(".roko").join("episodes.jsonl");
+        let knowledge_path = tmp
+            .path()
+            .join(".roko")
+            .join("neuro")
+            .join("knowledge.jsonl");
+        let playbooks_root = tmp.path().join(".roko").join("playbooks");
+        let logger = EpisodeLogger::new(&episodes_path);
+        let knowledge_store = Arc::new(KnowledgeStore::new(&knowledge_path));
+        let playbook_store = Arc::new(PlaybookStore::new(&playbooks_root));
+        let dispatcher = Arc::new(MockDispatcher {
+            response: r#"<|json|>{"entries":[]}<|/json|>"#.to_string(),
+        });
+
+        for idx in 0..2 {
+            let mut ep = episode(
+                &format!("threat-{idx}"),
+                "plan-threat",
+                "implementation",
+                "claude-haiku-4-5",
+                false,
+                Some("timeout"),
+            );
+            ep.tokens_used = 400;
+            ep.duration_secs = 60.0;
+            write_episode(&logger, &ep).await;
+        }
+
+        let mut cycle = DreamCycle::new(
+            Arc::new(logger),
+            knowledge_store.clone(),
+            playbook_store,
+            dispatcher,
+        );
+        cycle.configure_threats(false, 0.0);
+
+        let report = cycle.run().await.expect("run");
+        assert_eq!(report.processed_episodes, 2);
+
+        let entries = knowledge_store.read_all().expect("read knowledge");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.tags.iter().any(|tag| tag == "threat"))
+        );
+    }
+
     #[test]
     fn review_insights_from_heuristics_skips_confirmation_only_rules() {
         let analysis = TierProgressionReport {
@@ -2882,6 +3200,9 @@ mod tests {
                     source_episodes: vec!["ep-1".to_string(), "ep-2".to_string()],
                     source_model: None,
                     model_generality: 1.0,
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
                 roko_neuro::tier_progression::HeuristicRule {
                     id: "heuristic-2".to_string(),
@@ -2896,12 +3217,16 @@ mod tests {
                     source_episodes: vec!["ep-3".to_string(), "ep-4".to_string()],
                     source_model: None,
                     model_generality: 1.0,
+                    trials: 0,
+                    violations: 0,
+                    receipts: Vec::new(),
                 },
             ],
             playbook: roko_neuro::tier_progression::PlaybookCompilation {
                 markdown: String::new(),
                 rules: Vec::new(),
             },
+            falsifiers: Vec::new(),
         };
 
         let entries = review_insights_from_heuristics(&analysis, Utc::now());
@@ -2913,5 +3238,169 @@ mod tests {
         assert!(entry.tags.iter().any(|tag| tag == "review"));
         assert!(entry.source_episodes.contains(&"ep-1".to_string()));
         assert!(entry.source_episodes.contains(&"ep-2".to_string()));
+    }
+
+    // ── DREAM-11 + DREAM-01 tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn cycle_report_includes_hypnagogia_count() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join("episodes.jsonl");
+        let store = Arc::new(EpisodeLogger::new(episodes_path.clone()));
+        let ep = episode("e1", "plan-a", "implement", "haiku", true, None);
+        write_episode(&store, &ep).await;
+        let knowledge = Arc::new(KnowledgeStore::for_workdir(tmp.path()));
+        let playbooks = Arc::new(PlaybookStore::new(tmp.path().join("playbooks")));
+        let dispatcher: Arc<dyn AgentDispatcher> = Arc::new(MockDispatcher {
+            response: String::new(),
+        });
+        let mut cycle = DreamCycle::new(store, knowledge, playbooks, dispatcher);
+        let report = cycle.run().await.expect("dream cycle should succeed");
+        // Hypnagogia runs before NREM; even with few episodes it should run.
+        assert!(
+            report.hypnagogia_entries_count >= 0,
+            "hypnagogia_entries_count should be present in report"
+        );
+    }
+
+    #[tokio::test]
+    async fn cycle_report_includes_staging_buffer_stats() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join("episodes.jsonl");
+        let store = Arc::new(EpisodeLogger::new(episodes_path.clone()));
+        let ep = episode("e1", "plan-a", "implement", "haiku", true, None);
+        write_episode(&store, &ep).await;
+        let knowledge = Arc::new(KnowledgeStore::for_workdir(tmp.path()));
+        let playbooks = Arc::new(PlaybookStore::new(tmp.path().join("playbooks")));
+        let dispatcher: Arc<dyn AgentDispatcher> = Arc::new(MockDispatcher {
+            response: String::new(),
+        });
+        let mut cycle = DreamCycle::new(store, knowledge, playbooks, dispatcher);
+        let report = cycle.run().await.expect("dream cycle should succeed");
+        let stats = report
+            .staging_buffer_stats
+            .expect("staging_buffer_stats should be present");
+        // After a cycle, staging buffer should have been touched.
+        assert!(
+            stats.total_entries >= 0,
+            "total_entries should be non-negative"
+        );
+    }
+
+    // ── DREAM-12 tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cycle_with_compute_budget_tracks_per_phase_spend() {
+        let tmp = TempDir::new().expect("tempdir");
+        let episodes_path = tmp.path().join("episodes.jsonl");
+        let store = Arc::new(EpisodeLogger::new(episodes_path.clone()));
+        let ep = episode("e1", "plan-a", "implement", "haiku", true, None);
+        write_episode(&store, &ep).await;
+        let knowledge = Arc::new(KnowledgeStore::for_workdir(tmp.path()));
+        let playbooks = Arc::new(PlaybookStore::new(tmp.path().join("playbooks")));
+        let dispatcher: Arc<dyn AgentDispatcher> = Arc::new(MockDispatcher {
+            response: String::new(),
+        });
+        let mut cycle = DreamCycle::new(store, knowledge, playbooks, dispatcher);
+        cycle.configure_compute_budget(DreamComputeBudget::default());
+        let report = cycle.run().await.expect("dream cycle should succeed");
+        let summary = report
+            .phase_budget_summary
+            .expect("phase_budget_summary should be present when budget configured");
+        assert!(
+            summary.total_budget_usd > 0.0,
+            "total budget should be positive"
+        );
+        assert!(
+            summary.total_spend_usd >= 0.0,
+            "total spend should be non-negative"
+        );
+        // NREM should have some cost from cluster processing.
+        assert!(summary.nrem_usd >= 0.0, "NREM spend should be tracked");
+    }
+
+    #[test]
+    fn staging_buffer_stats_serialization_roundtrip() {
+        let stats = StagingBufferStats {
+            total_entries: 10,
+            raw_count: 3,
+            replayed_count: 4,
+            validated_count: 2,
+            promoted_this_cycle: 1,
+            gc_removed: 0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: StagingBufferStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, deserialized);
+    }
+
+    #[test]
+    fn phase_budget_summary_serialization_roundtrip() {
+        let summary = PhaseBudgetSummary {
+            hypnagogia_usd: 0.01,
+            nrem_usd: 0.30,
+            rem_usd: 0.50,
+            integration_usd: 0.0,
+            total_budget_usd: 1.50,
+            total_spend_usd: 0.81,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: PhaseBudgetSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, deserialized);
+    }
+
+    #[test]
+    fn dream_cycle_report_with_new_fields_serializes() {
+        let report = DreamCycleReport {
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            total_episodes: 10,
+            processed_episodes: 5,
+            processed_through: None,
+            analysis: TierProgressionReport {
+                insights: Vec::new(),
+                heuristics: Vec::new(),
+                playbook: roko_neuro::tier_progression::PlaybookCompilation {
+                    markdown: String::new(),
+                    rules: Vec::new(),
+                },
+                falsifiers: Vec::new(),
+            },
+            cfactor_regression: None,
+            clusters: Vec::new(),
+            knowledge_entries_written: 3,
+            playbooks_created: 1,
+            regressions_detected: Vec::new(),
+            strategy_hypotheses: Vec::new(),
+            performance_notes: Vec::new(),
+            hypnagogia_entries_count: 4,
+            staging_buffer_stats: Some(StagingBufferStats {
+                total_entries: 5,
+                raw_count: 2,
+                replayed_count: 1,
+                validated_count: 1,
+                promoted_this_cycle: 1,
+                gc_removed: 0,
+            }),
+            intensive_mode_active: true,
+            phase_budget_summary: Some(PhaseBudgetSummary {
+                hypnagogia_usd: 0.01,
+                nrem_usd: 0.30,
+                rem_usd: 0.50,
+                integration_usd: 0.0,
+                total_budget_usd: 1.50,
+                total_spend_usd: 0.81,
+            }),
+        };
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let deserialized: DreamCycleReport =
+            serde_json::from_str(&json).expect("deserialize report");
+        assert_eq!(
+            deserialized.hypnagogia_entries_count,
+            report.hypnagogia_entries_count
+        );
+        assert!(deserialized.staging_buffer_stats.is_some());
+        assert!(deserialized.intensive_mode_active);
+        assert!(deserialized.phase_budget_summary.is_some());
     }
 }

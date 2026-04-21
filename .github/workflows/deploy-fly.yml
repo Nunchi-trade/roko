@@ -1,0 +1,88 @@
+# Deploy to Fly.io on push to main or manual trigger.
+#
+# Prerequisites:
+#   1. Create a Fly.io app: `fly apps create roko-agent`
+#   2. Set the FLY_API_TOKEN secret in GitHub repository settings.
+#   3. Optionally set FLY_APP to override the app name.
+#
+# The workflow uses the Dockerfile at the repository root and the
+# generated fly.toml (see `roko deploy fly` / FLY_TOML_TEMPLATE).
+#
+# DEPLOY-08: Cloud deployment (Fly.io GitHub Action)
+
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Fly.io app name (overrides FLY_APP secret)"
+        required: false
+        type: string
+
+concurrency:
+  group: fly-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    # Only deploy if the FLY_API_TOKEN secret is set.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Fly CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Resolve app name
+        id: app
+        run: |
+          APP="${{ inputs.app || vars.FLY_APP || 'roko-agent' }}"
+          echo "name=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Generate fly.toml
+        run: |
+          cat > fly.toml <<'TOML'
+          app = "${{ steps.app.outputs.name }}"
+          primary_region = "iad"
+
+          [build]
+          dockerfile = "Dockerfile"
+
+          [http_service]
+          internal_port = 6677
+          force_https = true
+          auto_stop_machines = true
+          auto_start_machines = true
+          min_machines_running = 0
+
+          [[http_service.checks]]
+          interval = "30s"
+          timeout = "5s"
+          grace_period = "10s"
+          path = "/api/health"
+          method = "GET"
+
+          [mounts]
+          source = "roko_data"
+          destination = "/data/.roko"
+          TOML
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only --app "${{ steps.app.outputs.name }}"
+
+      - name: Show deployment URL
+        if: success()
+        run: |
+          echo "## Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "App **${{ steps.app.outputs.name }}** deployed to Fly.io." >> "$GITHUB_STEP_SUMMARY"
+          flyctl status --app "${{ steps.app.outputs.name }}" || true

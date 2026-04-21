@@ -56,9 +56,14 @@ pub fn create_openai_compat_backend(
                 .with_extra_body_params(build_extra_body_params(provider, model))
                 .with_poster(Box::new(SharedHttpPoster { inner: poster })),
         )),
-        ProviderKind::AnthropicApi => Err(AgentCreationError::MissingConfig(
-            "Anthropic HTTP tool-loop backend is not implemented yet".into(),
-        )),
+        ProviderKind::AnthropicApi => {
+            crate::provider::anthropic_api::tool_loop::create_tool_loop_backend(
+                provider,
+                model,
+                &crate::provider::AgentOptions::default(),
+                Box::new(SharedHttpPoster { inner: poster }),
+            )
+        }
         ProviderKind::ClaudeCli | ProviderKind::CursorAcp => {
             Err(AgentCreationError::MissingConfig(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
@@ -99,9 +104,14 @@ pub fn create_tool_loop_backend(
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
             "Gemini native tool-loop backend requires gemini_native tool_format".into(),
         )),
-        ProviderKind::AnthropicApi => Err(AgentCreationError::MissingConfig(
-            "Anthropic HTTP tool-loop backend is not implemented yet".into(),
-        )),
+        ProviderKind::AnthropicApi => {
+            crate::provider::anthropic_api::tool_loop::create_tool_loop_backend(
+                provider,
+                model,
+                options,
+                Box::new(SharedHttpPoster { inner: poster }),
+            )
+        }
         ProviderKind::ClaudeCli | ProviderKind::CursorAcp => {
             Err(AgentCreationError::MissingConfig(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),

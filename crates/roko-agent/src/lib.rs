@@ -25,10 +25,12 @@
     unused_assignments,
     unused_variables,
     clippy::borrowed_box,
+    clippy::doc_lazy_continuation,
     clippy::double_must_use,
     clippy::expect_used,
     clippy::large_enum_variant,
     clippy::module_name_repetitions,
+    clippy::needless_borrow,
     clippy::never_loop,
     clippy::nursery,
     clippy::pedantic,
@@ -54,6 +56,7 @@ pub mod format;
 pub mod gemini;
 pub mod http;
 pub mod introspection;
+pub mod lifecycle;
 pub mod mcp;
 pub mod metamorphosis;
 pub mod mock;
@@ -101,25 +104,31 @@ pub use gemini::{
     GenerateContentResponse, GroundingMetadata,
 };
 pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn};
+pub use lifecycle::*;
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
-pub use multi_pool::MultiAgentPool;
+pub use multi_pool::{KillReport, MultiAgentPool, WarmEntry};
 pub use ollama::agent::{OllamaAgent, OllamaLlmBackend};
 pub use openai_compat_backend::OpenAiCompatLlmBackend;
 pub use perplexity::{
     Annotation, PerplexityChatAgent, PerplexityDeepResearchAgent, PerplexityEmbedAgent,
     PerplexityMetadata, PerplexitySearchClient, SearchOptions, SearchResult,
 };
-pub use pool::{AgentInstanceId, AgentPool};
+pub use pool::{AgentInstanceId, AgentPool, AgentTask, InstanceStatus, TaskOutcome};
 pub use provider::{
     ProviderAdapter, adapter_for_kind, create_agent_for_model, current_safety_layer,
     with_scoped_safety_layer,
 };
 pub use rate_limit::ProviderRateLimiter;
 pub use safety::{
-    AgentWarrant, Capability, CapabilityError, SafetyLayer, check_capability, delegate,
+    AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,
+    SafetyHook, SafetyLayer, SafetyViolation, TaintLabel, TaintedString, ViolationSeverity,
+    ViolationType, check_capability, delegate,
 };
 pub use streaming::{StreamAccumulator, StreamChunk};
-pub use task_runner::{TaskResult, TaskRunner};
+pub use task_runner::{
+    AgentEvent, Anomaly, AnomalyDetector, BudgetAction, BudgetGuardrail, ConductorAction,
+    ConductorBandit, CostTable, EventBus, ModelPricing, TaskResult, TaskRunner, TaskRunnerError,
+};
 pub use tool_loop::ToolLoopAgent;
 pub use usage::Usage;

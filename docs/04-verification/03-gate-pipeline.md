@@ -150,7 +150,7 @@ when a pipeline contains multiple test gates (e.g., unit tests + integration tes
 ```rust
 #[async_trait]
 impl Gate for GatePipeline {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
+    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict {
         // ... iterate over self.gates, aggregate verdicts
     }
 
@@ -398,9 +398,9 @@ a single rung:
 ```rust
 #[async_trait]
 impl Gate for Parallel {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
+    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict {
         let futures: Vec<_> = self.0.iter()
-            .map(|g| g.verify(signal, ctx))
+            .map(|g| g.verify(engram, ctx))
             .collect();
         let verdicts = futures::future::join_all(futures).await;
 
@@ -439,9 +439,9 @@ voting gate runs multiple judges and requires a quorum:
 ```rust
 #[async_trait]
 impl Gate for Voting {
-    async fn verify(&self, signal: &Signal, ctx: &Context) -> Verdict {
+    async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict {
         let futures: Vec<_> = self.gates.iter()
-            .map(|g| g.verify(signal, ctx))
+            .map(|g| g.verify(engram, ctx))
             .collect();
         let verdicts = futures::future::join_all(futures).await;
 

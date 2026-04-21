@@ -1,9 +1,9 @@
-//! Complexity-based rung selection for the 6-rung gate pipeline (§10.14).
+//! Complexity-based rung selection for the 7-rung gate pipeline.
 //!
 //! Decides **which rungs to run** based on a plan's complexity and prior
-//! failure count. Trivial plans don't pay for property tests; complex plans
-//! run every rung. On repeated failure the selector escalates: a Trivial
-//! plan that has failed twice is promoted to Standard, running additional
+//! failure count. Trivial plans pay only for compilation; complex plans run
+//! every rung. On repeated failure the selector escalates: a Trivial plan
+//! that has failed twice is promoted to Standard, running additional
 //! verification rungs.
 //!
 //! This is a **pure function** — no I/O, no global state, no randomness.
@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PlanComplexity {
-    /// Single-line / derive-only change. Compile + test only.
+    /// Single-line / derive-only change. Compile only.
     Trivial,
-    /// Small feature, few files. Adds lint + symbol checking.
+    /// Small feature, few files. Adds linting.
     Simple,
-    /// Normal plan. Adds generated behavioural tests.
+    /// Normal plan. Adds the project's tests plus symbol checking.
     Standard,
     /// Large cross-crate work. Full rung suite.
     Complex,
@@ -57,25 +57,62 @@ impl PlanComplexity {
 
 // ─── Rung identifiers ───────────────────────────────────────────────────
 
-/// Canonical rung identifiers. Numeric repr matches [`CANONICAL_ORDER`]
-/// position, so derived `Ord` gives the correct execution sequence.
+/// Canonical rung identifiers for the 7-rung gate pipeline.
+///
+/// Each rung maps to one or more concrete [`Gate`](roko_core::Gate) impls via
+/// [`run_canonical_rung`](crate::rung_dispatch::run_canonical_rung). The numeric
+/// repr matches [`CANONICAL_ORDER`] position, so derived `Ord` gives the correct
+/// execution sequence.
+///
+/// # Two-tier gate architecture
+///
+/// Not every gate type is rung-dispatched. The crate ships **two tiers**:
+///
+/// 1. **Rung-dispatched gates** (this enum) -- the 7 rungs below cover 12
+///    concrete gates that form the core verification pipeline. These are
+///    selected by plan complexity and executed in order.
+///
+/// 2. **Standalone gates** -- [`DiffGate`](crate::DiffGate),
+///    [`CodeExecutionGate`](crate::CodeExecutionGate),
+///    [`ShellGate`](crate::ShellGate),
+///    [`BenchmarkRegressionGate`](crate::benchmark_gate::BenchmarkRegressionGate),
+///    [`FormatCheckGate`](crate::format_check_gate::FormatCheckGate),
+///    [`SecurityScanGate`](crate::security_scan_gate::SecurityScanGate), and
+///    [`GateGenerator`](crate::GateGenerator) are invoked outside the rung
+///    pipeline for scenario-specific checks (post-task diff review, sandboxed
+///    execution, ad-hoc generated checks, etc.).
+///
+/// Additionally, composition wrappers ([`ParallelGate`](crate::ParallelGate),
+/// [`VotingGate`](crate::VotingGate), [`FallbackGate`](crate::FallbackGate))
+/// let callers combine any gate into parallel / voting / fallback topologies
+/// regardless of whether the inner gates are rung-dispatched or standalone.
+///
+/// This design is intentional: rungs enforce a strict ordering for the
+/// critical build-lint-test path, while standalone gates are invoked ad-hoc
+/// when their specific domain context is available.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 #[repr(u8)]
 pub enum Rung {
-    /// Rung 0: compile / type-check.
+    /// Rung 0: compile / type-check. Dispatches [`CompileGate`](crate::CompileGate).
     Compile = 0,
-    /// Rung 1: lint (clippy, eslint, …).
+    /// Rung 1: lint (clippy, eslint, ...). Dispatches [`ClippyGate`](crate::ClippyGate).
     Lint = 1,
-    /// Rung 2: existing test suite.
+    /// Rung 2: existing test suite. Dispatches [`TestGate`](crate::TestGate).
     Test = 2,
-    /// Rung 3: symbol-manifest check.
+    /// Rung 3: symbol-manifest check. Dispatches [`SymbolGate`](crate::symbol_gate::SymbolGate).
     Symbol = 3,
-    /// Rung 4: generated behavioural tests.
+    /// Rung 4: generated behavioural tests. Dispatches
+    /// [`GeneratedTestGate`](crate::generated_test_gate::GeneratedTestGate) +
+    /// [`VerifyChainGate`](crate::verify_chain_gate::VerifyChainGate).
     GeneratedTest = 4,
-    /// Rung 5: property-based tests.
+    /// Rung 5: property-based tests. Dispatches
+    /// [`PropertyTestGate`](crate::property_test_gate::PropertyTestGate) +
+    /// [`FactCheckGate`](crate::FactCheckGate).
     PropertyTest = 5,
-    /// Rung 6: integration scenario.
+    /// Rung 6: integration scenario. Dispatches
+    /// [`LlmJudgeGate`](crate::llm_judge_gate::LlmJudgeGate) +
+    /// [`IntegrationGate`](crate::integration_gate::IntegrationGate).
     Integration = 6,
 }
 
@@ -91,6 +128,35 @@ pub const CANONICAL_ORDER: [Rung; 7] = [
 ];
 
 impl Rung {
+    /// Numeric index in canonical execution order.
+    #[must_use]
+    pub const fn as_index(self) -> u32 {
+        match self {
+            Self::Compile => 0,
+            Self::Lint => 1,
+            Self::Test => 2,
+            Self::Symbol => 3,
+            Self::GeneratedTest => 4,
+            Self::PropertyTest => 5,
+            Self::Integration => 6,
+        }
+    }
+
+    /// Parse a canonical rung index.
+    #[must_use]
+    pub const fn from_index(index: u32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Compile),
+            1 => Some(Self::Lint),
+            2 => Some(Self::Test),
+            3 => Some(Self::Symbol),
+            4 => Some(Self::GeneratedTest),
+            5 => Some(Self::PropertyTest),
+            6 => Some(Self::Integration),
+            _ => None,
+        }
+    }
+
     /// Short display label for TUI / logging.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -161,21 +227,15 @@ impl RungCaps {
 ///
 /// | Complexity | Compile | Lint | Test | Symbol | GenTest | PropTest | Integration |
 /// |---|---|---|---|---|---|---|---|
-/// | Trivial    |    ✓    |      |  ✓   |        |         |          |             |
-/// | Simple     |    ✓    |  ✓   |  ✓   |   ✓    |         |          |             |
-/// | Standard   |    ✓    |  ✓   |  ✓   |   ✓    |    ✓    |          |             |
+/// | Trivial    |    ✓    |      |      |        |         |          |             |
+/// | Simple     |    ✓    |  ✓   |      |        |         |          |             |
+/// | Standard   |    ✓    |  ✓   |  ✓   |   ✓    |         |          |             |
 /// | Complex    |    ✓    |  ✓   |  ✓   |   ✓    |    ✓    |    ✓     |      ✓      |
 const fn base_rungs(complexity: PlanComplexity) -> &'static [Rung] {
     match complexity {
-        PlanComplexity::Trivial => &[Rung::Compile, Rung::Test],
-        PlanComplexity::Simple => &[Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol],
-        PlanComplexity::Standard => &[
-            Rung::Compile,
-            Rung::Lint,
-            Rung::Test,
-            Rung::Symbol,
-            Rung::GeneratedTest,
-        ],
+        PlanComplexity::Trivial => &[Rung::Compile],
+        PlanComplexity::Simple => &[Rung::Compile, Rung::Lint],
+        PlanComplexity::Standard => &[Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol],
         PlanComplexity::Complex => &[
             Rung::Compile,
             Rung::Lint,
@@ -236,32 +296,23 @@ mod tests {
     // ── Base selection (0 prior failures) ────────────────────────────
 
     #[test]
-    fn trivial_selects_compile_and_test() {
+    fn trivial_selects_compile_only() {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 0);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     #[test]
-    fn simple_selects_compile_lint_test_symbol() {
+    fn simple_selects_compile_and_lint() {
         let rungs = select_rungs(PlanComplexity::Simple, &all_caps(), 0);
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint]);
     }
 
     #[test]
-    fn standard_selects_five_rungs() {
+    fn standard_selects_compile_lint_test_and_symbol() {
         let rungs = select_rungs(PlanComplexity::Standard, &all_caps(), 0);
         assert_eq!(
             rungs,
-            vec![
-                Rung::Compile,
-                Rung::Lint,
-                Rung::Test,
-                Rung::Symbol,
-                Rung::GeneratedTest,
-            ]
+            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
         );
     }
 
@@ -292,10 +343,7 @@ mod tests {
         };
         let rungs = select_rungs(PlanComplexity::Standard, &caps, 0);
         assert!(!rungs.contains(&Rung::Symbol));
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::GeneratedTest,]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint, Rung::Test]);
     }
 
     #[test]
@@ -312,7 +360,7 @@ mod tests {
             ..RungCaps::all()
         };
         let rungs = select_rungs(PlanComplexity::Simple, &caps, 0);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test, Rung::Symbol]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     #[test]
@@ -334,14 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn test_always_present() {
+    fn standard_and_complex_include_test() {
         let caps = RungCaps::default();
-        for complexity in [
-            PlanComplexity::Trivial,
-            PlanComplexity::Simple,
-            PlanComplexity::Standard,
-            PlanComplexity::Complex,
-        ] {
+        for complexity in [PlanComplexity::Standard, PlanComplexity::Complex] {
             let rungs = select_rungs(complexity, &caps, 0);
             assert!(
                 rungs.contains(&Rung::Test),
@@ -356,10 +399,7 @@ mod tests {
     fn one_failure_escalates_trivial_to_simple() {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 1);
         // Should match Simple base selection.
-        assert_eq!(
-            rungs,
-            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
-        );
+        assert_eq!(rungs, vec![Rung::Compile, Rung::Lint]);
     }
 
     #[test]
@@ -367,13 +407,7 @@ mod tests {
         let rungs = select_rungs(PlanComplexity::Trivial, &all_caps(), 2);
         assert_eq!(
             rungs,
-            vec![
-                Rung::Compile,
-                Rung::Lint,
-                Rung::Test,
-                Rung::Symbol,
-                Rung::GeneratedTest,
-            ]
+            vec![Rung::Compile, Rung::Lint, Rung::Test, Rung::Symbol]
         );
     }
 
@@ -398,7 +432,7 @@ mod tests {
             ..RungCaps::all()
         };
         let rungs = select_rungs(PlanComplexity::Trivial, &caps, 1);
-        assert_eq!(rungs, vec![Rung::Compile, Rung::Test, Rung::Symbol]);
+        assert_eq!(rungs, vec![Rung::Compile]);
     }
 
     // ── is_selected (base policy, no escalation) ─────────────────────
@@ -452,33 +486,33 @@ mod tests {
     fn decision_table_full_matrix() {
         let all = all_caps();
 
-        // Trivial: Compile, Test
+        // Trivial: Compile only
         let t = select_rungs(PlanComplexity::Trivial, &all, 0);
         assert!(t.contains(&Rung::Compile));
         assert!(!t.contains(&Rung::Lint));
-        assert!(t.contains(&Rung::Test));
+        assert!(!t.contains(&Rung::Test));
         assert!(!t.contains(&Rung::Symbol));
         assert!(!t.contains(&Rung::GeneratedTest));
         assert!(!t.contains(&Rung::PropertyTest));
         assert!(!t.contains(&Rung::Integration));
 
-        // Simple: +Lint, +Symbol
+        // Simple: +Lint
         let s = select_rungs(PlanComplexity::Simple, &all, 0);
         assert!(s.contains(&Rung::Compile));
         assert!(s.contains(&Rung::Lint));
-        assert!(s.contains(&Rung::Test));
-        assert!(s.contains(&Rung::Symbol));
+        assert!(!s.contains(&Rung::Test));
+        assert!(!s.contains(&Rung::Symbol));
         assert!(!s.contains(&Rung::GeneratedTest));
         assert!(!s.contains(&Rung::PropertyTest));
         assert!(!s.contains(&Rung::Integration));
 
-        // Standard: +GeneratedTest
+        // Standard: +Test, +Symbol
         let st = select_rungs(PlanComplexity::Standard, &all, 0);
         assert!(st.contains(&Rung::Compile));
         assert!(st.contains(&Rung::Lint));
         assert!(st.contains(&Rung::Test));
         assert!(st.contains(&Rung::Symbol));
-        assert!(st.contains(&Rung::GeneratedTest));
+        assert!(!st.contains(&Rung::GeneratedTest));
         assert!(!st.contains(&Rung::PropertyTest));
         assert!(!st.contains(&Rung::Integration));
 

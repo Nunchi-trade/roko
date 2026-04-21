@@ -4,10 +4,13 @@
 > and verification step costs attention tokens drawn from a finite pool. This document unifies
 > three previously disjoint mechanisms (VCG attention auction, CascadeRouter model selection,
 > and budget management) into a single coherent economy where attention tokens are the universal
-> unit of account. The result is an attention market that enables principled, incentive-compatible
-> allocation of cognitive resources across competing goals, agents, and timescales.
-
-> **Implementation**: Specified
+> unit of account. It also treats durable memory as a separate ledger: attention tokens spend in
+> the loop, while demurrage taxes idle Engram balance between loops so stale knowledge does not
+> keep its seat for free. The result is an attention market that enables principled,
+> incentive-compatible allocation of cognitive resources across competing goals, agents, and
+> timescales.
+>
+> **Implementation status**: Target-state concept. No demurrage, balance, or attention-currency code exists. This doc describes a deferred research direction.
 
 **Topic**: [00-architecture](./INDEX.md)
 **Prerequisites**: [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md), [09-universal-cognitive-loop](./09-universal-cognitive-loop.md), [10-three-cognitive-speeds](./10-three-cognitive-speeds.md)
@@ -23,7 +26,8 @@
 
 ## 1. The Problem: Three Disconnected Resource Systems
 
-Roko currently manages cognitive resources through three independent mechanisms:
+Roko currently manages loop-time cognitive resources through three independent mechanisms, plus
+a separate memory-side ledger:
 
 1. **CascadeRouter** (`roko-learn`): Selects among T0/T1/T2 inference tiers using LinUCB bandits.
    Each tier has a different cost (T0 ≈ 0 tokens, T1 ≈ 2K tokens, T2 ≈ 32K tokens). The router
@@ -37,12 +41,19 @@ Roko currently manages cognitive resources through three independent mechanisms:
    Designed to allocate "attention slots" among competing Engrams, but never wired to the
    actual Router or Composer.
 
-These three mechanisms make locally rational decisions that are globally incoherent. An agent
+4. **Proposed Neuro demurrage** (see [04-decay-variants](./04-decay-variants.md),
+   [18-decay-tier-matrix](./18-decay-tier-matrix.md), [Topic 06: Neuro](../06-neuro/INDEX.md),
+   and [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md)):
+   The deferred design says durable Engrams would carry `balance`, a holding-cost ledger that
+   decays when memory sits idle and is reinforced by use, citation, retrieval, or surprise.
+
+These mechanisms make locally rational decisions that are globally incoherent. An agent
 might cascade to T2 for every tick (CascadeRouter thinks it's optimal), while the budget is
 exhausted by low-priority context (Composer has no notion of priority), and the VCG auction
 sits disconnected from both.
 
-**Attention tokens** unify all three into a single economy.
+That is only half the economy, though. **Attention tokens** govern in-loop spending; **balance**
+governs whether durable knowledge remains economically justified between loops.
 
 ---
 
@@ -132,7 +143,28 @@ impl Default for AttentionBudget {
 }
 ```
 
-### 2.3 Token Flow Per Cognitive Loop Tick
+### 2.3 The Memory Ledger
+
+Attention tokens buy compute inside a tick. In the deferred companion design, demurrage would tax
+the right to keep a durable Engram warm after the tick ends.
+
+```text
+balance(t + Δt) = balance(t) - r·Δt - β·balance(t)·Δt + reinforcement
+```
+
+The `reinforcement` term comes from reads, citations, successful gates, and surprise. In the
+memory layer, `balance` is not interchangeable with the live attention pool: a session can be
+well-budgeted and still be fed by a petrified memory base if stale Engrams never pay a holding
+cost.
+
+| Ledger | Charged when | Governs | Example |
+|---|---|---|---|
+| Attention budget | During the loop | Router, Composer, Gate, Policy spend | A T2 inference burns session tokens |
+| Demurrage balance | Between loops | Durable memory residency | A stale playbook slowly loses balance |
+
+See also [04-decay-variants](./04-decay-variants.md), [18-decay-tier-matrix](./18-decay-tier-matrix.md), [Topic 06: Neuro](../06-neuro/INDEX.md), and [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md).
+
+### 2.4 Token Flow Per Cognitive Loop Tick
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -470,6 +502,17 @@ If theta_arbitrage > 1.0: Theta reflection is net-positive. Increase Theta frequ
 If theta_arbitrage < 0.5: Theta reflection is wasteful. Decrease Theta frequency.
 ```
 
+### 6.3 Delta Dividend vs Demurrage
+
+Delta consolidation and demurrage act on different sides of the ledger. The Delta dividend
+reduces future loop spend by compressing and distilling knowledge; demurrage reduces the amount
+of stale durable memory that can claim future attention at all.
+
+That distinction matters operationally. A cheaper Router does not fix a bloated memory base, and
+more aggressive Composer budgeting does not prevent old Engrams from ossifying. Only the memory
+ledger can do that, which is why the demurrage rules live with Neuro and the decay/tier docs
+rather than inside the attention budget itself.
+
 ---
 
 ## 7. Daimon Modulation of Attention Allocation
@@ -573,9 +616,13 @@ The attention economy wires into every step of the 9-step loop:
 | 4. INTEGRATE | Composer draws AT per KB assembled |
 | 5. ACT | **CascadeRouter** draws AT per tier selected |
 | 6. VERIFY | Gate draws AT per gate evaluation |
-| 7. PERSIST | No AT cost (persistence is free — we want to encourage it) |
+| 7. PERSIST | No AT cost in-loop; durable memory is taxed separately by demurrage |
 | 8. ADAPT | Policy observes AT expenditure, adjusts future budgets |
 | 9. META-COGNIZE | Daimon modulates next tick's AT allocation |
+
+This table covers loop-time attention spend only. Demurrage lives on the durable-memory ledger
+and is charged between loops by Neuro, so it does not appear as a Router, Composer, or Gate line
+item.
 
 ### 9.2 Into Existing Crates
 
@@ -591,7 +638,11 @@ The attention economy wires into every step of the 9-step loop:
 
 ---
 
-## 10. Observability and Telemetry
+## 10. Observability and Dashboard Implications
+
+If the dashboard only shows attention burn, it can miss the real failure mode: a healthy-looking
+tick budget with an unhealthy, over-retained memory base. The operator needs both ledgers on the
+same surface.
 
 ```rust
 /// Per-tick attention telemetry, logged to .roko/learn/attention.jsonl.
@@ -612,8 +663,27 @@ pub struct AttentionTelemetry {
     pub total_spent: f64,
     pub pressure: f64,
     pub pad_modulation: [f64; 3],  // [pleasure, arousal, dominance]
+    pub demurrage_balance_total: f64,
+    pub demurrage_paid_total: f64,
+    pub reinforcement_events: usize,
+    pub thaw_events: usize,
 }
 ```
+
+### 10.1 Dashboard Surfaces
+
+- **Spend burn**: how quickly the live attention pool is being consumed per tick.
+- **Balance distribution**: how much durable memory is sitting warm versus drifting cold.
+- **Reinforcement-by-kind**: whether citation, retrieval, gate success, or surprise is keeping
+  knowledge alive.
+- **Thaw rate**: how often cold Engrams return to the warm path, which indicates whether the
+  demurrage curve is too steep.
+- **Attention leaderboard**: the highest-balance Engrams, useful for spotting hoarding or
+  over-consolidation.
+
+These tiles should sit next to the Router and Composer spend charts, not behind a separate
+Neuro-only view. Otherwise the system can look budget-disciplined while still accumulating stale
+knowledge that never pays its holding cost.
 
 ---
 
@@ -634,6 +704,9 @@ pub struct AttentionTelemetry {
 | `test_cache_discount_applied` | Cached context costs 0.5× AT | Unit |
 | `test_telemetry_logged_per_tick` | AttentionTelemetry written every tick | Integration |
 | `test_circuit_breaker_on_overspend` | AT burn > 3× triggers conductor circuit breaker | Integration |
+| `test_demurrage_reduces_idle_balance` | Idle durable Engrams lose balance between loops | Unit |
+| `test_reinforcement_refunds_balance` | Citation, retrieval, or surprise increases balance | Unit |
+| `test_zero_balance_thaws_to_cold_tier` | Balance floor moves memory into cold storage | Integration |
 
 ---
 
@@ -699,7 +772,11 @@ confidence. Roko's `AttentionCascadeRouter` extends FrugalGPT with three innovat
 - [08-scorer-gate-router-composer-policy](./08-scorer-gate-router-composer-policy.md) — Trait specs that the attention economy wraps
 - [09-universal-cognitive-loop](./09-universal-cognitive-loop.md) — The 9-step loop that attention tokens flow through
 - [10-three-cognitive-speeds](./10-three-cognitive-speeds.md) — Gamma/Theta/Delta speed pools
+- [04-decay-variants](./04-decay-variants.md) — Demurrage as the memory-side holding cost over decay
+- [18-decay-tier-matrix](./18-decay-tier-matrix.md) — Tier promotion, cold storage, and thaw rules
+- [Topic 06: Neuro](../06-neuro/INDEX.md) — Durable knowledge, tiering, and reinforcement
 - [13-cognitive-cross-cuts](./13-cognitive-cross-cuts.md) — Daimon affect modulation
 - [29-cognitive-energy-model](./29-cognitive-energy-model.md) — Energy pools that replenish AT budgets
 - [Topic 05: Learning](../05-learning/INDEX.md) — CascadeRouter and bandit optimization
 - [Topic 16: Heartbeat](../16-heartbeat/INDEX.md) — CoALA 9-step pipeline integration
+- [tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md) — Full demurrage proposal behind this chapter update

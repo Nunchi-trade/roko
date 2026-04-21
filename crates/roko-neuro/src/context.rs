@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use roko_core::{Body, EmotionalTag, Engram, PadVector};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{KnowledgeEntry, KnowledgeStore};
 
@@ -141,22 +141,41 @@ pub enum ContextSource {
     Decomposition,
     /// IDs and titles of sibling tasks in the same plan.
     SiblingTasks,
+    /// Ambient pheromone signal from the stigmergic coordination layer.
+    Pheromone {
+        /// Pheromone kind (e.g. "Threat", "Opportunity", "Pattern").
+        kind: String,
+        /// Source agent that deposited the pheromone.
+        source: String,
+    },
 }
 
 /// Normalized PAD state used to bias retrieval when Daimon is available.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// Supports time-based exponential decay toward neutral (COMP-07) and
+/// serde-based disk persistence to `.roko/daimon/pad-state.json`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PadState {
     /// Pleasure dimension. Lower values favor cautionary / anti-knowledge.
     pub pleasure: f64,
     /// Arousal dimension. Higher values favor recent and action-oriented knowledge.
     pub arousal: f64,
-    /// Dominance dimension. Reserved for future modulation.
+    /// Dominance dimension. Modulates retrieval bias (COMP-06).
     pub dominance: f64,
     /// Situation-specific somatic valence in `[-1.0, 1.0]`.
     pub somatic_valence: f64,
     /// Strength of the somatic signal in `[0.0, 1.0]`.
     pub somatic_intensity: f64,
 }
+
+/// Default half-life for PAD state decay: 30 minutes in milliseconds.
+pub const DEFAULT_PAD_HALF_LIFE_MS: u64 = 30 * 60 * 1000;
+
+/// Minimum absolute value below which a PAD axis is snapped to zero.
+const PAD_SNAP_TO_ZERO: f64 = 0.01;
+
+/// Persistence filename within `.roko/daimon/`.
+const PAD_STATE_FILENAME: &str = "pad-state.json";
 
 impl PadState {
     /// Construct a normalized PAD state.
@@ -178,12 +197,214 @@ impl PadState {
         self.somatic_intensity = somatic_intensity.clamp(0.0, 1.0);
         self
     }
+
+    /// Exponentially decay all axes toward zero (neutral) over time.
+    ///
+    /// Uses the formula `x * 2^(-elapsed / half_life)` for each axis.
+    /// After decay, values below [`PAD_SNAP_TO_ZERO`] are snapped to 0.0
+    /// to prevent asymptotic drift.
+    ///
+    /// # Arguments
+    ///
+    /// * `elapsed_ms` -- milliseconds since the last decay/update.
+    /// * `half_life_ms` -- half-life in milliseconds (use [`DEFAULT_PAD_HALF_LIFE_MS`]
+    ///   for the default 30-minute half-life).
+    pub fn decay(&mut self, elapsed_ms: u64, half_life_ms: u64) {
+        if half_life_ms == 0 || elapsed_ms == 0 {
+            return;
+        }
+        let factor = 0.5_f64.powf(elapsed_ms as f64 / half_life_ms as f64);
+        self.pleasure *= factor;
+        self.arousal *= factor;
+        self.dominance *= factor;
+        self.somatic_valence *= factor;
+        self.somatic_intensity *= factor;
+
+        // Snap small values to zero.
+        snap_to_zero(&mut self.pleasure);
+        snap_to_zero(&mut self.arousal);
+        snap_to_zero(&mut self.dominance);
+        snap_to_zero(&mut self.somatic_valence);
+        snap_to_zero(&mut self.somatic_intensity);
+    }
+
+    /// Whether this state is effectively neutral (all axes near zero).
+    #[must_use]
+    pub fn is_neutral(&self) -> bool {
+        self.pleasure.abs() < PAD_SNAP_TO_ZERO
+            && self.arousal.abs() < PAD_SNAP_TO_ZERO
+            && self.dominance.abs() < PAD_SNAP_TO_ZERO
+    }
+
+    /// Persist the PAD state to `.roko/daimon/pad-state.json`.
+    ///
+    /// Creates the directory if it does not exist. Returns an error if
+    /// serialization or file I/O fails.
+    pub fn persist(&self, roko_dir: &std::path::Path) -> std::io::Result<()> {
+        let dir = roko_dir.join("daimon");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(PAD_STATE_FILENAME);
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Load the PAD state from `.roko/daimon/pad-state.json`.
+    ///
+    /// Returns `Ok(None)` if the file does not exist. Returns an error if
+    /// the file exists but cannot be parsed.
+    pub fn load(roko_dir: &std::path::Path) -> std::io::Result<Option<Self>> {
+        let path = roko_dir.join("daimon").join(PAD_STATE_FILENAME);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&path)?;
+        let state: Self = serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(Some(state))
+    }
+}
+
+/// Snap a value to zero if its absolute value is below the threshold.
+fn snap_to_zero(v: &mut f64) {
+    if v.abs() < PAD_SNAP_TO_ZERO {
+        *v = 0.0;
+    }
 }
 
 impl From<PadVector> for PadState {
     fn from(value: PadVector) -> Self {
         Self::new(value.pleasure, value.arousal, value.dominance)
     }
+}
+
+// ---------------------------------------------------------------------------
+// DAIM-06: Mood-congruent memory four-factor retrieval scoring.
+// ---------------------------------------------------------------------------
+
+/// Configurable weights for the four retrieval factors.
+///
+/// Per Bower (1981) and Emotional RAG (2024), knowledge retrieval is
+/// scored by four weighted factors: recency, importance, relevance, and
+/// emotional congruence.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FourFactorWeights {
+    /// How recently the entry was created or last accessed.
+    pub recency: f64,
+    /// Entry's confidence times tier multiplier.
+    pub importance: f64,
+    /// HDC or keyword similarity to the query.
+    pub relevance: f64,
+    /// PAD cosine similarity between agent state and entry tag.
+    pub congruence: f64,
+}
+
+impl Default for FourFactorWeights {
+    fn default() -> Self {
+        Self {
+            recency: 0.20,
+            importance: 0.25,
+            relevance: 0.35,
+            congruence: 0.20,
+        }
+    }
+}
+
+impl FourFactorWeights {
+    /// Normalize weights so they sum to 1.0.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        let total = self.recency + self.importance + self.relevance + self.congruence;
+        if total <= 0.0 {
+            return Self::default();
+        }
+        Self {
+            recency: self.recency / total,
+            importance: self.importance / total,
+            relevance: self.relevance / total,
+            congruence: self.congruence / total,
+        }
+    }
+}
+
+/// Four-factor retrieval scorer for knowledge entries.
+///
+/// Combines recency, importance (confidence * tier), relevance (keyword/HDC
+/// similarity), and emotional congruence (PAD cosine similarity) into a
+/// single retrieval score.
+#[derive(Clone, Debug)]
+pub struct FourFactorScorer {
+    /// Scoring weights.
+    pub weights: FourFactorWeights,
+}
+
+impl Default for FourFactorScorer {
+    fn default() -> Self {
+        Self {
+            weights: FourFactorWeights::default(),
+        }
+    }
+}
+
+impl FourFactorScorer {
+    /// Construct a scorer with custom weights.
+    #[must_use]
+    pub fn new(weights: FourFactorWeights) -> Self {
+        Self {
+            weights: weights.normalized(),
+        }
+    }
+
+    /// Score a single knowledge entry against a query context.
+    ///
+    /// - `recency_raw`: exponential decay factor based on entry age (0..1)
+    /// - `keyword_relevance`: keyword/HDC similarity score (0..1)
+    /// - `current_pad`: agent's current PAD state
+    #[must_use]
+    pub fn score(
+        &self,
+        entry: &crate::KnowledgeEntry,
+        recency_raw: f64,
+        keyword_relevance: f64,
+        current_pad: &PadVector,
+    ) -> f64 {
+        let w = &self.weights;
+
+        // Factor 1: Recency
+        let recency = recency_raw.clamp(0.0, 1.0);
+
+        // Factor 2: Importance = confidence * tier multiplier
+        let importance = (entry.confidence * entry.tier.multiplier() as f64).clamp(0.0, 1.0);
+
+        // Factor 3: Relevance
+        let relevance = keyword_relevance.clamp(0.0, 1.0);
+
+        // Factor 4: Emotional congruence via PAD cosine similarity
+        let congruence = entry
+            .emotional_tag
+            .as_ref()
+            .map(|tag| pad_cosine_similarity(current_pad, &tag.mood_snapshot))
+            .unwrap_or(0.5); // neutral if no emotional tag
+
+        w.recency * recency
+            + w.importance * importance
+            + w.relevance * relevance
+            + w.congruence * congruence
+    }
+}
+
+/// Cosine similarity between two PAD vectors.
+///
+/// Returns a value in `[-1.0, 1.0]`, mapped to `[0.0, 1.0]` for scoring.
+fn pad_cosine_similarity(a: &PadVector, b: &PadVector) -> f64 {
+    let dot = a.pleasure * b.pleasure + a.arousal * b.arousal + a.dominance * b.dominance;
+    let mag_a = (a.pleasure.powi(2) + a.arousal.powi(2) + a.dominance.powi(2)).sqrt();
+    let mag_b = (b.pleasure.powi(2) + b.arousal.powi(2) + b.dominance.powi(2)).sqrt();
+    if mag_a < f64::EPSILON || mag_b < f64::EPSILON {
+        return 0.5; // both near zero = neutral
+    }
+    // Map cosine from [-1, 1] to [0, 1].
+    ((dot / (mag_a * mag_b)) + 1.0) / 2.0
 }
 
 /// A single gathered context candidate.
@@ -235,6 +456,7 @@ const NOVELTY_PENALTY_WEIGHT: f64 = 0.35;
 const MARGINAL_VALUE_STOP_RATIO: f64 = 0.5;
 const CONTRARIAN_RETRIEVAL_RATIO: f64 = 0.15;
 const CONTRARIAN_NEUTRAL_BAND: f64 = 0.1;
+const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.85;
 
 impl ContextAssembler {
     /// Create a new assembler with the default 4K gathered-context budget.
@@ -269,7 +491,7 @@ impl ContextAssembler {
         workdir: impl AsRef<Path>,
         task: &TaskInput,
         plan_id: &str,
-        signals_path: impl AsRef<Path>,
+        engrams_path: impl AsRef<Path>,
     ) -> Vec<ContextChunk> {
         let task_text = task_query_text(task);
         let workdir = workdir.as_ref();
@@ -278,7 +500,7 @@ impl ContextAssembler {
         chunks.extend(self.gather_knowledge(&task_text));
         chunks.extend(self.gather_episodes(task, plan_id, &task_text));
         chunks.extend(self.gather_read_files(workdir, task));
-        chunks.extend(self.gather_recent_signals(plan_id, signals_path.as_ref()));
+        chunks.extend(self.gather_recent_engrams(plan_id, engrams_path.as_ref()));
 
         apply_somatic_bias(&mut chunks, self.affect_state);
         self.rank(&task_text, &mut chunks);
@@ -372,7 +594,7 @@ impl ContextAssembler {
             .ceil()
             .max(MIN_CHUNK_BUDGET_TOKENS as f64)
             .min(budget as f64) as usize;
-        let candidates = chunks
+        let candidates = dedup_similar_chunks(chunks)
             .into_iter()
             .map(|chunk| ContextCandidate::new(chunk))
             .collect::<Vec<_>>();
@@ -608,8 +830,8 @@ impl ContextAssembler {
         chunks
     }
 
-    fn gather_recent_signals(&self, plan_id: &str, signals_path: &Path) -> Vec<ContextChunk> {
-        let signals = read_jsonl_lossy::<Engram>(signals_path);
+    fn gather_recent_engrams(&self, plan_id: &str, engrams_path: &Path) -> Vec<ContextChunk> {
+        let signals = read_jsonl_lossy::<Engram>(engrams_path);
 
         let mut recent: Vec<Engram> = signals
             .into_iter()
@@ -1119,6 +1341,38 @@ fn chunk_attention_priority(chunk: &ContextChunk) -> AttentionPriority {
     }
 }
 
+fn dedup_similar_chunks(chunks: Vec<ContextChunk>) -> Vec<ContextChunk> {
+    let mut deduped: Vec<ContextChunk> = Vec::new();
+
+    'outer: for chunk in chunks {
+        for existing in &mut deduped {
+            if semantic_similarity(&existing.content, &chunk.content) < DEDUP_SIMILARITY_THRESHOLD {
+                continue;
+            }
+
+            if chunk_dedup_rank(&chunk) > chunk_dedup_rank(existing) {
+                *existing = chunk;
+            }
+            continue 'outer;
+        }
+
+        deduped.push(chunk);
+    }
+
+    deduped
+}
+
+fn chunk_dedup_rank(chunk: &ContextChunk) -> (u8, i64, usize) {
+    let priority = match chunk_attention_priority(chunk) {
+        AttentionPriority::Critical => 3,
+        AttentionPriority::High => 2,
+        AttentionPriority::Normal => 1,
+        AttentionPriority::Background => 0,
+    };
+    let relevance = (chunk.relevance * 1000.0).round() as i64;
+    (priority, relevance, chunk.content.len())
+}
+
 fn source_family(source: &ContextSource) -> SourceFamily {
     match source {
         ContextSource::KnowledgeEntry { .. } => SourceFamily::Knowledge,
@@ -1249,7 +1503,23 @@ fn affect_bias(chunk: &ContextChunk, recency: f64, affect_state: Option<&PadStat
     let somatic_bias = negative_somatic * (0.90 * caution - 0.20 * action)
         + positive_somatic * (0.75 * action - 0.08 * caution);
 
-    arousal_bias + pleasure_bias + emotional_congruence + somatic_bias
+    // COMP-06: Dominance modulates retrieval bias.
+    // High dominance -> prefer authoritative sources (knowledge entries, proven
+    // patterns) over exploratory/diverse ones.
+    // Low dominance -> prefer diverse sources (different families, broader
+    // coverage) and penalize concentration on a single authoritative source.
+    let dominance = affect.dominance.clamp(-1.0, 1.0);
+    let authoritative = authoritative_orientation(chunk);
+    let dominance_bias = if dominance > 0.0 {
+        // High dominance: boost authoritative sources.
+        dominance * 0.25 * authoritative
+    } else {
+        // Low dominance: boost diverse/non-authoritative sources and penalize
+        // concentration on a single high-authority type.
+        dominance.abs() * 0.20 * (1.0 - authoritative)
+    };
+
+    arousal_bias + pleasure_bias + emotional_congruence + somatic_bias + dominance_bias
 }
 
 /// Apply a lightweight somatic prior to gathered chunks before scoring.
@@ -1358,6 +1628,41 @@ fn caution_orientation(chunk: &ContextChunk) -> f64 {
     }
 }
 
+/// COMP-06: How "authoritative" a chunk is -- knowledge entries from proven
+/// sources (facts, constraints, tested patterns) score high; speculative or
+/// exploratory sources score low. Used by the dominance axis to modulate
+/// retrieval bias: high dominance boosts authoritative sources, low dominance
+/// boosts diverse/non-authoritative ones.
+fn authoritative_orientation(chunk: &ContextChunk) -> f64 {
+    match &chunk.source {
+        ContextSource::KnowledgeEntry { kind, .. } => {
+            let kind = kind.to_ascii_lowercase();
+            let kind_score: f64 = match kind.as_str() {
+                "fact" => 0.95,
+                "constraint" => 0.90,
+                "procedure" => 0.85,
+                "causal_link" => 0.75,
+                "heuristic" => 0.65,
+                "playbook" => 0.60,
+                "insight" => 0.45,
+                "strategy_fragment" => 0.35,
+                "warning" | "antiknowledge" | "anti_knowledge" => 0.30,
+                _ => 0.40,
+            };
+            // Confidence serves as an authority proxy when available.
+            let confidence_bonus = chunk.confidence.unwrap_or(0.5) * 0.1;
+            (kind_score + confidence_bonus).clamp(0.0, 1.0)
+        }
+        // Episodes from prior successful runs are moderately authoritative.
+        ContextSource::Episode { .. } => 0.50,
+        // Inline files are concrete but not reviewed knowledge.
+        ContextSource::InlineFile { .. } => 0.35,
+        // Recent signals are ephemeral.
+        ContextSource::RecentSignal { .. } => 0.15,
+        _ => 0.25,
+    }
+}
+
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '/' && ch != '-')
         .filter_map(|piece| {
@@ -1459,6 +1764,7 @@ fn context_source_label(source: &ContextSource) -> String {
         ContextSource::PrdExtract => "directive:prd_extract".to_string(),
         ContextSource::Decomposition => "directive:decomposition".to_string(),
         ContextSource::SiblingTasks => "directive:sibling_tasks".to_string(),
+        ContextSource::Pheromone { kind, source } => format!("pheromone:{kind}:{source}"),
     }
 }
 
@@ -1732,6 +2038,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add knowledge");
 
@@ -1748,7 +2063,7 @@ mod tests {
         )
         .expect("write episodes");
 
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         let signals: Vec<_> = (0..12)
@@ -1828,12 +2143,21 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add knowledge");
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::write(&signals_path, "").expect("write empty signals");
 
         let assembler = ContextAssembler::new(knowledge_store, episode_store).with_affect_state(
@@ -1879,6 +2203,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add strategy fragment");
         knowledge_store
@@ -1901,6 +2234,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add anti-knowledge");
         knowledge_store
@@ -1923,6 +2265,15 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add insight");
 
@@ -1944,7 +2295,7 @@ mod tests {
             depends_on: vec![],
             max_loc: None,
         };
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
@@ -2125,6 +2476,15 @@ mod tests {
                     emotional_tag: None,
                     emotional_provenance: None,
                     hdc_vector: None,
+
+                    confirmation_count: 0,
+
+                    distinct_contexts: Vec::new(),
+
+                    deprecated: false,
+                    balance: 1.0,
+                    frozen: false,
+                    catalytic_score: 0,
                 })
                 .expect("add anti-knowledge");
         }
@@ -2149,12 +2509,21 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add strategy");
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
@@ -2220,6 +2589,15 @@ mod tests {
                     emotional_tag: None,
                     emotional_provenance: None,
                     hdc_vector: None,
+
+                    confirmation_count: 0,
+
+                    distinct_contexts: Vec::new(),
+
+                    deprecated: false,
+                    balance: 1.0,
+                    frozen: false,
+                    catalytic_score: 0,
                 })
                 .expect("add heuristic");
         }
@@ -2244,12 +2622,21 @@ mod tests {
                 emotional_tag: None,
                 emotional_provenance: None,
                 hdc_vector: None,
+
+                confirmation_count: 0,
+
+                distinct_contexts: Vec::new(),
+
+                deprecated: false,
+                balance: 1.0,
+                frozen: false,
+                catalytic_score: 0,
             })
             .expect("add warning");
 
         let episode_store = Arc::new(EpisodeStore::new(workdir.join(".roko/episodes.jsonl")));
         std::fs::write(episode_store.path(), "").expect("write empty episodes");
-        let signals_path = workdir.join(".roko/signals.jsonl");
+        let signals_path = workdir.join(".roko/engrams.jsonl");
         std::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .expect("signals dir");
         std::fs::write(&signals_path, "").expect("write empty signals");
@@ -2329,6 +2716,42 @@ mod tests {
     }
 
     #[test]
+    fn compress_dedups_near_identical_chunks_before_selection() {
+        let dir = TempDir::new().expect("tempdir");
+        let assembler = ContextAssembler::new(
+            Arc::new(KnowledgeStore::new(dir.path().join("knowledge.jsonl"))),
+            Arc::new(EpisodeStore::new(dir.path().join("episodes.jsonl"))),
+        )
+        .with_max_context_tokens(64);
+        let chunks = vec![
+            ranked_chunk(
+                "reuse the same migration rollback sequence after validating the health check",
+                0.95,
+            ),
+            ranked_chunk(
+                "reuse the same migration rollback sequence after validating health checks",
+                0.70,
+            ),
+            ranked_chunk("unrelated deployment note", 0.60),
+        ];
+
+        let compressed = assembler.compress(chunks);
+
+        assert_eq!(
+            compressed
+                .iter()
+                .filter(|chunk| chunk.content.contains("migration rollback sequence"))
+                .count(),
+            1
+        );
+        assert!(
+            compressed
+                .iter()
+                .any(|chunk| chunk.content == "unrelated deployment note")
+        );
+    }
+
+    #[test]
     fn compress_drops_lowest_ranked_chunks_until_within_budget() {
         let dir = TempDir::new().expect("tempdir");
         let assembler = ContextAssembler::new(
@@ -2358,5 +2781,199 @@ mod tests {
                 .sum::<usize>()
                 <= 12
         );
+    }
+
+    // ── PAD state decay and persistence tests (COMP-07) ──��──────────
+
+    #[test]
+    fn pad_decay_halves_after_one_half_life() {
+        let mut state = PadState::new(0.8, -0.6, 0.4);
+        state.decay(30 * 60 * 1000, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!((state.pleasure - 0.4).abs() < 0.01);
+        assert!((state.arousal - (-0.3)).abs() < 0.01);
+        assert!((state.dominance - 0.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn pad_decay_zero_elapsed_is_noop() {
+        let mut state = PadState::new(0.8, -0.6, 0.4);
+        state.decay(0, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!((state.pleasure - 0.8).abs() < f64::EPSILON);
+        assert!((state.arousal - (-0.6)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pad_decay_long_elapsed_approaches_zero() {
+        let mut state = PadState::new(1.0, -1.0, 0.5);
+        // 10 half-lives = 2^(-10) ~ 0.001
+        state.decay(10 * DEFAULT_PAD_HALF_LIFE_MS, DEFAULT_PAD_HALF_LIFE_MS);
+        assert!(state.is_neutral());
+    }
+
+    #[test]
+    fn pad_decay_snaps_small_values_to_zero() {
+        let mut state = PadState::new(0.005, -0.003, 0.001);
+        state.decay(1000, DEFAULT_PAD_HALF_LIFE_MS);
+        assert_eq!(state.pleasure, 0.0);
+        assert_eq!(state.arousal, 0.0);
+        assert_eq!(state.dominance, 0.0);
+    }
+
+    #[test]
+    fn pad_persist_and_load_round_trips() {
+        let dir = TempDir::new().expect("tempdir");
+        let roko_dir = dir.path().join(".roko");
+        std::fs::create_dir_all(&roko_dir).expect("create roko dir");
+
+        let state = PadState::new(0.7, -0.3, 0.5).with_somatic_hint(-0.6, 0.8);
+        state.persist(&roko_dir).expect("persist");
+
+        let loaded = PadState::load(&roko_dir).expect("load").expect("Some");
+        assert!((loaded.pleasure - 0.7).abs() < f64::EPSILON);
+        assert!((loaded.arousal - (-0.3)).abs() < f64::EPSILON);
+        assert!((loaded.dominance - 0.5).abs() < f64::EPSILON);
+        assert!((loaded.somatic_valence - (-0.6)).abs() < f64::EPSILON);
+        assert!((loaded.somatic_intensity - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pad_load_returns_none_when_file_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        let roko_dir = dir.path().join(".roko");
+        let loaded = PadState::load(&roko_dir).expect("load");
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn pad_is_neutral_for_default() {
+        assert!(PadState::default().is_neutral());
+    }
+
+    #[test]
+    fn pad_serde_round_trip() {
+        let state = PadState::new(0.3, -0.7, 0.1).with_somatic_hint(0.5, 0.9);
+        let json = serde_json::to_string(&state).expect("serialize");
+        let deserialized: PadState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(state, deserialized);
+    }
+
+    // -------------------------------------------------------------------
+    // DAIM-06: Four-factor retrieval scoring tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn four_factor_weights_default_sum_to_one() {
+        let w = FourFactorWeights::default();
+        let sum = w.recency + w.importance + w.relevance + w.congruence;
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn four_factor_weights_normalize() {
+        let w = FourFactorWeights {
+            recency: 2.0,
+            importance: 2.0,
+            relevance: 4.0,
+            congruence: 2.0,
+        };
+        let n = w.normalized();
+        let sum = n.recency + n.importance + n.relevance + n.congruence;
+        assert!((sum - 1.0).abs() < 1e-10);
+        assert!((n.relevance - 0.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn four_factor_scorer_relevance_dominates() {
+        let scorer = FourFactorScorer::default();
+        let pad = PadVector::neutral();
+
+        let mut high_relevance = KnowledgeEntry::default();
+        high_relevance.confidence = 0.5;
+        let mut low_relevance = KnowledgeEntry::default();
+        low_relevance.confidence = 0.5;
+
+        let score_high = scorer.score(&high_relevance, 0.5, 0.9, &pad);
+        let score_low = scorer.score(&low_relevance, 0.5, 0.1, &pad);
+        assert!(
+            score_high > score_low,
+            "higher relevance should produce higher score"
+        );
+    }
+
+    #[test]
+    fn four_factor_scorer_congruent_mood_boosts() {
+        let scorer = FourFactorScorer::default();
+        let happy_pad = PadVector::new(0.8, 0.3, 0.5);
+
+        let mut happy_entry = KnowledgeEntry::default();
+        happy_entry.confidence = 0.5;
+        happy_entry.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(0.9, 0.3, 0.5),
+            0.5,
+            "happy",
+            PadVector::new(0.9, 0.3, 0.5),
+        ));
+
+        let mut sad_entry = KnowledgeEntry::default();
+        sad_entry.confidence = 0.5;
+        sad_entry.emotional_tag = Some(EmotionalTag::new(
+            PadVector::new(-0.9, -0.3, -0.5),
+            0.5,
+            "sad",
+            PadVector::new(-0.9, -0.3, -0.5),
+        ));
+
+        let score_congruent = scorer.score(&happy_entry, 0.5, 0.5, &happy_pad);
+        let score_incongruent = scorer.score(&sad_entry, 0.5, 0.5, &happy_pad);
+        assert!(
+            score_congruent > score_incongruent,
+            "mood-congruent entries should score higher"
+        );
+    }
+
+    #[test]
+    fn four_factor_scorer_importance_favors_high_tier() {
+        let scorer = FourFactorScorer::default();
+        let pad = PadVector::neutral();
+
+        let mut consolidated = KnowledgeEntry::default();
+        consolidated.confidence = 0.8;
+        consolidated.tier = crate::KnowledgeTier::Consolidated; // multiplier = 1.0
+
+        let mut transient = KnowledgeEntry::default();
+        transient.confidence = 0.8;
+        transient.tier = crate::KnowledgeTier::Transient; // multiplier = 0.1
+
+        let score_consolidated = scorer.score(&consolidated, 0.5, 0.5, &pad);
+        let score_transient = scorer.score(&transient, 0.5, 0.5, &pad);
+        assert!(
+            score_consolidated > score_transient,
+            "higher-tier entries should have higher importance"
+        );
+    }
+
+    #[test]
+    fn pad_cosine_similarity_identical_vectors() {
+        let pad = PadVector::new(0.5, 0.3, 0.8);
+        let sim = super::pad_cosine_similarity(&pad, &pad);
+        // Identical vectors = cosine 1.0 => mapped to 1.0.
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pad_cosine_similarity_opposite_vectors() {
+        let a = PadVector::new(0.5, 0.3, 0.8);
+        let b = PadVector::new(-0.5, -0.3, -0.8);
+        let sim = super::pad_cosine_similarity(&a, &b);
+        // Opposite vectors = cosine -1.0 => mapped to 0.0.
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn pad_cosine_similarity_neutral_returns_half() {
+        let a = PadVector::neutral();
+        let b = PadVector::new(0.5, 0.3, 0.8);
+        let sim = super::pad_cosine_similarity(&a, &b);
+        assert!((sim - 0.5).abs() < 1e-6, "neutral vector should yield 0.5");
     }
 }

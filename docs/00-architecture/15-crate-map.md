@@ -1,295 +1,182 @@
 # Crate Map
 
-> **Abstract:** Roko is implemented as an 18+ crate Rust workspace. Each crate maps to one
-> or more architectural layers, follows strict downward-only dependency rules, and implements
-> one or more of the six Synapse traits. This document provides the complete crate map, layer
-> assignments, dependency relationships, test coverage, and the dissolution of the legacy
-> `roko-golem` umbrella crate into standalone components.
+> **Abstract:** This document describes Roko's current workspace shape and the target crate boundaries proposed by
+> `tmp/refinements/20-modularity-composability.md`. The present tree still contains the organically grown crate map
+> that the audit documents in `docs/00-architecture/23-architectural-analysis-improvements.md` call out. The target
+> shape is stricter: three new kernel crates (`roko-bus`, `roko-hdc`, `roko-spi`), two splits (`roko-std` →
+> `roko-defaults` + `roko-tools`, `roko-compose` → `roko-compose-core` + `roko-templates`), and a dep graph that
+> keeps implementations replaceable without cross-layer leakage.
 
-
-> **Implementation**: Shipping
+> **Implementation status**: Mixed current and target-state. This file documents the current
+> workspace plus the target crate boundaries proposed by REF20. `roko-bus`, `roko-hdc`,
+> `roko-spi`, `roko-defaults`, `roko-tools`, `roko-compose-core`, and `roko-templates` are
+> target crates or target splits unless explicitly marked as existing.
 
 **Topic**: [00-architecture](./INDEX.md)
-**Prerequisites**: [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [06-synapse-traits](./06-synapse-traits.md)
+**Prerequisites**: [12-five-layer-taxonomy](./12-five-layer-taxonomy.md), [01-naming-and-glossary](./01-naming-and-glossary.md)
 **Key sources**:
-- `/Users/will/dev/nunchi/roko/refactoring-prd/00-overview.md` — Crate table
-- `/Users/will/dev/nunchi/roko/roko/crates/roko-core/src/lib.rs` — Kernel structure
-- `/Users/will/dev/nunchi/roko/roko/tmp/prd-migration/context-pack/00-ALWAYS-READ-FIRST.md` — Full crate listing
-- `/Users/will/dev/nunchi/roko/roko/tmp/prd-migration/context-pack/01-naming-map.md` — roko-golem dissolution
+- [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md) — canonical modularity proposal
+- [23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) — audit basis for the dep graph changes
+- [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) — layer placement and kernel rules
+- [01-naming-and-glossary](./01-naming-and-glossary.md) — terminology and current naming
 
 ---
 
 ## Abstract
 
-Roko's 18+ crate structure embodies the principle of modular composition: each crate has a
-clear responsibility, a well-defined position in the five-layer taxonomy, and strict
-dependency constraints. No crate at layer N may depend on a crate at layer N+1 or above.
-Cross-cutting concerns (Neuro, Daimon, Dreams) are injected via trait objects rather than
-direct imports, preserving the layering invariant.
+Roko's workspace already follows the broad five-layer architecture, but the current crate map still mixes kernel
+contracts, runtime infrastructure, and implementation details in ways that make refactors more expensive than they
+should be. REF20 reframes the workspace as a cleaner module graph with explicit boundaries:
 
-The workspace has evolved through several naming transitions: from `bardo-*` and `golem-*`
-prefixes to the unified `roko-*` namespace. The most significant structural change was the
-dissolution of `roko-golem`, an umbrella crate that aggregated cognitive subsystems behind a
-`ScaffoldEngine` trait. In the Synapse Architecture, composition happens at the application
-layer through config-driven assembly — no umbrella crate is needed because each subsystem
-defines its own Synapse trait implementations that compose through the universal Engram type.
+- current crates stay where they are until migrated;
+- target crates capture the kernel surfaces that are currently implicit;
+- implementations depend on traits and fabrics, not on adjacent concrete subsystems;
+- the `dep graph` should be machine-checkable, not just documented.
 
-This document provides the comprehensive crate map, including each crate's purpose, status,
-test coverage, primary Synapse traits implemented, and inter-crate dependencies.
+The target picture is intentionally conservative about scope. It does not claim every split is already complete.
+Instead, it defines the boundaries that future work should converge on so the core system can swap substrates, buses,
+templates, and plugin surfaces independently.
+
+This file is the workspace map for that target shape. It should be read alongside
+[12-five-layer-taxonomy](./12-five-layer-taxonomy.md) for layer placement, and
+[23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) for the audit findings that
+justify the split.
 
 ---
 
 ## 1. Layer-by-Layer Crate Map
 
-### 1.1 Layer 0: Runtime
+### 1.1 Current Workspace Shape
 
-Runtime crates provide the foundational infrastructure: event streaming, process supervision,
-cancellation, the adaptive clock, and shared primitive types including HDC vectors.
+The current workspace has the following load-bearing crates relevant to the modularity proposal:
 
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-primitives` | Built | — | HDC vectors (10,240-bit), Hamming similarity, tiering, shared types | (Provides types used by Substrate) |
-| `roko-runtime` | Built | — | Event bus, `ProcessSupervisor`, cancellation tokens, adaptive clock (Gamma/Theta/Delta) | (Infrastructure for Substrate) |
+| Crate | Current role | Notes |
+|---|---|---|
+| `roko-core` | Kernel contracts | Holds the durable Engram model and the core traits today. |
+| `roko-runtime` | Runtime infrastructure | Houses process supervision, clocks, and bus-like runtime plumbing. |
+| `roko-primitives` | HDC support | Contains the vector/similarity machinery that the target plan isolates more narrowly. |
+| `roko-std` | Default implementations + built-in tools | Currently mixes defaults with tool inventory. |
+| `roko-compose` | Prompt assembly + templates | Currently mixes composition engine and template data. |
+| `roko-agent` | LLM/provider integration | Depends on many framework pieces to bridge the application surface. |
+| `roko-gate` | Verification harness | Sits in the harness layer. |
+| `roko-fs` | File substrate | Concrete substrate implementation. |
+| `roko-orchestrator` | Planning and scheduling | Application-level coordination. |
+| `roko-conductor` | Reactive watchers | Current audit hotspot for cross-layer leakage. |
+| `roko-learn`, `roko-neuro`, `roko-daimon`, `roko-dreams` | Cross-cuts | Reflective and cognitive subsystems. |
+| `roko-plugin` | Extension surface | Current plugin/runtime boundary in the workspace today. |
+| `roko-spi`, `roko-extension-abi`, `roko-wasm-host` | Extension surface | Target crates and host boundaries proposed by REF20; they are not all present in the current workspace. |
+| `roko-cli`, `roko-serve`, `roko-index`, `roko-lang-*`, `roko-plugin`, `roko-chain`, `mirage-rs` | Application and domain crates | Top-level consumers and domain-specific crates. |
 
-**`roko-primitives`** provides the Hyperdimensional Computing foundation: 10,240-bit binary
-vectors with Bind (XOR), Bundle (majority), and Similarity (Hamming distance) operations.
-These vectors enable O(1) similarity search across the knowledge base (Kanerva 2009). The
-crate also provides HDC-based fingerprinting for code symbols and documents.
+This current shape is workable, but the audit shows where the boundary discipline is still fuzzy. The target map below
+is the cleaner version of the same workspace story.
 
-**`roko-runtime`** provides the process lifecycle management layer. `ProcessSupervisor`
-tracks spawned agent processes, handles graceful shutdown, and implements the adaptive clock
-that manages the three cognitive speeds (Gamma at ~5-15s, Theta at ~75s, Delta at hours).
-The event bus enables publish-subscribe communication within a single agent process.
+### 1.2 Target Kernel and Fabric Crates
 
-### 1.2 Kernel
+REF20 makes four crate surfaces first-class at the kernel boundary:
 
-The kernel crate is the architectural foundation — every other crate in the workspace
-depends on it.
+| Target crate | Role | Status |
+|---|---|---|
+| `roko-core` | Kernel contracts, shared types, operator traits | Existing kernel crate. |
+| `roko-bus` | Transport fabric for Pulses, topics, publish/subscribe semantics | New target kernel crate. |
+| `roko-hdc` | Hyperdimensional vector operations, similarity, encoding, fingerprints | New target kernel crate. |
+| `roko-spi` | Plugin and extension SPI contracts | New target kernel crate proposed by REF20. |
 
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-core` | Built | 376 | Engram type (currently `Signal`), 6 Synapse trait definitions, Score, Decay, Kind, Body, ContentHash, Provenance, Query, Budget, Context, Verdict, TickOutcome, loop_tick, OperatingFrequency, config schema | Defines all 6: Substrate, Scorer, Gate, Router, Composer, Policy |
+The target rule is simple: these crates define the intended shared contracts. Everything else
+should consume them through traits or data boundaries, not by reaching into implementation
+crates.
 
-**`roko-core`** is the "one noun, six verbs" made concrete. It defines:
+### 1.3 Target Framework Crates
 
-- **Engram** (`Signal` in current code, rename is Tier 0D): The universal content-addressed
-  data type with BLAKE3 hashing, 7-axis scoring, four decay variants, lineage DAG, and
-  provenance tracking.
-- **Six Synapse traits**: The composable interfaces that every capability in Roko implements.
-- **`loop_tick`**: The 5-step kernel loop (query → select → compose → verify → persist+policy)
-  that executes one cognitive cycle.
-- **OperatingFrequency**: The Gamma/Theta/Delta enum with adaptive scheduling and
-  affect-driven frequency selection.
-- **Config schema**: The `roko.toml` configuration structure for agent setup.
+The framework layer stays broad, but its crate boundaries get cleaner:
 
-The 376 tests cover the Engram lifecycle, trait contracts, score arithmetic, decay formulas,
-content hashing, query filtering, and loop_tick execution.
+| Target crate | Role | Target change |
+|---|---|---|
+| `roko-defaults` | Default implementations | Target split from `roko-std`; no builtin tool catalog. |
+| `roko-tools` | Builtin tools and tool inventory | Target split from `roko-std`; tool additions should not perturb defaults. |
+| `roko-agent` | Model/provider integration | Remains a framework crate, but should stop depending on adjacent implementation details. |
+| `roko-plugin` | Plugin discovery and loading | Current plugin crate; target direction is to consume `roko-spi` rather than define its own contract vocabulary. |
+| `roko-extension-abi`, `roko-wasm-host` | Native and WASM extension boundaries | Target host boundaries for higher-power extensions. |
 
-### 1.3 Layer 1: Framework
+### 1.4 Target Scaffold and Harness Crates
 
-Framework crates provide the building blocks: default trait implementations, LLM backends,
-tool routing, model cascade, MCP client, and safety capabilities.
+| Target crate | Role | Target change |
+|---|---|---|
+| `roko-compose-core` | Prompt assembly engine | Target split from `roko-compose`; it would keep the compositional machinery. |
+| `roko-templates` | Role and prompt templates | Target split from `roko-compose`; templates would become separately versioned data. |
+| `roko-gate` | Verification harness | Remains a harness crate. |
+| `roko-fs` | File substrate | Remains a concrete substrate implementation below the kernel contracts. |
 
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-std` | Built | 96 | Default implementations of all 6 Synapse traits, 19 built-in tools (file ops, shell, search, MCP), mock dispatcher for testing | Implements all 6 |
-| `roko-agent` | Built | 346 | 5 LLM backend drivers (Anthropic Claude, OpenAI, OpenRouter, Ollama, exec-based), connection pooling, CascadeRouter, MCP client, tool dispatch loop, safety layer (role auth + pre/post checks) | Router (CascadeRouter), Scorer (model selection) |
+The split here matters because template data changes much faster than the engine. Separating them makes the prompt
+surface easier to replace and easier to distribute independently.
 
-**`roko-std`** is the "batteries-included" crate. It provides sensible defaults for every
-Synapse trait:
+### 1.5 Target Orchestration and Cross-Cuts
 
-- `MemorySubstrate`: In-memory Substrate backed by `BTreeMap<ContentHash, Signal>`.
-- `DefaultScorer`: Composite scorer using keyword overlap + format matching.
-- `CompileGate`, `TestGate`, `ClippyGate`, `DiffGate`: Built-in verification gates.
-- `DefaultRouter`: Score-based selection with configurable confidence threshold.
-- `SystemPromptComposer`: Prompt assembly with budget constraints.
-- `DefaultPolicy`: Baseline reactive policy.
+| Target crate | Role | Target change |
+|---|---|---|
+| `roko-orchestrator` | Planning and scheduling | Continues to orchestrate from above the kernel. |
+| `roko-conductor` | Reactive control and watchers | Should consume shared buses and topics instead of reaching into learning internals. |
+| `roko-learn` | Episodes, playbooks, experiments | Should publish and subscribe via the Bus rather than exposing internal state. |
+| `roko-neuro` | Durable knowledge store | Cross-cut that reads Substrate and feeds composition. |
+| `roko-daimon` | Affect and motivation | Cross-cut that biases scoring and action selection. |
+| `roko-dreams` | Offline consolidation | Cross-cut that consolidates back into durable memory. |
 
-The 19 built-in tools cover: file read/write/edit, shell execution, search (glob + grep),
-MCP tool delegation, web fetch (when available), and testing utilities.
+### 1.6 Target Applications and Domain Crates
 
-**`roko-agent`** provides the bridge between Roko's Synapse Architecture and external LLM
-providers. The 5 backends all implement a common `AgentBackend` trait that abstracts
-provider-specific details:
+Top-level entry points and domain crates remain application-facing consumers of the workspace:
 
-- **Anthropic**: Native Claude API with streaming, tool use, extended thinking.
-- **OpenAI**: GPT-4o/GPT-4.1 API.
-- **OpenRouter**: Meta-routing across 100+ models via OpenRouter API.
-- **Ollama**: Local model execution.
-- **Exec-based**: Wraps any CLI tool (e.g., `claude`, `aider`) as an agent backend.
+| Crate | Role |
+|---|---|
+| `roko-cli` | User-facing application assembly and command surface. |
+| `roko-serve` | Remote API surface. |
+| `roko-index` | Code intelligence and symbol analysis. |
+| `roko-lang-rust`, `roko-lang-typescript`, `roko-lang-go` | Language-specific indexing support. |
+| `roko-chain` | Chain integration. |
+| `mirage-rs` | In-process EVM simulation for chain testing. |
 
-The `CascadeRouter` implements the T0/T1/T2 tier routing: given a prediction error from the
-16 T0 probes, it selects the cheapest model tier sufficient for the current task. This is the
-primary Router implementation used in production.
-
-### 1.4 Layer 2: Scaffold
-
-Scaffold crates handle context engineering — what the LLM sees and how it is assembled.
-
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-compose` | Built | 23 | `SystemPromptBuilder` (6-layer prompt assembly), 9 role-specific templates (implementer, debugger, architect, researcher, planner, reviewer, orchestrator, tester, security), context enrichment pipeline, token budget management | Composer (primary), Scorer (section evaluation) |
-
-**`roko-compose`** implements the Composer trait with a 6-layer prompt assembly pipeline:
-
-1. **Role identity layer**: Who the agent is (from 9 templates)
-2. **Domain context layer**: Project structure, language support, build system
-3. **Task context layer**: Current task PRD, plan constraints, acceptance criteria
-4. **Knowledge layer**: Relevant Neuro entries (injected via `&dyn Substrate`)
-5. **Iteration memory layer**: Past attempts, failures, fixes (from episodes)
-6. **Safety layer**: Constraints, permissions, forbidden actions
-
-Each layer bids for token budget via the VCG Attention Auction mechanism. Sections are
-scored by expected value and ranked by bid. The final composed prompt fits within the model's
-context window while maximizing information density.
-
-### 1.5 Layer 3: Harness
-
-Harness crates handle verification — did the agent's output actually work?
-
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-gate` | Built | 200 | 11+ gate implementations, 6-rung pipeline (syntax → compile → test → lint → diff → semantic), adaptive threshold EMA, gate verdict aggregation, `is_mostly_passing` classification | Gate (primary) |
-| `roko-fs` | Built | 37 | `FileSubstrate`: JSONL-based Engram persistence, append-only log, garbage collection by decay/prune, file-layout conventions | Substrate (file-backed) |
-
-**`roko-gate`** provides the verification pipeline that makes Roko's "verify everything"
-philosophy concrete. The 6-rung pipeline escalates verification from cheap to expensive:
-
-| Rung | Gate | Cost | What It Checks |
-|---|---|---|---|
-| 1 | Syntax | ~0ms | Parseable output, valid JSON/TOML/Rust syntax |
-| 2 | Compile | ~seconds | `cargo check` / `tsc` / `go build` passes |
-| 3 | Test | ~seconds-minutes | `cargo test` / `npm test` / `go test` passes |
-| 4 | Lint | ~seconds | `clippy` / `eslint` / `golangci-lint` clean |
-| 5 | Diff | ~ms | Output differs meaningfully from input (not no-op) |
-| 6 | Semantic | ~seconds | LLM-as-judge or domain-specific semantic check |
-
-Each gate produces a `Verdict` Engram with pass/fail, confidence, reason, test counts, and
-error digest. Adaptive thresholds (EMA per rung) learn the expected pass rate over time,
-allowing the system to detect anomalous gate failures.
-
-**`roko-fs`** provides the production Substrate: append-only JSONL files with content-hash
-indexing. Supports garbage collection by decay (expired Engrams) and explicit prune policies.
-File layout follows `.roko/signals.jsonl` with optional per-session partitioning.
-
-### 1.6 Layer 4: Orchestration
-
-Orchestration crates coordinate multi-agent work: planning, scheduling, parallel execution,
-and reactive adaptation.
-
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-orchestrator` | Built | 158 | Plan DAG execution, parallel task scheduler, merge queue, worktree-based isolation, state persistence + resume, safety validation | Policy (orchestration-level reactive control) |
-| `roko-conductor` | Built | — | 10 reactive watchers (file changes, build events, test results, etc.), circuit breaker (exponential backoff on repeated failures), real-time monitoring | Policy (event-driven reactions) |
-
-**`roko-orchestrator`** implements the plan-execute-gate-persist loop that drives Roko's
-self-hosting capability:
-
-1. Parse plans from TOML task files
-2. Build a DAG of task dependencies
-3. Execute tasks in parallel (respecting dependencies)
-4. Gate-verify each task output
-5. Persist state (snapshot + resume on interruption)
-6. Feed gate results back into the learning system
-
-The 158 tests cover DAG construction, parallel execution ordering, state serialization,
-resume from interruption, and merge queue conflict detection.
-
-**`roko-conductor`** provides reactive event-driven control. Its 10 watchers monitor the
-environment (file system changes, build results, test results, resource usage) and fire
-Policy-style interventions when conditions are met. The circuit breaker prevents infinite
-retry loops when a persistent error is detected.
-
-### 1.7 Cognitive Cross-Cuts
-
-These crates implement the three cognitive subsystems that are injected across all layers
-via trait objects.
-
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-learn` | Built | 101 | Episode logging, playbook extraction, skill libraries, epsilon-greedy bandits, CascadeRouter persistence, prompt experiments (A/B), adaptive gate thresholds (EMA) | Substrate (episode storage), Scorer (reward computation), Router (bandit-based selection) |
-| `roko-neuro` | Built | — | Knowledge store: 6 knowledge types (Insight, Heuristic, Warning, CausalLink, StrategyFragment, AntiKnowledge), 4 tiers (Transient → Persistent), HDC encoding for similarity search, distillation pipeline | Substrate (knowledge-backed), Scorer (knowledge relevance) |
-| `roko-daimon` | Built | — | PAD (Pleasure-Arousal-Dominance) vector, 6 behavioral states (Engaged/Focused/Exploring/Struggling/Coasting/Resting), somatic markers (Damasio), affect-driven frequency selection | Scorer (somatic marker evaluation), Router (affect-biased selection) |
-| `roko-dreams` | Scaffold | — | Offline learning: NREM replay (Mattar-Daw), REM imagination (Boden + Pearl SCM), integration staging (0.20→0.70 promotion), hypnagogia engine (Thalamic Gate + Executive Loosener + Dali Interrupt + Homuncular Observer) | Substrate (dream staging), Policy (consolidation decisions) |
-
-### 1.8 Chain
-
-| Crate | Status | Tests | Purpose | Primary Traits |
-|---|---|---|---|---|
-| `roko-chain` | Built | 52 | `ChainClient` / `ChainWallet` trait abstractions, chain witness (Engram → on-chain attestation), ERC-8004 integration path | Substrate (chain-backed), Gate (chain verification) |
-
-**`roko-chain`** provides the bridge between Roko's Engram-based cognition and on-chain
-verifiability. The `ChainClient` trait abstracts blockchain interaction; `ChainWallet`
-manages key material and signing. The chain witness module posts Engram attestations on-chain,
-enabling the forensic AI capability.
-
-### 1.9 Plugins, Lang, MCP
-
-| Crate | Status | Tests | Purpose |
-|---|---|---|---|
-| `roko-plugin` | Built | — | Event source framework: file watch, cron scheduling, webhook ingestion |
-| `roko-index` | Built | — | Code parsing (tree-sitter), symbol graph construction, HDC fingerprinting for code |
-| `roko-lang-rust` | Built | — | Rust language support: Cargo integration, module resolution, type extraction |
-| `roko-lang-typescript` | Built | — | TypeScript language support: npm/pnpm integration, type extraction |
-| `roko-lang-go` | Built | — | Go language support: module resolution, type extraction |
-| `roko-mcp-stdio` | Scaffold | — | MCP server over stdio transport |
-| `roko-mcp-github` | Scaffold | — | MCP server for GitHub integration |
-| `roko-mcp-slack` | Scaffold | — | MCP server for Slack integration |
-| `roko-mcp-scripts` | Scaffold | — | MCP server for script execution |
-
-### 1.10 Applications
-
-| Crate | Status | Tests | Purpose |
-|---|---|---|---|
-| `roko-cli` | Built | 38 | User-facing binary: all subcommands (init, run, plan, prd, research, status, replay, config, dashboard) |
-| `roko-serve` | Scaffold | — | HTTP server + REST API for remote operation |
-| `mirage-rs` | Built | 141 | In-process EVM simulator for chain agent testing without real chain interaction |
+These crates are consumers, not boundary-setters. They should depend on the kernel contracts and the layer directly
+below them, not on sibling implementation details.
 
 ---
 
-## 2. Crate Dissolution: `roko-golem`
+## 2. Crate Dissolution and Splits
 
-The `roko-golem` crate was an umbrella that aggregated cognitive subsystems behind a
-`ScaffoldEngine` trait and a `GolemScaffold` aggregator struct. In the Synapse Architecture,
-this aggregation is unnecessary — each subsystem defines its own Synapse trait implementations
-that compose through the universal Engram type.
+### 2.1 What Has Already Happened
 
-### 2.1 Redistribution Map
+The current workspace already reflects some of the long-running decomposition work from earlier architecture changes.
+Those historical moves are useful context, but they are not the focus of this refinement. The important point is that
+Roko is already capable of dissolving umbrella crates and splitting responsibilities cleanly when the dependency graph
+supports it.
 
-| Subsystem | Lines | Source | Destination | Action |
-|---|---|---|---|---|
-| Daimon | 972 | `roko-golem/daimon.rs` | `roko-daimon` (standalone crate) | Move full implementation |
-| Dreams | 43 | `roko-golem/dreams.rs` | `roko-dreams` (standalone crate) | Delete placeholder, expand in roko-dreams |
-| Grimoire | 44 | `roko-golem/grimoire.rs` | `roko-neuro` (standalone crate) | Delete placeholder; roko-neuro replaces |
-| Chain Witness | 43 | `roko-golem/chain_witness.rs` | `roko-chain` (as `chain_witness` module) | Move |
-| Mortality | 44 | `roko-golem/mortality.rs` | **DELETE ENTIRELY** | No mortality in the new architecture |
-| Hypnagogia | 42 | `roko-golem/hypnagogia.rs` | `roko-dreams` (as `hypnagogia` module) | Move |
-| `ScaffoldEngine` trait | — | `roko-golem/lib.rs` | **DELETE** | Each subsystem has its own trait |
-| `GolemScaffold` aggregator | — | `roko-golem/lib.rs` | **DELETE** | Composition at application layer via config |
+### 2.2 What REF20 Adds
 
-### 2.2 Composability Principle
+REF20 proposes the next round of decomposition:
 
-After dissolution, any subsystem can pipe to any other through Engrams:
+- `roko-bus` would extract transport semantics from the runtime surface.
+- `roko-hdc` would extract HDC math and encoding from the broader primitives bucket.
+- `roko-spi` would become the shared extension contract surface.
+- `roko-std` would split into `roko-defaults` and `roko-tools`.
+- `roko-compose` would split into `roko-compose-core` and `roko-templates`.
 
-```
-Daimon emits Engrams → Neuro stores them
-Dreams reads from Neuro → produces new Engrams
-Chain posts Engrams on-chain → produces attestation Engrams
-Everything flows through the 6 Synapse traits
-No umbrella crate needed
-```
+The design goal is not to proliferate crates for its own sake. It is to make the boundary between “contract,”
+“implementation,” and “data” explicit so that changes in one area do not force unrelated recompilation or code
+movement elsewhere.
 
-The application layer (e.g., `roko-cli`) assembles the desired composition via `roko.toml`
-configuration, selecting which Substrate, Router, Gate, etc. implementations to use for a
-given agent.
+### 2.3 Target Boundary Note
+
+These are target boundaries, not an assertion that all of them are already shipping. The current workspace still has
+the pre-split crates, and the migration path should preserve compatibility while the new crates land.
+
+For the motivating audit trail, see
+[23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) and the canonical proposal in
+[tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md).
 
 ---
 
 ## 3. Dependency Rules
 
-### 3.1 The Downward-Only Invariant
+### 3.1 Downward-Only Invariant
 
-Dependencies flow strictly downward through the layer hierarchy:
+The target dep graph keeps the same broad five-layer shape, but it makes the kernel surfaces explicit:
 
 ```
 L4 (Orchestration) → may depend on L3, L2, L1, L0, Kernel
@@ -297,101 +184,177 @@ L3 (Harness)       → may depend on L2, L1, L0, Kernel
 L2 (Scaffold)      → may depend on L1, L0, Kernel
 L1 (Framework)     → may depend on L0, Kernel
 L0 (Runtime)       → may depend on Kernel only
-Kernel             → depends on nothing (leaf of dependency tree)
+Kernel             → depends on nothing
 ```
 
-Cross-cutting cognitive crates (roko-learn, roko-neuro, roko-daimon, roko-dreams) may
-depend on Kernel and L0 but are injected into higher layers via trait objects, never via
-direct imports.
+Here, “Kernel” means the target kernel boundary: `roko-core` today, plus proposed
+`roko-bus`, `roko-hdc`, and `roko-spi`. Those crates define the intended shared contract
+surface. Every other crate must consume them through traits, data, or host interfaces.
 
-### 3.2 Concrete Dependency Graph (Key Edges)
+### 3.2 Target Dep Graph
 
+The dep graph below is the intended direction of travel, not a snapshot of every current Cargo.toml:
+
+```text
+                    roko-cli / roko-serve / roko-index / domain crates
+                                      ▲
+                                      │
+                     roko-orchestrator / roko-conductor / roko-learn
+                                      ▲
+                                      │
+                      roko-gate / roko-fs / roko-dreams / roko-neuro
+                                      ▲
+                                      │
+        roko-agent / roko-compose-core / roko-templates / roko-defaults / roko-tools
+                                      ▲
+                                      │
+            roko-core ─── roko-bus ─── roko-hdc ─── roko-spi
+                                      ▲
+                                      │
+                           runtime and host implementations
 ```
-roko-cli ─────────→ roko-orchestrator ──→ roko-gate ──→ roko-core
-    │                     │                   │              ↑
-    ├──→ roko-agent ──────┤                   │              │
-    │         │           │                   │              │
-    │         └──→ roko-compose ──→ roko-core │              │
-    │                     │                   │              │
-    ├──→ roko-learn ──────┘                   │              │
-    │         │                               │              │
-    │         └──→ roko-fs ───────────────────┘              │
-    │                                                        │
-    ├──→ roko-std ──→ roko-core ─────────────────────────────┘
-    │
-    └──→ roko-runtime ──→ roko-primitives
-```
 
-### 3.3 Test Count Summary
+Concrete rules for that graph:
 
-| Crate | Tests | Coverage Focus |
+1. `roko-core` is the current kernel-tier crate; `roko-bus`, `roko-hdc`, and `roko-spi`
+   are the proposed target kernel-tier crates.
+2. Runtime and host crates implement the kernel contracts; they do not become new contract surfaces themselves.
+3. Framework crates consume the kernel and should not import each other unless there is a documented reason.
+4. In the target graph, `roko-compose-core` sits above the kernel and below application
+   assembly; templates are data, not engine code.
+5. In the target graph, `roko-defaults` and `roko-tools` should not depend on each other.
+6. `roko-conductor` should react through the Bus and topics rather than importing `roko-learn` internals.
+7. Cross-cuts (`roko-neuro`, `roko-daimon`, `roko-dreams`) may read kernel contracts and inject behavior, but they do
+   not define new kernel types.
+
+### 3.3 Stability Tiers
+
+REF20 also implies a public-API stability model for the target workspace:
+
+| Tier | Stability | Examples |
 |---|---|---|
-| roko-core | 376 | Engram lifecycle, trait contracts, score arithmetic, decay, hashing, loop_tick |
-| roko-agent | 346 | Backend drivers, connection pooling, CascadeRouter, safety layer, tool dispatch |
-| roko-gate | 200 | Gate pipeline, adaptive thresholds, verdict aggregation, mostly_passing |
-| roko-orchestrator | 158 | DAG execution, parallel scheduling, state persistence, resume |
-| mirage-rs | 141 | EVM simulation, contract interaction, gas estimation |
-| roko-learn | 101 | Episodes, playbooks, bandits, experiments, efficiency events |
-| roko-std | 96 | Default trait impls, built-in tools, mock dispatcher |
-| roko-chain | 52 | ChainClient/ChainWallet, chain witness |
-| roko-cli | 38 | Subcommand parsing, config loading, integration smoke tests |
-| roko-fs | 37 | JSONL persistence, GC, layout conventions |
-| roko-compose | 23 | Prompt assembly, template rendering, budget enforcement |
-| **Total** | **~1,568** | |
+| Core | Semver-major-only breaks | `Engram`, `Substrate`, and today's kernel traits; target core adds `Bus` and `Topic` |
+| Extended | Minor-version breaks with notice | `Pulse`, `TopicFilter`, gate/routing helpers, default compositions |
+| Experimental | Anything goes behind feature flags or scaffolds | future chain, dreams, and host-specific boundaries |
+
+The important constraint is that plugin authors and downstream applications should be able to depend on the Core tier
+without tracking every implementation split in the workspace.
+
+### 3.4 What a Clean Graph Buys Us
+
+The cleaner graph makes replacement cheaper:
+
+- swap `roko-fs` without editing unrelated framework crates;
+- swap or extend bus transport without changing agent logic;
+- add templates without touching the composition engine;
+- add builtin tools without perturbing defaults;
+- keep plugin contracts stable while host implementations evolve.
+
+Those are not abstract benefits. They are the specific maintenance costs the current audit says are too high.
 
 ---
 
-## 4. Legacy Crate Names
+## 4. Migration Plan
 
-For reference, here is the complete old→new crate naming map:
+### Phase 1: Kernel extraction
 
-| Old Name | New Name | Notes |
+- Extract `roko-bus` from runtime transport plumbing.
+- Narrow `roko-hdc` to the HDC vector and similarity surface.
+- Keep `roko-spi` as the shared plugin contract surface.
+
+### Phase 2: Framework split
+
+- Split `roko-std` into `roko-defaults` and `roko-tools`.
+- Ensure defaults can build without inheriting the entire builtin tool catalog.
+- Ensure tools can evolve without forcing defaults to change.
+
+### Phase 3: Composition split
+
+- Split `roko-compose` into `roko-compose-core` and `roko-templates`.
+- Keep the engine stable while template data becomes separately versioned.
+- Let role packs evolve independently of prompt assembly code.
+
+### Phase 4: Enforcement
+
+- Add CI checks that fail when the dep graph drifts outside the target boundaries.
+- Deprecate direct imports where a trait, topic, or shared contract should be used instead.
+- Keep the migration mechanical: one crate boundary at a time, not a workspace-wide rewrite.
+
+The sequencing matters. Kernel first, then framework splits, then composition splits, then enforcement. That keeps the
+workspace compiling while the boundaries tighten.
+
+---
+
+## 5. Stability Tiers for Public APIs
+
+The workspace needs a simple rule for what downstream code may rely on:
+
+| Tier | Stability intent | Boundary examples |
 |---|---|---|
-| `bardo-primitives` | `roko-primitives` | HDC vectors, shared types |
-| `bardo-runtime` | `roko-runtime` | Event bus, supervision |
-| `golem-core` | `roko-core` | Kernel |
-| `mori-index` | `roko-index` | Code parsing, symbol graphs |
-| `mori-context` | Split: `roko-compose` + `roko-index` | Context features → compose; code intelligence → index |
-| `mori-mcp` | `roko-mcp-{stdio,github,slack,scripts}` | Split into transport-specific crates |
-| `bardo-terminal` | `roko-cli` | Terminal UI scaffold in roko-cli |
-| `roko-golem` | **DISSOLVED** | See Section 2 above |
+| Core | Long-lived, semver-stable contracts | `roko-core` today; target core adds `roko-bus`, `roko-hdc`, and `roko-spi` |
+| Extended | Compatible, but allowed to evolve with notice | `roko-defaults`, `roko-tools`, `roko-compose-core`, `roko-templates` |
+| Experimental | Internal or feature-gated surfaces | migration shims, scaffolds, future host-specific integrations |
 
-All `golem-*` and `bardo-*` crate references in legacy documents should be translated to
-their `roko-*` equivalents.
+This tiering is the practical answer to “what can a plugin depend on?” and “what can an application assume?” It also
+keeps the refactor honest: a split is only useful if the resulting surface is stable enough to justify depending on it.
 
 ---
 
-## Academic Foundations
+## 6. CI Dep Graph Enforcement
 
-| Citation | Contribution |
-|---|---|
-| Ousterhout 2018, "A Philosophy of Software Design" | Module depth principle: deep modules with narrow interfaces. Applied to Synapse trait design. |
-| Parnas 1972, "On the criteria to be used in decomposing systems into modules" | Information hiding: each crate hides implementation behind trait interfaces |
-| Beer 1972, Brain of the Firm | Viable System Model: recursive subsystem organization maps to layer hierarchy |
+The target dep graph is only useful if CI can keep it honest.
+
+A workspace-level check should verify, at minimum:
+
+- kernel crates do not depend on implementation crates;
+- `roko-std`-derived splits remain separated;
+- `roko-compose`-derived splits remain separated;
+- `roko-conductor` does not reintroduce a direct dependency on `roko-learn` for reactive state;
+- forbidden edges fail fast before merge.
+
+The check can be implemented however the repo prefers, but the rule is simple: the declared dep graph must match the
+actual Cargo metadata. This is the difference between a tidy diagram and a maintainable architecture.
+
+For the audit context behind that enforcement, see
+[23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md).
 
 ---
 
-## Current Status and Gaps
+## 7. Current Status and Gaps
 
-- **18+ crates built**: The workspace compiles and passes ~1,568 tests across all crates.
-  Requires rustc 1.91+ for alloy dependencies.
-- **roko-golem dissolution**: Specified but not yet executed as a code migration. The Daimon
-  implementation (972 lines) exists in both roko-golem and roko-daimon. The authoritative
-  version should be the standalone `roko-daimon` crate.
-- **MCP crates**: Scaffolded but not fully implemented. `roko-mcp-stdio` has basic transport;
-  the others are stubs.
-- **roko-serve**: Scaffolded. HTTP API not yet wired.
-- **roko-dreams**: Scaffolded. Three-phase cycle specified but not shipping.
-- **Signal → Engram rename**: Completed in the core codebase; any remaining mentions are documentation drift,
-  not a live type mismatch. All PRD documentation uses "Engram" and the Rust type now does too.
-  reference `Signal` with explanatory comments.
+The current workspace is not yet the target workspace.
+
+- `roko-bus`, `roko-hdc`, and the split crates are target boundaries proposed by REF20, not all fully shipped.
+- `roko-std` and `roko-compose` still exist in the current tree as the combined crates.
+- The audit still matters because it identifies the exact dependency edges the target graph is meant to eliminate.
+- The migration should preserve current behavior while changing the dependency surface underneath it.
+
+That is the main reason this doc stays a crate map rather than a pure design note: it needs to describe both the current
+workspace and the boundary we want to converge on.
+
+---
+
+## 8. Legacy Crate Names
+
+This section is retained only as legacy context for older references.
+
+| Old name | Current name | Notes |
+|---|---|---|
+| `bardo-primitives` | `roko-primitives` | legacy name for the HDC support bucket |
+| `bardo-runtime` | `roko-runtime` | legacy runtime naming |
+| `golem-core` | `roko-core` | legacy kernel naming |
+| `roko-golem` | retired | umbrella crate dissolved in the current architecture story |
+
+Legacy names should only appear in historical or retired contexts. New prose should use the current `roko-*` names.
 
 ---
 
 ## Cross-References
 
-- See [02-engram-data-type](./02-engram-data-type.md) for the Engram struct that all crates process
-- See [06-synapse-traits](./06-synapse-traits.md) for the trait definitions that crates implement
-- See [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) for the layer assignments
-- See [01-naming-and-glossary](./01-naming-and-glossary.md) for the complete old→new naming map
-- See topic [17-lifecycle](../17-lifecycle/INDEX.md) for the roko-golem dissolution plan
+- See [12-five-layer-taxonomy](./12-five-layer-taxonomy.md) for the layer assignments that this crate map plugs into.
+- See [01-naming-and-glossary](./01-naming-and-glossary.md) for the canonical vocabulary, including the current
+  kernel terms.
+- See [23-architectural-analysis-improvements](./23-architectural-analysis-improvements.md) for the audit that
+  motivates the target dep graph.
+- See [tmp/refinements/20-modularity-composability.md](../../tmp/refinements/20-modularity-composability.md) for the
+  full proposal that this doc propagates.

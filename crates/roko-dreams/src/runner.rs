@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
 use crate::imagination::ImaginationMode;
+use crate::phase2::advanced::{DreamJournal, DreamJournalEntry};
 use crate::replay::{DreamReplayBatch, DreamReplayPolicy, select_replay_episodes};
 
 /// Public alias for the replay input episodes.
@@ -216,7 +217,7 @@ impl DreamBudget {
 }
 
 /// Dream scheduling trigger kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DreamTrigger {
     /// Idle gap between task dispatches.
@@ -225,17 +226,76 @@ pub enum DreamTrigger {
     Scheduled,
     /// Manual command invocation.
     Manual,
+    /// Accumulated episode count since last dream.
+    EpisodeCount,
+    /// Bus-reactive trigger from a high-value engram (DREAM-09).
+    BusPulse {
+        /// Hash or ID of the engram that triggered the dream.
+        #[serde(default)]
+        engram_hash: String,
+    },
+    /// Coordination pattern trigger (INT-19): conductor compound patterns
+    /// trigger dream consolidation so the system can process and learn from
+    /// the detected coordination issues.
+    CoordinationPattern {
+        /// Name of the compound pattern that triggered the dream.
+        #[serde(default)]
+        pattern_name: String,
+        /// Watchers that contributed to the pattern detection.
+        #[serde(default)]
+        contributing_watchers: Vec<String>,
+    },
 }
 
 impl DreamTrigger {
     /// Stable lowercase label.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Scheduled => "scheduled",
             Self::Manual => "manual",
+            Self::EpisodeCount => "episode_count",
+            Self::BusPulse { .. } => "bus_pulse",
+            Self::CoordinationPattern { .. } => "coordination_pattern",
         }
+    }
+}
+
+/// Criteria for determining whether an engram is "dream-worthy" (DREAM-09).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BusPulseTriggerConfig {
+    /// Minimum engram score to trigger a dream (default 0.7).
+    pub min_score: f64,
+    /// Minimum interval between bus-triggered dreams (default 30 minutes).
+    pub min_interval_secs: u64,
+    /// Engram kinds that can trigger dreams.
+    pub trigger_kinds: Vec<String>,
+}
+
+impl Default for BusPulseTriggerConfig {
+    fn default() -> Self {
+        Self {
+            min_score: 0.7,
+            min_interval_secs: 1800,
+            trigger_kinds: vec![
+                "gate_verdict".to_string(),
+                "episode_complete".to_string(),
+                "knowledge_ingested".to_string(),
+            ],
+        }
+    }
+}
+
+impl BusPulseTriggerConfig {
+    /// Check if an engram with the given score and kind qualifies as dream-worthy.
+    #[must_use]
+    pub fn is_dream_worthy(&self, score: f64, kind: &str) -> bool {
+        score >= self.min_score
+            && self
+                .trigger_kinds
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(kind))
     }
 }
 
@@ -260,6 +320,10 @@ pub struct DreamSchedulePolicy {
     /// Factor applied when dream output quality is low.
     #[serde(default = "default_quality_penalty")]
     pub quality_penalty: f64,
+    /// Episode count threshold: trigger after N new episodes since last dream.
+    /// Zero disables this trigger.
+    #[serde(default)]
+    pub episode_count_trigger: usize,
 }
 
 impl Default for DreamSchedulePolicy {
@@ -271,6 +335,7 @@ impl Default for DreamSchedulePolicy {
             manual_enabled: true,
             quality_gain: 0.75,
             quality_penalty: 1.25,
+            episode_count_trigger: 0,
         }
     }
 }
@@ -317,10 +382,14 @@ impl DreamSchedulePolicy {
 
     /// Determine whether a trigger kind is allowed under the current policy.
     #[must_use]
-    pub fn allows(&self, trigger: DreamTrigger) -> bool {
+    pub fn allows(&self, trigger: &DreamTrigger) -> bool {
         match trigger {
             DreamTrigger::Idle | DreamTrigger::Scheduled => self.enabled,
             DreamTrigger::Manual => self.manual_enabled,
+            DreamTrigger::EpisodeCount => self.enabled && self.episode_count_trigger > 0,
+            DreamTrigger::BusPulse { .. } => self.enabled,
+            // INT-19: coordination patterns always allowed when dreams are enabled.
+            DreamTrigger::CoordinationPattern { .. } => self.enabled,
         }
     }
 
@@ -328,7 +397,7 @@ impl DreamSchedulePolicy {
     #[must_use]
     pub fn trigger_delay(
         &self,
-        trigger: DreamTrigger,
+        trigger: &DreamTrigger,
         report: Option<&DreamReport>,
         budget: Option<&DreamBudget>,
         now: DateTime<Utc>,
@@ -340,6 +409,10 @@ impl DreamSchedulePolicy {
             DreamTrigger::Idle => Some(self.idle_delay(report, budget)),
             DreamTrigger::Scheduled => self.cron_delay(now),
             DreamTrigger::Manual => Some(Duration::ZERO),
+            DreamTrigger::EpisodeCount => Some(Duration::ZERO),
+            DreamTrigger::BusPulse { .. } => Some(Duration::ZERO),
+            // INT-19: coordination pattern triggers fire immediately.
+            DreamTrigger::CoordinationPattern { .. } => Some(Duration::ZERO),
         }
     }
 }
@@ -402,13 +475,75 @@ pub struct DreamHeartbeatReport {
     pub delta_ready: bool,
 }
 
+/// Settings for intensive dream mode: longer, more thorough cycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntensiveMode {
+    /// Whether intensive mode is currently active.
+    #[serde(default)]
+    pub active: bool,
+    /// Replay iteration multiplier (applied to default replay count).
+    #[serde(default = "default_intensive_replay_multiplier")]
+    pub replay_multiplier: u32,
+    /// Maximum counterfactual exploration depth (deeper = more thorough).
+    #[serde(default = "default_intensive_counterfactual_depth")]
+    pub counterfactual_depth: usize,
+    /// Threat rehearsal scenario limit (0 = use default).
+    #[serde(default = "default_intensive_rehearsal_limit")]
+    pub rehearsal_limit: usize,
+    /// Episode backlog high-water mark: trigger intensive mode when
+    /// unreplayed episodes exceed this count (default 50).
+    #[serde(default = "default_backlog_high_water")]
+    pub backlog_high_water: usize,
+    /// Episode backlog low-water mark: exit intensive mode when
+    /// unreplayed episodes drop below this count (default 20).
+    #[serde(default = "default_backlog_low_water")]
+    pub backlog_low_water: usize,
+}
+
+impl Default for IntensiveMode {
+    fn default() -> Self {
+        Self {
+            active: false,
+            replay_multiplier: default_intensive_replay_multiplier(),
+            counterfactual_depth: default_intensive_counterfactual_depth(),
+            rehearsal_limit: default_intensive_rehearsal_limit(),
+            backlog_high_water: default_backlog_high_water(),
+            backlog_low_water: default_backlog_low_water(),
+        }
+    }
+}
+
+impl IntensiveMode {
+    /// Check if intensive mode should activate based on episode backlog.
+    ///
+    /// Returns the adjusted `max_episodes` if intensive, otherwise `None`.
+    #[must_use]
+    pub fn check_activation(&self, unreplayed_count: usize, default_max: usize) -> Option<usize> {
+        if unreplayed_count >= self.backlog_high_water {
+            Some(
+                default_max
+                    .saturating_mul(self.replay_multiplier as usize)
+                    .max(default_max),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Check if intensive mode should deactivate.
+    #[must_use]
+    pub fn should_deactivate(&self, unreplayed_count: usize) -> bool {
+        unreplayed_count < self.backlog_low_water
+    }
+}
+
 /// Combined runtime controls for replay, budgeting, and scheduling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DreamRuntimeControls {
     /// Replay planner configuration.
     #[serde(default)]
     pub replay: DreamReplayPolicy,
-    /// Optional sleep-time compute budget.
+    /// Optional offline consolidation budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<DreamBudget>,
     /// Scheduling policy.
@@ -426,6 +561,9 @@ pub struct DreamRuntimeControls {
     /// Minimum severity required before a threat becomes a warning entry.
     #[serde(default = "default_threat_floor")]
     pub threat_severity_floor: f64,
+    /// Intensive mode settings for deeper dream cycles.
+    #[serde(default)]
+    pub intensive: IntensiveMode,
 }
 
 impl Default for DreamRuntimeControls {
@@ -438,6 +576,7 @@ impl Default for DreamRuntimeControls {
             imagination_mode: ImaginationMode::default(),
             threat_simulation: true,
             threat_severity_floor: 0.20,
+            intensive: IntensiveMode::default(),
         }
     }
 }
@@ -598,7 +737,7 @@ impl DreamRunner {
 
     /// Resolve the delay for a specific trigger kind.
     #[must_use]
-    pub fn trigger_delay(&self, trigger: DreamTrigger) -> Option<Duration> {
+    pub fn trigger_delay(&self, trigger: &DreamTrigger) -> Option<Duration> {
         if !self.config.auto_dream {
             return None;
         }
@@ -638,15 +777,114 @@ impl DreamRunner {
     }
 
     async fn consolidate_async(&mut self) -> Result<DreamReport> {
-        let episodes = Arc::new(EpisodeLogger::new(
-            self.workdir.join(".roko").join("episodes.jsonl"),
-        ));
+        let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
+        let episodes = Arc::new(EpisodeLogger::new(episodes_path.clone()));
         let knowledge = Arc::new(KnowledgeStore::for_workdir(&self.workdir));
         let playbooks_root = self.workdir.join(".roko").join("learn").join("playbooks");
         let playbooks = Arc::new(PlaybookStore::new(playbooks_root));
         let dispatcher = build_dream_review_dispatcher(&self.workdir, &self.config.agent)?;
+
+        // ── DREAM-06: Check episode backlog for intensive mode ──────
+        let all_episodes = EpisodeLogger::read_all_lossy(&episodes_path)
+            .await
+            .unwrap_or_default();
+        let latest_report = self.latest_report().ok().flatten();
+        let unreplayed_count = match &latest_report {
+            Some(report) => all_episodes
+                .iter()
+                .filter(|ep| {
+                    report
+                        .processed_through
+                        .is_none_or(|cutoff| ep.timestamp > cutoff)
+                })
+                .count(),
+            None => all_episodes.len(),
+        };
+
+        let intensive_active = self
+            .controls
+            .intensive
+            .check_activation(unreplayed_count, self.controls.replay.max_episodes)
+            .is_some();
+
+        if intensive_active {
+            self.controls.intensive.active = true;
+            // Double max_episodes during intensive mode
+            self.controls.replay.max_episodes = self
+                .controls
+                .replay
+                .max_episodes
+                .saturating_mul(self.controls.intensive.replay_multiplier as usize);
+        }
+
         let mut cycle = DreamCycle::new(episodes, knowledge, playbooks, dispatcher);
-        cycle.run_budgeted(&mut self.controls.budget).await
+        cycle.configure_threats(
+            self.controls.threat_simulation,
+            self.controls.threat_severity_floor,
+        );
+        let mut report = cycle.run_budgeted(&mut self.controls.budget).await?;
+
+        // Mark intensive mode in the report.
+        report.intensive_mode_active = intensive_active;
+
+        // Check whether to deactivate intensive mode.
+        if intensive_active
+            && self
+                .controls
+                .intensive
+                .should_deactivate(unreplayed_count.saturating_sub(report.processed_episodes))
+        {
+            self.controls.intensive.active = false;
+        }
+
+        // ── DREAM-14: Persist dream cycle report as journal entry ────
+        self.persist_journal_entry(&report);
+
+        Ok(report)
+    }
+
+    /// Append a journal entry for the completed dream cycle (DREAM-14).
+    fn persist_journal_entry(&self, report: &DreamReport) {
+        let mut journal = DreamJournal::standard(&self.workdir);
+        let entry = DreamJournalEntry {
+            cycle_id: format!("dream-{}", report.started_at.timestamp_millis()),
+            agent_id: self.config.agent.command.clone(),
+            cycle_start: report.started_at,
+            cycle_end: report.completed_at,
+            trigger: DreamTrigger::Manual,
+            nrem_duration_secs: {
+                let diff = report.completed_at - report.started_at;
+                diff.num_seconds().max(0) as u64
+            },
+            rem_duration_secs: 0,
+            consolidation_duration_secs: 0,
+            hypotheses_generated: report.strategy_hypotheses.len(),
+            hypotheses_staged: report
+                .staging_buffer_stats
+                .as_ref()
+                .map(|s| s.total_entries)
+                .unwrap_or(0),
+            hypotheses_promoted: report
+                .staging_buffer_stats
+                .as_ref()
+                .map(|s| s.promoted_this_cycle)
+                .unwrap_or(0),
+            hypotheses_refuted: 0,
+            nightmares_detected: 0,
+            human_review_required: false,
+            hypothesis_diversity: 0.0,
+            total_tokens: 0,
+            early_termination: report
+                .performance_notes
+                .iter()
+                .any(|n| n.contains("budget exhausted")),
+            early_termination_reason: report
+                .performance_notes
+                .iter()
+                .find(|n| n.contains("budget exhausted"))
+                .cloned(),
+        };
+        let _ = journal.append(&entry);
     }
 }
 
@@ -724,7 +962,7 @@ impl DreamEngine for DreamRunner {
 
         let latest_episode = heartbeat.latest_episode_at?;
         let idle_delay = self.controls.schedule.trigger_delay(
-            DreamTrigger::Idle,
+            &DreamTrigger::Idle,
             last_report.as_ref(),
             self.controls.budget.as_ref(),
             now,
@@ -732,7 +970,7 @@ impl DreamEngine for DreamRunner {
         let idle_fire_at = latest_episode + chrono::Duration::from_std(idle_delay).ok()?;
         let mut target = idle_fire_at;
         if let Some(cron_delay) = self.controls.schedule.trigger_delay(
-            DreamTrigger::Scheduled,
+            &DreamTrigger::Scheduled,
             last_report.as_ref(),
             self.controls.budget.as_ref(),
             now,
@@ -816,6 +1054,26 @@ fn default_delta_interval_mins() -> u64 {
 
 fn default_idle_grace_mins() -> u64 {
     15
+}
+
+fn default_intensive_replay_multiplier() -> u32 {
+    3
+}
+
+fn default_intensive_counterfactual_depth() -> usize {
+    8
+}
+
+fn default_intensive_rehearsal_limit() -> usize {
+    50
+}
+
+fn default_backlog_high_water() -> usize {
+    50
+}
+
+fn default_backlog_low_water() -> usize {
+    20
 }
 
 /// Load the latest persisted dream report from a report directory.
@@ -972,8 +1230,55 @@ mod tests {
     #[test]
     fn schedule_manual_trigger_is_allowed() {
         let policy = DreamSchedulePolicy::default();
-        let delay = policy.trigger_delay(DreamTrigger::Manual, None, None, Utc::now());
+        let delay = policy.trigger_delay(&DreamTrigger::Manual, None, None, Utc::now());
         assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    // INT-19: Coordination pattern trigger tests.
+
+    #[test]
+    fn coordination_pattern_trigger_label() {
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "resource_exhaustion".to_string(),
+            contributing_watchers: vec!["cost-overrun".to_string(), "time-overrun".to_string()],
+        };
+        assert_eq!(trigger.label(), "coordination_pattern");
+    }
+
+    #[test]
+    fn coordination_pattern_trigger_is_allowed() {
+        let policy = DreamSchedulePolicy::default();
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "quality_degradation".to_string(),
+            contributing_watchers: vec!["compile-fail-repeat".to_string()],
+        };
+        assert!(policy.allows(&trigger));
+    }
+
+    #[test]
+    fn coordination_pattern_trigger_immediate_delay() {
+        let policy = DreamSchedulePolicy::default();
+        let trigger = DreamTrigger::CoordinationPattern {
+            pattern_name: "progress_stall".to_string(),
+            contributing_watchers: vec![],
+        };
+        let delay = policy.trigger_delay(&trigger, None, None, Utc::now());
+        assert_eq!(delay, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn schedule_scheduled_trigger_uses_cron_expression() {
+        let policy = DreamSchedulePolicy {
+            scheduled_cron: Some("0 * * * * * *".to_string()),
+            ..DreamSchedulePolicy::default()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-04-18T12:34:15Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        let delay = policy.trigger_delay(&DreamTrigger::Scheduled, None, None, now);
+
+        assert_eq!(delay, Some(Duration::from_secs(45)));
     }
 
     #[test]
@@ -1050,5 +1355,86 @@ mod tests {
         assert_eq!(report.recent_episode_count, 0);
         assert!(!report.enough_recent_episodes);
         assert_eq!(report.delta_due_in_secs, None);
+    }
+
+    // ── DREAM-06 intensive mode tests ───────────────────────────────────
+
+    #[test]
+    fn intensive_mode_activates_at_high_water() {
+        let mode = IntensiveMode::default();
+        assert_eq!(mode.backlog_high_water, 50);
+        assert_eq!(mode.backlog_low_water, 20);
+
+        // Below high water: no activation.
+        assert!(mode.check_activation(30, 24).is_none());
+
+        // At high water: activates with doubled max.
+        let adjusted = mode.check_activation(50, 24);
+        assert!(adjusted.is_some());
+        assert_eq!(adjusted.unwrap(), 24 * 3); // default multiplier is 3
+    }
+
+    #[test]
+    fn intensive_mode_deactivates_at_low_water() {
+        let mode = IntensiveMode::default();
+        assert!(mode.should_deactivate(15));
+        assert!(!mode.should_deactivate(25));
+    }
+
+    #[test]
+    fn intensive_mode_serialization_roundtrip() {
+        let mode = IntensiveMode {
+            active: true,
+            replay_multiplier: 4,
+            counterfactual_depth: 10,
+            rehearsal_limit: 100,
+            backlog_high_water: 60,
+            backlog_low_water: 25,
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: IntensiveMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.backlog_high_water, 60);
+        assert_eq!(deserialized.backlog_low_water, 25);
+        assert!(deserialized.active);
+    }
+
+    // ── DREAM-14 journal persistence tests ──────────────────────────────
+
+    #[test]
+    fn journal_entry_written_to_standard_path() {
+        let tmp = TempDir::new().unwrap();
+        let mut journal = DreamJournal::standard(tmp.path());
+        let entry = DreamJournalEntry {
+            cycle_id: "test-cycle".to_string(),
+            agent_id: "cat".to_string(),
+            cycle_start: Utc::now(),
+            cycle_end: Utc::now(),
+            trigger: DreamTrigger::Manual,
+            nrem_duration_secs: 10,
+            rem_duration_secs: 5,
+            consolidation_duration_secs: 2,
+            hypotheses_generated: 3,
+            hypotheses_staged: 2,
+            hypotheses_promoted: 1,
+            hypotheses_refuted: 0,
+            nightmares_detected: 0,
+            human_review_required: false,
+            hypothesis_diversity: 0.5,
+            total_tokens: 500,
+            early_termination: false,
+            early_termination_reason: None,
+        };
+        journal.append(&entry).unwrap();
+        let entries = journal.read_all().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cycle_id, "test-cycle");
+    }
+
+    #[test]
+    fn bus_pulse_trigger_config_dream_worthiness() {
+        let config = BusPulseTriggerConfig::default();
+        assert!(config.is_dream_worthy(0.8, "gate_verdict"));
+        assert!(!config.is_dream_worthy(0.5, "gate_verdict")); // below min_score
+        assert!(!config.is_dream_worthy(0.8, "unknown_kind"));
     }
 }

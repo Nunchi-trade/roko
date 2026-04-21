@@ -9,10 +9,10 @@
 Roko is a Rust toolkit for building agents that build themselves. It provides a cognitive
 architecture — not just prompt chaining — where agents plan work, execute it via LLMs,
 verify results through gate pipelines, learn from outcomes, and persist everything as
-content-addressed, decaying data (called "Engrams" in docs, `Signal` in code). The core
+content-addressed, decaying data (Engrams). The core
 loop is wired end-to-end: Roko already uses itself to develop itself.
 
-**18 crates, ~177K LOC, 1,568 tests.**
+**36 workspace members, ~322K LOC, 3,761 tests.**
 
 ---
 
@@ -20,7 +20,7 @@ loop is wired end-to-end: Roko already uses itself to develop itself.
 
 **One noun, six verbs.**
 
-The noun is the **Engram** (`Signal` in Rust) — a universal content-addressed datum with
+The noun is the **Engram** — a universal content-addressed datum with
 BLAKE3 hashing, 7-axis scoring, four decay models, lineage tracking, and provenance stamps.
 Every event, output, verdict, and knowledge entry is an Engram.
 
@@ -152,7 +152,7 @@ The docs are organized into 22 sections. Here's the reading order for different 
 | `crates/` | All 18+ Rust crates |
 | `crates/roko-cli/src/` | CLI entry point and subcommands |
 | `crates/roko-cli/src/orchestrate.rs` | The main plan-execute-gate-persist loop |
-| `crates/roko-core/` | Kernel: Signal, 6 traits, config |
+| `crates/roko-core/` | Kernel: Engram, 6 traits, config |
 | `.roko/` | Runtime data (signals, episodes, state, dreams, learn) |
 | `.roko/prd/` | PRD storage |
 | `.roko/state/` | Executor snapshots for resume |

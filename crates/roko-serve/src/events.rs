@@ -200,6 +200,22 @@ pub enum ServerEvent {
 
     /// A webhook signal was accepted and published for downstream processing.
     WebhookReceived { signal: Engram },
+
+    /// Configuration was reloaded from disk (LIFE-07).
+    ConfigReloaded {
+        /// Summaries of sections that were hot-reloaded.
+        applied_sections: Vec<String>,
+        /// Summaries of sections that require a restart to take effect.
+        restart_required: Vec<String>,
+    },
+
+    /// STRATEGY.md was reloaded from disk (LIFE-07).
+    StrategyReloaded {
+        /// Number of parsed goals.
+        goals_count: usize,
+        /// Number of parsed tactics.
+        tactics_count: usize,
+    },
 }
 
 #[cfg(test)]

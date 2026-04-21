@@ -6,6 +6,132 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+// ─── Plugin trust tiers ──────────────────────────────────────────────
+
+/// Trust tier assigned to plugins and MCP servers.
+///
+/// Each tier grants a specific set of capabilities. Lower tiers are
+/// more restricted: tiers 1-2 are denied secrets and network egress by
+/// default. The tier is assigned in `.mcp.json` or at registration time;
+/// absent an explicit tier, plugins default to [`PluginTier::Sandboxed`].
+///
+/// # Tier summary
+///
+/// | Tier | Label | FS | Network | Secrets |
+/// |------|-------------|-----------|---------|---------|
+/// | 1 | Untrusted | none | no | no |
+/// | 2 | Sandboxed | read-only | no | no |
+/// | 3 | Standard | worktree | allow | no |
+/// | 4 | Trusted | full | full | yes |
+/// | 5 | Kernel | full | full | yes |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginTier {
+    /// Tier 1: untrusted WASM — no filesystem, no network, no secrets.
+    Untrusted = 1,
+    /// Tier 2: sandboxed native — read-only filesystem, no network.
+    Sandboxed = 2,
+    /// Tier 3: standard plugin — worktree-scoped filesystem, allowlisted network.
+    Standard = 3,
+    /// Tier 4: trusted native — full filesystem, full network, secrets allowed.
+    Trusted = 4,
+    /// Tier 5: kernel extension — same trust as core.
+    Kernel = 5,
+}
+
+impl Default for PluginTier {
+    /// Plugins default to Sandboxed (tier 2) when no explicit tier is set.
+    fn default() -> Self {
+        Self::Sandboxed
+    }
+}
+
+impl PluginTier {
+    /// Return the set of capabilities that this tier permits.
+    ///
+    /// Higher tiers are strict supersets of lower tiers. The returned
+    /// capabilities are used by [`check_plugin_tier`] to gate tool calls
+    /// originating from plugins.
+    #[must_use]
+    pub fn allowed_capabilities(&self) -> Vec<Capability> {
+        match self {
+            Self::Untrusted => {
+                // Tier 1: only named tool invocation, nothing else.
+                vec![]
+            }
+            Self::Sandboxed => {
+                // Tier 2: read-only paths.
+                vec![Capability::ReadPath(PathBuf::from("/"))]
+            }
+            Self::Standard => {
+                // Tier 3: read + write (worktree-scoped via PathPolicy) + exec.
+                vec![
+                    Capability::ReadPath(PathBuf::from("/")),
+                    Capability::WritePath(PathBuf::from("/")),
+                    Capability::Exec("*".into()),
+                ]
+            }
+            Self::Trusted | Self::Kernel => {
+                // Tier 4-5: full capabilities including network.
+                vec![
+                    Capability::ReadPath(PathBuf::from("/")),
+                    Capability::WritePath(PathBuf::from("/")),
+                    Capability::Exec("*".into()),
+                    Capability::Network {
+                        host: "*".into(),
+                        port: 0,
+                    },
+                ]
+            }
+        }
+    }
+
+    /// Return `true` if this tier permits network egress.
+    #[must_use]
+    pub const fn allows_network(&self) -> bool {
+        matches!(self, Self::Standard | Self::Trusted | Self::Kernel)
+    }
+
+    /// Return `true` if this tier permits access to secrets.
+    #[must_use]
+    pub const fn allows_secrets(&self) -> bool {
+        matches!(self, Self::Trusted | Self::Kernel)
+    }
+
+    /// Return `true` if this tier permits filesystem writes.
+    #[must_use]
+    pub const fn allows_writes(&self) -> bool {
+        matches!(self, Self::Standard | Self::Trusted | Self::Kernel)
+    }
+}
+
+/// Check whether a plugin at the given `tier` is allowed to invoke the
+/// requested `capability`. Returns `Ok(())` on success; returns a
+/// human-readable error on denial.
+pub fn check_plugin_tier(tier: PluginTier, capability: &Capability) -> Result<(), String> {
+    match capability {
+        Capability::Network { .. } if !tier.allows_network() => Err(format!(
+            "plugin tier {:?} does not permit network access",
+            tier
+        )),
+        Capability::WritePath(_) if !tier.allows_writes() => Err(format!(
+            "plugin tier {:?} does not permit filesystem writes",
+            tier
+        )),
+        Capability::ReadPath(_) if matches!(tier, PluginTier::Untrusted) => Err(format!(
+            "plugin tier {:?} does not permit filesystem reads",
+            tier
+        )),
+        Capability::Exec(_) if matches!(tier, PluginTier::Untrusted | PluginTier::Sandboxed) => {
+            Err(format!(
+                "plugin tier {:?} does not permit subprocess execution",
+                tier
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A concrete capability required to execute a tool or resource access.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -184,5 +310,96 @@ mod tests {
     fn network_capability_parses_host_and_port() {
         let cap = network_capability_from_url("https://api.example.com:443/path").unwrap();
         assert!(matches!(cap, Capability::Network { .. }));
+    }
+
+    // ─── PluginTier tests ────────────────────────────────────────────
+
+    #[test]
+    fn plugin_tier_default_is_sandboxed() {
+        assert_eq!(PluginTier::default(), PluginTier::Sandboxed);
+    }
+
+    #[test]
+    fn plugin_tier_ordering_is_ascending() {
+        assert!(PluginTier::Untrusted < PluginTier::Sandboxed);
+        assert!(PluginTier::Sandboxed < PluginTier::Standard);
+        assert!(PluginTier::Standard < PluginTier::Trusted);
+        assert!(PluginTier::Trusted < PluginTier::Kernel);
+    }
+
+    #[test]
+    fn untrusted_tier_blocks_everything() {
+        let tier = PluginTier::Untrusted;
+        assert!(!tier.allows_network());
+        assert!(!tier.allows_secrets());
+        assert!(!tier.allows_writes());
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_err());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err());
+        assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_err());
+        assert!(
+            check_plugin_tier(
+                tier,
+                &Capability::Network {
+                    host: "example.com".into(),
+                    port: 443
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sandboxed_tier_allows_reads_only() {
+        let tier = PluginTier::Sandboxed;
+        assert!(!tier.allows_network());
+        assert!(!tier.allows_secrets());
+        assert!(!tier.allows_writes());
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_err());
+        assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_err());
+    }
+
+    #[test]
+    fn standard_tier_allows_reads_writes_exec_no_network() {
+        let tier = PluginTier::Standard;
+        assert!(tier.allows_network());
+        assert!(!tier.allows_secrets());
+        assert!(tier.allows_writes());
+        assert!(check_plugin_tier(tier, &Capability::ReadPath(PathBuf::from("/tmp"))).is_ok());
+        assert!(check_plugin_tier(tier, &Capability::WritePath(PathBuf::from("/tmp"))).is_ok());
+        assert!(check_plugin_tier(tier, &Capability::Exec("ls".into())).is_ok());
+    }
+
+    #[test]
+    fn trusted_tier_allows_everything() {
+        let tier = PluginTier::Trusted;
+        assert!(tier.allows_network());
+        assert!(tier.allows_secrets());
+        assert!(tier.allows_writes());
+        assert!(
+            check_plugin_tier(
+                tier,
+                &Capability::Network {
+                    host: "example.com".into(),
+                    port: 443
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn plugin_tier_round_trips_through_serde() {
+        for tier in [
+            PluginTier::Untrusted,
+            PluginTier::Sandboxed,
+            PluginTier::Standard,
+            PluginTier::Trusted,
+            PluginTier::Kernel,
+        ] {
+            let json = serde_json::to_string(&tier).unwrap();
+            let decoded: PluginTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, tier);
+        }
     }
 }

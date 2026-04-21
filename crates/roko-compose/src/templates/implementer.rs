@@ -3,8 +3,10 @@
 //! Ports Mori's `implementer_sections` + `implementer_prompt` into a typed,
 //! I/O-free API. The most context-heavy template in the set.
 
+use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 /// Typed input for the implementer template. All fields are pre-read strings.
 #[derive(Clone, Debug, Default)]
@@ -61,6 +63,7 @@ impl RolePromptTemplate for ImplementerTemplate {
     type Input = ImplementerInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = budget_for(AgentRole::Implementer);
         let mut sections = Vec::with_capacity(10);
 
         // 1. agents_instructions — System / Critical
@@ -73,11 +76,11 @@ impl RolePromptTemplate for ImplementerTemplate {
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(
-            PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
+            PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
                 .with_priority(SectionPriority::Critical)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
-                .with_hard_cap(50_000),
+                .with_hard_cap(budget.plan),
         );
 
         // 3. brief — Session / High
@@ -98,11 +101,14 @@ impl RolePromptTemplate for ImplementerTemplate {
 
         // 5. workspace_map — Session / High / hard_cap 20k
         sections.push(
-            PromptSection::new("workspace_map", truncate(&input.workspace_map, 20_000))
-                .with_priority(SectionPriority::High)
-                .with_cache_layer(CacheLayer::Workspace)
-                .with_placement(Placement::Middle)
-                .with_hard_cap(20_000),
+            PromptSection::new(
+                "workspace_map",
+                truncate(&input.workspace_map, budget.workspace_map),
+            )
+            .with_priority(SectionPriority::High)
+            .with_cache_layer(CacheLayer::Workspace)
+            .with_placement(Placement::Middle)
+            .with_hard_cap(budget.workspace_map),
         );
 
         // 6. preflight — Session / Normal / hard_cap 5k
@@ -126,33 +132,33 @@ impl RolePromptTemplate for ImplementerTemplate {
         // 8. prev_reviews — Dynamic / High / hard_cap 15k (only when present)
         if let Some(ref reviews) = input.prev_reviews {
             sections.push(
-                PromptSection::new("prev_reviews", truncate(reviews, 15_000))
+                PromptSection::new("prev_reviews", truncate(reviews, budget.reviews))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End)
-                    .with_hard_cap(15_000),
+                    .with_hard_cap(budget.reviews),
             );
         }
 
         // 9. verify_chain — Session / High / hard_cap 4k (only when present)
         if let Some(ref chain) = input.verify_chain {
             sections.push(
-                PromptSection::new("verify_chain", truncate(chain, 4_000))
+                PromptSection::new("verify_chain", truncate(chain, budget.instructions))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End)
-                    .with_hard_cap(4_000),
+                    .with_hard_cap(budget.instructions),
             );
         }
 
         // 10. invariants — Session / High / hard_cap 4k (only when present)
         if let Some(ref inv) = input.invariants {
             sections.push(
-                PromptSection::new("invariants", truncate(inv, 4_000))
+                PromptSection::new("invariants", truncate(inv, budget.instructions))
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::End)
-                    .with_hard_cap(4_000),
+                    .with_hard_cap(budget.instructions),
             );
         }
 

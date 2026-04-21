@@ -5,8 +5,11 @@
 > This topic covers the `Agent` trait, provider registry, provider adapters,
 > chat types, agent roles, agent pools, MCP integration, tool loop, harness
 > engineering, format translation, temperament profiling, dual-process tier
-> routing, extensibility, creation site consolidation, provider integrations,
+> routing, extensibility, domain profiles, creation site consolidation,
+> provider integrations, the four-layer Rust SDK for custom-agent authoring,
 > and current status.
+>
+> See also: `../../tmp/refinements/22-developer-ux-rust.md`.
 
 ---
 
@@ -26,10 +29,11 @@
 | 09 | [Format Translation](09-format-translation.md) | `09-format-translation.md` | `Translator` trait, 4 translators (OpenAI/Claude/Ollama/ReAct), wire format types, model capabilities, reasoning extraction |
 | 10 | [Temperament Profiling](10-temperament-profiling.md) | `10-temperament-profiling.md` | Conservative/Balanced/Aggressive/Exploratory dial, controls for model params, tool selection, gates, review, routing |
 | 11 | [Dual-Process Routing](11-dual-process-routing.md) | `11-dual-process-routing.md` | System 1/System 2 model, `CascadeRouter`, `LinUCB` bandit, Pareto frontier, Thompson sampling, anomaly detection, **Dual-Process Theory 2.0** (competing intuitions, triple-process), **MoE connection**, **routing feedback loops**, **meta-routing**, **latest routing research** (Router-R1, xRouter, IRT-Router, BEST-Route) |
-| 12 | [Extensibility](12-extensibility.md) | `12-extensibility.md` | Adding providers, adapters, translators, LlmBackends, 8-step domain plugin process, **self-evolving architecture** (Darwin Gödel Machine, Voyager skill library, agent memory sharing, intrinsic metacognition) |
+| 12 | [Extensibility](12-extensibility.md) | `12-extensibility.md` | Adding providers, adapters, translators, LlmBackends, the four-layer Rust SDK (one-liner, builder, trait impl, runtime impl), 8-step domain plugin process, **self-evolving architecture** (Darwin Gödel Machine, Voyager skill library, agent memory sharing, intrinsic metacognition) |
 | 13 | [Creation Sites](13-creation-sites.md) | `13-creation-sites.md` | 8 agent creation sites, consolidation into `create_agent_for_model`, migration strategy and status |
 | 14 | [Provider Integrations](14-provider-integrations.md) | `14-provider-integrations.md` | Perplexity (Sonar), Gemini, ZhipuAI (GLM), Moonshot (Kimi), OpenRouter — API surfaces, config, extensions, status |
 | 15 | [Status and Gaps](15-status-gaps.md) | `15-status-gaps.md` | What works, what's built but not wired, 7 prioritized gaps, integration path, metrics |
+| 16 | [Domain Profiles](16-domain-profiles.md) | `16-domain-profiles.md` | Six canonical domain profiles, profile composition, `TypedContext`, `Custody`, installable bundles, merge rules, evaluation suites |
 
 ---
 
@@ -76,6 +80,7 @@
 | `modelrouting/19-implementation-guide.md` | 5 integration points |
 | `modelrouting/20-perplexity-integration.md` | Perplexity Sonar API surfaces |
 | `modelrouting/21-gemini-integration.md` | Gemini 1M context, grounding |
+| `tmp/refinements/25-domain-specific-agents.md` | Canonical source for domain profiles, TypedContext, Custody |
 | `11-inconsistencies.md` | Gap #1: SafetyLayer not reached |
 | `01-agent-wiring.md` | ExecAgent → ClaudeCliAgent migration |
 
@@ -108,7 +113,8 @@
 12. Router-R1 (2025). — RL-trained per-query router.
 13. WildToolBench — Format-specific accuracy benchmarks.
 14. Qwen3-coder — Documented format switching above 5 tools.
-15. Mori (reference orchestrator) — `apps/mori/src/agent/connection.rs`,
+15. Roko Orchestrator (legacy reference orchestrator; formerly Mori) —
+    `apps/mori/src/agent/connection.rs`,
     108K LOC reference implementation.
 16. Hewitt, C., Bishop, P., & Steiger, R. (1973). "A Universal Modular ACTOR
     Formalism for Artificial Intelligence." IJCAI. — Actor model foundation.
@@ -151,12 +157,12 @@
 
 | Old name | New name | Context |
 |---|---|---|
-| Bardo | Roko | Project name |
-| Golem | Agent | Agent subsystem |
-| Mori | Roko Orchestrator | CLI/runtime |
-| Grimoire | Neuro | Knowledge system |
-| Signal | Engram | Content-addressed unit (rename Tier 0D) |
-| Clade | Collective / Mesh | Multi-agent groups |
+| Bardo (legacy) | Roko | Project name |
+| Golem (legacy) | Agent | Agent subsystem |
+| Mori (legacy) | Roko Orchestrator | CLI/runtime |
+| Grimoire (legacy) | Neuro | Knowledge system |
+| Signal (legacy) | Engram | Content-addressed unit (rename Tier 0D) |
+| Clade (legacy) | Collective / Mesh | Multi-agent groups |
 | GNOS | KORAI / DAEJI | Metrics systems |
 
 ---

@@ -9,9 +9,33 @@
 //! - **Traced** — lineage tracks which engrams this derived from
 //! - **Composable** — engrams combine into new engrams via [`Composer`]s
 
-use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Score};
+use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Pulse, Score};
+use roko_primitives::HdcVector;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// HDC fingerprint metadata stored alongside an [`Engram`].
+///
+/// The vector provides semantic similarity lookup, while `encoder_version`
+/// records which deterministic encoder produced it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HdcFingerprint {
+    /// The semantic fingerprint vector for this engram.
+    pub vector: HdcVector,
+    /// Monotonic version of the encoder used to derive `vector`.
+    pub encoder_version: u32,
+}
+
+impl HdcFingerprint {
+    /// Construct fingerprint metadata from a vector and encoder version.
+    #[must_use]
+    pub const fn new(vector: HdcVector, encoder_version: u32) -> Self {
+        Self {
+            vector,
+            encoder_version,
+        }
+    }
+}
 
 /// The universal datum of the Roko system.
 ///
@@ -39,6 +63,12 @@ use std::collections::BTreeMap;
 pub struct Engram {
     /// Content-addressed identity (computed from kind + body + author + tags).
     pub id: ContentHash,
+    /// HDC fingerprint plus encoder metadata used for similarity and clustering.
+    ///
+    /// This remains optional so callers can construct engrams before a
+    /// substrate has finalized fingerprinting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<HdcFingerprint>,
     /// What kind of engram this is.
     pub kind: Kind,
     /// The engram's payload.
@@ -79,13 +109,13 @@ impl Engram {
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(self.kind.as_str().as_bytes());
+        hasher.update(self.kind.identity_key().as_bytes());
         hasher.update(b"|");
         hasher.update(&self.body.canonical_bytes());
         hasher.update(b"|");
         hasher.update(self.provenance.author.as_bytes());
         hasher.update(b"|");
-        hasher.update(&[u8::from(self.provenance.tainted)]);
+        hasher.update(&[u8::from(self.provenance.is_tainted())]);
         hasher.update(b"|");
         for h in &self.lineage {
             hasher.update(&h.0);
@@ -134,6 +164,133 @@ impl Engram {
             .lineage([self.id])
             .provenance(Provenance::agent("derived"))
     }
+
+    /// Emit a derived gate verdict engram with explicit verdict defaults.
+    ///
+    /// Unlike [`Engram::derive`], this preserves the parent's visible tag set,
+    /// carries forward the full known lineage chain, and applies the
+    /// [`Decay::GATE_VERDICT`] contract.
+    pub fn derive_verdict(&self, body: Body) -> EngramBuilder {
+        let mut builder = EngramBuilder::new(Kind::GateVerdict)
+            .body(body)
+            .decay(Decay::GATE_VERDICT)
+            .lineage(self.derived_lineage())
+            .provenance(Provenance::agent("derived"));
+
+        for (key, value) in &self.tags {
+            builder = builder.tag(key.clone(), value.clone());
+        }
+
+        builder
+    }
+
+    /// Promote a single [`Pulse`] to a synthetic [`Engram`].
+    ///
+    /// The resulting engram carries the pulse's kind, body, tags, and timestamp.
+    /// Provenance is marked `"pulse_promotion"` and decay is `None`.
+    #[must_use]
+    pub fn from_pulse_synthetic(p: &Pulse) -> Self {
+        let mut builder = EngramBuilder::new(p.kind.clone())
+            .body(p.body.clone())
+            .created_at_ms(p.created_at_ms)
+            .provenance(Provenance::agent("pulse_promotion"));
+        for (k, v) in &p.tags {
+            builder = builder.tag(k.clone(), v.clone());
+        }
+        builder.build()
+    }
+
+    /// Combine multiple [`Pulse`]s into a single summary [`Engram`].
+    ///
+    /// Uses the first pulse's kind, concatenates text bodies (or collects
+    /// JSON bodies into an array), and merges all tags. Useful for gate
+    /// defaults that need to persist a batch of ephemeral events.
+    #[must_use]
+    pub fn from_pulses(pulses: &[Pulse]) -> Self {
+        if pulses.is_empty() {
+            return EngramBuilder::new(Kind::Episode)
+                .provenance(Provenance::agent("pulse_batch"))
+                .build();
+        }
+
+        let kind = pulses[0].kind.clone();
+        let body = if pulses.len() == 1 {
+            pulses[0].body.clone()
+        } else {
+            // Concatenate text bodies, or collect as JSON array.
+            let texts: Vec<&str> = pulses
+                .iter()
+                .filter_map(|p| {
+                    if let Body::Text(s) = &p.body {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if texts.len() == pulses.len() {
+                Body::text(texts.join("\n"))
+            } else {
+                let values: Vec<serde_json::Value> = pulses
+                    .iter()
+                    .map(|p| serde_json::to_value(&p.body).unwrap_or_default())
+                    .collect();
+                Body::Json(serde_json::Value::Array(values))
+            }
+        };
+
+        // Merge tags from all pulses (later values win on key collision).
+        let mut tags = BTreeMap::new();
+        for p in pulses {
+            for (k, v) in &p.tags {
+                tags.insert(k.clone(), v.clone());
+            }
+        }
+
+        let earliest = pulses.iter().map(|p| p.created_at_ms).min().unwrap_or(0);
+
+        let mut builder = EngramBuilder::new(kind)
+            .body(body)
+            .created_at_ms(earliest)
+            .provenance(Provenance::agent("pulse_batch"));
+        for (k, v) in tags {
+            builder = builder.tag(k, v);
+        }
+        builder.build()
+    }
+
+    /// Bind this engram to another in HDC space when both fingerprints exist.
+    #[must_use]
+    pub fn bind(&self, other: &Engram) -> Option<HdcVector> {
+        Some(self.fingerprint?.vector.bind(&other.fingerprint?.vector))
+    }
+
+    /// Bundle the fingerprints of several engrams into one consensus vector.
+    #[must_use]
+    pub fn bundle(engrams: &[Engram]) -> Option<HdcVector> {
+        let mut vectors = Vec::with_capacity(engrams.len());
+        for engram in engrams {
+            vectors.push(engram.fingerprint?.vector);
+        }
+        let refs = vectors.iter().collect::<Vec<_>>();
+        Some(HdcVector::bundle(&refs))
+    }
+
+    /// Permute this engram's fingerprint into a positional binding slot.
+    #[must_use]
+    pub fn at_position(&self, position: usize) -> Option<HdcVector> {
+        Some(self.fingerprint?.vector.permute(position))
+    }
+
+    fn derived_lineage(&self) -> Vec<ContentHash> {
+        let mut lineage = Vec::with_capacity(self.lineage.len() + 1);
+        for hash in self.lineage.iter().copied().chain(std::iter::once(self.id)) {
+            if !lineage.contains(&hash) {
+                lineage.push(hash);
+            }
+        }
+        lineage
+    }
 }
 
 // ─── Builder ───────────────────────────────────────────────────────────────
@@ -151,6 +308,7 @@ pub struct EngramBuilder {
     score: Score,
     lineage: Vec<ContentHash>,
     tags: BTreeMap<String, String>,
+    fingerprint: Option<HdcFingerprint>,
     attestation: Option<Attestation>,
     emotional_tag: Option<EmotionalTag>,
 }
@@ -168,6 +326,7 @@ impl EngramBuilder {
             score: Score::NEUTRAL,
             lineage: Vec::new(),
             tags: BTreeMap::new(),
+            fingerprint: None,
             attestation: None,
             emotional_tag: None,
         }
@@ -222,6 +381,16 @@ impl EngramBuilder {
         self
     }
 
+    /// Stage fingerprint metadata for this engram.
+    ///
+    /// Most callers leave this unset and allow `Substrate::put()` to populate
+    /// it using the active encoder registry.
+    #[must_use]
+    pub fn fingerprint(mut self, fingerprint: HdcFingerprint) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+
     /// Attach a cryptographic proof of origin.
     #[must_use]
     pub fn attestation(mut self, attestation: Attestation) -> Self {
@@ -242,6 +411,7 @@ impl EngramBuilder {
         let created_at_ms = self.created_at_ms.unwrap_or_else(current_time_ms);
         let mut engram = Engram {
             id: ContentHash([0; 32]), // placeholder
+            fingerprint: self.fingerprint,
             kind: self.kind,
             body: self.body,
             created_at_ms,
@@ -275,6 +445,7 @@ mod tests {
         assert_eq!(s.decay, Decay::None);
         assert!(s.lineage.is_empty());
         assert!(s.tags.is_empty());
+        assert!(s.fingerprint.is_none());
         assert!(s.attestation.is_none());
         assert!(s.emotional_tag.is_none());
     }
@@ -380,6 +551,34 @@ mod tests {
     }
 
     #[test]
+    fn derive_verdict_preserves_lineage_tags_and_decay() {
+        let ancestor = Engram::builder(Kind::Prompt)
+            .body(Body::text("ancestor"))
+            .created_at_ms(0)
+            .build();
+        let parent = Engram::builder(Kind::Task)
+            .body(Body::text("parent"))
+            .created_at_ms(1)
+            .lineage([ancestor.id])
+            .tag("plan_id", "plan-42")
+            .tag("gate", "compile")
+            .build();
+
+        let child = parent
+            .derive_verdict(Body::text("pass"))
+            .tag("passed", "true")
+            .tag("gate", "test")
+            .build();
+
+        assert_eq!(child.kind, Kind::GateVerdict);
+        assert_eq!(child.decay, Decay::GATE_VERDICT);
+        assert_eq!(child.lineage, vec![ancestor.id, parent.id]);
+        assert_eq!(child.tag("plan_id"), Some("plan-42"));
+        assert_eq!(child.tag("passed"), Some("true"));
+        assert_eq!(child.tag("gate"), Some("test"));
+    }
+
+    #[test]
     fn content_hash_ignores_attestation() {
         let base = Engram::builder(Kind::Task)
             .body(Body::text("same"))
@@ -421,6 +620,20 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_ignores_fingerprint() {
+        let base = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        let fingerprinted = Engram::builder(Kind::Task)
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .fingerprint(HdcFingerprint::new(HdcVector::from_seed(b"same"), 3))
+            .build();
+        assert_eq!(base.id, fingerprinted.id);
+    }
+
+    #[test]
     fn serde_roundtrip() {
         let s = Engram::builder(Kind::Episode)
             .body(Body::text("an episode happened"))
@@ -428,6 +641,7 @@ mod tests {
                 half_life_ms: 60_000,
             })
             .tag("run", "42")
+            .fingerprint(HdcFingerprint::new(HdcVector::from_seed(b"episode"), 7))
             .build();
         let json = serde_json::to_string(&s).unwrap();
         let parsed: Engram = serde_json::from_str(&json).unwrap();
@@ -446,5 +660,44 @@ mod tests {
         let s = Engram::builder(Kind::GateVerdict).build();
         assert!(s.is(&Kind::GateVerdict));
         assert!(!s.is(&Kind::Task));
+    }
+
+    #[test]
+    fn compound_kind_hash_distinguishes_components() {
+        let a = Engram::builder(Kind::Compound(vec![Kind::Task, Kind::Prompt]))
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        let b = Engram::builder(Kind::Compound(vec![Kind::Task, Kind::PromptSection]))
+            .body(Body::text("same"))
+            .created_at_ms(0)
+            .build();
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn hdc_helpers_use_staged_fingerprints() {
+        let left = Engram::builder(Kind::Task)
+            .fingerprint(HdcFingerprint::new(HdcVector::from_seed(b"left"), 1))
+            .build();
+        let right = Engram::builder(Kind::Prompt)
+            .fingerprint(HdcFingerprint::new(HdcVector::from_seed(b"right"), 1))
+            .build();
+
+        assert_eq!(
+            left.bind(&right),
+            Some(HdcVector::from_seed(b"left").bind(&HdcVector::from_seed(b"right")))
+        );
+        assert_eq!(
+            Engram::bundle(&[left.clone(), right.clone()]),
+            Some(HdcVector::bundle(&[
+                &HdcVector::from_seed(b"left"),
+                &HdcVector::from_seed(b"right"),
+            ]))
+        );
+        assert_eq!(
+            left.at_position(13),
+            Some(HdcVector::from_seed(b"left").permute(13))
+        );
     }
 }

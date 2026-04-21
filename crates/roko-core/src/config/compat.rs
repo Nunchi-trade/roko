@@ -9,10 +9,12 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::schema::{
-    AgentConfig, AgentRoleToggles, BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig,
-    DeployConfig, GatesConfig, GeminiConfig, GithubWebhookConfig, LearningConfig, PerplexityConfig,
-    PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride, RoutingConfig,
-    SchedulerConfig, ServeConfig, ServerConfig, TuiConfig, WatcherConfig, WebhooksConfig,
+    AgentConfig, AgentRoleToggles, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION,
+    ConductorConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig, GeminiConfig,
+    GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig,
+    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride,
+    RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TemporalConfig, ToolsConfig,
+    TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -109,6 +111,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         conductor: convert_conductor(m),
         watcher: WatcherConfig::default(),
         learning: convert_learning(m),
+        demurrage: DemurrageConfig::default(),
         tui: TuiConfig::default(),
         serve: ServeConfig::default(),
         scheduler: SchedulerConfig::default(),
@@ -122,6 +125,13 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         deploy: DeployConfig::default(),
         perplexity: PerplexityConfig::default(),
         gemini: GeminiConfig::default(),
+        attention: AttentionConfig::default(),
+        immune: ImmuneConfig::default(),
+        temporal: TemporalConfig::default(),
+        goals: GoalsConfig::default(),
+        energy: EnergyConfig::default(),
+        tools: ToolsConfig::default(),
+        oneirography: OneirographyConfig::default(),
     }
 }
 
@@ -169,6 +179,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         default_model,
         default_backend: d.default_backend,
         default_effort,
+        temperament: d.temperament,
         context_limit_k: m.context_limit_k.unwrap_or(d.context_limit_k),
         bare_mode: m.agent_bare_mode.unwrap_or(d.bare_mode),
         command: None,
@@ -178,6 +189,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         tier_models: d.tier_models,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
+        data_llm: None,
     }
 }
 
@@ -187,6 +199,7 @@ fn convert_gates(m: &MoriConfig) -> GatesConfig {
         clippy_enabled: m.clippy_enabled.unwrap_or(d.clippy_enabled),
         skip_tests: m.skip_tests.unwrap_or(d.skip_tests),
         max_iterations: m.max_iterations.unwrap_or(d.max_iterations),
+        domain_gates: HashMap::new(),
     }
 }
 

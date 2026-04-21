@@ -11,16 +11,20 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::clone_on_copy,
+    clippy::doc_markdown,
     clippy::expect_used,
     clippy::float_cmp,
     clippy::manual_clamp,
     clippy::map_unwrap_or,
     clippy::match_same_arms,
     clippy::missing_const_for_fn,
+    clippy::missing_panics_doc,
     clippy::option_if_let_else,
     clippy::ref_option,
     clippy::suboptimal_flops,
     clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::too_long_first_doc_paragraph,
     clippy::useless_conversion
 )]
 
@@ -34,7 +38,129 @@ use roko_core::{
     BehavioralState, ContentHash, EmotionalTag, OperatingFrequencyAffect, PadVector, Task,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Emergent goal structures -- goals that emerge from behavior patterns.
+pub mod goals;
+/// Life review pipeline: Butler 1963 emotional memory retrieval, turning
+/// point detection, and McAdams narrative arc classification (P0-23).
+pub mod life_review;
+/// Mortality emotions (Jonas/Dane/Heidegger), Nietzsche behavioral phases
+/// (Camel/Lion/Child), and EmotionalDeathTestament (P0-24, P1-26, P1-28).
+pub mod mortality;
+mod phase2_stubs;
+/// Somatic TA integration: somatic marker bias for oracle predictions,
+/// IIT Phi metric, and PID synergy detection (TA-11).
+pub mod somatic_ta;
+
+pub use self::goals::{GoalNode, GoalSeed, GoalStatus, GoalTree};
+pub use self::phase2_stubs::{
+    AffectBehaviorModulation, AffectBehaviorStrategy, AffectOctant, AffectWeightedQuery, AgentId,
+    BehavioralStateThresholds, BehavioralStateTracker, BorrowedAffect, ContagionEvent,
+    ContagionTrigger, ContrarianConfig, ContrarianTracker, CrateConfidence, CrateFatigueSuggestion,
+    DimensionDef, DimensionSource, DimensionWeights, DomainRegistration, EfficiencyEvent,
+    EmotionalProvenance, ErrorPatternTracker, FatigueAction, FatigueDetector, ResourcePressure,
+    ScoredEntry, SomaticField, SomaticMarkerFiredEvent, StrategyTransferMapper, TierBias,
+    TierThresholds, ValidationArc, adjusted_thresholds, contagion, contagion_susceptibility,
+    fatigue_response, pad_cosine_similarity,
+};
+pub use self::somatic_ta::{
+    IitPhiMetric, MutualInfoMatrix, SomaticOracleContext, SomaticRetrieval, SomaticRetrievalConfig,
+    SubsystemActivity, apply_somatic_confidence_bias, detect_synergy, somatic_confidence_bias,
+};
+
+// ─── Four-Factor Retrieval Model (P0-20) ────────────────────────────
+
+/// Learnable weights for the four-factor retrieval scoring model.
+///
+/// Per spec (PRD 03-daimon/02-emotion-memory.md):
+/// ```text
+/// score = w_recency    * recency(Ebbinghaus)
+///       + w_importance  * quality(Reflexion)
+///       + w_relevance   * cosine(query, entry)
+///       + w_emotional   * PAD_cosine(current_mood, entry_affect)
+/// ```
+///
+/// Initial weights: recency 0.20, importance 0.25, relevance 0.35, emotional 0.20.
+/// Weights are online-learnable based on which factors correlate with positive outcomes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalWeights {
+    /// Weight for temporal recency (Ebbinghaus forgetting curve).
+    pub recency: f64,
+    /// Weight for importance/quality (Reflexion validation ratio).
+    pub importance: f64,
+    /// Weight for semantic relevance (cosine similarity).
+    pub relevance: f64,
+    /// Weight for emotional congruence (PAD cosine with current mood).
+    pub emotional: f64,
+}
+
+impl Default for RetrievalWeights {
+    fn default() -> Self {
+        Self {
+            recency: 0.20,
+            importance: 0.25,
+            relevance: 0.35,
+            emotional: 0.20,
+        }
+    }
+}
+
+impl RetrievalWeights {
+    /// Compute the four-factor retrieval score for a knowledge entry.
+    ///
+    /// - `recency_factor`: exponential decay based on age (0..1)
+    /// - `importance_factor`: confidence * validation ratio (0..1)
+    /// - `relevance_factor`: semantic similarity to query (0..1)
+    /// - `emotional_factor`: PAD cosine similarity with current mood (0..1)
+    #[must_use]
+    pub fn score(
+        &self,
+        recency_factor: f64,
+        importance_factor: f64,
+        relevance_factor: f64,
+        emotional_factor: f64,
+    ) -> f64 {
+        self.recency * recency_factor
+            + self.importance * importance_factor
+            + self.relevance * relevance_factor
+            + self.emotional * emotional_factor
+    }
+
+    /// Online weight update via gradient descent on retrieval quality.
+    ///
+    /// `factors`: the four factor values used for the retrieval.
+    /// `outcome`: 1.0 if the retrieved entry was useful, -1.0 if harmful, 0 if neutral.
+    /// `learning_rate`: step size for gradient update.
+    pub fn update(&mut self, factors: [f64; 4], outcome: f64, learning_rate: f64) {
+        let predicted = self.score(factors[0], factors[1], factors[2], factors[3]);
+        let error = outcome - predicted;
+
+        self.recency = (self.recency + learning_rate * error * factors[0]).clamp(0.01, 0.80);
+        self.importance = (self.importance + learning_rate * error * factors[1]).clamp(0.01, 0.80);
+        self.relevance = (self.relevance + learning_rate * error * factors[2]).clamp(0.01, 0.80);
+        self.emotional = (self.emotional + learning_rate * error * factors[3]).clamp(0.01, 0.80);
+
+        // Normalize to sum to 1.0.
+        let total = self.recency + self.importance + self.relevance + self.emotional;
+        if total > 0.0 {
+            self.recency /= total;
+            self.importance /= total;
+            self.relevance /= total;
+            self.emotional /= total;
+        }
+    }
+}
+
+/// Compute emotional congruence between current mood and an entry's affect.
+///
+/// Uses PAD cosine similarity mapped to [0, 1]. Congruent emotions
+/// (same octant) score near 1.0; incongruent (opposite octant) score near 0.0.
+#[must_use]
+pub fn emotional_congruence(current_mood: &PadVector, entry_affect: &PadVector) -> f64 {
+    // Map cosine similarity from [-1, 1] to [0, 1].
+    f64::midpoint(current_mood.cosine_similarity(*entry_affect), 1.0)
+}
 
 const STRATEGY_DIMENSIONS: usize = 8;
 const DEFAULT_SOMATIC_NEIGHBORS: usize = 5;
@@ -52,7 +178,136 @@ fn default_somatic_tree() -> SomaticTree {
     KdTree::new()
 }
 
-/// Current affect snapshot.
+/// Three-layer temporal affect model (Gebhard 2005).
+///
+/// Each layer has a different time constant:
+/// - Emotion: fast (default tau=0.1), reacts immediately to events
+/// - Mood: medium (default tau=0.5), running average of recent emotions
+/// - Temperament: slow (default tau=0.9), stable baseline personality
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlmaLayers {
+    /// Fast emotional response. Updated every tick.
+    pub emotion: PadVector,
+    /// Medium-term mood. Updated every `mood_interval` ticks.
+    pub mood: PadVector,
+    /// Stable personality baseline. Updated every `temperament_interval` ticks.
+    pub temperament: PadVector,
+    /// Emotion layer decay factor per tick (default 0.1).
+    #[serde(default = "AlmaLayers::default_tau_emotion")]
+    pub tau_emotion: f64,
+    /// Mood layer EMA factor (default 0.5).
+    #[serde(default = "AlmaLayers::default_tau_mood")]
+    pub tau_mood: f64,
+    /// Temperament layer EMA factor (default 0.9).
+    #[serde(default = "AlmaLayers::default_tau_temperament")]
+    pub tau_temperament: f64,
+    /// Mood sampling interval in ticks (default 10).
+    #[serde(default = "AlmaLayers::default_mood_interval")]
+    pub mood_interval: u64,
+    /// Temperament sampling interval in ticks (default 100).
+    #[serde(default = "AlmaLayers::default_temperament_interval")]
+    pub temperament_interval: u64,
+}
+
+impl Default for AlmaLayers {
+    fn default() -> Self {
+        Self {
+            emotion: PadVector::neutral(),
+            mood: PadVector::neutral(),
+            temperament: PadVector::neutral(),
+            tau_emotion: Self::default_tau_emotion(),
+            tau_mood: Self::default_tau_mood(),
+            tau_temperament: Self::default_tau_temperament(),
+            mood_interval: Self::default_mood_interval(),
+            temperament_interval: Self::default_temperament_interval(),
+        }
+    }
+}
+
+impl AlmaLayers {
+    fn default_tau_emotion() -> f64 {
+        0.1
+    }
+    fn default_tau_mood() -> f64 {
+        0.5
+    }
+    fn default_tau_temperament() -> f64 {
+        0.9
+    }
+    fn default_mood_interval() -> u64 {
+        10
+    }
+    fn default_temperament_interval() -> u64 {
+        100
+    }
+
+    /// Apply a stimulus to the emotion layer via EMA:
+    /// `emotion = (1 - tau_e) * emotion + tau_e * stimulus`
+    pub fn update_emotion(&mut self, stimulus: &PadVector) {
+        let tau = self.tau_emotion;
+        let retain = 1.0 - tau;
+        self.emotion = PadVector::new(
+            retain * self.emotion.pleasure + tau * stimulus.pleasure,
+            retain * self.emotion.arousal + tau * stimulus.arousal,
+            retain * self.emotion.dominance + tau * stimulus.dominance,
+        )
+        .clamped();
+    }
+
+    /// Update mood layer as EMA of emotion:
+    /// `mood = (1 - tau_m) * mood + tau_m * emotion`
+    pub fn update_mood(&mut self) {
+        let tau = self.tau_mood;
+        let retain = 1.0 - tau;
+        self.mood = PadVector::new(
+            retain * self.mood.pleasure + tau * self.emotion.pleasure,
+            retain * self.mood.arousal + tau * self.emotion.arousal,
+            retain * self.mood.dominance + tau * self.emotion.dominance,
+        )
+        .clamped();
+    }
+
+    /// Update temperament layer as EMA of mood:
+    /// `temperament = (1 - tau_t) * temperament + tau_t * mood`
+    pub fn update_temperament(&mut self) {
+        let tau = self.tau_temperament;
+        let retain = 1.0 - tau;
+        self.temperament = PadVector::new(
+            retain * self.temperament.pleasure + tau * self.mood.pleasure,
+            retain * self.temperament.arousal + tau * self.mood.arousal,
+            retain * self.temperament.dominance + tau * self.mood.dominance,
+        )
+        .clamped();
+    }
+
+    /// Compute the effective affect as a weighted blend:
+    /// 0.5 * emotion + 0.3 * mood + 0.2 * temperament
+    #[must_use]
+    pub fn effective_affect(&self) -> PadVector {
+        PadVector::new(
+            0.5 * self.emotion.pleasure
+                + 0.3 * self.mood.pleasure
+                + 0.2 * self.temperament.pleasure,
+            0.5 * self.emotion.arousal + 0.3 * self.mood.arousal + 0.2 * self.temperament.arousal,
+            0.5 * self.emotion.dominance
+                + 0.3 * self.mood.dominance
+                + 0.2 * self.temperament.dominance,
+        )
+        .clamped()
+    }
+
+    /// Process a tick, updating mood and temperament layers at their intervals.
+    pub fn tick(&mut self, tick_count: u64) {
+        if tick_count > 0 && tick_count % self.mood_interval == 0 {
+            self.update_mood();
+        }
+        if tick_count > 0 && tick_count % self.temperament_interval == 0 {
+            self.update_temperament();
+        }
+    }
+}
+
+/// Current single-layer affect snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
     /// Current PAD vector.
@@ -64,6 +319,12 @@ pub struct AffectState {
     pub behavioral_state: BehavioralState,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Three-layer ALMA temporal model (Gebhard 2005).
+    #[serde(default)]
+    pub alma: AlmaLayers,
+    /// Total appraisal ticks since creation.
+    #[serde(default)]
+    pub tick_count: u64,
 }
 
 impl Default for AffectState {
@@ -73,6 +334,8 @@ impl Default for AffectState {
             confidence: 0.5,
             behavioral_state: BehavioralState::Engaged,
             updated_at: Utc::now(),
+            alma: AlmaLayers::default(),
+            tick_count: 0,
         }
     }
 }
@@ -97,6 +360,7 @@ impl AffectState {
         let factor = decay_factor(elapsed_hours, half_life_hours);
         if factor != 1.0 {
             self.pad.decay_by_factor(factor);
+            // Confidence mean-reverts toward the neutral midpoint, not toward zero.
             self.confidence = (0.5 + (self.confidence - 0.5) * factor).clamp(0.0, 1.0);
         }
         self.refresh_behavioral_state();
@@ -111,8 +375,21 @@ impl AffectState {
         confidence: f64,
         now: DateTime<Utc>,
     ) {
-        self.pad.apply_delta(pleasure, arousal, dominance);
+        // Apply deltas to the emotion layer (fast, reactive).
+        let stimulus = PadVector::new(
+            self.alma.emotion.pleasure + pleasure,
+            self.alma.emotion.arousal + arousal,
+            self.alma.emotion.dominance + dominance,
+        )
+        .clamped();
+        self.alma.update_emotion(&stimulus);
+
         self.confidence = (self.confidence + confidence).clamp(0.0, 1.0);
+        self.tick_count += 1;
+        self.alma.tick(self.tick_count);
+
+        // Effective PAD = weighted blend of all three ALMA layers.
+        self.pad = self.alma.effective_affect();
         self.refresh_behavioral_state();
         self.updated_at = now;
     }
@@ -122,10 +399,13 @@ impl AffectState {
     }
 
     /// Build an emotional annotation from the current affect state.
+    ///
+    /// The `mood_snapshot` is taken from the ALMA mood layer, providing
+    /// a slower-moving baseline separate from the immediate emotional PAD.
     #[must_use]
     pub fn emotional_tag(&self, trigger: impl Into<String>) -> EmotionalTag {
         let normalized_intensity = (self.pad.magnitude() / 3.0_f64.sqrt()).clamp(0.0, 1.0) as f32;
-        EmotionalTag::new(self.pad, normalized_intensity, trigger, self.pad)
+        EmotionalTag::new(self.pad, normalized_intensity, trigger, self.alma.mood)
     }
 }
 
@@ -1455,6 +1735,235 @@ pub enum AffectEvent {
         /// Number of failing episodes observed.
         failure_count: usize,
     },
+    /// Dream cycle completed — its outcomes feed the affect model (INT-18).
+    ///
+    /// Positive outcomes (knowledge entries, playbooks, strategy hypotheses)
+    /// increase pleasure and dominance, while regressions decrease pleasure
+    /// and increase arousal.
+    DreamOutcome {
+        /// Number of knowledge entries written to the durable store.
+        knowledge_entries: usize,
+        /// Number of playbooks created during consolidation.
+        playbooks_created: usize,
+        /// Number of regressions detected during the dream cycle.
+        regressions_detected: usize,
+        /// Number of strategy hypotheses synthesized.
+        strategy_hypotheses: usize,
+        /// Number of episodes that were processed.
+        episodes_processed: usize,
+    },
+}
+
+// ─── OCC Appraisal Dimensions (P0-19) ───────────────────────────────
+
+/// Structured appraisal result from the OCC/Scherer evaluation.
+///
+/// Per spec (PRD 03-daimon/01-appraisal.md): events are evaluated along
+/// three primary dimensions before mapping to PAD vectors. This replaces
+/// the hardcoded PAD delta approach with principled emotion generation.
+///
+/// Three dimensions from OCC (Ortony, Clore & Collins 1988) + Scherer (2001):
+/// - **Desirability**: Was this event good or bad for the agent's goals?
+/// - **Likelihood**: How expected or unexpected was this event?
+/// - **Coping potential**: How well-equipped is the agent to handle this?
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppraisalResult {
+    /// Goal-congruence in [-1.0, 1.0]. Positive = good for goals, negative = bad.
+    pub desirability: f64,
+    /// Expectedness in [0.0, 1.0]. 0 = completely unexpected (surprise), 1 = fully expected.
+    pub likelihood: f64,
+    /// Coping ability in [0.0, 1.0]. 0 = helpless, 1 = fully in control.
+    pub coping_potential: f64,
+    /// Trigger category that produced this appraisal.
+    pub trigger: AppraisalTrigger,
+    /// Whether this event crossed the novelty threshold to warrant appraisal.
+    pub novel: bool,
+}
+
+/// Trigger categories for appraisal events.
+///
+/// Per spec: 10 categories, each mapping to different appraisal weights.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppraisalTrigger {
+    /// Gate or test result (performance feedback).
+    Performance,
+    /// Task completion or failure.
+    TaskOutcome,
+    /// External dependency or blocking event.
+    Blocked,
+    /// Temporal pressure.
+    TimePressure,
+    /// Resource or queue contention.
+    ResourceWait,
+    /// Dream cycle outcome.
+    Dream,
+    /// Anomaly or unexpected pattern.
+    Anomaly,
+    /// Periodic curator self-assessment (every ~50 ticks).
+    Curator,
+}
+
+impl AppraisalResult {
+    /// Map OCC appraisal dimensions to PAD vector deltas.
+    ///
+    /// Per spec formulas:
+    /// - Pleasure ← desirability (60%) + outcome direction (40%)
+    /// - Arousal  ← (1 - likelihood) × magnitude (surprise drives arousal)
+    /// - Dominance ← coping_potential (70%) + trend direction (30%)
+    ///
+    /// The negativity bias of 1.6x means negative desirability weighs heavier
+    /// (matching Kahneman-Tversky prospect theory).
+    #[must_use]
+    pub fn to_pad_delta(&self) -> PadVector {
+        if !self.novel {
+            return PadVector::neutral();
+        }
+
+        // Negativity bias: losses hurt ~1.6x more than equivalent gains feel good.
+        let negativity_bias = if self.desirability < 0.0 { 1.6 } else { 1.0 };
+
+        // Pleasure: primarily from desirability, scaled by bias.
+        let pleasure = self.desirability * negativity_bias * 0.15;
+
+        // Arousal: surprise (1 - likelihood) × magnitude of desirability.
+        let surprise = 1.0 - self.likelihood;
+        let arousal = surprise * self.desirability.abs() * 0.20;
+
+        // Dominance: coping potential is the primary driver.
+        let dominance = (self.coping_potential - 0.5) * 0.10;
+
+        PadVector {
+            pleasure: pleasure.clamp(-1.0, 1.0),
+            arousal: arousal.clamp(-1.0, 1.0),
+            dominance: dominance.clamp(-1.0, 1.0),
+        }
+    }
+
+    /// Evaluate structured appraisal from an AffectEvent.
+    ///
+    /// This layers principled OCC evaluation on top of the event, producing
+    /// dimensions that can be mapped to PAD or used directly.
+    #[must_use]
+    pub fn from_event(event: &AffectEvent, confidence: f64) -> Self {
+        match event {
+            AffectEvent::GateResult { passed, rung, .. } => Self {
+                desirability: if *passed {
+                    0.3 + 0.1 * (*rung as f64).min(3.0)
+                } else {
+                    -0.5 - 0.1 * (*rung as f64).min(3.0)
+                },
+                likelihood: if *passed { 0.7 } else { 0.4 }, // failures slightly more surprising
+                coping_potential: confidence.clamp(0.0, 1.0),
+                trigger: AppraisalTrigger::Performance,
+                novel: true,
+            },
+            AffectEvent::TaskOutcome { succeeded, .. } => Self {
+                desirability: if *succeeded { 0.8 } else { -0.9 },
+                likelihood: if *succeeded { 0.6 } else { 0.3 },
+                coping_potential: confidence.clamp(0.0, 1.0),
+                trigger: AppraisalTrigger::TaskOutcome,
+                novel: true,
+            },
+            AffectEvent::Blocked { blocker_count, .. } => {
+                let severity = (*blocker_count as f64 / 5.0).min(1.0);
+                Self {
+                    desirability: -0.3 * severity,
+                    likelihood: 0.5, // blocking is moderately expected
+                    coping_potential: (1.0 - severity * 0.5).max(0.1),
+                    trigger: AppraisalTrigger::Blocked,
+                    novel: *blocker_count > 1,
+                }
+            }
+            AffectEvent::TimePressure {
+                deadline_proximity, ..
+            } => Self {
+                desirability: -0.2 * deadline_proximity,
+                likelihood: 0.8, // time pressure is expected
+                coping_potential: (1.0 - deadline_proximity).max(0.1),
+                trigger: AppraisalTrigger::TimePressure,
+                novel: *deadline_proximity > 0.7,
+            },
+            AffectEvent::QueueWait { wait_hours, .. } => Self {
+                desirability: -0.1 * (wait_hours / 4.0).min(1.0),
+                likelihood: 0.6,
+                coping_potential: 0.5,
+                trigger: AppraisalTrigger::ResourceWait,
+                novel: *wait_hours > 2.0,
+            },
+            AffectEvent::DreamFailure { failure_count, .. } => Self {
+                desirability: -0.2 * (*failure_count as f64 / 5.0).min(1.0),
+                likelihood: 0.4,
+                coping_potential: confidence.clamp(0.0, 1.0) * 0.8,
+                trigger: AppraisalTrigger::Dream,
+                novel: *failure_count >= 2,
+            },
+            AffectEvent::DreamOutcome {
+                knowledge_entries,
+                regressions_detected,
+                episodes_processed,
+                ..
+            } => {
+                let positive = *knowledge_entries as f64;
+                let negative = *regressions_detected as f64;
+                let scale = (*episodes_processed as f64).sqrt().max(1.0);
+                Self {
+                    desirability: (positive - negative * 2.0) / scale * 0.3,
+                    likelihood: 0.5,
+                    coping_potential: confidence.clamp(0.0, 1.0),
+                    trigger: AppraisalTrigger::Dream,
+                    novel: *knowledge_entries > 0 || *regressions_detected > 0,
+                }
+            }
+        }
+    }
+}
+
+/// Novelty filter to prevent emotional flooding (spec section 3.2).
+///
+/// Tracks recent appraisal triggers to suppress duplicate emotions within
+/// a short window. Only events that cross a novelty threshold or are of
+/// a new category trigger full appraisal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoveltyFilter {
+    /// Recent trigger types (ring buffer of last N triggers).
+    recent_triggers: Vec<String>,
+    /// Maximum window size for deduplication.
+    window_size: usize,
+}
+
+impl NoveltyFilter {
+    /// Create a new novelty filter with the given deduplication window.
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            recent_triggers: Vec::new(),
+            window_size: window_size.max(1),
+        }
+    }
+
+    /// Check if a trigger is novel (not seen recently in the same category).
+    pub fn is_novel(&self, trigger: &AppraisalTrigger) -> bool {
+        let key = format!("{trigger:?}");
+        !self
+            .recent_triggers
+            .iter()
+            .rev()
+            .take(self.window_size)
+            .any(|t| t == &key)
+    }
+
+    /// Record a trigger (call after appraisal fires).
+    pub fn record(&mut self, trigger: &AppraisalTrigger) {
+        let key = format!("{trigger:?}");
+        self.recent_triggers.push(key);
+        if self.recent_triggers.len() > self.window_size * 2 {
+            self.recent_triggers.drain(..self.window_size);
+        }
+    }
+
+    /// Reset the filter.
+    pub fn reset(&mut self) {
+        self.recent_triggers.clear();
+    }
 }
 
 /// Single entry point for affect operations.
@@ -1471,6 +1980,27 @@ pub struct DaimonState {
     /// Active strategy-space definition for interpreting 8D coordinates.
     #[serde(default)]
     pub strategy_space: StrategySpaceDefinition,
+    /// Per-crate confidence hints for coding-domain integrations.
+    #[serde(default)]
+    pub crate_confidence_map: HashMap<String, f64>,
+    /// Per-crate confidence and fatigue tracking (DAIM-03).
+    #[serde(default)]
+    pub crate_trackers: HashMap<String, CrateConfidence>,
+    /// Rolling contrarian retrieval tracker.
+    #[serde(default)]
+    pub contrarian_tracker: ContrarianTracker,
+    /// Familiarity model for error-category appraisal scaling.
+    #[serde(default)]
+    pub error_patterns: ErrorPatternTracker,
+    /// Failure-streak tracker for fatigue detection.
+    #[serde(default)]
+    pub fatigue_detector: FatigueDetector,
+    /// Borrowed peer affect awaiting accelerated decay.
+    #[serde(default)]
+    pub borrowed_affect: Vec<BorrowedAffect>,
+    /// Behavioral state tracker with hysteresis and minimum dwell time (DAIM-02).
+    #[serde(default)]
+    pub behavioral_tracker: BehavioralStateTracker,
     /// Optional persistence path for best-effort autosaves.
     #[serde(skip, default)]
     persistence_path: Option<PathBuf>,
@@ -1491,6 +2021,13 @@ impl DaimonState {
             half_life_hours: default_half_life_hours(),
             somatic_landscape: SomaticLandscape::new(),
             strategy_space: StrategySpaceDefinition::default(),
+            crate_confidence_map: HashMap::new(),
+            crate_trackers: HashMap::new(),
+            contrarian_tracker: ContrarianTracker::default(),
+            error_patterns: ErrorPatternTracker::default(),
+            fatigue_detector: FatigueDetector::default(),
+            borrowed_affect: Vec::new(),
+            behavioral_tracker: BehavioralStateTracker::default(),
             persistence_path: None,
         }
     }
@@ -1641,6 +2178,8 @@ impl DaimonState {
     fn rebuild_indexes(&mut self) {
         self.somatic_landscape.rebuild_index();
         self.state.refresh_behavioral_state();
+        // Sync tracker with current state on reload.
+        self.behavioral_tracker.current_state = self.state.behavioral_state;
     }
 }
 
@@ -1737,7 +2276,43 @@ impl AffectEngine for DaimonState {
                 let confidence_drop = -(0.07 * failures).min(0.35);
                 self.state.apply_delta(0.0, 0.0, 0.0, confidence_drop, now);
             }
+            // INT-18: Dream outcomes feed the affect model.
+            // Positive outcomes (knowledge, playbooks, hypotheses) boost pleasure/dominance.
+            // Regressions decrease pleasure and raise arousal (heightened alertness).
+            AffectEvent::DreamOutcome {
+                knowledge_entries,
+                playbooks_created,
+                regressions_detected,
+                strategy_hypotheses,
+                episodes_processed,
+            } => {
+                let positive = (knowledge_entries + playbooks_created + strategy_hypotheses) as f64;
+                let negative = regressions_detected as f64;
+                let scale = if episodes_processed > 0 {
+                    (episodes_processed as f64).sqrt().min(5.0) / 5.0
+                } else {
+                    0.2
+                };
+                // Pleasure: net positive -> up, regressions -> down.
+                let pleasure = (positive * 0.03 - negative * 0.06).clamp(-0.30, 0.15) * scale;
+                // Arousal: regressions raise alertness, positive lowers it slightly.
+                let arousal = (negative * 0.04 - positive * 0.01).clamp(-0.10, 0.20) * scale;
+                // Dominance: knowledge acquisition increases sense of control.
+                let dominance = (positive * 0.02 - negative * 0.03).clamp(-0.15, 0.10) * scale;
+                // Confidence: net positive -> boost, net negative -> drop.
+                let confidence = (positive * 0.02 - negative * 0.05).clamp(-0.20, 0.10) * scale;
+                self.state
+                    .apply_delta(pleasure, arousal, dominance, confidence, now);
+            }
         }
+
+        // DAIM-02: Use hysteresis tracker instead of memoryless classification.
+        // The tracker enforces minimum dwell time and split entry/exit thresholds,
+        // preventing rapid oscillation between behavioral states.
+        let stable = self
+            .behavioral_tracker
+            .update(&self.state, self.state.tick_count);
+        self.state.behavioral_state = stable;
 
         self.autosave();
         self.state.pad
@@ -1745,7 +2320,8 @@ impl AffectEngine for DaimonState {
 
     fn query(&self) -> AffectState {
         let mut state = self.state.clone();
-        state.refresh_behavioral_state();
+        // Use the tracker's current stable state instead of memoryless classification.
+        state.behavioral_state = self.behavioral_tracker.current_state;
         state
     }
 
@@ -2039,6 +2615,193 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// DAIM-06: Mood-congruent memory retrieval.
+// ---------------------------------------------------------------------------
+
+/// Score a knowledge entry against the current mood for retrieval biasing.
+///
+/// Four factors are blended:
+/// - **Valence match**: PAD cosine similarity (emotional tone)
+/// - **Arousal match**: closeness of arousal intensity
+/// - **Recency**: exponential decay favoring newer entries
+/// - **Relevance**: semantic similarity passed in from the caller
+///
+/// The output is in `[0.0, 1.0]` and should be used as a soft multiplier
+/// on retrieval scores, not an override.
+#[must_use]
+pub fn mood_congruent_score(
+    entry_pad: &PadVector,
+    entry_created_at: DateTime<Utc>,
+    current_mood: &PadVector,
+    semantic_relevance: f64,
+    now: DateTime<Utc>,
+) -> f64 {
+    // Factor 1: Valence match via PAD cosine similarity -> [0.0, 1.0]
+    let valence_match = current_mood.cosine_similarity(*entry_pad);
+
+    // Factor 2: Arousal match -> [0.0, 1.0], 1.0 when identical intensity
+    let arousal_diff = (current_mood.arousal - entry_pad.arousal).abs();
+    let arousal_match = 1.0 - (arousal_diff / 2.0).clamp(0.0, 1.0);
+
+    // Factor 3: Recency -> exponential decay with 7-day half-life
+    let age_days = now
+        .signed_duration_since(entry_created_at)
+        .num_seconds()
+        .max(0) as f64
+        / 86400.0;
+    let recency = 0.5_f64.powf(age_days / 7.0);
+
+    // Factor 4: Semantic relevance -> pass-through, clamped
+    let relevance = semantic_relevance.clamp(0.0, 1.0);
+
+    // Weighted blend: valence 0.35, arousal 0.15, recency 0.20, relevance 0.30
+    let score = 0.35 * valence_match + 0.15 * arousal_match + 0.20 * recency + 0.30 * relevance;
+    score.clamp(0.0, 1.0)
+}
+
+// ---------------------------------------------------------------------------
+// DAIM-04: Somatic marker creation from dream replay episodes.
+// ---------------------------------------------------------------------------
+
+/// Create a somatic marker from an emotionally significant episode.
+///
+/// The episode's PAD state is mapped to valence (pleasure) and intensity
+/// (arousal magnitude). Positive markers bias future decisions toward approach;
+/// negative markers bias toward avoidance.
+#[must_use]
+pub fn create_somatic_marker(
+    episode_hash: ContentHash,
+    pad: &PadVector,
+    strategy_coords: StrategyCoordinates,
+) -> SomaticMarker {
+    SomaticMarker {
+        strategy_coords: strategy_coords.clamped(),
+        valence: pad.pleasure.clamp(-1.0, 1.0),
+        intensity: pad.arousal.abs().clamp(0.0, 1.0),
+        episodes: vec![episode_hash],
+        updated_at: Utc::now(),
+    }
+    .clamped()
+}
+
+/// Create somatic markers from a batch of dream replay results.
+///
+/// Only episodes whose PAD signal exceeds the configured intensity and
+/// valence thresholds produce markers; sub-threshold episodes are skipped.
+pub fn create_somatic_markers_from_dreams(
+    dream_results: &[(ContentHash, PadVector, StrategyCoordinates)],
+) -> Vec<SomaticMarker> {
+    dream_results
+        .iter()
+        .filter(|(_, pad, _)| {
+            pad.arousal.abs() >= SOMATIC_EVENT_INTENSITY_THRESHOLD
+                && pad.pleasure.abs() >= SOMATIC_EVENT_VALENCE_THRESHOLD
+        })
+        .map(|(hash, pad, coords)| create_somatic_marker(*hash, pad, *coords))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// DAIM-05: Full 8D behavioral strategy extraction from PAD octants.
+// ---------------------------------------------------------------------------
+
+/// Behavioral strategy derived from PAD octant mapping.
+///
+/// Each of the eight PAD octants maps to a distinct behavioral approach
+/// that influences agent behavior guidance and prompt composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehavioralStrategy {
+    /// (+P, +A, +D) Exuberant: aggressive exploration, high risk tolerance.
+    Exuberant,
+    /// (+P, +A, -D) Dependent: seek guidance, follow proven playbooks.
+    Dependent,
+    /// (+P, -A, +D) Relaxed: consolidate gains, exploit known patterns.
+    Relaxed,
+    /// (+P, -A, -D) Docile: passive acceptance, minimal intervention.
+    Docile,
+    /// (-P, +A, +D) Hostile: forceful correction, escalate resources.
+    Hostile,
+    /// (-P, +A, -D) Anxious: cautious probing, defensive validation.
+    Anxious,
+    /// (-P, -A, +D) Disdainful: selective engagement, skip low-value work.
+    Disdainful,
+    /// (-P, -A, -D) Bored: idle maintenance, background consolidation.
+    Bored,
+}
+
+impl BehavioralStrategy {
+    /// Human-readable guidance text for prompt composition.
+    #[must_use]
+    pub const fn guidance(self) -> &'static str {
+        match self {
+            Self::Exuberant => {
+                "Explore aggressively. Try novel approaches and accept higher risk for potential breakthroughs."
+            }
+            Self::Dependent => {
+                "Seek guidance from existing patterns. Follow proven playbooks and ask for clarification when uncertain."
+            }
+            Self::Relaxed => {
+                "Consolidate recent gains. Exploit known-good patterns rather than exploring new territory."
+            }
+            Self::Docile => {
+                "Make minimal changes. Accept current state and avoid unnecessary intervention."
+            }
+            Self::Hostile => {
+                "Apply forceful correction. Escalate model tier, increase retries, and push through blockers."
+            }
+            Self::Anxious => {
+                "Proceed cautiously. Add extra validation, prefer conservative strategies, and verify assumptions."
+            }
+            Self::Disdainful => {
+                "Be selective. Focus only on high-value tasks and skip marginal work items."
+            }
+            Self::Bored => {
+                "Run background maintenance. Trigger dream cycles, consolidate knowledge, and clean up technical debt."
+            }
+        }
+    }
+
+    /// Map this strategy to a dispatch strategy for the agent loop.
+    #[must_use]
+    pub const fn dispatch_strategy(self) -> DispatchStrategy {
+        match self {
+            Self::Exuberant => DispatchStrategy::Exploratory,
+            Self::Dependent => DispatchStrategy::Conservative,
+            Self::Relaxed => DispatchStrategy::Balanced,
+            Self::Docile => DispatchStrategy::Conservative,
+            Self::Hostile => DispatchStrategy::Escalating,
+            Self::Anxious => DispatchStrategy::Conservative,
+            Self::Disdainful => DispatchStrategy::Balanced,
+            Self::Bored => DispatchStrategy::Proactive,
+        }
+    }
+}
+
+/// Extract the full 8D behavioral strategy from a PAD vector.
+///
+/// Maps the PAD vector's sign pattern to one of eight behavioral strategies,
+/// each derived from the corresponding octant of the PAD space.
+#[must_use]
+pub fn strategy_from_pad(pad: &PadVector) -> BehavioralStrategy {
+    // Treat near-zero values as the positive side (approach default).
+    let positive_pleasure = pad.pleasure >= 0.0;
+    let positive_arousal = pad.arousal >= 0.0;
+    let positive_dominance = pad.dominance >= 0.0;
+
+    match (positive_pleasure, positive_arousal, positive_dominance) {
+        (true, true, true) => BehavioralStrategy::Exuberant,
+        (true, true, false) => BehavioralStrategy::Dependent,
+        (true, false, true) => BehavioralStrategy::Relaxed,
+        (true, false, false) => BehavioralStrategy::Docile,
+        (false, true, true) => BehavioralStrategy::Hostile,
+        (false, true, false) => BehavioralStrategy::Anxious,
+        (false, false, true) => BehavioralStrategy::Disdainful,
+        (false, false, false) => BehavioralStrategy::Bored,
+    }
+}
+
 fn apply_somatic_bias(params: &mut DispatchParams, state: &AffectState, signal: &SomaticSignal) {
     if !signal.is_actionable() {
         return;
@@ -2162,13 +2925,14 @@ mod tests {
             rung: 2,
         });
 
+        // ALMA blends emotion with neutral mood/temperament, so effective PAD
+        // is 50% of the emotion layer delta.
         assert!(pad.pleasure < 0.0);
         assert!(pad.arousal > 0.0);
         assert!(pad.dominance < 0.0);
-        assert!(matches!(
-            state.query().behavioral_state,
-            BehavioralState::Exploring | BehavioralState::Struggling
-        ));
+        // With ALMA + hysteresis tracker (min_dwell_ticks=10), a single event
+        // won't transition away from Engaged.
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
         assert!(path.exists());
 
         let reloaded = DaimonState::load_or_new(&path);
@@ -2181,15 +2945,17 @@ mod tests {
 
     #[test]
     fn modulation_escalates_on_negative_state() {
+        // With ALMA + hysteresis, we need enough failures to (1) accumulate
+        // negative emotion across ALMA layers and (2) exceed the tracker's
+        // min_dwell_ticks. Set min_dwell_ticks=0 to test modulation directly.
         let mut state = DaimonState::new();
-        let _ = state.appraise(AffectEvent::TaskOutcome {
-            task_id: "task-a".to_string(),
-            succeeded: false,
-        });
-        let _ = state.appraise(AffectEvent::TaskOutcome {
-            task_id: "task-a".to_string(),
-            succeeded: false,
-        });
+        state.behavioral_tracker.min_dwell_ticks = 0;
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "task-a".to_string(),
+                succeeded: false,
+            });
+        }
 
         let mut params = DispatchParams::new("claude-haiku-4-5", 20);
         state.modulate(&mut params);
@@ -2244,6 +3010,35 @@ mod tests {
         assert_eq!(tag.trigger, "task_outcome");
         assert!(tag.intensity > 0.0);
         assert_eq!(tag.pad, state.query().pad);
+        // mood_snapshot comes from the ALMA mood layer, which is slower-moving
+        // than the effective PAD. After only 1 tick it stays near neutral.
+        assert_eq!(tag.mood_snapshot, state.state.alma.mood);
+    }
+
+    #[test]
+    fn affect_state_decay_moves_toward_neutral_and_midpoint() {
+        let updated_at = Utc::now() - chrono::Duration::hours(4);
+        let mut state = AffectState {
+            pad: PadVector::new(0.8, -0.6, 0.4),
+            confidence: 0.9,
+            behavioral_state: BehavioralState::Focused,
+            updated_at,
+            alma: AlmaLayers::default(),
+            tick_count: 0,
+        };
+        let now = Utc::now();
+
+        state.decay(4.0, now);
+
+        assert!((state.pad.pleasure - 0.4).abs() < 1e-10);
+        assert!((state.pad.arousal + 0.3).abs() < 1e-10);
+        assert!((state.pad.dominance - 0.2).abs() < 1e-10);
+        assert!((state.confidence - 0.7).abs() < 1e-10);
+        assert_eq!(
+            state.behavioral_state,
+            BehavioralState::classify(state.pad, state.confidence)
+        );
+        assert_eq!(state.updated_at, now);
     }
 
     #[test]
@@ -2662,5 +3457,303 @@ mod tests {
         assert_eq!(custom.scope, baseline.scope);
         assert_eq!(custom.reversibility, baseline.reversibility);
         assert_eq!(custom.dependency_depth, baseline.dependency_depth);
+    }
+
+    // --- DAIM-08: ALMA three-layer temporal model tests ---
+
+    #[test]
+    fn alma_emotion_layer_responds_to_stimulus() {
+        let mut alma = AlmaLayers::default();
+        let stimulus = PadVector::new(0.8, -0.4, 0.6);
+        alma.update_emotion(&stimulus);
+
+        // tau_emotion=0.1, so emotion = 0.9*0.0 + 0.1*stimulus
+        assert!((alma.emotion.pleasure - 0.08).abs() < 1e-10);
+        assert!((alma.emotion.arousal - (-0.04)).abs() < 1e-10);
+        assert!((alma.emotion.dominance - 0.06).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_mood_layer_tracks_emotion_via_ema() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.6, -0.3, 0.4);
+        alma.update_mood();
+
+        // tau_mood=0.5, so mood = 0.5*0.0 + 0.5*emotion
+        assert!((alma.mood.pleasure - 0.3).abs() < 1e-10);
+        assert!((alma.mood.arousal - (-0.15)).abs() < 1e-10);
+        assert!((alma.mood.dominance - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_temperament_evolves_slowly() {
+        let mut alma = AlmaLayers::default();
+        alma.mood = PadVector::new(0.5, -0.2, 0.3);
+        alma.update_temperament();
+
+        // tau_temperament=0.9, so temperament = 0.1*0.0 + 0.9*mood
+        assert!((alma.temperament.pleasure - 0.45).abs() < 1e-10);
+        assert!((alma.temperament.arousal - (-0.18)).abs() < 1e-10);
+        assert!((alma.temperament.dominance - 0.27).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_effective_affect_blends_all_layers() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(1.0, 0.0, 0.0);
+        alma.mood = PadVector::new(0.0, 1.0, 0.0);
+        alma.temperament = PadVector::new(0.0, 0.0, 1.0);
+
+        let effective = alma.effective_affect();
+
+        // 0.5*emotion + 0.3*mood + 0.2*temperament
+        assert!((effective.pleasure - 0.5).abs() < 1e-10);
+        assert!((effective.arousal - 0.3).abs() < 1e-10);
+        assert!((effective.dominance - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn alma_tick_updates_mood_at_interval() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.8, 0.0, 0.0);
+
+        // Mood should not update before interval.
+        alma.tick(5);
+        assert_eq!(alma.mood, PadVector::neutral());
+
+        // Mood updates at tick 10 (default mood_interval=10).
+        alma.tick(10);
+        assert!(alma.mood.pleasure > 0.0);
+    }
+
+    #[test]
+    fn alma_tick_updates_temperament_at_interval() {
+        let mut alma = AlmaLayers::default();
+        alma.mood = PadVector::new(0.5, 0.0, 0.0);
+
+        // Temperament should not update before interval.
+        alma.tick(50);
+        assert_eq!(alma.temperament, PadVector::neutral());
+
+        // Temperament updates at tick 100 (default temperament_interval=100).
+        alma.tick(100);
+        assert!(alma.temperament.pleasure > 0.0);
+    }
+
+    #[test]
+    fn alma_layers_serialize_and_deserialize() {
+        let mut alma = AlmaLayers::default();
+        alma.emotion = PadVector::new(0.3, -0.1, 0.2);
+        alma.mood = PadVector::new(0.1, 0.0, 0.1);
+
+        let json = serde_json::to_string(&alma).unwrap();
+        let deserialized: AlmaLayers = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(alma, deserialized);
+    }
+
+    #[test]
+    fn alma_backward_compat_missing_fields_defaults() {
+        // Old serialized state without ALMA fields should deserialize with defaults.
+        let json = r#"{"pad":{"pleasure":0.1,"arousal":-0.1,"dominance":0.2},"confidence":0.6,"behavioral_state":"engaged","updated_at":"2025-01-01T00:00:00Z"}"#;
+        let state: AffectState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.alma, AlmaLayers::default());
+        assert_eq!(state.tick_count, 0);
+    }
+
+    // --- DAIM-02: Mood sampling hysteresis tests ---
+
+    #[test]
+    fn hysteresis_prevents_rapid_oscillation() {
+        // Without hysteresis, a single bad event could flip Engaged -> Struggling
+        // and back. With the tracker (min_dwell_ticks=10), rapid flipping is dampened.
+        let mut state = DaimonState::new();
+
+        // Single failure should NOT transition from Engaged.
+        let _ = state.appraise(AffectEvent::GateResult {
+            plan_id: "plan-a".to_string(),
+            task_id: "task-a".to_string(),
+            passed: false,
+            rung: 3,
+        });
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
+
+        // Immediate success should also NOT flip away from Engaged.
+        let _ = state.appraise(AffectEvent::GateResult {
+            plan_id: "plan-a".to_string(),
+            task_id: "task-a".to_string(),
+            passed: true,
+            rung: 3,
+        });
+        assert_eq!(state.query().behavioral_state, BehavioralState::Engaged);
+    }
+
+    #[test]
+    fn hysteresis_allows_transition_after_dwell() {
+        let mut state = DaimonState::new();
+        // Set min_dwell_ticks=0 so transition can happen immediately if the
+        // hysteresis thresholds are met.
+        state.behavioral_tracker.min_dwell_ticks = 0;
+
+        // Multiple failures to push into Struggling territory.
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "t".to_string(),
+                succeeded: false,
+            });
+        }
+
+        assert_eq!(state.query().behavioral_state, BehavioralState::Struggling);
+    }
+
+    #[test]
+    fn behavioral_tracker_persists_across_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+
+        let mut state = DaimonState::load_or_new(&path);
+        state.behavioral_tracker.min_dwell_ticks = 0;
+        for _ in 0..8 {
+            let _ = state.appraise(AffectEvent::TaskOutcome {
+                task_id: "t".to_string(),
+                succeeded: false,
+            });
+        }
+        let before = state.behavioral_tracker.current_state;
+
+        let reloaded = DaimonState::load_or_new(&path);
+        assert_eq!(reloaded.behavioral_tracker.current_state, before);
+    }
+
+    // --- DAIM-06: Mood-congruent retrieval ---
+
+    #[test]
+    fn mood_congruent_score_prefers_matching_valence() {
+        let now = Utc::now();
+        let positive_mood = PadVector::new(0.8, 0.3, 0.5);
+        let positive_entry = PadVector::new(0.7, 0.2, 0.4);
+        let negative_entry = PadVector::new(-0.8, -0.3, -0.5);
+
+        let score_match = mood_congruent_score(&positive_entry, now, &positive_mood, 0.8, now);
+        let score_mismatch = mood_congruent_score(&negative_entry, now, &positive_mood, 0.8, now);
+
+        assert!(score_match > score_mismatch);
+    }
+
+    #[test]
+    fn mood_congruent_score_decays_with_age() {
+        let now = Utc::now();
+        let mood = PadVector::new(0.5, 0.0, 0.0);
+        let entry_pad = PadVector::new(0.5, 0.0, 0.0);
+        let old = now - chrono::Duration::days(30);
+
+        let score_fresh = mood_congruent_score(&entry_pad, now, &mood, 0.8, now);
+        let score_stale = mood_congruent_score(&entry_pad, old, &mood, 0.8, now);
+
+        assert!(score_fresh > score_stale);
+    }
+
+    // --- DAIM-07: Contagion with maturity decay ---
+
+    #[test]
+    fn contagion_susceptibility_decays_with_maturity() {
+        let young = contagion_susceptibility(0);
+        let mature = contagion_susceptibility(1000);
+        let old = contagion_susceptibility(5000);
+
+        assert!(young > mature);
+        assert!(mature > old);
+        assert!(old >= 0.1); // floor
+    }
+
+    #[test]
+    fn contagion_blends_peer_affect() {
+        let my_pad = PadVector::neutral();
+        let peer_pads = vec![PadVector::new(0.8, 0.2, 0.0)];
+        let result = contagion(&my_pad, &peer_pads, 0);
+
+        // Young agent (tick=0), full susceptibility
+        assert!(result.pleasure > 0.0);
+        assert!(result.arousal > 0.0);
+    }
+
+    #[test]
+    fn contagion_caps_arousal() {
+        let my_pad = PadVector::neutral();
+        let peer_pads = vec![PadVector::new(0.0, 1.0, 0.0)];
+        let result = contagion(&my_pad, &peer_pads, 0);
+
+        // Arousal should be capped at 0.3
+        assert!(result.arousal <= 0.3 + 1e-10);
+    }
+
+    #[test]
+    fn contagion_empty_peers_returns_self() {
+        let my_pad = PadVector::new(0.5, -0.3, 0.2);
+        let result = contagion(&my_pad, &[], 100);
+        assert_eq!(result, my_pad);
+    }
+
+    // INT-18 tests: DreamOutcome variant feeds the affect model.
+
+    #[test]
+    fn dream_outcome_positive_boosts_pleasure() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+        let before = state.query().pad.pleasure;
+
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 5,
+            playbooks_created: 2,
+            regressions_detected: 0,
+            strategy_hypotheses: 3,
+            episodes_processed: 10,
+        });
+
+        assert!(
+            state.query().pad.pleasure > before,
+            "positive dream outcomes should increase pleasure"
+        );
+    }
+
+    #[test]
+    fn dream_outcome_regressions_lower_confidence() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+        let before = state.query().confidence;
+
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 0,
+            playbooks_created: 0,
+            regressions_detected: 4,
+            strategy_hypotheses: 0,
+            episodes_processed: 10,
+        });
+
+        assert!(
+            state.query().confidence < before,
+            "dream regressions should lower confidence"
+        );
+    }
+
+    #[test]
+    fn dream_outcome_zero_episodes_still_applies() {
+        let tmp = TempDir::new().unwrap();
+        let path = temp_state_path(&tmp);
+        let mut state = DaimonState::load_or_new(&path);
+
+        // Zero episodes -> small scale factor, but should not panic.
+        let _ = state.appraise(AffectEvent::DreamOutcome {
+            knowledge_entries: 1,
+            playbooks_created: 0,
+            regressions_detected: 0,
+            strategy_hypotheses: 0,
+            episodes_processed: 0,
+        });
+        // Just verify it didn't panic and state is still valid.
+        assert!(state.query().confidence >= 0.0);
+        assert!(state.query().confidence <= 1.0);
     }
 }

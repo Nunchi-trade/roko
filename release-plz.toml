@@ -1,0 +1,32 @@
+# release-plz configuration for roko workspace.
+#
+# Automates version bumping, changelog generation, and release PR creation.
+# See: https://release-plz.ieni.dev/docs/config
+
+[workspace]
+# Use git-cliff for changelog generation.
+changelog_config = "cliff.toml"
+# Allow updating packages with unpublished dependencies.
+allow_dirty = true
+# All crates are publish = false; we release binaries not crates.
+publish = false
+# Create a single release PR for the entire workspace.
+release_commits = "^(feat|fix|perf|refactor|docs|test|chore)"
+# Do not update cargo registry (we distribute binaries only).
+registry_update = false
+
+[[package]]
+name = "roko-cli"
+# This is the primary binary we release.
+publish = false
+# Generate changelog for the CLI binary.
+changelog_include = [
+    "roko-core",
+    "roko-agent",
+    "roko-gate",
+    "roko-compose",
+    "roko-orchestrator",
+    "roko-learn",
+    "roko-serve",
+    "roko-cli",
+]

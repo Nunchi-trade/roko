@@ -472,7 +472,7 @@ pub struct ParseHealth {
 |---|---|---|---|
 | Initial parse (10K line file) | ~2ms | ~10ms | Tree-sitter is slower for initial but more accurate |
 | Incremental re-parse (1 line change) | N/A (full re-parse) | ~50μs | Tree-sitter's killer feature |
-| Full workspace parse (177K lines) | ~100ms | ~500ms | Initial; subsequent passes are incremental |
+| Full workspace parse (~322K lines) | ~100ms | ~500ms | Initial; subsequent passes are incremental |
 | Symbol extraction (per file) | ~0.5ms | ~1ms | Including query execution |
 | Import extraction (per file) | ~0.3ms | ~0.5ms | Including query execution |
 

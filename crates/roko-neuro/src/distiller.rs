@@ -25,6 +25,10 @@ use crate::{EmotionalProvenance, KnowledgeEntry, KnowledgeKind, ValidationArc};
 const DEFAULT_MODEL: &str = "claude-haiku-3-5";
 const DEFAULT_MAX_TOKENS: u32 = 2_048;
 const DEFAULT_CONFIDENCE: f64 = 0.75;
+const DISTILLER_SOURCE: &str = "distiller";
+const MAX_DISTILLED_TAGS: usize = 12;
+const MAX_DISTILLED_SOURCE_EPISODES: usize = 32;
+const MIN_MULTI_EPISODE_SUPPORT: usize = 2;
 
 /// Backend contract for episode distillation.
 #[async_trait]
@@ -151,13 +155,22 @@ struct DistillationEnvelope {
 impl DistillationEnvelope {
     fn into_entries(self, episodes: &[Episode]) -> Vec<KnowledgeEntry> {
         let fallback_source = batch_source_episodes(episodes);
+        let valid_source_ids = fallback_source
+            .as_ref()
+            .map(|ids| ids.iter().cloned().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         let episode_models = episode_models_by_source(episodes);
         let episode_affect = episode_affect_by_source(episodes);
 
         self.entries
             .into_iter()
             .filter_map(|candidate| {
-                candidate.into_entry(fallback_source.as_deref(), &episode_models, &episode_affect)
+                candidate.into_entry(
+                    fallback_source.as_deref(),
+                    &valid_source_ids,
+                    &episode_models,
+                    &episode_affect,
+                )
             })
             .collect()
     }
@@ -187,6 +200,7 @@ impl DistillationCandidate {
     fn into_entry(
         mut self,
         fallback_source: Option<&[String]>,
+        valid_source_ids: &BTreeSet<String>,
         episode_models: &BTreeMap<String, String>,
         episode_affect: &BTreeMap<String, EpisodeAffectSnapshot>,
     ) -> Option<KnowledgeEntry> {
@@ -195,21 +209,30 @@ impl DistillationCandidate {
             return None;
         }
 
+        let source_episodes_were_explicit = !self.source_episodes.is_empty();
         if self.source_episodes.is_empty()
             && let Some(source) = fallback_source
         {
             self.source_episodes.extend(source.iter().cloned());
         }
 
-        self.source_episodes.sort();
-        self.source_episodes.dedup();
+        self.source_episodes = sanitize_source_episodes(self.source_episodes, valid_source_ids);
+        if source_episodes_were_explicit && self.source_episodes.is_empty() {
+            return None;
+        }
+        self.tags = sanitize_tags(self.tags);
+
+        if requires_multi_episode_support(self.kind)
+            && self.source_episodes.len() < MIN_MULTI_EPISODE_SUPPORT
+        {
+            return None;
+        }
 
         let kind_tag = knowledge_kind_tag(self.kind);
         if !self.tags.iter().any(|tag| tag == kind_tag) {
             self.tags.push(kind_tag.to_string());
         }
-        self.tags.sort();
-        self.tags.dedup();
+        self.tags = sanitize_tags(self.tags);
 
         let confidence = self.confidence.clamp(0.0, 1.0);
         let (source_model, model_generality) = inferred_model_scope(
@@ -230,7 +253,7 @@ impl DistillationCandidate {
         Some(KnowledgeEntry {
             id: derive_knowledge_id(self.kind, content, &self.source_episodes, &self.tags),
             kind: self.kind,
-            source: None,
+            source: Some(DISTILLER_SOURCE.to_string()),
             content: content.to_string(),
             confidence,
             confidence_weight: confidence,
@@ -246,8 +269,49 @@ impl DistillationCandidate {
             emotional_tag,
             emotional_provenance,
             hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         })
     }
+}
+
+fn sanitize_source_episodes(
+    source_episodes: Vec<String>,
+    valid_source_ids: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut sanitized = source_episodes
+        .into_iter()
+        .map(|source| source.trim().to_string())
+        .filter(|source| !source.is_empty())
+        .filter(|source| valid_source_ids.is_empty() || valid_source_ids.contains(source))
+        .collect::<Vec<_>>();
+    sanitized.sort();
+    sanitized.dedup();
+    sanitized.truncate(MAX_DISTILLED_SOURCE_EPISODES);
+    sanitized
+}
+
+const fn requires_multi_episode_support(kind: KnowledgeKind) -> bool {
+    matches!(
+        kind,
+        KnowledgeKind::Heuristic | KnowledgeKind::StrategyFragment
+    )
+}
+
+fn sanitize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut sanitized = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    sanitized.sort();
+    sanitized.dedup();
+    sanitized.truncate(MAX_DISTILLED_TAGS);
+    sanitized
 }
 
 #[derive(Debug, Clone)]
@@ -760,10 +824,13 @@ mod tests {
     #[tokio::test]
     async fn model_specific_heuristics_preserve_model_metadata() {
         let backend = MockBackend::new(
-            r#"<|json|>{"entries":[{"kind":"heuristic","content":"Use XML tool tags for tool calls.","confidence":0.82,"source_episodes":["ep-a"],"source_model":"claude-sonnet-4-5","model_generality":0.2}]}<|/json|>"#,
+            r#"<|json|>{"entries":[{"kind":"heuristic","content":"Use XML tool tags for tool calls.","confidence":0.82,"source_episodes":["ep-a","ep-b"],"source_model":"claude-sonnet-4-5","model_generality":0.2}]}<|/json|>"#,
         );
         let distiller = Distiller::with_backend(backend);
-        let episodes = vec![episode("signal-a", "ep-a", true)];
+        let episodes = vec![
+            episode("signal-a", "ep-a", true),
+            episode("signal-b", "ep-b", true),
+        ];
 
         let entries = distiller.distill(&episodes).await.expect("distill");
         assert_eq!(entries.len(), 1);
@@ -775,6 +842,56 @@ mod tests {
         assert!((entries[0].model_generality - 0.2).abs() < f64::EPSILON);
         assert!(entries[0].applies_to_model("claude-sonnet-4-5"));
         assert!(!entries[0].applies_to_model("gpt-5.4"));
+    }
+
+    #[tokio::test]
+    async fn distiller_bounds_tags_and_marks_entry_source() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"insight","content":"Normalize noisy tags.","confidence":0.9,"source_episodes":[" ep-a ","","ep-a","ep-b"],"tags":[" one ","two","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let entries = distiller
+            .distill(&[
+                episode("signal-a", "ep-a", true),
+                episode("signal-b", "ep-b", true),
+            ])
+            .await
+            .expect("distill");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source.as_deref(), Some(DISTILLER_SOURCE));
+        assert_eq!(entries[0].source_episodes, vec!["ep-a", "ep-b"]);
+        assert!(entries[0].tags.iter().any(|tag| tag == "insight"));
+        assert!(entries[0].tags.len() <= MAX_DISTILLED_TAGS);
+    }
+
+    #[tokio::test]
+    async fn single_episode_distillation_does_not_emit_heuristics_or_strategy_fragments() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"heuristic","content":"One run is enough.","confidence":0.8,"source_episodes":["ep-a"]},{"kind":"strategy_fragment","content":"Always do this from one attempt.","confidence":0.9,"source_episodes":["ep-a"]},{"kind":"insight","content":"One concrete observation.","confidence":0.7,"source_episodes":["ep-a"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let entries = distiller
+            .distill(&[episode("signal-a", "ep-a", true)])
+            .await
+            .expect("distill");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, KnowledgeKind::Insight);
+    }
+
+    #[tokio::test]
+    async fn distiller_discards_unknown_source_episode_ids() {
+        let backend = MockBackend::new(
+            r#"<|json|>{"entries":[{"kind":"insight","content":"Unknown provenance should drop.","confidence":0.8,"source_episodes":["not-in-batch"]}]}<|/json|>"#,
+        );
+        let distiller = Distiller::with_backend(backend);
+        let entries = distiller
+            .distill(&[episode("signal-a", "ep-a", true)])
+            .await
+            .expect("distill");
+
+        assert!(entries.is_empty());
     }
 
     #[tokio::test]

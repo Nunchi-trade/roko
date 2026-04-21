@@ -84,7 +84,7 @@ impl RelayState {
             .card
             .as_ref()
             .map(|_| relay_card_uri(&hello.agent_id))
-            .or(hello.card_uri.clone());
+            .or_else(|| hello.card_uri.clone());
         let agent = ConnectedAgent {
             agent_id: hello.agent_id.clone(),
             name: hello.name,
@@ -151,18 +151,16 @@ impl RelayState {
                 return;
             }
             inner.agents.remove(agent_id);
-
-            let message_ids = inner
-                .pending
-                .iter()
-                .filter(|(_, pending)| pending.agent_id == agent_id)
-                .map(|(message_id, _)| message_id.clone())
-                .collect::<Vec<_>>();
-
-            message_ids
-                .into_iter()
-                .filter_map(|message_id| inner.pending.remove(&message_id))
-                .collect::<Vec<_>>()
+            let mut pending = Vec::new();
+            for (message_id, pending_response) in std::mem::take(&mut inner.pending) {
+                if pending_response.agent_id == agent_id {
+                    pending.push(pending_response);
+                } else {
+                    inner.pending.insert(message_id, pending_response);
+                }
+            }
+            drop(inner);
+            pending
         };
 
         for pending in pending {
@@ -310,8 +308,11 @@ pub fn relay_card_uri(agent_id: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }

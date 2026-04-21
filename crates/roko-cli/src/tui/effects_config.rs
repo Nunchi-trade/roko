@@ -130,8 +130,15 @@ impl EffectsConfig {
     }
 
     /// Load TUI effects from `roko.toml`, falling back to defaults on error.
+    ///
+    /// If `ROKO_REDUCED_MOTION` is set, forces all animations and effects off.
     #[must_use]
     pub fn load_from_root(root: &Path) -> Self {
+        // Respect reduced-motion: disable all effects.
+        if std::env::var_os("ROKO_REDUCED_MOTION").is_some() {
+            return Self::default();
+        }
+
         let mut config = Self::default();
         let Ok(content) = std::fs::read_to_string(root.join("roko.toml")) else {
             return config;
@@ -149,6 +156,12 @@ impl EffectsConfig {
             bool_at_path(&value, &["tui", "effects", "screen_postfx"]).unwrap_or(false);
 
         config
+    }
+
+    /// Check if reduced-motion mode is active (via env var).
+    #[must_use]
+    pub fn is_reduced_motion() -> bool {
+        std::env::var_os("ROKO_REDUCED_MOTION").is_some()
     }
 
     fn apply_preset(&mut self, preset: EffectsPreset) {

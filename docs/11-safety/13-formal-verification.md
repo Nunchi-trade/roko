@@ -708,11 +708,9 @@ The `Gate` trait (defined in `roko-core`) is:
 ```rust
 #[async_trait]
 pub trait Gate: Send + Sync {
-    async fn verify(&self, engram: &Signal) -> Result<Verdict>;
+    async fn verify(&self, engram: &Engram) -> Result<Verdict>;
 }
 ```
-
-Where `Signal` will be renamed to `Engram` in Tier 0D of the implementation plan.
 
 ### Timeout handling per stage with fallback logic
 
@@ -876,7 +874,7 @@ pub struct VerificationPipelineGate {
 
 #[async_trait]
 impl Gate for VerificationPipelineGate {
-    async fn verify(&self, engram: &Signal) -> Result<Verdict> {
+    async fn verify(&self, engram: &Engram) -> Result<Verdict> {
         let target = extract_verification_target(engram)?;
         let result = run_pipeline(&self.config, &target).await;
 

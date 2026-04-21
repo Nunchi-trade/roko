@@ -7,6 +7,8 @@ use roko_core::{Body, Context, Engram, Kind, Policy};
 
 /// Maximum consecutive identical compile failures before firing.
 pub const MAX_IDENTICAL_COMPILE_FAILURES: usize = 3;
+/// Docs-compatible alias for [`MAX_IDENTICAL_COMPILE_FAILURES`].
+pub const MAX_COMPILE_FAIL_REPEAT: usize = MAX_IDENTICAL_COMPILE_FAILURES;
 
 /// Tag key marking signals from this watcher.
 pub const WATCHER_NAME: &str = "compile-fail-repeat";
@@ -15,7 +17,7 @@ pub const WATCHER_NAME: &str = "compile-fail-repeat";
 ///
 /// Scans `CompileDiagnostic` signals from the end of the stream and
 /// fires when the same error text appears consecutively at least
-/// [`MAX_IDENTICAL_COMPILE_FAILURES`] times.
+/// [`MAX_COMPILE_FAIL_REPEAT`] times.
 #[derive(Debug, Clone)]
 pub struct CompileFailRepeatWatcher {
     /// Consecutive identical compile failures before firing.

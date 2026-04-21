@@ -2,84 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Normalized Pleasure-Arousal-Dominance vector.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
-pub struct PadVector {
-    /// Pleasure in `[-1.0, 1.0]`.
-    pub pleasure: f64,
-    /// Arousal in `[-1.0, 1.0]`.
-    pub arousal: f64,
-    /// Dominance in `[-1.0, 1.0]`.
-    pub dominance: f64,
-}
-
-impl PadVector {
-    /// Construct a normalized PAD vector.
-    #[must_use]
-    pub const fn new(pleasure: f64, arousal: f64, dominance: f64) -> Self {
-        Self {
-            pleasure,
-            arousal,
-            dominance,
-        }
-    }
-
-    /// Neutral PAD vector.
-    #[must_use]
-    pub const fn neutral() -> Self {
-        Self::new(0.0, 0.0, 0.0)
-    }
-
-    /// Clamp all dimensions to the legal `[-1.0, 1.0]` range.
-    #[must_use]
-    pub fn clamped(self) -> Self {
-        Self {
-            pleasure: self.pleasure.clamp(-1.0, 1.0),
-            arousal: self.arousal.clamp(-1.0, 1.0),
-            dominance: self.dominance.clamp(-1.0, 1.0),
-        }
-    }
-
-    /// Add a delta in-place, keeping the vector normalized.
-    pub fn apply_delta(&mut self, pleasure: f64, arousal: f64, dominance: f64) {
-        *self = Self::new(
-            self.pleasure + pleasure,
-            self.arousal + arousal,
-            self.dominance + dominance,
-        )
-        .clamped();
-    }
-
-    /// Apply an exponential decay factor in-place.
-    pub fn decay_by_factor(&mut self, factor: f64) {
-        *self = Self::new(
-            self.pleasure * factor,
-            self.arousal * factor,
-            self.dominance * factor,
-        )
-        .clamped();
-    }
-
-    /// Euclidean magnitude of the PAD vector.
-    #[must_use]
-    pub fn magnitude(self) -> f64 {
-        (self.pleasure.powi(2) + self.arousal.powi(2) + self.dominance.powi(2)).sqrt()
-    }
-
-    /// PAD cosine similarity mapped to `[0.0, 1.0]`.
-    #[must_use]
-    pub fn cosine_similarity(self, other: Self) -> f64 {
-        let dot = self.pleasure * other.pleasure
-            + self.arousal * other.arousal
-            + self.dominance * other.dominance;
-        let mag_self = self.magnitude();
-        let mag_other = other.magnitude();
-        if mag_self == 0.0 || mag_other == 0.0 {
-            return 0.5;
-        }
-        (dot / (mag_self * mag_other) + 1.0) / 2.0
-    }
-}
+/// Re-export the canonical PAD vector from [`roko_primitives`].
+///
+/// This is the **single definition** shared across the entire workspace.
+/// Previously roko-core defined its own `PadVector` (f64) and roko-runtime
+/// had a separate f32 variant; both now delegate to `roko_primitives::PadVector`.
+pub use roko_primitives::PadVector;
 
 /// Discrete behavioral state derived from PAD plus affect confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -102,6 +30,9 @@ pub enum BehavioralState {
 
 impl BehavioralState {
     /// Classify a behavioral state from the current PAD vector and confidence.
+    ///
+    /// This classifier is memoryless: it uses only the current snapshot and
+    /// applies no hysteresis, dwell-time, or transition cooldown.
     #[must_use]
     pub fn classify(pad: PadVector, confidence: f64) -> Self {
         let p = pad.pleasure;
@@ -157,7 +88,7 @@ impl DaimonPolicy {
     }
 }
 
-/// Optional emotional metadata attached to an Engram.
+/// Optional PAD-based emotional metadata attached to an Engram.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EmotionalTag {
     /// Immediate PAD signal associated with the engram.
@@ -166,7 +97,9 @@ pub struct EmotionalTag {
     pub intensity: f32,
     /// Human-readable or machine-generated trigger label.
     pub trigger: String,
-    /// Snapshot of the broader affective mood when the engram was created.
+    /// Snapshot of the current PAD state when the engram was created.
+    ///
+    /// The live runtime does not persist a separate mood/personality layer.
     pub mood_snapshot: PadVector,
 }
 
@@ -217,6 +150,22 @@ mod tests {
         assert_eq!(
             BehavioralState::classify(PadVector::new(0.0, 0.2, 0.0), 0.5),
             BehavioralState::Exploring
+        );
+    }
+
+    #[test]
+    fn behavioral_state_classification_uses_documented_threshold_precedence() {
+        assert_eq!(
+            BehavioralState::classify(PadVector::neutral(), 0.0),
+            BehavioralState::Engaged
+        );
+        assert_eq!(
+            BehavioralState::classify(PadVector::new(0.5, 0.5, -0.4), 0.8),
+            BehavioralState::Struggling
+        );
+        assert_eq!(
+            BehavioralState::classify(PadVector::new(0.5, 0.0, 0.4), 0.8),
+            BehavioralState::Coasting
         );
     }
 

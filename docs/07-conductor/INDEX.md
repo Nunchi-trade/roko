@@ -99,7 +99,7 @@ Every watcher implements the same trait:
 
 ```rust
 pub trait Policy {
-    fn decide(&self, stream: &[Signal], ctx: &Context) -> Vec<Signal>;
+    fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
     fn name(&self) -> &str;
 }
 ```

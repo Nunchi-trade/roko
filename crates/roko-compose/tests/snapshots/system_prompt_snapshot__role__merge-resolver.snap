@@ -33,6 +33,10 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 ## Tool Instructions
 
+## MCP Tools (free, instant)
+
+You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
+
 Claude tool allowlist: Read,Edit,Bash
 
 Use only the tools granted to your role.
@@ -91,7 +95,7 @@ Do NOT:
 
 ## Affect Guidance
 
-You are under time pressure, focus on the most critical path. Prefer proven approaches, verify early, and surface uncertainty explicitly. Execute decisively, but keep claims grounded in evidence. This task resembles prior failure territory; favor conservative validation and known-safe sequences.
+You are under time pressure, focus on the most critical path. Prefer proven approaches, verify early, and surface uncertainty explicitly. Execute decisively, but keep claims grounded in evidence. Prefer proven patterns over experimental approaches. This task resembles prior failure territory; favor conservative validation and known-safe sequences.
 
 <!-- LAYERED VIEW -->
 
@@ -125,6 +129,10 @@ Prefer deterministic fixtures and readable snapshot diffs.
 
 <!-- TOOLS -->
 ## Tool Instructions
+
+## MCP Tools (free, instant)
+
+You have MCP server tools. Use them for file reading, searching, and navigation instead of shelling out. They are faster and do not consume subprocess budget.
 
 Claude tool allowlist: Read,Edit,Bash
 
@@ -191,4 +199,4 @@ Do NOT:
 <!-- POLICY -->
 ## Affect Guidance
 
-You are under time pressure, focus on the most critical path. Prefer proven approaches, verify early, and surface uncertainty explicitly. Execute decisively, but keep claims grounded in evidence. This task resembles prior failure territory; favor conservative validation and known-safe sequences.
+You are under time pressure, focus on the most critical path. Prefer proven approaches, verify early, and surface uncertainty explicitly. Execute decisively, but keep claims grounded in evidence. Prefer proven patterns over experimental approaches. This task resembles prior failure territory; favor conservative validation and known-safe sequences.

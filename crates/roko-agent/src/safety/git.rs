@@ -197,6 +197,12 @@ fn strip_leading_prefixes(mut s: &str) -> &str {
             continue;
         }
 
+        // Strip leading `env ` so subsequent assignment tokens can be removed.
+        if let Some(rest) = s.strip_prefix("env ") {
+            s = rest.trim_start();
+            continue;
+        }
+
         // Strip `env KEY=VALUE` tokens (one at a time).
         // An env assignment looks like a token that contains `=` and whose
         // left side has no `/` (to avoid confusing paths like `/usr/bin/env`).
@@ -607,7 +613,14 @@ mod tests {
         assert_blocked("cd /repo && git push --force origin main");
     }
 
-    // ── Test 18: chained command — second segment checked ────────────────────
+    // ── Test 18: env prefix stripped ─────────────────────────────────────────
+
+    #[test]
+    fn env_prefix_stripped() {
+        assert_blocked("env GIT_SSH_COMMAND=ssh git push --force origin main");
+    }
+
+    // ── Test 19: chained command — second segment checked ────────────────────
 
     #[test]
     fn chained_command_each_segment_checked() {
@@ -615,7 +628,7 @@ mod tests {
         assert_blocked("git status && git push --force origin main");
     }
 
-    // ── Test 19: default policy values are sane ───────────────────────────────
+    // ── Test 20: default policy values are sane ───────────────────────────────
 
     #[test]
     fn default_policy_values_sane() {
@@ -643,7 +656,7 @@ mod tests {
         );
     }
 
-    // ── Test 20: custom protected branches list ───────────────────────────────
+    // ── Test 21: custom protected branches list ───────────────────────────────
 
     #[test]
     fn custom_protected_branches_list() {

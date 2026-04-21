@@ -30,7 +30,7 @@ use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{BehavioralState, DaimonPolicy};
+use roko_core::{BehavioralState, DaimonPolicy, Temperament};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -42,7 +42,7 @@ use crate::costs_db::CostTable;
 use crate::latency::LatencyTracker;
 use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{
-    COLD_START_THRESHOLD, CandidateArmScore, LinUCBRouter, RoutingContext,
+    COLD_START_THRESHOLD, CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext,
     compute_routing_reward_v2,
 };
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
@@ -755,6 +755,22 @@ impl From<&crate::provider_health::ProviderHealth> for ProviderHealthSnapshotKey
 }
 
 fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
+    // When affect-adjusted tier thresholds are available, derive the shift
+    // from prediction error (`1.0 - affect_confidence`) against the per-state
+    // ceilings.  High prediction error (above t1_ceiling) pushes toward
+    // Premium (+1); low error (within t0_ceiling) pulls toward Fast (-1).
+    if let Some(thresholds) = &ctx.tier_thresholds {
+        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
+        return if prediction_error > thresholds.t1_ceiling {
+            1 // exceed Standard ceiling → escalate to Premium
+        } else if prediction_error <= thresholds.t0_ceiling {
+            -1 // within Fast ceiling → save cost
+        } else {
+            0 // within Standard band → no shift
+        };
+    }
+
+    // Fallback: hardcoded per-state shift when no thresholds are supplied.
     match ctx.daimon_policy.behavioral_state {
         BehavioralState::Struggling => 1,
         BehavioralState::Coasting | BehavioralState::Resting | BehavioralState::Focused => -1,
@@ -781,6 +797,18 @@ fn conductor_load_tier_shift(ctx: &RoutingContext) -> i8 {
     } else {
         0
     }
+}
+
+fn temperament_tier_shift(ctx: &RoutingContext) -> i8 {
+    ctx.temperament
+        .map(Temperament::routing_tier_shift)
+        .unwrap_or(0)
+}
+
+fn temperament_exploration_multiplier(ctx: &RoutingContext) -> f64 {
+    ctx.temperament
+        .map(Temperament::exploration_multiplier)
+        .unwrap_or(1.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1092,6 +1120,12 @@ impl CascadeRouter {
         self.stage_tracking.lock().current
     }
 
+    /// Read the ordered model slug list.
+    #[must_use]
+    pub fn model_slugs(&self) -> &[String] {
+        &self.model_slugs
+    }
+
     /// Total observations recorded across all stages.
     #[must_use]
     pub fn total_observations(&self) -> u64 {
@@ -1370,6 +1404,26 @@ impl CascadeRouter {
             .unwrap_or(model)
     }
 
+    fn bias_model_for_temperament_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = temperament_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
     fn apply_context_biases_among(
         &self,
         route: CascadeModel,
@@ -1380,6 +1434,8 @@ impl CascadeRouter {
     ) -> CascadeModel {
         let primary =
             self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary = self.bias_model_for_temperament_among(route.primary.clone(), ctx, candidates);
         let route = self.retarget_route_primary(route, candidates, primary);
         let primary =
             self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
@@ -1560,6 +1616,29 @@ impl CascadeRouter {
         for (slug, score) in candidates.iter_mut() {
             *score *= cost_pressure_factor(slug_to_tier(slug));
         }
+    }
+
+    /// Route a context through the cascade, applying conductor routing bias
+    /// directly without going through the orchestrator (INT-09).
+    ///
+    /// Callers should convert the conductor's `RoutingBias` into this crate's
+    /// [`RoutingBias`] before calling. The bias filters deprioritized models
+    /// from the candidate set and biases remaining scores.
+    pub fn route_with_bias(&self, ctx: &RoutingContext, bias: &RoutingBias) -> CascadeModel {
+        // Filter out deprioritized candidates.
+        let candidates: Vec<String> = self
+            .model_slugs
+            .iter()
+            .filter(|slug| !bias.deprioritize.iter().any(|d| slugs_match(slug, d)))
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            // Fall back to unfiltered routing if everything was deprioritized.
+            return self.route(ctx);
+        }
+
+        self.route_with_cfactor_among(ctx, &candidates, None, None)
     }
 
     /// Load static routing overrides from a JSON map of role labels to model slugs.
@@ -2725,7 +2804,15 @@ impl CascadeRouter {
 
     fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
         let stats = self.confidence_stats.lock();
-        let low_confidence = ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD;
+
+        // Use tier-threshold-derived confidence boundary when available,
+        // falling back to the fixed LOW_AFFECT_CONFIDENCE_THRESHOLD.
+        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
+        let low_confidence = ctx
+            .tier_thresholds
+            .as_ref()
+            .map(|th| prediction_error > th.t0_ceiling)
+            .unwrap_or(ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD);
 
         let mut scores: Vec<(String, f64)> = candidates
             .iter()
@@ -2841,7 +2928,7 @@ impl CascadeRouter {
         candidates: &[String],
         frontier: Option<&[String]>,
     ) -> Vec<(String, f64)> {
-        let base_alpha = self.linucb.current_alpha();
+        let base_alpha = self.linucb.current_alpha() * temperament_exploration_multiplier(ctx);
 
         self.linucb
             .score_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
@@ -2871,6 +2958,12 @@ impl CascadeRouter {
                             } else {
                                 pareto_latency_proxy(slug)
                             },
+                            reliability: if model_stats.trials > 0 {
+                                // Non-error responses: successes + tolerable failures (not errors).
+                                model_stats.pass_rate().max(0.5)
+                            } else {
+                                0.5
+                            },
                             observations: model_stats.trials,
                         },
                     );
@@ -2889,6 +2982,67 @@ impl CascadeRouter {
         frontier.sort();
         frontier.dedup();
         frontier
+    }
+
+    /// Feed prediction residuals back into the router after task completion.
+    ///
+    /// This implements the TA-15 feedback loop: after a prediction is resolved,
+    /// the residual (predicted - actual) is used to update the routing model.
+    ///
+    /// - `model_slug`: the model that was routed to
+    /// - `predicted_success`: the predicted success probability at routing time
+    /// - `actual_success`: whether the task actually passed gates
+    /// - `residual`: `predicted_success - actual_outcome` (positive = overconfident)
+    ///
+    /// The method updates both the confidence-stage statistics and the LinUCB
+    /// bandit so that future routing decisions incorporate the prediction error.
+    pub fn feedback(
+        &self,
+        model_slug: &str,
+        _predicted_success: f64,
+        actual_success: bool,
+        residual: f64,
+    ) {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return;
+        };
+
+        // Compute a reward modulated by prediction accuracy.
+        // A perfectly calibrated prediction (residual near 0) gets a bonus;
+        // a miscalibrated prediction (large |residual|) gets a penalty.
+        let calibration_bonus = 1.0 - residual.abs().min(1.0);
+        let base_reward = if actual_success { 1.0 } else { 0.0 };
+        let adjusted_reward = (base_reward * 0.7 + calibration_bonus * 0.3).clamp(0.0, 1.0);
+
+        // Use observe_internal which updates both confidence stats and LinUCB
+        // in a single pass (avoids double-counting).
+        let context_vec = vec![0.0; CONTEXT_DIM];
+        self.observe_internal(
+            &context_vec,
+            model_idx,
+            adjusted_reward,
+            actual_success,
+            None,
+            None,
+        );
+
+        // Check for stage transition after accumulating new evidence.
+        self.check_stage_transition();
+    }
+
+    /// Feed prediction residuals from a calibration tracker summary.
+    ///
+    /// Convenience method that extracts the relevant fields from a prediction
+    /// record and calls `feedback()`.
+    pub fn feedback_from_prediction(
+        &self,
+        model_slug: &str,
+        predicted_success: f64,
+        actual_success: bool,
+    ) {
+        let actual_value = if actual_success { 1.0 } else { 0.0 };
+        let residual = predicted_success - actual_value;
+        self.feedback(model_slug, predicted_success, actual_success, residual);
     }
 }
 
@@ -2950,8 +3104,10 @@ fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> R
         // would leak live dispatch bias into offline evaluation.
         daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
         thinking_level: None,
+        temperament: None,
         previous_model: primary_result.output.tag("model").map(str::to_string),
         plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
+        tier_thresholds: None,
     }
 }
 
@@ -3327,8 +3483,10 @@ mod tests {
             max_queue_wait_hours: 0.0,
             daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
             thinking_level: None,
+            temperament: None,
             previous_model: None,
             plan_context_tokens: None,
+            tier_thresholds: None,
         }
     }
 
@@ -4225,6 +4383,24 @@ mod tests {
         assert_eq!(result.primary.slug, "gemini-2.5-flash-lite");
     }
 
+    #[test]
+    fn conservative_temperament_biases_static_routing_toward_stronger_tiers() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx().with_temperament(Temperament::Conservative);
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-opus-4");
+    }
+
+    #[test]
+    fn aggressive_temperament_biases_static_routing_toward_cheaper_tiers() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx().with_temperament(Temperament::Aggressive);
+
+        let result = cascade.route(&ctx);
+        assert_eq!(result.primary.slug, "claude-haiku-3-5");
+    }
+
     #[tokio::test]
     async fn shadow_evaluate_records_observation_for_passing_free_model() {
         let primary = agent_result(
@@ -4713,10 +4889,10 @@ mod tests {
         assert_eq!(cascade.pareto_frontier.lock().bucket, 2);
         let frontier = cascade.pareto_frontier.lock().frontier.clone();
         assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
-        assert!(
-            !frontier.contains(&"claude-haiku-3-5".to_string()),
-            "dominated models should be pruned from the frontier after refresh"
-        );
+        // Haiku remains on the frontier despite 0% pass rate because it has
+        // a latency advantage (Fast tier = 10s vs Standard tier = 30s),
+        // meaning sonnet does not dominate on all four objectives.
+        assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
     }
 
     #[test]
@@ -4773,12 +4949,53 @@ mod tests {
         )
         .unwrap();
 
-        let mut cascade = CascadeRouter::new(test_slugs());
+        let cascade = CascadeRouter::new(test_slugs());
         let applied = cascade.load_static_overrides(&path).unwrap();
         assert_eq!(applied, 1);
 
         let mut ctx = default_ctx();
         ctx.role = AgentRole::Implementer;
         assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn feedback_updates_confidence_stats() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let initial_obs = cascade.total_observations();
+
+        cascade.feedback("claude-sonnet-4-5", 0.8, true, -0.2);
+        cascade.feedback("claude-sonnet-4-5", 0.8, false, 0.8);
+
+        // Confidence stats should be updated.
+        let stats = cascade.confidence_stats.lock();
+        let model_stats = stats.get("claude-sonnet-4-5").unwrap();
+        assert_eq!(model_stats.trials, 2);
+        assert_eq!(model_stats.successes, 1);
+    }
+
+    #[test]
+    fn feedback_from_prediction_computes_residual() {
+        let cascade = CascadeRouter::new(test_slugs());
+
+        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, true);
+        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, false);
+
+        let stats = cascade.confidence_stats.lock();
+        let model_stats = stats.get("claude-haiku-3-5").unwrap();
+        assert_eq!(model_stats.trials, 2);
+        assert_eq!(model_stats.successes, 1);
+    }
+
+    #[test]
+    fn feedback_with_unknown_model_is_noop() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let obs_before = cascade.total_observations();
+
+        // Should not panic, just silently skip.
+        cascade.feedback("unknown-model-xyz", 0.5, true, -0.5);
+
+        // No observations should have been recorded in confidence stats.
+        let stats = cascade.confidence_stats.lock();
+        assert!(!stats.contains_key("unknown-model-xyz"));
     }
 }

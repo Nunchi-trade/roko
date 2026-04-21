@@ -12,7 +12,15 @@ Technical analysis (TA) originated as a financial discipline — chart patterns,
 
 The core insight: code, markets, research, and operations all share the same structural properties that make TA useful — measurable state variables, time series dynamics, feedback loops, pattern recurrence, adversarial dynamics, and external verification. A build time trend is structurally analogous to a price trend. A test failure probability is structurally analogous to a risk assessment. The mathematics is identical; the domain vocabulary changes.
 
-The `Oracle` trait provides the universal interface. Domain-specific implementations (chain, coding, research, custom) handle the details. New domains are added by implementing the Oracle trait — not modifying the kernel.
+The `Oracle` trait provides the universal interface. Domain-specific implementations (chain, coding, research, custom) handle the details. New domains are added by implementing the Oracle trait — not modifying the kernel. This topic is also where REF15's compounding, superlinear, and exponential product claims become measurable, where REF18's moat becomes observable, and where REF19's net-new innovation claims become testable rather than rhetorical: the oracle stack is intended to supply the KPIs, anti-metrics, calibration traces, and replay evidence that can separate a genuinely new primitive from a careful integration. See [tmp/refinements/15-exponential-scaling.md](../../tmp/refinements/15-exponential-scaling.md), [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md), [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md), and the shared [glossary](../00-architecture/01-naming-and-glossary.md).
+
+> **Status framing**: This topic mixes shipping building blocks with research
+> hypotheses. Shipping today: the Rust orchestration/runtime stack, multi-backend
+> dispatch, the gate pipeline, HDC primitives, episode logging/feedback loops,
+> and the interactive TUI. Target-state or research-hypothesis material here
+> includes the universal Oracle surface, moat telemetry over unbuilt primitives,
+> demurrage dashboards, replication-ledger-backed claims, and much of the
+> REF19 innovation catalog.
 
 ---
 
@@ -20,7 +28,7 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 
 | # | File | Title | Lines | Summary |
 |---|---|---|---|---|
-| 00 | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) | TA as Universal Oracle Primitives | ~230 | Vision document. Why generalize TA. Structural analogy argument. Cross-domain HDC transfer. Where oracles fit in the Synapse Architecture. |
+| 00 | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) | TA as Universal Oracle Primitives | ~280 | Vision document. Why generalize TA. Structural analogy argument. Cross-domain HDC transfer. Includes target-state moat telemetry and an honesty split between shipping evidence, research hypotheses, and integrated prior art. |
 | 01 | [01-oracle-trait.md](./01-oracle-trait.md) | The Oracle Trait | ~380 | Full Rust trait signature. `predict()`, `evaluate()`. OracleQuery, Prediction, PredictionAccuracy structs. PredictionStore, ResidualCorrector, CalibrationTracker. Integration with all 6 Synapse traits. |
 | 02 | [02-chain-oracles.md](./02-chain-oracles.md) | Chain Oracles | ~300 | ChainOracle implementation. Traditional TA (MA, RSI, Bollinger, MACD). DeFi-native indicators (concentrated liquidity, lending, funding rates, yield curves, on-chain options). MEV detection. 8 T0 chain probes. Mirage-rs integration. |
 | 03 | [03-coding-oracles.md](./03-coding-oracles.md) | Coding Oracles | ~320 | CodingOracle implementation. Build time prediction, test failure probability, complexity drift, dependency risk, performance regression. 6 T0 coding probes. Tech debt feedback loops. roko-index integration. |
@@ -33,7 +41,7 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 | 10 | [10-predictive-geometry-and-resonant-patterns.md](./10-predictive-geometry-and-resonant-patterns.md) | Predictive Geometry & Resonant Patterns | ~320 | TDA persistence diagrams and landscapes (Bubenik). Topology-to-trajectory mapping. Resonant patterns as organisms with HDC genomes. Reproductive algebra. VCG auction competition. Lotka-Volterra dynamics. Price equation. |
 | 11 | [11-adversarial-signal-robustness.md](./11-adversarial-signal-robustness.md) | Adversarial Signal Robustness | ~300 | Adversarial signal decomposition. HDC prototype matching (~10ns). Robust statistics (trimmed mean, Hodges-Lehmann, MAD, rank transform). Signal cross-validation. Red-team dreaming algorithm. Domain-specific attack prototypes. |
 | 12 | [12-somatic-ta-and-emergent-multiscale.md](./12-somatic-ta-and-emergent-multiscale.md) | Somatic TA & Emergent Multiscale Intelligence | ~320 | Somatic markers (Damasio) as HDC bindings. PAD encoding. Somatic retrieval (~63ns). 15% contrarian retrieval (Bower). IIT Phi over 9 TA subsystems (510 bipartitions). MIB diagnostic. PID synergy detection (Williams & Beer). |
-| 13 | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) | Predictive Foraging & Active Inference | ~330 | The complete prediction-resolution-calibration loop. PredictionClaim, ResidualCorrector (~50ns), CalibrationTracker. Active inference POMDP (90 states). EFE decomposition (pragmatic + epistemic - ambiguity). Charnov MVT stopping rule. Thompson Sampling for oracle selection. Collective calibration on Korai. |
+| 13 | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) | Predictive Foraging & Active Inference | ~330 | The complete prediction-resolution-calibration loop. PredictionClaim, ResidualCorrector (~50ns), CalibrationTracker. Active inference POMDP (90 states). EFE decomposition (pragmatic + epistemic - ambiguity). Charnov MVT stopping rule. Thompson Sampling for oracle selection. Collective calibration on Korai and the data needed for REF15 scaling KPIs. |
 | 14 | [14-sheaf-tropical-geometry.md](./14-sheaf-tropical-geometry.md) | Sheaf-Theoretic Consistency & Tropical Decision Geometry | ~450 | Cellular sheaves for oracle consistency (Hansen & Ghrist). Sheaf Laplacian, cohomology for inconsistency detection. Sheaf neural networks (Bodnar et al.). Tropical semiring (max-plus). Tropical polynomials as oracle decisions. Tropical convexity. Tropical attention (symbolic-neural fusion). Tropical robustness (exact adversarial distances). Tropical VCG auctions. |
 
 ---
@@ -47,6 +55,8 @@ The `Oracle` trait provides the universal interface. Domain-specific implementat
 | **PredictionStore** | Lifecycle management: register → track → resolve → feedback | [01-oracle-trait.md](./01-oracle-trait.md) |
 | **ResidualCorrector** | Bias elimination at ~50ns per correction | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) |
 | **CalibrationTracker** | Per-(model, category) accuracy statistics | [13-predictive-foraging-and-active-inference.md](./13-predictive-foraging-and-active-inference.md) |
+| **Scaling dashboard** | Target-state cross-session compounding KPIs, moat telemetry, and anti-metrics for testing superlinear claims | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) |
+| **Net-new innovation lens** | Distinguishes shipping innovations from research hypotheses and integrated prior art | [00-vision-ta-generalized.md](./00-vision-ta-generalized.md) |
 | **CorticalState** | Shared atomic signal bus for T0 probes | [05-witness-as-ta-generalized.md](./05-witness-as-ta-generalized.md) |
 | **T0 Probes** | 16 zero-LLM probes (8 chain + 6 coding + 2 universal) | [02-chain-oracles.md](./02-chain-oracles.md), [03-coding-oracles.md](./03-coding-oracles.md) |
 | **HDC pattern algebra** | 10,240-bit BSC vectors: bind (XOR), bundle (majority), permute (rotate) | [06-hyperdimensional-ta.md](./06-hyperdimensional-ta.md) |
@@ -179,9 +189,9 @@ All academic citations used across this topic's sub-documents:
 ## Generation notes
 
 - **Generated by**: Claude Opus 4.6, PRD migration batch
-- **Source material**: `refactoring-prd/03-cognitive-subsystems.md` §4, `refactoring-prd/09-innovations.md` §I/II/III/VII/XIX, `refactoring-prd/01-synapse-architecture.md`, `bardo-backup/prd/23-ta/*` (11 legacy files), `bardo-backup/tmp/agent-chain/10-predictive-foraging.md`, `tmp/implementation-plans/modelrouting/12-advanced-patterns.md`
-- **Naming map applied**: golem→agent, grimoire→neuro, bardo→roko, Signal→Engram, GNOS→KORAI, clade→collective, Styx→Agent Mesh
-- **Reframe rules applied**: mortality→resource management, death clocks→budget limits, succession→backup/restore
+- **Source material**: `refactoring-prd/03-cognitive-subsystems.md` §4, `refactoring-prd/09-innovations.md` §I/II/III/VII/XIX, `refactoring-prd/01-synapse-architecture.md`, legacy sources `bardo-backup/prd/23-ta/*` (11 legacy files) and `bardo-backup/tmp/agent-chain/10-predictive-foraging.md`, plus `tmp/implementation-plans/modelrouting/12-advanced-patterns.md`
+- **Legacy naming map applied**: golem→agent, grimoire→neuro, bardo→roko, Signal→Engram, GNOS→KORAI, clade→collective, Styx→Agent Mesh
+- **Legacy reframe rules applied**: mortality→resource management, death clocks→budget limits, succession→backup/restore
 - **Citation count**: 76 unique academic citations across 15 sub-documents
 - **Total lines**: ~11,000 across 16 files
 - **2025-04-13 enhancement**: Deep research pass adding oracle calibration/composition (conformal prediction, Brier decomposition), information geometry (Fisher-Rao, natural gradient, α-connections, Wasserstein), continuous DAG learning (NOTEARS, DAG-GNN, SDCD, DAGMA), advanced TDA (persistence images, Ripser, vectorization methods), certified adversarial robustness (randomized smoothing, Lipschitz bounds, IBP), sheaf theory (cellular sheaves, Laplacian, cohomology), and tropical geometry (max-plus semiring, tropical attention, tropical VCG auctions). 28 new citations from 2017-2025 research.

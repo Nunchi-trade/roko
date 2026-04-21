@@ -21,9 +21,9 @@
 use std::sync::Arc;
 
 use roko_core::config::schema::ModelProfile;
-use roko_core::tool::{ToolFormat, format::profile_for_model};
+use roko_core::tool::{ToolDef, ToolFormat, format::profile_for_model};
 
-use super::{ClaudeTranslator, OllamaTranslator, ReActTranslator, Translator};
+use super::{ClaudeTranslator, GeminiTranslator, OllamaTranslator, ReActTranslator, Translator};
 
 /// Snapshot of a model's tool-calling capabilities.
 ///
@@ -129,6 +129,18 @@ pub fn capabilities_from_profile(profile: &ModelProfile) -> ModelCapabilities {
     }
 }
 
+/// Enforce the model's configured tool-count ceiling before dispatch.
+#[must_use]
+pub fn cap_tools_for_profile(profile: &ModelProfile, mut tools: Vec<ToolDef>) -> Vec<ToolDef> {
+    let limit = usize::from(
+        capabilities_from_profile(profile)
+            .max_tools_before_degrade
+            .max(1),
+    );
+    tools.truncate(limit);
+    tools
+}
+
 fn tool_format_from_str(tool_format: &str) -> ToolFormat {
     match tool_format.trim() {
         "openai_json" => ToolFormat::OpenAiJson,
@@ -151,18 +163,30 @@ fn tool_format_from_str(tool_format: &str) -> ToolFormat {
 /// dedicated translator for the model's preferred format.
 #[must_use]
 pub fn translator_for(slug: &str) -> Arc<dyn Translator> {
-    let caps = capabilities_for(slug);
-    if !caps.supports_tools {
+    translator_for_capabilities(&capabilities_for(slug))
+}
+
+/// Pick the translator best suited to a capability snapshot.
+#[must_use]
+pub fn translator_for_capabilities(capabilities: &ModelCapabilities) -> Arc<dyn Translator> {
+    if !capabilities.supports_tools {
         return Arc::new(ReActTranslator);
     }
-    match caps.tool_format {
+    match &capabilities.tool_format {
         ToolFormat::AnthropicBlocks => Arc::new(ClaudeTranslator),
         ToolFormat::OpenAiJson => Arc::new(OllamaTranslator),
+        ToolFormat::Custom(name) if name == "gemini_native" => Arc::new(GeminiTranslator),
         // `ReActText` plus every format without a dedicated translator yet
         // (HermesJson, Gemma4Tokens, MistralTokens, Pythonic, QwenXml,
         // JsonMode, Custom) all fall through to the ReAct fallback.
         _ => Arc::new(ReActTranslator),
     }
+}
+
+/// Pick the translator for a fully resolved model profile.
+#[must_use]
+pub fn translator_for_profile(profile: &ModelProfile) -> Arc<dyn Translator> {
+    translator_for_capabilities(&capabilities_from_profile(profile))
 }
 
 /// Short, stable name of the translator Roko picks for a model slug.
@@ -174,18 +198,30 @@ pub fn translator_for(slug: &str) -> Arc<dyn Translator> {
 /// This matches [`translator_for`] exactly.
 #[must_use]
 pub fn translator_name_for(slug: &str) -> &'static str {
-    let caps = capabilities_for(slug);
-    if !caps.supports_tools {
+    translator_name_for_capabilities(&capabilities_for(slug))
+}
+
+/// Short, stable name of the translator Roko picks for a capability snapshot.
+#[must_use]
+pub fn translator_name_for_capabilities(capabilities: &ModelCapabilities) -> &'static str {
+    if !capabilities.supports_tools {
         return "react";
     }
-    match caps.tool_format {
+    match &capabilities.tool_format {
         ToolFormat::AnthropicBlocks => "claude",
         ToolFormat::OpenAiJson => "openai",
+        ToolFormat::Custom(name) if name == "gemini_native" => "gemini",
         // ReActText + every format without a dedicated translator
         // (HermesJson, Gemma4Tokens, MistralTokens, Pythonic, QwenXml,
         // JsonMode, Custom) falls through to the ReAct fallback.
         _ => "react",
     }
+}
+
+/// Short, stable name of the translator Roko picks for a full model profile.
+#[must_use]
+pub fn translator_name_for_profile(profile: &ModelProfile) -> &'static str {
+    translator_name_for_capabilities(&capabilities_from_profile(profile))
 }
 
 #[cfg(test)]
@@ -348,6 +384,33 @@ mod tests {
     }
 
     #[test]
+    fn cap_tools_for_profile_truncates_to_model_limit() {
+        let profile = ModelProfile {
+            provider: "openai".to_string(),
+            slug: "qwen3-32b".to_string(),
+            supports_tools: true,
+            tool_format: "openai_json".to_string(),
+            max_tools: Some(2),
+            ..Default::default()
+        };
+        let tools = (0..5)
+            .map(|index| {
+                roko_core::tool::ToolDef::new(
+                    format!("tool_{index}"),
+                    "test tool",
+                    roko_core::tool::ToolCategory::Read,
+                    roko_core::tool::ToolPermission::read_only(),
+                )
+            })
+            .collect();
+
+        let capped = cap_tools_for_profile(&profile, tools);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].name, "tool_0");
+        assert_eq!(capped[1].name, "tool_1");
+    }
+
+    #[test]
     fn translator_for_claude_slug_uses_claude_translator() {
         // Trait objects can't be downcast, so we discriminate via
         // `.format()` — each translator advertises its own wire format.
@@ -405,6 +468,24 @@ mod tests {
         assert_eq!(translator_name_for("llama3.2-3b"), "react");
         // HermesJson has no dedicated translator → react
         assert_eq!(translator_name_for("qwen3-32b"), "react");
+    }
+
+    #[test]
+    fn translator_for_profile_routes_gemini_native_models_to_gemini_translator() {
+        let profile = ModelProfile {
+            provider: "gemini".to_string(),
+            slug: "gemini-2.5-pro".to_string(),
+            supports_tools: true,
+            tool_format: "gemini_native".to_string(),
+            ..Default::default()
+        };
+
+        let translator = translator_for_profile(&profile);
+        assert_eq!(
+            translator.format(),
+            ToolFormat::Custom("gemini_native".to_string())
+        );
+        assert_eq!(translator_name_for_profile(&profile), "gemini");
     }
 
     #[test]

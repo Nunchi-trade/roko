@@ -1,6 +1,6 @@
 # Packaging and Distribution
 
-> How Roko's 18-crate Cargo workspace is packaged, versioned, and distributed to users through
+> How Roko's 36-workspace-member Cargo workspace is packaged, versioned, and distributed to users through
 > multiple channels: crates.io, Homebrew, GitHub Releases with prebuilt binaries, and Docker
 > images on ghcr.io. This document covers the full release pipeline from commit to installable
 > artifact.
@@ -45,7 +45,7 @@ it gets all channels.
 
 ## What to Publish to crates.io
 
-The workspace contains 18+ crates. Most are internal implementation details. Publish only the
+The workspace contains 36 workspace members. Most are internal implementation details. Publish only the
 products (binaries users install) and their key shared libraries (types other Rust projects
 might depend on):
 

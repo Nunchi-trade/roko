@@ -1,6 +1,6 @@
 //! MCP-backed tool handlers for the dispatcher.
 //!
-//! MCP-discovered tools are registered under `{server}__{tool}` names via
+//! MCP-discovered tools are registered under `{server}.{tool}` names via
 //! [`super::mcp_to_tool_def`]. [`McpHandlerResolver`] uses that prefix to route
 //! dynamic tool calls to the correct live MCP client while still deferring to a
 //! static resolver for built-in tools first.
@@ -15,7 +15,7 @@ use super::client::{McpContent, McpToolResult};
 use super::{McpClient, Transport};
 use crate::dispatcher::HandlerResolver;
 
-const MCP_TOOL_SEPARATOR: &str = "__";
+const MCP_TOOL_SEPARATOR: &str = ".";
 
 /// Dispatcher resolver that falls back from built-in handlers to live MCP
 /// clients for namespaced MCP tools.
@@ -26,7 +26,7 @@ pub struct McpHandlerResolver<T: Transport> {
 
 impl<T: Transport> McpHandlerResolver<T> {
     /// Create a resolver that checks `static_resolver` first, then resolves MCP
-    /// tools using the `{server}__{tool}` naming convention.
+    /// tools using the `{server}.{tool}` naming convention.
     #[must_use]
     pub fn new(
         static_resolver: Arc<dyn HandlerResolver>,
@@ -186,7 +186,7 @@ mod tests {
     #[async_trait]
     impl ToolHandler for StaticHandler {
         fn name(&self) -> &str {
-            "local__echo"
+            "local.echo"
         }
 
         async fn execute(&self, _call: ToolCall, _ctx: &ToolContext) -> ToolResult {
@@ -222,6 +222,7 @@ mod tests {
                     "properties": {"text": {"type": "string"}},
                     "required": ["text"]
                 })),
+                annotations: None,
             },
             "local",
         )])) as Arc<dyn ToolRegistry>;
@@ -234,7 +235,7 @@ mod tests {
 
         let result = dispatcher
             .dispatch(
-                ToolCall::new("call-1", "local__echo", json!({"text": "hello"})),
+                ToolCall::new("call-1", "local.echo", json!({"text": "hello"})),
                 &ToolContext::testing("/tmp/mcp-handler-resolver"),
             )
             .await;
@@ -254,20 +255,20 @@ mod tests {
         let client = Arc::new(McpClient::new(transport));
         let resolver = McpHandlerResolver::new(
             Arc::new(|name: &str| {
-                (name == "local__echo").then(|| Arc::new(StaticHandler) as Arc<dyn ToolHandler>)
+                (name == "local.echo").then(|| Arc::new(StaticHandler) as Arc<dyn ToolHandler>)
             }),
             HashMap::from([("local".to_string(), client)]),
         );
 
-        let handler = resolver.resolve("local__echo").expect("handler");
-        assert_eq!(handler.name(), "local__echo");
+        let handler = resolver.resolve("local.echo").expect("handler");
+        assert_eq!(handler.name(), "local.echo");
     }
 
     #[test]
     fn mcp_handler_resolver_returns_none_for_unknown_server() {
         let resolver: McpHandlerResolver<Arc<MockTransport>> =
             McpHandlerResolver::new(Arc::new(|_: &str| None), HashMap::new());
-        assert!(resolver.resolve("missing__echo").is_none());
+        assert!(resolver.resolve("missing.echo").is_none());
         assert!(resolver.resolve("not-prefixed").is_none());
     }
 }

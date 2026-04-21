@@ -41,6 +41,8 @@ pub enum PageId {
     ProviderHealth,
     /// Model comparison metrics.
     ModelComparison,
+    /// Dream state visualization.
+    Dreams,
 }
 
 impl PageId {
@@ -63,6 +65,7 @@ impl PageId {
             Self::ConfigView => "Config View",
             Self::ProviderHealth => "Provider Health",
             Self::ModelComparison => "Model Comparison",
+            Self::Dreams => "Dreams",
         }
     }
 
@@ -85,6 +88,7 @@ impl PageId {
             Self::ConfigView => "config-view",
             Self::ProviderHealth => "provider-health",
             Self::ModelComparison => "model-comparison",
+            Self::Dreams => "dreams",
         }
     }
 
@@ -106,7 +110,8 @@ impl PageId {
             | Self::Signals
             | Self::ConfigView
             | Self::ProviderHealth
-            | Self::ModelComparison => "operations",
+            | Self::ModelComparison
+            | Self::Dreams => "operations",
         }
     }
 }

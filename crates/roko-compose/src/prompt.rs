@@ -9,6 +9,9 @@ use roko_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::auction::LearningBidder;
+use crate::foraging::{MultiPatchForager, should_stop_searching};
+
 /// Estimate token count for a text blob.
 ///
 /// Uses the GPT/Claude rule-of-thumb of ≈4 bytes per token. This is coarse
@@ -279,13 +282,25 @@ const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
 ///
 /// # Budget
 ///
-/// Respects `Budget::max_tokens`. If unset, only `max_signals` limits
+/// Respects `Budget::max_tokens`. If unset, only `max_pulses` limits
 /// inclusion. If a critical section alone exceeds `max_tokens`, the composer
 /// returns an error rather than silently dropping it.
 pub struct PromptComposer {
     name: String,
     /// Include section headers (e.g. `--- role ---`) in the output.
     include_headers: bool,
+    /// COMP-02: Per-subsystem learning bidders that adjust bids based on
+    /// prior task outcomes. When populated, the composer multiplies each
+    /// candidate's base bid by the bidder's learned section value.
+    learning_bidders: HashMap<AttentionBidder, LearningBidder>,
+    /// COMP-03: MVT foraging pre-pass. When set, the composer uses the
+    /// foraging stopping rule to decide how many optional candidates to
+    /// evaluate before committing to the auction.
+    foraging: Option<MultiPatchForager>,
+    /// COMP-04: HDC dedup similarity threshold. When > 0.0 and the `hdc`
+    /// feature is enabled, candidates with content similarity above this
+    /// threshold are deduplicated before the auction.
+    hdc_dedup_threshold: f64,
 }
 
 impl Default for PromptComposer {
@@ -301,6 +316,9 @@ impl PromptComposer {
         Self {
             name: "prompt_composer".into(),
             include_headers: true,
+            learning_bidders: HashMap::new(),
+            foraging: None,
+            hdc_dedup_threshold: 0.0,
         }
     }
 
@@ -317,6 +335,70 @@ impl PromptComposer {
         self.name = name.into();
         self
     }
+
+    // ── COMP-02: VCG Learning Bidder integration ─────────────────────
+
+    /// Register a [`LearningBidder`] for a subsystem. During composition,
+    /// the bidder's learned section values are multiplied into the base bid
+    /// density, replacing the prior-only fallback.
+    pub fn register_bidder(&mut self, bidder: AttentionBidder, learning_bidder: LearningBidder) {
+        self.learning_bidders.insert(bidder, learning_bidder);
+    }
+
+    /// Set learning bidders for multiple subsystems at once.
+    #[must_use]
+    pub fn with_learning_bidders(
+        mut self,
+        bidders: HashMap<AttentionBidder, LearningBidder>,
+    ) -> Self {
+        self.learning_bidders = bidders;
+        self
+    }
+
+    /// Update all registered learning bidders after observing a task outcome.
+    ///
+    /// `included_sections`: names of sections that were included in the prompt.
+    /// `gate_passed`: whether the downstream gate passed.
+    pub fn update_bidders(&mut self, included_sections: &[String], gate_passed: bool) {
+        for bidder in self.learning_bidders.values_mut() {
+            for section_name in included_sections {
+                bidder.update(section_name, true, gate_passed);
+            }
+        }
+    }
+
+    /// Borrow the current learning bidders (for persistence).
+    #[must_use]
+    pub fn learning_bidders(&self) -> &HashMap<AttentionBidder, LearningBidder> {
+        &self.learning_bidders
+    }
+
+    // ── COMP-03: MVT foraging pre-pass ──────────────────────────────
+
+    /// Set a [`MultiPatchForager`] for context retrieval stopping decisions.
+    ///
+    /// When set, the composer uses the foraging stopping rule to limit how
+    /// many optional candidates are evaluated before committing to the
+    /// auction. This prevents wasting budget on diminishing-returns sources.
+    #[must_use]
+    pub fn with_foraging(mut self, forager: MultiPatchForager) -> Self {
+        self.foraging = Some(forager);
+        self
+    }
+
+    // ── COMP-04: HDC dedup ──────────────────────────────────────────
+
+    /// Enable HDC-based deduplication of candidates before the auction.
+    ///
+    /// Candidates with content similarity above `threshold` (range 0.0..1.0)
+    /// are deduplicated, keeping the higher-scoring one. The spec recommends
+    /// 0.85. Requires the `hdc` feature to be enabled at compile time;
+    /// otherwise this is a no-op.
+    #[must_use]
+    pub fn with_hdc_dedup(mut self, threshold: f64) -> Self {
+        self.hdc_dedup_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
 }
 
 impl Composer for PromptComposer {
@@ -331,10 +413,17 @@ impl Composer for PromptComposer {
         // per-section hard cap at decode time so downstream accounting
         // reflects the actual bytes that will land in the prompt.
         // Split critical sections out — they MUST be included.
-        let (critical, optional): (Vec<_>, Vec<_>) = signals
+        let decoded_sections = signals
             .iter()
             .filter_map(|s| PromptSection::from_signal(s).ok().map(|p| (p, s)))
             .map(|(p, s)| (p.enforce_hard_cap(), s))
+            .collect::<Vec<_>>();
+        let decoded_section_names = decoded_sections
+            .iter()
+            .map(|(section, _)| section.name.clone())
+            .collect::<Vec<_>>();
+        let (critical, optional): (Vec<_>, Vec<_>) = decoded_sections
+            .into_iter()
             .partition(|(p, _)| p.priority == SectionPriority::Critical);
 
         let critical_tokens: usize = critical.iter().map(|(s, _)| s.estimated_tokens()).sum();
@@ -353,20 +442,44 @@ impl Composer for PromptComposer {
             .max_tokens
             .map_or(usize::MAX, |m| m.saturating_sub(critical_tokens));
         let remaining_signals = budget
-            .max_signals
+            .max_pulses
             .map_or(usize::MAX, |m| m.saturating_sub(critical.len()));
 
         let mut kept: Vec<(PromptSection, &Engram)> = critical;
         let mut token_total = critical_tokens;
         let affect = AuctionAffectState::from_context(ctx);
+
+        // COMP-02: Compute bid density, incorporating learning bidders when available.
         let mut optional = optional
             .into_iter()
-            .map(|(section, source_signal)| AuctionCandidate {
-                bid_density: candidate_bid_density(&section, source_signal, scorer, ctx),
-                section,
-                source_signal,
+            .map(|(section, source_signal)| {
+                let base_density = candidate_bid_density(&section, source_signal, scorer, ctx);
+                // Multiply by the learning bidder's posterior for this section.
+                let learned_multiplier = self
+                    .learning_bidders
+                    .get(&section.bidder)
+                    .map(|bidder| bidder.bid(&section.name, 1.0) as f32)
+                    .unwrap_or(1.0);
+                AuctionCandidate {
+                    bid_density: base_density * learned_multiplier,
+                    section,
+                    source_signal,
+                }
             })
             .collect::<Vec<_>>();
+
+        // COMP-04: HDC-based deduplication before the auction.
+        #[cfg(feature = "hdc")]
+        if self.hdc_dedup_threshold > 0.0 {
+            optional = hdc_dedup_candidates(optional, self.hdc_dedup_threshold);
+        }
+
+        // COMP-03: MVT foraging pre-pass — limit candidates when foraging
+        // says sufficient context has been gathered.
+        if let Some(forager) = &self.foraging {
+            optional = foraging_prepass(optional, forager);
+        }
+
         optional.sort_by(|a, b| {
             b.bid_density
                 .partial_cmp(&a.bid_density)
@@ -403,6 +516,20 @@ impl Composer for PromptComposer {
                 .then_with(|| a.0.cache_layer.cmp(&b.0.cache_layer))
         });
 
+        let kept_section_names = kept
+            .iter()
+            .map(|(section, _)| section.name.clone())
+            .collect::<Vec<_>>();
+        let kept_name_set = kept_section_names
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>();
+        let dropped_section_names = decoded_section_names
+            .iter()
+            .filter(|name| !kept_name_set.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Concatenate.
         let prompt_text = render_sections(&kept, self.include_headers);
 
@@ -413,7 +540,17 @@ impl Composer for PromptComposer {
             .provenance(Provenance::trusted(&self.name))
             .lineage(lineage)
             .tag("sections", kept.len().to_string())
+            .tag("sections_decoded", decoded_section_names.len().to_string())
+            .tag("sections_dropped", dropped_section_names.len().to_string())
             .tag("tokens", token_total.to_string())
+            .tag(
+                "budget_tokens_limit",
+                budget
+                    .max_tokens
+                    .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string()),
+            )
+            .tag("kept_section_names", kept_section_names.join(","))
+            .tag("dropped_section_names", dropped_section_names.join(","))
             .tag("distinct_bidders", bidder_count(&kept).to_string())
             .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
             .tag(
@@ -797,6 +934,116 @@ fn fallback_section_score(section: &PromptSection, signal: &Engram, ctx: &Contex
         1.0 - (age_ms - 60.0 * 60.0 * 1000.0) / (23.0 * 60.0 * 60.0 * 1000.0) * 0.65
     };
     priority * (0.55 + 0.45 * cache) * recency
+}
+
+// ─── COMP-03: MVT foraging pre-pass ─────────────────────────────────────
+
+/// Apply the MVT foraging stopping rule to limit candidate evaluation.
+///
+/// Sorts candidates by bid density, then walks them in order. After each
+/// candidate, computes the marginal gain ratio (current candidate's density
+/// vs running average). When `should_stop_searching` returns true, the
+/// remaining lower-value candidates are dropped. This prevents wasting
+/// token budget on diminishing-returns context sections.
+fn foraging_prepass<'a>(
+    mut candidates: Vec<AuctionCandidate<'a>>,
+    forager: &MultiPatchForager,
+) -> Vec<AuctionCandidate<'a>> {
+    if candidates.is_empty() || forager.environment_rate <= 0.0 {
+        return candidates;
+    }
+
+    // Sort by bid density descending for MVT evaluation order.
+    candidates.sort_by(|a, b| {
+        b.bid_density
+            .partial_cmp(&a.bid_density)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut kept = Vec::with_capacity(candidates.len());
+    let mut running_sum = 0.0_f64;
+    let mut count = 0usize;
+    let mut total_content_tokens = 0usize;
+
+    for candidate in candidates {
+        count += 1;
+        running_sum += candidate.bid_density as f64;
+        let avg = running_sum / count as f64;
+
+        // MVT ratio: marginal gain of this candidate vs environment average.
+        let mvt_ratio = if avg > 0.0 {
+            candidate.bid_density as f64 / avg
+        } else {
+            1.0
+        };
+
+        total_content_tokens += candidate.section.estimated_tokens();
+
+        // Coverage sufficiency: approximate as the fraction of token budget
+        // that has been consumed. Once we have gathered many candidates,
+        // additional low-value ones are unlikely to help.
+        let sufficiency = if forager.environment_rate > 0.0 {
+            // Normalize to a [0, 1] range using the environment rate as proxy
+            // for the expected number of useful candidates.
+            let expected_useful = (1.0 / forager.environment_rate).max(3.0);
+            (count as f64 / expected_useful).min(1.0)
+        } else {
+            0.0
+        };
+
+        kept.push(candidate);
+
+        // Require at least 3 candidates before stopping to avoid premature
+        // cutoff on small input sets.
+        if should_stop_searching(mvt_ratio, sufficiency, 0.8) && count >= 3 {
+            break;
+        }
+    }
+
+    let _ = total_content_tokens; // Available for future cost tracking.
+    kept
+}
+
+// ─── COMP-04: HDC-based deduplication ───────────────────────────────────
+
+/// Remove near-duplicate candidates using HDC fingerprint similarity.
+///
+/// For each candidate in bid-density order, computes an HDC fingerprint from
+/// its content, then compares against all accepted candidates. If similarity
+/// exceeds `threshold` (typically 0.85), the candidate is rejected as a
+/// near-duplicate.
+#[cfg(feature = "hdc")]
+fn hdc_dedup_candidates(
+    candidates: Vec<AuctionCandidate<'_>>,
+    threshold: f64,
+) -> Vec<AuctionCandidate<'_>> {
+    use roko_primitives::HdcVector;
+
+    if candidates.is_empty() || threshold <= 0.0 {
+        return candidates;
+    }
+
+    // Compute HDC fingerprints for all candidates.
+    let fingerprints: Vec<HdcVector> = candidates
+        .iter()
+        .map(|c| HdcVector::from_seed(c.section.content.as_bytes()))
+        .collect();
+
+    let mut kept = Vec::with_capacity(candidates.len());
+    let mut kept_fingerprints = Vec::with_capacity(candidates.len());
+
+    for (candidate, fingerprint) in candidates.into_iter().zip(fingerprints) {
+        let is_duplicate = kept_fingerprints
+            .iter()
+            .any(|accepted: &HdcVector| f64::from(fingerprint.similarity(accepted)) > threshold);
+
+        if !is_duplicate {
+            kept_fingerprints.push(fingerprint);
+            kept.push(candidate);
+        }
+    }
+
+    kept
 }
 
 /// Context-gathering strategy used to produce a prompt.
@@ -1219,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_respects_max_signals() {
+    fn composer_respects_max_pulses() {
         let composer = PromptComposer::new();
         let sections: Vec<_> = (0..10)
             .map(|i| {
@@ -1235,7 +1482,7 @@ mod tests {
                 &sections,
                 &Budget {
                     max_tokens: None,
-                    max_signals: Some(3),
+                    max_pulses: Some(3),
                     max_bytes: None,
                     max_wall_ms: None,
                 },

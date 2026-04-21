@@ -7,10 +7,14 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
+
+/// MCP protocol version targeted by Roko's client.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 // ── Wire types ──────────────────────────────────────────────────────────
 
@@ -65,6 +69,29 @@ pub struct McpToolDef {
     /// JSON Schema for the tool's input.
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Option<serde_json::Value>,
+    /// Optional behavioral annotations from newer MCP servers.
+    #[serde(default)]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+/// Behavioral annotations for an MCP tool.
+///
+/// These annotations let Roko map dynamic MCP tools onto its static
+/// permission model without trusting every external tool equally.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolAnnotations {
+    /// Tool does not modify external state.
+    #[serde(default, rename = "readOnly")]
+    pub read_only: Option<bool>,
+    /// Tool accesses open-world resources such as network services.
+    #[serde(default, rename = "openWorld")]
+    pub open_world: Option<bool>,
+    /// Calling the tool twice with the same arguments has no extra effect.
+    #[serde(default)]
+    pub idempotent: Option<bool>,
+    /// Human-readable title for UI surfaces.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// The result of invoking an MCP tool via `tools/call`.
@@ -139,8 +166,22 @@ impl StdioTransport {
     /// The process is started with stdin/stdout piped for JSON-RPC communication.
     /// Stderr is inherited so server logs appear in the parent's stderr.
     pub fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+        Self::spawn_with_env(command, args, &HashMap::new())
+    }
+
+    /// Spawn a child MCP server process with additional environment variables.
+    ///
+    /// The provided environment is layered on top of the current process
+    /// environment before the child process is started.
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Self, McpError> {
+        let resolved_env = resolve_env(env);
         let mut child = tokio::process::Command::new(command)
             .args(args)
+            .envs(resolved_env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -259,8 +300,13 @@ impl<T: Transport> McpClient<T> {
         self.call(
             "initialize",
             serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {
+                    "sampling": {},
+                    "roots": {
+                        "listChanged": true
+                    }
+                },
                 "clientInfo": {
                     "name": "roko",
                     "version": "0.1.0"
@@ -299,6 +345,23 @@ impl<T: Transport> McpClient<T> {
         let tool_result: McpToolResult = serde_json::from_value(result)?;
         Ok(tool_result)
     }
+}
+
+fn resolve_env(env: &HashMap<String, String>) -> HashMap<String, String> {
+    env.iter()
+        .map(|(key, value)| (key.clone(), resolve_env_value(value)))
+        .collect()
+}
+
+fn resolve_env_value(value: &str) -> String {
+    let Some(name) = value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return value.to_string();
+    };
+
+    std::env::var(name).unwrap_or_default()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -363,6 +426,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mcp_env_placeholders_resolve_from_host_env() {
+        let literal = resolve_env_value("plain-token");
+        assert_eq!(literal, "plain-token");
+
+        let missing = resolve_env_value("${ROKO_DP18_MISSING_ENV_FOR_TEST}");
+        assert_eq!(missing, "");
+    }
+
     #[tokio::test]
     async fn mcp_initialize_sends_correct_method() {
         let transport = MockTransport::new(vec![ok_response(
@@ -377,6 +449,8 @@ mod tests {
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].method, "initialize");
         assert_eq!(reqs[0].jsonrpc, "2.0");
+        assert_eq!(reqs[0].params["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert!(reqs[0].params["capabilities"]["sampling"].is_object());
     }
 
     #[tokio::test]
@@ -407,8 +481,33 @@ mod tests {
         assert_eq!(tools[0].name, "read_file");
         assert_eq!(tools[0].description.as_deref(), Some("Read a file"));
         assert!(tools[0].input_schema.is_some());
+        assert!(tools[0].annotations.is_none());
         assert_eq!(tools[1].name, "search");
         assert!(tools[1].input_schema.is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_list_tools_parses_annotations() {
+        let tools_json = serde_json::json!({
+            "tools": [{
+                "name": "get_pr",
+                "annotations": {
+                    "readOnly": true,
+                    "openWorld": true,
+                    "idempotent": true,
+                    "title": "Get PR"
+                }
+            }]
+        });
+        let transport = MockTransport::new(vec![ok_response(1, tools_json)]);
+        let client = McpClient::new(transport);
+
+        let tools = client.list_tools().await.unwrap();
+        let annotations = tools[0].annotations.as_ref().expect("annotations");
+        assert_eq!(annotations.read_only, Some(true));
+        assert_eq!(annotations.open_world, Some(true));
+        assert_eq!(annotations.idempotent, Some(true));
+        assert_eq!(annotations.title.as_deref(), Some("Get PR"));
     }
 
     #[tokio::test]

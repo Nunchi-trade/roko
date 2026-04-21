@@ -144,7 +144,7 @@ pub struct MevGate {
 
 #[async_trait]
 impl Gate for MevGate {
-    async fn verify(&self, engram: &Signal) -> Result<Verdict> {
+    async fn verify(&self, engram: &Engram) -> Result<Verdict> {
         // Extract transaction parameters from the Engram body
         let tx_params = parse_transaction_params(&engram.body)?;
 

@@ -29,7 +29,104 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 /// macOS LaunchAgents plist helpers for daemon installation.
+#[cfg(target_os = "macos")]
 pub mod launchd;
+/// Linux systemd user-service helpers for daemon installation.
+#[cfg(target_os = "linux")]
+pub mod systemd;
+
+// ─── DaemonCmd IPC protocol ──────────────────────────────────────────────────
+
+/// Commands accepted over the Unix-domain-socket IPC protocol.
+///
+/// The daemon listens on `$ROKO_STATE_DIR/daemon.sock` (typically
+/// `~/.roko/daemon.sock`). Clients send a JSON-encoded `DaemonCmd` and
+/// receive a JSON-encoded [`DaemonResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum DaemonCmd {
+    /// Return daemon status: uptime, active agents, subscription count,
+    /// memory usage.
+    Status,
+    /// Graceful shutdown: flush pending, backup state, deregister.
+    Stop,
+    /// Stop then restart with config reload.
+    Restart,
+    /// Reload configuration, templates, and subscriptions without restart.
+    Reload,
+    /// Return a snapshot of all monitored subscriptions.
+    ListSubscriptions,
+    /// Temporarily pause monitoring for a subscription by ID.
+    PauseSubscription {
+        /// Subscription ID to pause.
+        id: String,
+    },
+    /// Resume a previously paused subscription.
+    ResumeSubscription {
+        /// Subscription ID to resume.
+        id: String,
+    },
+}
+
+/// Response returned over the daemon IPC socket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonResponse {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// The command that was executed.
+    pub command: String,
+    /// Optional payload (command-specific).
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+    /// Error message if `ok` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl DaemonResponse {
+    fn success(command: &str) -> Self {
+        Self {
+            ok: true,
+            command: command.to_string(),
+            data: serde_json::Value::Null,
+            error: None,
+        }
+    }
+
+    fn success_with_data(command: &str, data: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            command: command.to_string(),
+            data,
+            error: None,
+        }
+    }
+
+    fn failure(command: &str, error: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            command: command.to_string(),
+            data: serde_json::Value::Null,
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// Subscription summary returned by `ListSubscriptions` and the IPC
+/// pause/resume commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionSummary {
+    /// Subscription ID.
+    pub id: String,
+    /// Agent template name.
+    pub template: String,
+    /// Trigger pattern.
+    pub trigger: String,
+    /// Whether the subscription is currently enabled.
+    pub enabled: bool,
+    /// Maximum concurrent dispatches.
+    pub concurrency_limit: usize,
+}
 
 use crate::config::RepoRegistry;
 use crate::load_layered;
@@ -381,8 +478,48 @@ pub async fn daemon_restart(workdir: &Path, port: u16) -> Result<()> {
     daemon_start(workdir, false, port).await
 }
 
-/// Install the daemon as a macOS LaunchAgent.
+/// Install the daemon under the host service manager.
 pub fn daemon_install() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return daemon_install_launchd();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return systemd::install_systemd(crate::DEFAULT_SERVE_PORT);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(anyhow!(
+            "daemon install is only supported on macOS (launchd) and Linux (systemd)"
+        ))
+    }
+}
+
+/// Uninstall the daemon from the host service manager.
+pub fn daemon_uninstall() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return daemon_uninstall_launchd();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return systemd::uninstall_systemd();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(anyhow!(
+            "daemon uninstall is only supported on macOS (launchd) and Linux (systemd)"
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn daemon_install_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
     let plist_dir = plist_path
         .parent()
@@ -393,7 +530,7 @@ pub fn daemon_install() -> Result<()> {
     let logs_dir = home_dir.join(".roko").join("logs");
     fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
 
-    let plist = launchd::generate_plist(9090);
+    let plist = launchd::generate_plist(crate::DEFAULT_SERVE_PORT);
     fs::write(&plist_path, plist).with_context(|| format!("write {}", plist_path.display()))?;
 
     let status = Command::new("launchctl")
@@ -413,8 +550,8 @@ pub fn daemon_install() -> Result<()> {
     Ok(())
 }
 
-/// Uninstall the daemon LaunchAgent.
-pub fn daemon_uninstall() -> Result<()> {
+#[cfg(target_os = "macos")]
+fn daemon_uninstall_launchd() -> Result<()> {
     let plist_path = launchd::plist_path();
 
     let status = Command::new("launchctl")
@@ -861,7 +998,7 @@ fn format_uptime(total_secs: u64) -> String {
 }
 
 async fn count_signals_processed(workdir: &Path) -> Result<usize> {
-    let path = workdir.join(".roko").join("signals.jsonl");
+    let path = workdir.join(".roko").join("engrams.jsonl");
     match tokio::fs::read_to_string(&path).await {
         Ok(text) => Ok(text.lines().filter(|line| !line.trim().is_empty()).count()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
@@ -931,85 +1068,174 @@ async fn start_ipc_server(
     }))
 }
 
+/// Parse an IPC request as either a JSON `DaemonCmd` or a legacy plain-text
+/// command. Plain-text commands (`status`, `stop`, `reload`, `shutdown`) are
+/// still accepted for backward compatibility with existing `daemon_stop` and
+/// `daemon_status` callers.
+fn parse_ipc_request(raw: &str) -> Result<DaemonCmd, String> {
+    let trimmed = raw.trim();
+    // Try JSON first.
+    if trimmed.starts_with('{') {
+        return serde_json::from_str(trimmed).map_err(|e| format!("invalid JSON command: {e}"));
+    }
+    // Legacy plain-text fallback.
+    match trimmed.to_ascii_lowercase().as_str() {
+        "status" => Ok(DaemonCmd::Status),
+        "stop" | "shutdown" => Ok(DaemonCmd::Stop),
+        "reload" => Ok(DaemonCmd::Reload),
+        "restart" => Ok(DaemonCmd::Restart),
+        "list_subscriptions" => Ok(DaemonCmd::ListSubscriptions),
+        other => Err(format!("unknown command: {other}")),
+    }
+}
+
 async fn handle_ipc_command(
     mut stream: UnixStream,
     state: Arc<AppState>,
     shutdown_request: CancellationToken,
 ) -> Result<()> {
-    let mut buf = vec![0u8; 1024];
+    let mut buf = vec![0u8; 4096];
     let n = stream
         .read(&mut buf)
         .await
         .context("read daemon IPC request")?;
-    let request = String::from_utf8_lossy(&buf[..n])
-        .trim()
-        .to_ascii_lowercase();
+    let raw = String::from_utf8_lossy(&buf[..n]);
 
-    if request == "status" {
-        let active_agents = state.supervisor.count().await;
-        let subscriptions = state.subscriptions.all().len();
-        let uptime_secs = state.started_at.elapsed().as_secs();
-        let response = json!({
-            "pid": std::process::id(),
-            "active_agents": active_agents,
-            "subscriptions": subscriptions,
-            "uptime_secs": uptime_secs,
-        });
-        stream.write_all(response.to_string().as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        return Ok(());
-    }
-
-    if request == "reload" {
-        let response = reload_daemon_runtime(&state).await;
-        if response.ok {
-            if response.warnings.is_empty() {
-                info!(
-                    subscriptions = response.subscriptions,
-                    templates = response.templates,
-                    loaded = response.loaded,
-                    "daemon config reloaded after IPC request"
-                );
-            } else {
-                warn!(
-                    subscriptions = response.subscriptions,
-                    templates = response.templates,
-                    loaded = response.loaded,
-                    warnings = ?response.warnings,
-                    "daemon config reloaded after IPC request with warnings"
-                );
-            }
+    let cmd = match parse_ipc_request(&raw) {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            let resp = DaemonResponse::failure("unknown", &err);
+            let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+            stream.write_all(&bytes).await?;
+            stream.write_all(b"\n").await?;
+            return Ok(());
         }
-        let response =
-            serde_json::to_string(&response).context("serialize daemon reload response")?;
-        stream.write_all(response.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        return Ok(());
-    }
+    };
 
-    if request == "stop" {
-        stream
-            .write_all(b"{\"ok\":true,\"command\":\"stop\"}\n")
-            .await?;
-        shutdown_request.cancel();
-        return Ok(());
-    }
-
-    if request == "shutdown" {
-        stream
-            .write_all(b"{\"ok\":true,\"command\":\"shutdown\"}\n")
-            .await?;
-        shutdown_request.cancel();
-        return Ok(());
-    }
-
-    let response = json!({
-        "ok": false,
-        "error": format!("unknown command: {request}"),
-    });
-    stream.write_all(response.to_string().as_bytes()).await?;
+    let response = dispatch_daemon_cmd(cmd, &state, &shutdown_request).await;
+    let bytes = serde_json::to_vec(&response).unwrap_or_default();
+    stream.write_all(&bytes).await?;
     stream.write_all(b"\n").await?;
     Ok(())
+}
+
+/// Execute a parsed `DaemonCmd` and produce a response.
+async fn dispatch_daemon_cmd(
+    cmd: DaemonCmd,
+    state: &AppState,
+    shutdown_request: &CancellationToken,
+) -> DaemonResponse {
+    match cmd {
+        DaemonCmd::Status => {
+            let active_agents = state.supervisor.count().await;
+            let subscriptions = state.subscriptions.all().len();
+            let uptime_secs = state.started_at.elapsed().as_secs();
+            DaemonResponse::success_with_data(
+                "status",
+                json!({
+                    "pid": std::process::id(),
+                    "active_agents": active_agents,
+                    "subscriptions": subscriptions,
+                    "uptime_secs": uptime_secs,
+                }),
+            )
+        }
+        DaemonCmd::Stop => {
+            shutdown_request.cancel();
+            DaemonResponse::success("stop")
+        }
+        DaemonCmd::Restart => {
+            // Restart is handled by the caller re-invoking daemon_start after
+            // daemon_stop completes. From the IPC perspective we trigger stop.
+            shutdown_request.cancel();
+            DaemonResponse::success("restart")
+        }
+        DaemonCmd::Reload => {
+            let reload = reload_daemon_runtime(state).await;
+            if reload.ok {
+                if reload.warnings.is_empty() {
+                    info!(
+                        subscriptions = reload.subscriptions,
+                        templates = reload.templates,
+                        loaded = reload.loaded,
+                        "daemon config reloaded after IPC request"
+                    );
+                } else {
+                    warn!(
+                        subscriptions = reload.subscriptions,
+                        templates = reload.templates,
+                        loaded = reload.loaded,
+                        warnings = ?reload.warnings,
+                        "daemon config reloaded after IPC request with warnings"
+                    );
+                }
+                DaemonResponse::success_with_data(
+                    "reload",
+                    json!({
+                        "subscriptions": reload.subscriptions,
+                        "templates": reload.templates,
+                        "loaded": reload.loaded,
+                        "warnings": reload.warnings,
+                    }),
+                )
+            } else {
+                DaemonResponse::failure(
+                    "reload",
+                    reload
+                        .error
+                        .unwrap_or_else(|| "daemon reload failed".into()),
+                )
+            }
+        }
+        DaemonCmd::ListSubscriptions => {
+            let subs: Vec<SubscriptionSummary> = state
+                .subscriptions
+                .all()
+                .iter()
+                .map(|s| SubscriptionSummary {
+                    id: s.id.clone(),
+                    template: s.template.clone(),
+                    trigger: s.trigger.clone(),
+                    enabled: s.enabled,
+                    concurrency_limit: s.concurrency_limit,
+                })
+                .collect();
+            DaemonResponse::success_with_data(
+                "list_subscriptions",
+                serde_json::to_value(&subs).unwrap_or_default(),
+            )
+        }
+        DaemonCmd::PauseSubscription { id } => match state.subscriptions.get_by_id(&id) {
+            Some(mut sub) => {
+                sub.enabled = false;
+                let _ = state.subscriptions.update_by_id(&id, sub);
+                info!(subscription_id = %id, "subscription paused via IPC");
+                DaemonResponse::success_with_data(
+                    "pause_subscription",
+                    json!({ "id": id, "enabled": false }),
+                )
+            }
+            None => DaemonResponse::failure(
+                "pause_subscription",
+                format!("subscription not found: {id}"),
+            ),
+        },
+        DaemonCmd::ResumeSubscription { id } => match state.subscriptions.get_by_id(&id) {
+            Some(mut sub) => {
+                sub.enabled = true;
+                let _ = state.subscriptions.update_by_id(&id, sub);
+                info!(subscription_id = %id, "subscription resumed via IPC");
+                DaemonResponse::success_with_data(
+                    "resume_subscription",
+                    json!({ "id": id, "enabled": true }),
+                )
+            }
+            None => DaemonResponse::failure(
+                "resume_subscription",
+                format!("subscription not found: {id}"),
+            ),
+        },
+    }
 }
 
 async fn reload_daemon_runtime(state: &AppState) -> DaemonReloadResponse {
@@ -1209,7 +1435,7 @@ async fn graceful_shutdown_daemon(
 }
 
 async fn flush_daemon_artifacts(workdir: &Path) -> Result<()> {
-    flush_file(workdir.join(".roko").join("signals.jsonl")).await?;
+    flush_file(workdir.join(".roko").join("engrams.jsonl")).await?;
     flush_file(workdir.join(".roko").join("episodes.jsonl")).await?;
     flush_file(workdir.join(".roko").join("learn").join("heartbeat.json")).await?;
     flush_file(workdir.join(".roko").join("learn").join("heartbeat.jsonl")).await?;
@@ -1228,6 +1454,244 @@ async fn flush_file(path: PathBuf) -> Result<()> {
             .with_context(|| format!("sync {}", path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
+    }
+}
+
+// ─── DEPLOY-11: Multi-repo daemon coordination ──────────────────────────────
+
+/// Per-repository subscription managed by the daemon (DEPLOY-11).
+///
+/// Each repo has its own `.roko/` state directory, agent budget, and
+/// scheduling priority. The daemon's [`SubscriptionManager`] coordinates
+/// them under a shared agent concurrency limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoSubscription {
+    /// Unique subscription identifier (e.g. `"repo-0"`).
+    pub id: String,
+    /// Absolute path to the repository root.
+    pub repo_path: PathBuf,
+    /// Repository-local `.roko/` directory (derived from `repo_path`).
+    pub state_dir: PathBuf,
+    /// Whether the subscription is currently active.
+    pub enabled: bool,
+    /// Per-repo USD budget limit (0 = unlimited).
+    pub budget_limit_usd: f64,
+    /// USD spent so far in the current billing period.
+    pub budget_spent_usd: f64,
+    /// Current number of active agents for this repo.
+    pub active_agents: usize,
+    /// Scheduling priority (higher = more urgent; recent changes bump this).
+    pub priority: u32,
+    /// Trigger configuration from `roko.toml`.
+    pub trigger: String,
+    /// Agent template name.
+    pub template: String,
+}
+
+impl RepoSubscription {
+    /// Create a subscription for a repository.
+    #[must_use]
+    pub fn new(id: String, repo_path: PathBuf, template: String, trigger: String) -> Self {
+        let state_dir = repo_path.join(".roko");
+        Self {
+            id,
+            repo_path,
+            state_dir,
+            enabled: true,
+            budget_limit_usd: 0.0,
+            budget_spent_usd: 0.0,
+            active_agents: 0,
+            priority: 0,
+            trigger,
+            template,
+        }
+    }
+
+    /// Whether the subscription has remaining budget (or unlimited).
+    #[must_use]
+    pub fn has_budget(&self) -> bool {
+        self.budget_limit_usd <= 0.0 || self.budget_spent_usd < self.budget_limit_usd
+    }
+
+    /// Record spending against this repo's budget.
+    pub fn record_spend(&mut self, amount_usd: f64) {
+        self.budget_spent_usd += amount_usd;
+    }
+}
+
+/// Manages N repository subscriptions under a shared agent limit (DEPLOY-11).
+///
+/// The daemon creates one `SubscriptionManager` on startup, loads repos
+/// from the `[[subscriptions]]` config, and distributes agent slots using
+/// priority-based scheduling.
+#[derive(Debug, Clone)]
+pub struct SubscriptionManager {
+    /// All registered repository subscriptions.
+    pub repos: Vec<RepoSubscription>,
+    /// Maximum total agents across all repos.
+    pub max_total_agents: usize,
+    /// Current total active agents.
+    pub total_active_agents: usize,
+}
+
+impl Default for SubscriptionManager {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            max_total_agents: 8,
+            total_active_agents: 0,
+        }
+    }
+}
+
+impl SubscriptionManager {
+    /// Create a manager with the given agent concurrency limit.
+    #[must_use]
+    pub fn new(max_total_agents: usize) -> Self {
+        Self {
+            repos: Vec::new(),
+            max_total_agents,
+            total_active_agents: 0,
+        }
+    }
+
+    /// Load subscriptions from the config's `[[subscriptions]]` entries.
+    ///
+    /// Each subscription that has a `path` field in its trigger_config
+    /// becomes a repo subscription. Subscriptions without paths are
+    /// skipped (they belong to the primary repo).
+    pub fn load_from_config(
+        &mut self,
+        subscriptions: &[roko_core::config::schema::SubscriptionConfig],
+        primary_workdir: &Path,
+    ) {
+        self.repos.clear();
+        for (i, sub) in subscriptions.iter().enumerate() {
+            let repo_path = if let Some(ref trigger_cfg) = sub.trigger_config {
+                match trigger_cfg {
+                    roko_core::config::SubscriptionTrigger::FileWatch { paths, .. } => {
+                        // If the watch path looks absolute, derive repo from it.
+                        paths
+                            .first()
+                            .and_then(|p| {
+                                let path = PathBuf::from(p);
+                                if path.is_absolute() {
+                                    path.parent().map(|p| p.to_path_buf())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| primary_workdir.to_path_buf())
+                    }
+                    _ => primary_workdir.to_path_buf(),
+                }
+            } else {
+                primary_workdir.to_path_buf()
+            };
+
+            let id = format!("sub-{i}");
+            self.repos.push(RepoSubscription::new(
+                id,
+                repo_path,
+                sub.template.clone(),
+                sub.trigger.clone(),
+            ));
+        }
+    }
+
+    /// Whether we can schedule another agent (global limit not reached).
+    #[must_use]
+    pub fn can_schedule(&self) -> bool {
+        self.total_active_agents < self.max_total_agents
+    }
+
+    /// Try to allocate an agent slot for the given repo.
+    ///
+    /// Returns `true` if the slot was granted.
+    pub fn allocate_agent(&mut self, repo_id: &str) -> bool {
+        if !self.can_schedule() {
+            return false;
+        }
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            if !repo.enabled || !repo.has_budget() {
+                return false;
+            }
+            repo.active_agents += 1;
+            self.total_active_agents += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release an agent slot for the given repo.
+    pub fn release_agent(&mut self, repo_id: &str) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.active_agents = repo.active_agents.saturating_sub(1);
+            self.total_active_agents = self.total_active_agents.saturating_sub(1);
+        }
+    }
+
+    /// Return the next repo that should receive an agent slot, based on
+    /// priority. Repos with higher priority and fewer active agents are
+    /// preferred.
+    #[must_use]
+    pub fn next_schedulable(&self) -> Option<&RepoSubscription> {
+        self.repos
+            .iter()
+            .filter(|r| r.enabled && r.has_budget())
+            .max_by_key(|r| {
+                // Higher priority wins; tie-break by fewer active agents.
+                (r.priority, usize::MAX - r.active_agents)
+            })
+    }
+
+    /// Pause a subscription by ID.
+    pub fn pause(&mut self, repo_id: &str) -> Result<()> {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.enabled = false;
+            Ok(())
+        } else {
+            Err(anyhow!("subscription not found: {repo_id}"))
+        }
+    }
+
+    /// Resume a subscription by ID.
+    pub fn resume(&mut self, repo_id: &str) -> Result<()> {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.enabled = true;
+            Ok(())
+        } else {
+            Err(anyhow!("subscription not found: {repo_id}"))
+        }
+    }
+
+    /// Bump the priority of a repo (e.g. when recent changes detected).
+    pub fn bump_priority(&mut self, repo_id: &str, amount: u32) {
+        if let Some(repo) = self.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.priority = repo.priority.saturating_add(amount);
+        }
+    }
+
+    /// Return summaries of all subscriptions.
+    #[must_use]
+    pub fn summaries(&self) -> Vec<SubscriptionSummary> {
+        self.repos
+            .iter()
+            .map(|r| SubscriptionSummary {
+                id: r.id.clone(),
+                template: r.template.clone(),
+                trigger: r.trigger.clone(),
+                enabled: r.enabled,
+                concurrency_limit: self.max_total_agents,
+            })
+            .collect()
+    }
+
+    /// Number of registered repos.
+    #[must_use]
+    pub fn repo_count(&self) -> usize {
+        self.repos.len()
     }
 }
 
@@ -1325,5 +1789,227 @@ mod tests {
         assert!(text.contains("/tmp/s1.sock"));
         assert!(text.contains("5"));
         assert!(text.contains("12345"));
+    }
+
+    // ─── DaemonCmd IPC protocol tests ────────────────────────────────────
+
+    #[test]
+    fn parse_ipc_plain_text_status() {
+        let cmd = parse_ipc_request("status").unwrap();
+        assert_eq!(cmd, DaemonCmd::Status);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_stop() {
+        let cmd = parse_ipc_request("stop").unwrap();
+        assert_eq!(cmd, DaemonCmd::Stop);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_shutdown_maps_to_stop() {
+        let cmd = parse_ipc_request("shutdown").unwrap();
+        assert_eq!(cmd, DaemonCmd::Stop);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_reload() {
+        let cmd = parse_ipc_request("reload").unwrap();
+        assert_eq!(cmd, DaemonCmd::Reload);
+    }
+
+    #[test]
+    fn parse_ipc_plain_text_list_subscriptions() {
+        let cmd = parse_ipc_request("list_subscriptions").unwrap();
+        assert_eq!(cmd, DaemonCmd::ListSubscriptions);
+    }
+
+    #[test]
+    fn parse_ipc_json_status() {
+        let cmd = parse_ipc_request(r#"{"cmd":"status"}"#).unwrap();
+        assert_eq!(cmd, DaemonCmd::Status);
+    }
+
+    #[test]
+    fn parse_ipc_json_pause_subscription() {
+        let cmd = parse_ipc_request(r#"{"cmd":"pause_subscription","id":"config-0"}"#).unwrap();
+        assert_eq!(
+            cmd,
+            DaemonCmd::PauseSubscription {
+                id: "config-0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipc_json_resume_subscription() {
+        let cmd = parse_ipc_request(r#"{"cmd":"resume_subscription","id":"config-1"}"#).unwrap();
+        assert_eq!(
+            cmd,
+            DaemonCmd::ResumeSubscription {
+                id: "config-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ipc_json_list_subscriptions() {
+        let cmd = parse_ipc_request(r#"{"cmd":"list_subscriptions"}"#).unwrap();
+        assert_eq!(cmd, DaemonCmd::ListSubscriptions);
+    }
+
+    #[test]
+    fn parse_ipc_unknown_command_fails() {
+        assert!(parse_ipc_request("wiggle").is_err());
+    }
+
+    #[test]
+    fn parse_ipc_invalid_json_fails() {
+        assert!(parse_ipc_request("{bad json").is_err());
+    }
+
+    #[test]
+    fn daemon_response_success_serializes() {
+        let resp = DaemonResponse::success("stop");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"command\":\"stop\""));
+    }
+
+    #[test]
+    fn daemon_response_failure_serializes() {
+        let resp = DaemonResponse::failure("reload", "disk full");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ok\":false"));
+        assert!(json.contains("\"error\":\"disk full\""));
+    }
+
+    #[test]
+    fn subscription_summary_roundtrip() {
+        let summary = SubscriptionSummary {
+            id: "config-0".into(),
+            template: "pr-review".into(),
+            trigger: "github.pull_request.*".into(),
+            enabled: true,
+            concurrency_limit: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: SubscriptionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, parsed);
+    }
+
+    // ─── DEPLOY-11: SubscriptionManager tests ───────────────────────────
+
+    #[test]
+    fn subscription_manager_default_limit() {
+        let mgr = SubscriptionManager::default();
+        assert_eq!(mgr.max_total_agents, 8);
+        assert!(mgr.can_schedule());
+    }
+
+    #[test]
+    fn subscription_manager_allocate_and_release() {
+        let mut mgr = SubscriptionManager::new(2);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo/a"),
+            "template".into(),
+            "watch".into(),
+        ));
+        mgr.repos.push(RepoSubscription::new(
+            "r2".into(),
+            PathBuf::from("/repo/b"),
+            "template".into(),
+            "cron".into(),
+        ));
+
+        assert!(mgr.allocate_agent("r1"));
+        assert!(mgr.allocate_agent("r2"));
+        assert!(!mgr.allocate_agent("r1"), "limit of 2 reached");
+        assert_eq!(mgr.total_active_agents, 2);
+
+        mgr.release_agent("r1");
+        assert_eq!(mgr.total_active_agents, 1);
+        assert!(mgr.allocate_agent("r1"));
+    }
+
+    #[test]
+    fn subscription_manager_budget_enforcement() {
+        let mut mgr = SubscriptionManager::new(10);
+        let mut sub = RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo"),
+            "t".into(),
+            "watch".into(),
+        );
+        sub.budget_limit_usd = 10.0;
+        sub.budget_spent_usd = 9.5;
+        mgr.repos.push(sub);
+
+        assert!(mgr.allocate_agent("r1"), "still under budget");
+        mgr.release_agent("r1");
+
+        mgr.repos[0].budget_spent_usd = 10.0;
+        assert!(!mgr.allocate_agent("r1"), "budget exhausted");
+    }
+
+    #[test]
+    fn subscription_manager_pause_resume() {
+        let mut mgr = SubscriptionManager::new(10);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/repo"),
+            "t".into(),
+            "watch".into(),
+        ));
+
+        mgr.pause("r1").unwrap();
+        assert!(!mgr.repos[0].enabled);
+        assert!(!mgr.allocate_agent("r1"), "paused repo should not allocate");
+
+        mgr.resume("r1").unwrap();
+        assert!(mgr.repos[0].enabled);
+        assert!(mgr.allocate_agent("r1"));
+    }
+
+    #[test]
+    fn subscription_manager_priority_scheduling() {
+        let mut mgr = SubscriptionManager::new(10);
+        let mut sub1 =
+            RepoSubscription::new("r1".into(), PathBuf::from("/a"), "t".into(), "w".into());
+        sub1.priority = 5;
+        let mut sub2 =
+            RepoSubscription::new("r2".into(), PathBuf::from("/b"), "t".into(), "w".into());
+        sub2.priority = 10;
+        mgr.repos.push(sub1);
+        mgr.repos.push(sub2);
+
+        let next = mgr.next_schedulable().unwrap();
+        assert_eq!(next.id, "r2", "higher priority should be scheduled first");
+    }
+
+    #[test]
+    fn subscription_manager_summaries() {
+        let mut mgr = SubscriptionManager::new(4);
+        mgr.repos.push(RepoSubscription::new(
+            "r1".into(),
+            PathBuf::from("/a"),
+            "template-a".into(),
+            "cron".into(),
+        ));
+        let summaries = mgr.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "r1");
+        assert_eq!(summaries[0].template, "template-a");
+    }
+
+    #[test]
+    fn repo_subscription_state_dir_derived() {
+        let sub = RepoSubscription::new(
+            "x".into(),
+            PathBuf::from("/home/user/project"),
+            "t".into(),
+            "w".into(),
+        );
+        assert_eq!(sub.state_dir, PathBuf::from("/home/user/project/.roko"));
     }
 }

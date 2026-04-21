@@ -4,6 +4,10 @@
 //! a small transaction and then checking that the mined receipt contains the
 //! expected witness payload. The mock backend mirrors this by emitting a log
 //! entry that carries the fingerprint bytes.
+//!
+//! This module is intentionally narrow: it is an attestation anchor helper,
+//! not the broader block-observer / triage runtime sometimes described as a
+//! `WitnessEngine` in the frontier chain docs.
 
 use crate::{ChainClient, ChainError, ChainResult, ChainWallet, TxHash, TxRequest};
 use roko_core::{Attestation, ChainAttestation, ContentHash};
@@ -13,7 +17,11 @@ pub(crate) const WITNESS_TOPIC: &str = "roko.attestation.witness";
 pub(crate) const WITNESS_TO: &str = "0x00000000000000000000000000000000000000c0";
 const DEFAULT_RECEIPT_TIMEOUT_MS: u64 = 30_000;
 
-/// Helper for anchoring and checking attestation witnesses on-chain.
+/// Narrow helper for anchoring and checking attestation witnesses on-chain.
+///
+/// This type only covers attestation publication and receipt verification. It
+/// does not implement the larger observer / anomaly pipeline described in the
+/// deferred chain documentation.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChainWitnessEngine;
 
@@ -90,7 +98,13 @@ impl ChainWitnessEngine {
         let Some(receipt) = client.get_receipt(&tx_hash).await? else {
             return Ok(false);
         };
+        if client.chain_id().await? != chain_attestation.chain_id {
+            return Ok(false);
+        }
         if !receipt.status {
+            return Ok(false);
+        }
+        if receipt.block_number != chain_attestation.block_number {
             return Ok(false);
         }
         Ok(receipt.logs.iter().any(|log| {
@@ -207,10 +221,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn witness_submission_uses_static_sink_and_topic() {
+        let (client, wallet) = paired_mocks(1_000);
+        let engram = Engram::builder(Kind::Task)
+            .body(Body::text("anchor this"))
+            .provenance(Provenance::trusted("roko"))
+            .created_at_ms(0)
+            .build();
+        let mut attestation = sign(&engram, &signing_key(7));
+
+        let tx_hash = witness_on_chain(&mut attestation, &wallet, &client)
+            .await
+            .unwrap();
+        let submitted = wallet.submitted();
+        assert_eq!(submitted.len(), 1);
+
+        let (submitted_hash, submitted_tx) = &submitted[0];
+        assert_eq!(submitted_hash, &tx_hash);
+        assert_eq!(submitted_tx.to.as_deref(), Some(WITNESS_TO));
+        assert!(submitted_tx.data.starts_with(WITNESS_MARKER));
+
+        let receipt = client
+            .get_receipt(&tx_hash)
+            .await
+            .unwrap()
+            .expect("receipt");
+        assert_eq!(receipt.logs.len(), 1);
+        assert_eq!(receipt.logs[0].topics, vec![WITNESS_TOPIC.to_string()]);
+        assert_eq!(receipt.logs[0].data, attestation.witness_hash().0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn verify_on_chain_rejects_missing_witness() {
         let (client, _wallet) = paired_mocks(1_000);
         let engram = Engram::builder(Kind::Task).created_at_ms(0).build();
         let attestation = sign(&engram, &signing_key(1));
+        assert!(!verify_on_chain(&attestation, &client).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verify_on_chain_rejects_chain_id_mismatch() {
+        let (client, wallet) = paired_mocks(1_000);
+        let engram = Engram::builder(Kind::Task)
+            .body(Body::text("anchor this"))
+            .provenance(Provenance::trusted("roko"))
+            .created_at_ms(0)
+            .build();
+        let mut attestation = sign(&engram, &signing_key(3));
+
+        witness_on_chain(&mut attestation, &wallet, &client)
+            .await
+            .unwrap();
+        let mismatched_client = client.clone().with_chain_id(31337);
+
+        assert!(
+            !verify_on_chain(&attestation, &mismatched_client)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn verify_on_chain_rejects_block_number_mismatch() {
+        let (client, wallet) = paired_mocks(1_000);
+        let engram = Engram::builder(Kind::Task)
+            .body(Body::text("anchor this"))
+            .provenance(Provenance::trusted("roko"))
+            .created_at_ms(0)
+            .build();
+        let mut attestation = sign(&engram, &signing_key(4));
+
+        witness_on_chain(&mut attestation, &wallet, &client)
+            .await
+            .unwrap();
+        attestation
+            .chain_attestation
+            .as_mut()
+            .expect("chain attestation")
+            .block_number += 1;
+
         assert!(!verify_on_chain(&attestation, &client).await.unwrap());
     }
 }

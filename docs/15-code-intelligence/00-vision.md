@@ -13,7 +13,7 @@
 
 ## Abstract
 
-Coding agents powered by large language models face a fundamental constraint: the context window is finite, but codebases are not. A 200,000-token window sounds generous until you realize that a mid-size Rust workspace — the Roko codebase itself at ~177K lines across 18 crates — already exceeds that budget as raw text. Agents must work with partial views, and the quality of those partial views determines the quality of the agent's output.
+Coding agents powered by large language models face a fundamental constraint: the context window is finite, but codebases are not. A 200,000-token window sounds generous until you realize that a mid-size Rust workspace — the Roko codebase itself at ~322K lines across 36 workspace members — already exceeds that budget as raw text. Agents must work with partial views, and the quality of those partial views determines the quality of the agent's output.
 
 Code intelligence is the subsystem that makes those partial views excellent. Rather than dumping files into the context window and hoping the relevant code is somewhere in the pile, code intelligence provides structured understanding: what symbols exist, how they relate, which ones matter most for the current task, and how to retrieve exactly the right context at the right granularity. This is the difference between a coding agent that wastes tokens on irrelevant boilerplate and one that arrives at the task with precisely the context it needs.
 
@@ -31,7 +31,7 @@ Modern LLMs offer context windows ranging from 128K to 2M tokens. This sounds ab
 
 | Metric | Roko workspace | Typical enterprise |
 |---|---|---|
-| Lines of code | ~177K | 500K–5M |
+| Lines of code | ~322K | 500K–5M |
 | Estimated tokens (raw) | ~500K | 1.5M–15M |
 | Context budget (128K model) | 128K | 128K |
 | Usable for code (after system prompt, instructions, history) | ~80K | ~80K |

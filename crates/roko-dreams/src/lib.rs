@@ -1,7 +1,8 @@
 //! Dreams subsystem crate.
 //!
-//! This package owns the dream-cycle runtime, heartbeat helpers, and the
-//! remaining placeholder subsystem types that still live in the dreams domain.
+//! This package owns the shipping dream-cycle runtime, heartbeat helpers, and
+//! compatibility metadata for the subsystem surfaces that still live in the
+//! dreams domain.
 
 #![allow(
     clippy::assigning_clones,
@@ -33,17 +34,28 @@
     clippy::too_many_lines,
     clippy::uninlined_format_args,
     clippy::unnecessary_wraps,
-    clippy::unused_async
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    clippy::missing_fields_in_debug,
+    clippy::needless_borrows_for_generic_args,
+    clippy::vec_init_then_push
 )]
 
 pub mod cycle;
 pub mod hypnagogia;
 pub mod imagination;
+pub mod phase2;
+pub mod rehearsal;
 pub mod replay;
 pub mod runner;
+pub mod staging;
 pub mod threat;
 
-pub use cycle::{AgentDispatcher, DreamCycle, DreamCycleReport};
+pub use cycle::{
+    AgentDispatcher, DreamCycle, DreamCycleReport, PhaseBudgetSummary, StagingBufferStats,
+};
 pub use hypnagogia::{
     DaliInterrupt, ExecutiveLoosener, HomuncularObserver, HypnagogiaEngine, ThalamicGate,
 };
@@ -51,12 +63,18 @@ pub use imagination::{
     CausalModel, CounterfactualQuery, ImaginationMode, ImaginationOutcome, counterfactual_episode,
     imagine, synthesize_hypotheses,
 };
-pub use replay::{DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, select_replay_episodes};
-pub use runner::{
-    DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine, DreamHeartbeatPolicy,
-    DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner, DreamRuntimeControls,
-    DreamSchedulePolicy, DreamTrigger, Episode, Insight, build_dream_review_dispatcher,
+pub use rehearsal::{RehearsalOutcome, RehearsalReport, rehearse_threats};
+pub use replay::{
+    DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, MattarDawConfig, ReplayUtility,
+    compute_replay_utility, select_replay_episodes, select_replay_episodes_with_affect,
 };
+pub use runner::{
+    BusPulseTriggerConfig, DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine,
+    DreamHeartbeatPolicy, DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner,
+    DreamRuntimeControls, DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
+    build_dream_review_dispatcher,
+};
+pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use threat::{ThreatScenario, enumerate_threats, threat_warning_entries};
 
 /// Stable subsystem identifiers still surfaced by the dreams crate.
@@ -68,14 +86,14 @@ pub enum DreamsSubsystemId {
     Hypnagogia,
 }
 
-/// Summary metadata for one dreams subsystem placeholder.
+/// Summary metadata for one dreams subsystem compatibility surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DreamsSubsystemSummary {
     /// Stable subsystem identifier.
     pub id: DreamsSubsystemId,
     /// Human-readable label.
     pub label: &'static str,
-    /// Static marker string describing placeholder behavior.
+    /// Static marker string describing compatibility behavior.
     pub marker: &'static str,
 }
 
@@ -105,7 +123,7 @@ impl DreamsEngine {
         Self
     }
 
-    /// Summary metadata for this subsystem placeholder.
+    /// Summary metadata for this subsystem compatibility surface.
     #[must_use]
     pub const fn summary(self) -> DreamsSubsystemSummary {
         DreamsSubsystemSummary::new(Self::ID, Self::LABEL, Self::MARKER)

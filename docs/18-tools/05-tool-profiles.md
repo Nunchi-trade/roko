@@ -1,7 +1,8 @@
 # 05 — Tool Profiles & Configuration
 
 > Profile-based tool loading, 13 chain domain profiles, configuration hierarchy,
-> environment variables, and fine-grained overrides.
+> environment variables, and fine-grained overrides. See also
+> [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 
 > **Implementation**: Shipping
@@ -11,20 +12,48 @@
 ## Overview
 
 Tool profiles control which tools are loaded at agent boot. A profile is a named selection of
-tool categories — it determines the agent's structural capabilities. An agent with the `data`
-profile is **structurally unable** to trade: the write tool adapters don't exist in its
-registry. This is not a runtime policy check — it's a structural absence.
+tool categories and companion extensions - it determines the agent's structural capabilities.
+An agent with the `data` profile is **structurally unable** to trade: the write tool adapters
+don't exist in its registry. This is not a runtime policy check - it's a structural absence.
 
 Profiles are set in `roko.toml` or via the `TOOL_PROFILE` environment variable. They compose —
 `TOOL_PROFILE=trader,vault` activates both trader and vault categories.
 
 ---
 
-## The 13 Chain Domain Profiles
+## Domain Profile Bundles
 
-These profiles are specific to the chain domain plugin. Other domains (coding, research, ops)
-define their own role-based access via the `StaticToolRegistry.for_role()` mechanism (see
-`01-builtin-tools.md`).
+The refinement path treats profiles as installable bundles, not just config switches. A domain
+profile bundle packages Tier 1/2/3/4 extensions together:
+
+- profile defaults and role presets,
+- domain-specific tool sets,
+- gates and heuristics,
+- starter templates,
+- and the domain's typed context schema and custody expectations.
+
+This is how the same kernel can host coding, research, blockchain, data, ops, and writing
+deployments without forcing every domain through one monolithic tool registry.
+
+Typical bundle composition follows the same merge rules across domains:
+
+- tools merge by union,
+- roles merge by union with collision warnings,
+- gates stack unless explicitly scoped,
+- heuristics coexist and are routed by fit,
+- and profile priority resolves key conflicts when two bundles declare the same override.
+
+The chain domain is the most detailed reference implementation, so the matrix below keeps the
+chain-specific profile names, but the bundle pattern itself is domain-agnostic.
+
+---
+
+## Chain Domain Reference Profiles
+
+These profiles are specific to the chain domain plugin. Other domains can ship their own
+profile bundles with their own tool sets, TypedContext keys, and custody rules. Built-in
+tools continue to use role-based access via the `StaticToolRegistry.for_role()` mechanism
+(see `01-builtin-tools.md`).
 
 | Profile | Read Tools | Write Tools | Use Case |
 |---|---|---|---|
@@ -94,6 +123,11 @@ let tools: Vec<&ToolDef> = ALL_TOOL_DEFS
     .collect();
 ```
 
+For domain bundles, filtering is only the first pass. The runtime also binds a domain-specific
+`TypedContext` to the loaded tool set and routes custody-aware writes through the domain's
+provenance rules. That is what makes the same profile name mean "read-only analytics" in one
+domain and "execution-capable operator" in another, without relying on a late policy check.
+
 ---
 
 ## Configuration Hierarchy
@@ -132,6 +166,10 @@ ttl_seconds = 15
 max_entries = 1000
 ```
 
+For domain bundles, this section is the runtime override layer. The bundle itself carries the
+default tools, gates, heuristics, templates, and typed context schema; `roko.toml` only
+overrides specific selections.
+
 ### Environment Variables
 
 All environment variables use the `ROKO_` prefix (renamed from the legacy `GOLEM_`/`BARDO_`
@@ -161,6 +199,10 @@ prefixes):
 The read tier is sufficient for most tools. Write tier is only needed for tools that submit
 orders via the Uniswap Trading API (UniswapX, Smart Order Router). Feedback tier enables
 quality-of-execution reporting that improves routing over time.
+
+Domain bundles can add their own credential tiers, but they should follow the same rule:
+credentials are scoped to the smallest tool set that needs them and should be reflected in the
+bundle's custody rules.
 
 ---
 
@@ -222,3 +264,20 @@ The profile affects not just tool availability but how cognitive subsystems beha
 | `data` | Low (monitoring) | Low | Data quality insights |
 
 The Daimon (motivation/affect system) reads the profile to calibrate its Pleasure-Arousal-Dominance (PAD) vector baselines. An observatory agent naturally has lower arousal (it's watching, not acting), which in turn affects tier routing — lower arousal means more T0 probes and fewer T2 deep-reasoning ticks, which is exactly right for a passive observation role.
+
+---
+
+## Typed Context And Custody
+
+Domain profiles are not just about which tools are present. They also define the structure of
+the situation the tools run against and the provenance trail their actions leave behind.
+
+`TypedContext` is the per-domain context snapshot that lets gates, heuristics, and tool
+selection reason over structured fields instead of free-text summaries. A blockchain profile
+declares keys like `chain`, `wallet`, and `intent`; a coding profile would declare repo and
+language keys; a writing profile would carry corpus and voice-fingerprint data.
+
+`Custody` is the target-state durable action record attached to tool execution. It captures who acted,
+why the action was taken, whether simulation ran, what claim or heuristic justified it, and
+what result came back. Tool docs should treat custody as part of the tool contract whenever a
+write path has real consequences.

@@ -218,6 +218,7 @@ fn test_integration_ok() {
             task_description: "Implement add".into(),
             diff: "pub fn add(a: i32, b: i32) -> i32 { a + b }".into(),
         })),
+        code_intel_hints: Vec::new(),
     };
     let generated_store: Arc<dyn ArtifactStore> = Arc::new(InMemoryArtifactStore::new());
     let config = RungExecutionConfig {
@@ -232,16 +233,17 @@ fn test_integration_ok() {
         llm_judge_min_score: Some(0.5),
         integration_test_pattern: Some("test_integration_ok".into()),
         integration_build_system: None,
+        verdict_publisher: None,
     };
 
     let ctx = Context::now();
     let expected = [
         vec!["compile:cargo"],
-        vec!["test:cargo"],
         vec!["clippy:cargo"],
-        vec!["symbol", "generated_test:cargo"],
-        vec!["property_test:cargo", "verify_chain"],
-        vec!["fact_check"],
+        vec!["test:cargo"],
+        vec!["symbol"],
+        vec!["generated_test:cargo", "verify_chain"],
+        vec!["property_test:cargo", "fact_check"],
         vec!["llm_judge", "integration:build_test:test_integration_ok"],
     ];
 
@@ -373,7 +375,7 @@ async fn diff_gate_accepts_real_diffs_and_rejects_stub_tokens() {
 #[tokio::test]
 async fn symbol_rung_passes_and_reports_missing_symbols() {
     let tmp = tempdir();
-    write_text(tmp.path(), "src/lib.rs", "pub struct Present;\n");
+    write_text(tmp.path(), "lib.rs", "pub struct Present;\n");
 
     let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
     let manifest = SymbolManifest::new("plan-symbol").with_expectation(SymbolExpectation {

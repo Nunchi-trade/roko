@@ -3,7 +3,7 @@
 > **Crate:** `roko-learn` · **Modules:** `playbook.rs`, `playbook_rules.rs`
 > **Persistence:** `.roko/learn/playbooks/` (JSON per playbook), `.roko/learn/playbook-rules.toml`
 > **Wiring:** `LearningRuntime::record_completed_run()` → `PlaybookStore`, `PlaybookRules`
-> **Cross-references:** [00-episode-logger](00-episode-logger.md), [02-skill-library-voyager](02-skill-library-voyager.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md)
+> **Cross-references:** [00-episode-logger](00-episode-logger.md), [02-skill-library-voyager](02-skill-library-voyager.md), [05-pattern-discovery-trigram](05-pattern-discovery-trigram.md), [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md), [04-decay-variants](../00-architecture/04-decay-variants.md), [25-attention-as-currency](../00-architecture/25-attention-as-currency.md), [Naming and Glossary](../00-architecture/01-naming-and-glossary.md), [REF12 demurrage proposal](../../tmp/refinements/12-knowledge-demurrage.md), [REF14 worldview validation proposal](../../tmp/refinements/14-worldview-validation.md)
 
 
 > **Implementation**: Shipping
@@ -12,25 +12,32 @@
 
 ## Purpose
 
-The playbook system is the validated knowledge tier of Roko's three-tier memory architecture. Where episodes are raw observations and patterns are extracted hypotheses, playbook rules are validated instructions that have proven their predictive accuracy across multiple subsequent executions. When a rule correctly predicts outcomes across 5+ builds, it earns high confidence and gets injected directly into agent prompts, preventing the agent from repeating known mistakes.
+The playbook system is the concrete procedural projection of Roko's learning stack, not the whole stack by itself. REF14 adds a first-class `Heuristic` layer above episodes and patterns: heuristics capture reusable claims, predictions, falsifiers, and calibration records, while playbooks remain the highly specific ordered steps and prompt-ready rules compiled from those validated beliefs. When a rule correctly predicts outcomes across multiple subsequent executions, it earns enough reinforcement to stay warm and gets injected directly into agent prompts, preventing the agent from repeating known mistakes. Freshness is not governed by confidence alone: demurrage, successful reuse, and contradiction-driven penalties decide whether a rule remains active or cools into cold storage. See also [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md) and `../../tmp/refinements/14-worldview-validation.md`.
 
 The system has two components:
 
-1. **PlaybookStore** — manages named sequences of steps (playbooks) with success/failure counters.
-2. **PlaybookRules** — manages if-then rules with globset-based triggers and bounded confidence dynamics.
+1. **PlaybookStore** — manages named sequences of steps (playbooks) with success/failure counters and freshness balance.
+2. **PlaybookRules** — manages if-then rules with globset-based triggers, bounded confidence dynamics, and demurrage-driven reinforcement.
 
 ---
 
-## Three-Tier Memory Architecture
+## Playbooks Inside The Learning Stack
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    Tier 3: Playbook Rules                        │
-│   Validated instructions injected into agent prompts.            │
-│   Confidence: 0.0 – 0.95 (bounded). Validated ≥5 times.         │
-│   Trigger: file globs, tags, categories, error signatures, roles │
-│   Action: inject body text into Implementer prompt               │
-│   Lifecycle: validate (+0.05) / contradict (−0.10) / prune       │
+│              Tier 4: Playbook Rules And Playbooks                │
+│   Concrete instructions compiled from validated heuristics and   │
+│   repeated strategy fragments. Confidence: 0.0 – 0.95 bounded.  │
+│   Reinforcement + balance keep rules warm; demurrage cools      │
+│   stale rules. Trigger: file globs, tags, categories, error     │
+│   signatures, roles. Action: inject prompt-ready body text.     │
+│   Lifecycle: validate / contradict / reinforce / demurrage /    │
+│   prune.                                                         │
+├──────────────────────────────────────────────────────────────────┤
+│             Tier 3: Heuristics And Worldview Priors              │
+│   Reusable rules of thumb with preconditions, predictions,       │
+│   falsifier surfaces, calibration records, and episode receipts. │
+│   See: 19-heuristics-worldviews-and-falsifiers.md                │
 ├──────────────────────────────────────────────────────────────────┤
 │                    Tier 2: Patterns                               │
 │   Extracted hypotheses from episode clustering.                   │
@@ -60,6 +67,10 @@ pub struct Playbook {
     pub goal: String,
     /// Ordered steps to execute.
     pub steps: Vec<PlaybookStep>,
+    /// Attention balance that self-trims stale playbooks.
+    pub balance: f64,
+    /// Total demurrage charged against this playbook.
+    pub demurrage_paid: f64,
     /// Number of times this playbook led to a gate pass.
     pub success_count: u32,
     /// Number of times this playbook led to a gate failure.
@@ -103,7 +114,7 @@ Each playbook is stored as a separate JSON file in `.roko/learn/playbooks/`, key
 
 ## PlaybookRules
 
-The `PlaybookRules` module manages if-then rules with rich trigger matching and bounded confidence dynamics. Rules are the actionable output of the learning system — they are injected into agent prompts to prevent known failure modes.
+The `PlaybookRules` module manages if-then rules with rich trigger matching and bounded confidence dynamics. Rules are the actionable output of the learning system — they are injected into agent prompts to prevent known failure modes, and they self-trim through demurrage instead of depending on fixed-age retention windows.
 
 ### Rule Schema
 
@@ -117,6 +128,10 @@ pub struct Rule {
     pub body: String,
     /// Conditions that cause this rule to fire.
     pub triggers: Triggers,
+    /// Freshness balance that rises with reinforcement and falls with demurrage.
+    pub balance: f64,
+    /// Total demurrage charged against this rule.
+    pub demurrage_paid: f64,
     /// Confidence score; bounded to [0.0, 0.95].
     pub confidence: f64,
     /// Number of validated predictions.
@@ -196,15 +211,17 @@ The `PlaybookRules::select(context)` method returns all rules whose triggers mat
 
 ### Confidence Dynamics
 
-Confidence is event-driven, not time-based:
+Confidence is update-driven, not time-based, and freshness is governed by balance rather than a hard retention window:
 
-| Event | Confidence change | Bounds |
-|-------|------------------|--------|
-| Validation (rule predicted correctly) | `+0.05` | Capped at `0.95` |
-| Contradiction (rule predicted incorrectly) | `−0.10` | Floored at `0.0` |
-| Prune threshold | N/A | Rule removed if `confidence < min_confidence` |
+| Trigger | Confidence change | Balance change | Effect |
+|-------|------------------|----------------|--------|
+| Validation (rule predicted correctly) | `+0.05` | Reinforcement bonus | Keeps a useful rule warm |
+| Contradiction (rule predicted incorrectly) | `−0.10` | Reinforcement loss plus cooling pressure | Stale or wrong rules cool faster |
+| Successful reuse / citation | N/A | Reinforcement bonus | Returns attention to the rule |
+| Demurrage tick | N/A | Holding cost | Unused rules drift toward cold storage |
+| Prune threshold | N/A | Balance or confidence below floor | Rule removed if it can no longer justify retention |
 
-The asymmetric update rate (contradictions penalize 2× more than validations reward) ensures that rules which stop being accurate are quickly demoted. The confidence ceiling of 0.95 prevents any rule from becoming "certain" — there is always a small probability that the rule is wrong, which keeps the system open to revision.
+The asymmetric update rate (contradictions penalize 2× more than validations reward) ensures that rules which stop being accurate are quickly demoted. Demurrage makes that demotion continuous instead of relying on periodic cleanup: a rule that is no longer cited or successfully reused loses balance over time even if its confidence remains superficially high. The confidence ceiling of 0.95 prevents any rule from becoming "certain" — there is always a small probability that the rule is wrong, which keeps the system open to revision.
 
 ```
 Confidence lifecycle:
@@ -253,11 +270,13 @@ A pattern is promoted to a rule when:
 ### Demotion and Pruning
 
 Rules that stop being accurate are automatically demoted:
-1. Each contradiction reduces confidence by 0.10.
-2. When confidence drops below `min_confidence` (configurable, default 0.10), the rule is pruned.
-3. Pruned rules are removed from the TOML file on the next save.
+1. Each contradiction reduces confidence by 0.10 and cuts into balance.
+2. Each demurrage tick reduces balance even when the rule is not contradicted.
+3. Successful reuse or citation replenishes balance, so rules stay warm only when they keep earning attention.
+4. When confidence or balance drops below `min_confidence` / `min_balance` (configurable), the rule is pruned or moved to cold storage.
+5. Pruned rules are removed from the TOML file on the next save.
 
-This creates a self-cleaning knowledge base: rules that were valid for an older version of the codebase but no longer apply are automatically removed as contradictions accumulate.
+This creates a self-cleaning knowledge base: rules that were valid for an older version of the codebase but no longer apply are automatically removed as contradictions accumulate and their balance drains. It also fixes stale-playbook petrification, where a once-good rule would otherwise sit in prompts forever just because it had a high historical confidence score.
 
 ---
 
@@ -327,8 +346,8 @@ Playbook rules are project-agnostic when their triggers use structural patterns 
 The cross-project transfer workflow:
 1. Export rules from project A: `cp .roko/learn/playbook-rules.toml /shared/rules/project-a.toml`
 2. Import into project B: merge into `.roko/learn/playbook-rules.toml`
-3. Reset confidence to 0.50 (rules must re-earn confidence in the new context)
-4. Rules that validate in project B climb in confidence; rules that contradict are pruned.
+3. Reset confidence to 0.50 and balance to a starter value (rules must re-earn both in the new context)
+4. Rules that validate in project B climb in confidence and balance; rules that contradict or go unused lose balance and are pruned.
 
 This enables a form of cross-project knowledge transfer that operates at ~50ns per pattern lookup (via HDC fingerprint matching) rather than requiring expensive embedding-based retrieval.
 
@@ -341,3 +360,7 @@ This enables a form of cross-project knowledge transfer that operates at ~50ns p
 - **[05-pattern-discovery-trigram](05-pattern-discovery-trigram.md)** — Patterns are the intermediate tier between episodes and rules. Patterns with sufficient support are promoted to rules.
 - **[13-8-missing-feedback-loops](13-8-missing-feedback-loops.md)** — The Skills→Prompts feedback loop (loop 5) describes how playbook rules feed back into prompt composition.
 - **[14-stability-mechanisms](14-stability-mechanisms.md)** — Confidence dynamics prevent oscillation: the asymmetric update rate and 0.95 ceiling are stability mechanisms.
+- **[04-decay-variants](../00-architecture/04-decay-variants.md)** — Demurrage supersedes simple decay for retention.
+- **[25-attention-as-currency](../00-architecture/25-attention-as-currency.md)** — Playbook freshness is an attention-economy problem.
+- **[Naming and Glossary](../00-architecture/01-naming-and-glossary.md)** — Canonical vocabulary for the learning and memory layers.
+- **See also:** [REF12 demurrage proposal](../../tmp/refinements/12-knowledge-demurrage.md)

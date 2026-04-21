@@ -17,6 +17,7 @@ use crate::integration_gate::IntegrationGate;
 use crate::llm_judge_gate::{JudgeOracle, LlmJudgeGate};
 use crate::payload::BuildSystem;
 use crate::property_test_gate::PropertyTestGate;
+use crate::rung_selector::Rung;
 use crate::symbol_gate::SymbolGate;
 use crate::test_gate::TestGate;
 use crate::verify_chain_gate::{VERIFY_SCRIPT_TAG, VerifyChainGate};
@@ -34,10 +35,14 @@ pub struct RungExecutionInputs {
     pub fact_check_signal: Option<Engram>,
     /// `LlmJudgeGate` expects a `JudgePayload` or text diff.
     pub llm_judge_signal: Option<Engram>,
+    /// INT-16: Code-intelligence context from `roko-index` used to enrich
+    /// verification decisions.  Symbol and LLM-judge gates may use these
+    /// hints to focus checks on relevant symbols / files.
+    pub code_intel_hints: Vec<String>,
 }
 
 /// Configuration knobs for executing the 7-rung runtime gate mapping.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RungExecutionConfig {
     /// Source roots for `SymbolGate`.
     pub source_roots: Option<Vec<PathBuf>>,
@@ -57,18 +62,20 @@ pub struct RungExecutionConfig {
     pub integration_test_pattern: Option<String>,
     /// Build system for the integration scenario. Defaults to cargo.
     pub integration_build_system: Option<BuildSystem>,
+    /// Optional verdict publisher for broadcasting gate outcomes.
+    pub verdict_publisher: Option<crate::verdict_publisher::VerdictPublisher>,
 }
 
-/// Execute a single rung of the 7-rung runtime mapping.
+/// Execute a single canonical rung of the 7-rung runtime mapping.
 ///
 /// The mapping is:
 ///
 /// - `0`: compile
-/// - `1`: test
-/// - `2`: clippy
-/// - `3`: symbol + generated test
-/// - `4`: property test + verify-chain
-/// - `5`: fact-check
+/// - `1`: clippy
+/// - `2`: test
+/// - `3`: symbol
+/// - `4`: generated test + verify-chain
+/// - `5`: property test + fact-check
 /// - `6`: llm-judge + integration
 ///
 /// Any `rung > 6` executes every rung in order and flattens the resulting
@@ -82,40 +89,43 @@ pub async fn run_rung(
 ) -> Vec<Verdict> {
     if rung > 6 {
         let mut verdicts = Vec::new();
-        for current_rung in 0..=6 {
-            verdicts.extend(run_single_rung(base_signal, ctx, current_rung, inputs, config).await);
+        for rung in crate::rung_selector::CANONICAL_ORDER {
+            verdicts.extend(run_canonical_rung(base_signal, ctx, rung, inputs, config).await);
         }
         return verdicts;
     }
 
-    run_single_rung(base_signal, ctx, rung, inputs, config).await
+    let Some(rung) = Rung::from_index(rung) else {
+        unreachable!("rung > 6 is handled above");
+    };
+    run_canonical_rung(base_signal, ctx, rung, inputs, config).await
 }
 
-async fn run_single_rung(
+/// Execute one [`Rung`] using the canonical 7-rung runtime mapping.
+pub async fn run_canonical_rung(
     base_signal: &Engram,
     ctx: &Context,
-    rung: u32,
+    rung: Rung,
     inputs: &RungExecutionInputs,
     config: &RungExecutionConfig,
 ) -> Vec<Verdict> {
     match rung {
-        0 => vec![CompileGate::cargo().verify(base_signal, ctx).await],
-        1 => vec![TestGate::cargo().verify(base_signal, ctx).await],
-        2 => vec![ClippyGate::cargo().verify(base_signal, ctx).await],
-        3 => vec![
-            run_symbol_gate(ctx, inputs, config).await,
+        Rung::Compile => vec![CompileGate::cargo().verify(base_signal, ctx).await],
+        Rung::Lint => vec![ClippyGate::cargo().verify(base_signal, ctx).await],
+        Rung::Test => vec![TestGate::cargo().verify(base_signal, ctx).await],
+        Rung::Symbol => vec![run_symbol_gate(ctx, inputs, config).await],
+        Rung::GeneratedTest => vec![
             run_generated_test_gate(base_signal, ctx, config).await,
-        ],
-        4 => vec![
-            PropertyTestGate::cargo().verify(base_signal, ctx).await,
             run_verify_chain_gate(base_signal, ctx, config).await,
         ],
-        5 => vec![run_fact_check_gate(ctx, inputs, config).await],
-        6 => vec![
+        Rung::PropertyTest => vec![
+            PropertyTestGate::cargo().verify(base_signal, ctx).await,
+            run_fact_check_gate(ctx, inputs, config).await,
+        ],
+        Rung::Integration => vec![
             run_llm_judge_gate(ctx, inputs, config).await,
             run_integration_gate(base_signal, ctx, config).await,
         ],
-        _ => unreachable!("rung > 6 is handled by run_rung"),
     }
 }
 
@@ -138,7 +148,20 @@ async fn run_symbol_gate(
     let Some(source_roots) = config.source_roots.clone() else {
         return stub_verdict("symbol", "no source roots configured for rung 3");
     };
-    SymbolGate::new(source_roots).verify(signal, ctx).await
+    // INT-16: When code-intel hints are available, tag the signal so the
+    // symbol gate can focus on the most relevant files/symbols.
+    let signal = if inputs.code_intel_hints.is_empty() {
+        signal.clone()
+    } else {
+        let mut enriched = signal.clone();
+        for (i, hint) in inputs.code_intel_hints.iter().enumerate().take(10) {
+            enriched
+                .tags
+                .insert(format!("code_intel_hint_{i}"), hint.clone());
+        }
+        enriched
+    };
+    SymbolGate::new(source_roots).verify(&signal, ctx).await
 }
 
 async fn run_generated_test_gate(

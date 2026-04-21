@@ -47,9 +47,11 @@
     clippy::uninlined_format_args,
     clippy::unnested_or_patterns,
     clippy::unused_async,
-    clippy::unwrap_or_default
+    clippy::unwrap_or_default,
+    clippy::io_other_error
 )]
 
+pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
 pub mod dreams;
@@ -59,6 +61,7 @@ pub mod events;
 pub mod extract;
 pub mod feedback;
 pub mod fswatcher;
+pub mod integrations;
 pub mod openapi;
 pub mod plan_types;
 pub mod routes;
@@ -83,7 +86,7 @@ use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
-use crate::events::ServerEvent;
+use crate::events::{ExecutionEvent, ServerEvent};
 use runtime::CliRuntime;
 use state::AppState;
 
@@ -194,8 +197,10 @@ impl ServerBuilder {
         ));
         tokio::spawn(dispatch::dispatch_loop(Arc::clone(&state), dispatcher));
         start_builtin_event_sources(Arc::clone(&state), self.config.roko_config.clone());
+        let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
+        let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
@@ -263,7 +268,9 @@ pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
 /// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
     let roko_config = state.load_roko_config().as_ref().clone();
+    let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
+    let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
@@ -292,7 +299,122 @@ fn build_app_state(
     roko_config: RokoConfig,
 ) -> AppState {
     let deploy_backend = create_deploy_backend(&roko_config);
-    AppState::new(workdir, runtime, roko_config, deploy_backend)
+    let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
+    let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
+    state
+}
+
+fn start_state_hub_bridge(state: Arc<AppState>) -> JoinHandle<()> {
+    let mut rx = state.event_bus.subscribe();
+    let sender = state.state_hub.sender();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(envelope) => {
+                    if let Some(event) = server_event_to_dashboard(&envelope.payload) {
+                        sender.publish(event);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "state hub bridge lagged behind server event bus");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::DashboardEvent> {
+    use roko_core::DashboardEvent;
+
+    match event {
+        ServerEvent::PlanStarted { plan_id } => Some(DashboardEvent::PlanStarted {
+            plan_id: plan_id.clone(),
+        }),
+        ServerEvent::PlanCompleted { plan_id, success } => Some(DashboardEvent::PlanCompleted {
+            plan_id: plan_id.clone(),
+            success: *success,
+        }),
+        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: role.clone(),
+        }),
+        ServerEvent::AgentOutput {
+            agent_id, content, ..
+        } => Some(DashboardEvent::AgentOutput {
+            agent_id: agent_id.clone(),
+            content: content.clone(),
+        }),
+        ServerEvent::GateResult {
+            plan_id,
+            task_id,
+            gate,
+            passed,
+        } => Some(DashboardEvent::GateResult {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            gate: gate.clone(),
+            passed: *passed,
+        }),
+        ServerEvent::Execution { plan_id, event } => match event {
+            ExecutionEvent::TaskStarted { task_id, phase } => Some(DashboardEvent::TaskStarted {
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                phase: phase.clone(),
+            }),
+            ExecutionEvent::TaskCompleted { task_id, outcome } => {
+                Some(DashboardEvent::TaskCompleted {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    outcome: outcome.clone(),
+                })
+            }
+            ExecutionEvent::TaskPhaseChanged {
+                task_id,
+                old_phase,
+                new_phase,
+            } => Some(DashboardEvent::TaskPhaseChanged {
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                old_phase: old_phase.clone(),
+                new_phase: new_phase.clone(),
+            }),
+            ExecutionEvent::GateResult {
+                task_id,
+                gate,
+                passed,
+                ..
+            } => Some(DashboardEvent::GateResult {
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                gate: gate.clone(),
+                passed: *passed,
+            }),
+            _ => None,
+        },
+        ServerEvent::PhaseTransition { plan_id, from, to } => {
+            Some(DashboardEvent::PhaseTransition {
+                plan_id: plan_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+            })
+        }
+        ServerEvent::EfficiencyEvent {
+            plan_id,
+            task_id,
+            metric,
+            value,
+        } => Some(DashboardEvent::EfficiencyEvent {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            metric: metric.clone(),
+            value: *value,
+        }),
+        ServerEvent::Error { message } => Some(DashboardEvent::Error {
+            message: message.clone(),
+        }),
+        _ => None,
+    }
 }
 
 pub(crate) fn start_event_source_group(

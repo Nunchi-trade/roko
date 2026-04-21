@@ -889,10 +889,12 @@ mod tests {
     fn test_state_with_runtime(runtime: Arc<dyn CliRuntime>) -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().to_path_buf();
+        let mut roko_config = roko_core::config::schema::RokoConfig::default();
+        roko_config.prd.auto_plan = true;
         let state = Arc::new(AppState::new(
             workdir,
             runtime,
-            roko_core::config::schema::RokoConfig::default(),
+            roko_config,
             Arc::new(ManualBackend::default()),
         ));
         (dir, state)

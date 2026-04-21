@@ -91,6 +91,20 @@ authors = ["Roko <engineering@roko.dev>"]
 repository = "https://github.com/nunchi/roko"
 homepage = "https://github.com/nunchi/roko"
 
+# cargo-dist configuration for prebuilt binary releases.
+# Targets: macOS ARM + Intel, Linux x86_64 glibc + musl.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.1"
+ci = "github"
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+install-path = "CARGO_HOME"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }
@@ -118,9 +132,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+blake3 = "1"
 
-# Testing
+# Testing & benchmarks
 proptest = "1.10"
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
@@ -152,6 +168,7 @@ globset = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
 regex = "1"
+rusqlite = { version = "0.35", features = ["bundled"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

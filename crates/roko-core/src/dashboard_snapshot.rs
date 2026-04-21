@@ -85,6 +85,17 @@ pub enum DashboardEvent {
         /// Current rolling c-factor buckets for the Learning tab.
         buckets: Vec<CFactorBucket>,
     },
+    /// An episode was recorded by the learning subsystem.
+    EpisodeRecorded {
+        /// Agent that produced the episode.
+        agent_id: String,
+        /// Agent role (e.g. "implementer", "reviewer").
+        role: String,
+        /// Stable episode identifier.
+        episode_id: String,
+        /// Whether the episode was successful.
+        passed: bool,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -146,6 +157,21 @@ pub struct GateVerdict {
     /// Gate name.
     pub gate: String,
     /// Whether the gate passed.
+    pub passed: bool,
+    /// Unix timestamp in milliseconds.
+    pub ts_millis: u64,
+}
+
+/// Recent episode summary for the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeSummary {
+    /// Stable episode identifier.
+    pub episode_id: String,
+    /// Agent that produced the episode.
+    pub agent_id: String,
+    /// Agent role.
+    pub role: String,
+    /// Whether the episode was successful.
     pub passed: bool,
     /// Unix timestamp in milliseconds.
     pub ts_millis: u64,
@@ -569,6 +595,9 @@ pub struct DashboardSnapshot {
     /// Recent failing verdicts across all gates.
     #[serde(default)]
     pub gate_recent_failures: Vec<FailureEntry>,
+    /// Recent episode summaries (ring of last 128).
+    #[serde(default)]
+    pub episodes: VecDeque<EpisodeSummary>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
     /// Overall counts.
@@ -598,6 +627,9 @@ pub struct SnapshotStats {
     pub gates_failed: usize,
     /// Total errors recorded.
     pub errors_total: usize,
+    /// Total episodes recorded.
+    #[serde(default)]
+    pub episodes_total: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +640,7 @@ const MAX_GATES: usize = 256;
 const MAX_DIAGNOSES: usize = 50;
 const MAX_ERRORS: usize = 64;
 const MAX_GATE_FAILURES: usize = 50;
+const MAX_EPISODES: usize = 128;
 const GATE_TREND_BUCKET_SIZE_SECS: u64 = 60 * 60;
 const GATE_TREND_BUCKET_COUNT: usize = 24;
 
@@ -780,6 +813,24 @@ impl DashboardSnapshot {
             DashboardEvent::CFactorTrendUpdated { buckets } => {
                 self.cfactor_trend = buckets.clone();
             }
+            DashboardEvent::EpisodeRecorded {
+                agent_id,
+                role,
+                episode_id,
+                passed,
+            } => {
+                self.stats.episodes_total += 1;
+                while self.episodes.len() >= MAX_EPISODES {
+                    self.episodes.pop_front();
+                }
+                self.episodes.push_back(EpisodeSummary {
+                    episode_id: episode_id.clone(),
+                    agent_id: agent_id.clone(),
+                    role: role.clone(),
+                    passed: *passed,
+                    ts_millis: ts,
+                });
+            }
             DashboardEvent::Error { message } => {
                 self.stats.errors_total += 1;
                 if self.errors.len() >= MAX_ERRORS {
@@ -806,7 +857,7 @@ impl DashboardSnapshot {
         let state =
             read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
         let task_trackers = read_task_trackers(&state_dir.join("task-trackers.json"))?;
-        let signal_gates = read_signal_gates(&roko_dir.join("signals.jsonl"))?;
+        let signal_gates = read_signal_gates(&roko_dir.join("engrams.jsonl"))?;
         let event_entries = read_event_entries(&state_dir.join("events.json"))?;
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
         let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
@@ -2275,7 +2326,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            roko_dir.join("signals.jsonl"),
+            roko_dir.join("engrams.jsonl"),
             format!(
                 "{}\n",
                 serde_json::json!({

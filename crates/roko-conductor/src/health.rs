@@ -156,8 +156,8 @@ impl HealthMonitor {
                     check_fn: check_terminal_liveness,
                 },
                 NamedCheck {
-                    name: "golem_status",
-                    check_fn: check_golem_status,
+                    name: "agent_status",
+                    check_fn: check_agent_status,
                 },
                 NamedCheck {
                     name: "spec_drift",
@@ -169,6 +169,12 @@ impl HealthMonitor {
                 },
             ],
         }
+    }
+
+    /// Docs-compatible alias for [`Self::overall_status`].
+    #[must_use]
+    pub fn check(&self, snapshot: &SystemSnapshot) -> HealthStatus {
+        self.overall_status(snapshot)
     }
 
     /// Number of registered checks.
@@ -192,6 +198,36 @@ impl HealthMonitor {
             .max()
             .unwrap_or(HealthStatus::Healthy)
     }
+
+    /// Run only the terminal-liveness check.
+    #[must_use]
+    pub fn terminal_liveness(&self, snapshot: &SystemSnapshot) -> HealthCheckResult {
+        check_terminal_liveness(snapshot)
+    }
+
+    /// Run only the agent-status check.
+    #[must_use]
+    pub fn agent_status(&self, snapshot: &SystemSnapshot) -> HealthCheckResult {
+        check_agent_status(snapshot)
+    }
+
+    /// Run only the spec-drift check.
+    #[must_use]
+    pub fn spec_drift(&self, snapshot: &SystemSnapshot) -> HealthCheckResult {
+        check_spec_drift(snapshot)
+    }
+
+    /// Run only the coverage-trend check.
+    #[must_use]
+    pub fn coverage_trend(&self, snapshot: &SystemSnapshot) -> HealthCheckResult {
+        check_coverage_trend(snapshot)
+    }
+
+    /// Run the reserved chain-status check.
+    #[must_use]
+    pub fn chain_status(&self, snapshot: &SystemSnapshot) -> HealthCheckResult {
+        check_chain_status(snapshot)
+    }
 }
 
 // ---- Built-in checks --------------------------------------------------------
@@ -206,22 +242,10 @@ fn check_terminal_liveness(snapshot: &SystemSnapshot) -> HealthCheckResult {
         return HealthCheckResult::healthy("terminal_liveness", "no agents expected", now);
     }
 
-    // Check if active agents match expected.
-    if snapshot.active_agents == 0 && snapshot.expected_agents > 0 {
+    if snapshot.last_agent_heartbeat_ms <= 0 {
         return HealthCheckResult::critical(
             "terminal_liveness",
-            format!("0/{} expected agents active", snapshot.expected_agents),
-            now,
-        );
-    }
-
-    if snapshot.active_agents < snapshot.expected_agents {
-        return HealthCheckResult::degraded(
-            "terminal_liveness",
-            format!(
-                "{}/{} expected agents active",
-                snapshot.active_agents, snapshot.expected_agents
-            ),
+            "no heartbeat received while agents are expected",
             now,
         );
     }
@@ -233,39 +257,67 @@ fn check_terminal_liveness(snapshot: &SystemSnapshot) -> HealthCheckResult {
         60_000
     };
 
-    if snapshot.last_agent_heartbeat_ms > 0 {
-        let staleness = now - snapshot.last_agent_heartbeat_ms;
-        if staleness > timeout {
-            return HealthCheckResult::degraded(
-                "terminal_liveness",
-                format!("agent heartbeat stale by {:.0}s", staleness as f64 / 1000.0),
-                now,
-            );
-        }
+    let staleness = now - snapshot.last_agent_heartbeat_ms;
+    if staleness > timeout {
+        return HealthCheckResult::degraded(
+            "terminal_liveness",
+            format!("agent heartbeat stale by {:.0}s", staleness as f64 / 1000.0),
+            now,
+        );
+    }
+
+    HealthCheckResult::healthy("terminal_liveness", "heartbeat within threshold", now)
+}
+
+/// Check whether the expected number of agents are running.
+fn check_agent_status(snapshot: &SystemSnapshot) -> HealthCheckResult {
+    let now = snapshot.now_ms;
+
+    if snapshot.expected_agents == 0 {
+        return HealthCheckResult::healthy("agent_status", "no agents expected", now);
+    }
+
+    if snapshot.active_agents == 0 {
+        return HealthCheckResult::critical(
+            "agent_status",
+            format!("0/{} expected agents active", snapshot.expected_agents),
+            now,
+        );
+    }
+
+    if snapshot.active_agents < snapshot.expected_agents {
+        return HealthCheckResult::degraded(
+            "agent_status",
+            format!(
+                "{}/{} expected agents active",
+                snapshot.active_agents, snapshot.expected_agents
+            ),
+            now,
+        );
     }
 
     HealthCheckResult::healthy(
-        "terminal_liveness",
+        "agent_status",
         format!(
-            "{}/{} agents active",
+            "{}/{} expected agents active",
             snapshot.active_agents, snapshot.expected_agents
         ),
         now,
     )
 }
 
-/// Check chain / golem connection status.
-fn check_golem_status(snapshot: &SystemSnapshot) -> HealthCheckResult {
+/// Check chain connection status.
+fn check_chain_status(snapshot: &SystemSnapshot) -> HealthCheckResult {
     let now = snapshot.now_ms;
 
     if !snapshot.chain_expected {
-        return HealthCheckResult::healthy("golem_status", "chain not required", now);
+        return HealthCheckResult::healthy("chain_status", "chain not required", now);
     }
 
     if snapshot.chain_connected {
-        HealthCheckResult::healthy("golem_status", "chain connected", now)
+        HealthCheckResult::healthy("chain_status", "chain connected", now)
     } else {
-        HealthCheckResult::degraded("golem_status", "chain connection lost", now)
+        HealthCheckResult::degraded("chain_status", "chain connection lost", now)
     }
 }
 
@@ -292,7 +344,7 @@ fn check_spec_drift(snapshot: &SystemSnapshot) -> HealthCheckResult {
 fn check_coverage_trend(snapshot: &SystemSnapshot) -> HealthCheckResult {
     let now = snapshot.now_ms;
 
-    if snapshot.coverage_history.len() < 2 {
+    if snapshot.coverage_history.len() < 3 {
         return HealthCheckResult::healthy(
             "coverage_trend",
             "insufficient data for trend analysis",
@@ -301,26 +353,28 @@ fn check_coverage_trend(snapshot: &SystemSnapshot) -> HealthCheckResult {
     }
 
     let len = snapshot.coverage_history.len();
-    let recent = snapshot.coverage_history[len - 1];
-    let previous = snapshot.coverage_history[len - 2];
-    let delta = recent - previous;
+    let split = len / 2;
+    let earlier = &snapshot.coverage_history[..split];
+    let recent = &snapshot.coverage_history[split..];
 
-    if delta < -5.0 {
-        HealthCheckResult::critical(
-            "coverage_trend",
-            format!("coverage dropped sharply: {previous:.1}% -> {recent:.1}% ({delta:+.1}%)"),
-            now,
-        )
-    } else if delta < -1.0 {
+    let earlier_avg = earlier.iter().sum::<f64>() / earlier.len() as f64;
+    let recent_avg = recent.iter().sum::<f64>() / recent.len() as f64;
+    let delta = recent_avg - earlier_avg;
+
+    if delta < -2.0 {
         HealthCheckResult::degraded(
             "coverage_trend",
-            format!("coverage declining: {previous:.1}% -> {recent:.1}% ({delta:+.1}%)"),
+            format!(
+                "coverage declining: earlier avg {earlier_avg:.1}% -> recent avg {recent_avg:.1}% ({delta:+.1}%)"
+            ),
             now,
         )
     } else {
         HealthCheckResult::healthy(
             "coverage_trend",
-            format!("coverage stable/improving: {previous:.1}% -> {recent:.1}% ({delta:+.1}%)"),
+            format!(
+                "coverage stable/improving: earlier avg {earlier_avg:.1}% -> recent avg {recent_avg:.1}% ({delta:+.1}%)"
+            ),
             now,
         )
     }
@@ -374,7 +428,7 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_terminal_liveness(&snap);
+        let result = monitor().agent_status(&snap);
         assert_eq!(result.status, HealthStatus::Critical);
         assert!(result.message.contains("0/3"));
     }
@@ -387,8 +441,21 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_terminal_liveness(&snap);
+        let result = monitor().agent_status(&snap);
         assert_eq!(result.status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn missing_heartbeat_is_critical() {
+        let snap = SystemSnapshot {
+            active_agents: 2,
+            expected_agents: 2,
+            last_agent_heartbeat_ms: 0,
+            now_ms: 100_000,
+            ..SystemSnapshot::default()
+        };
+        let result = monitor().terminal_liveness(&snap);
+        assert_eq!(result.status, HealthStatus::Critical);
     }
 
     #[test]
@@ -401,7 +468,7 @@ mod tests {
             heartbeat_timeout_ms: 60_000,
             ..SystemSnapshot::default()
         };
-        let result = check_terminal_liveness(&snap);
+        let result = monitor().terminal_liveness(&snap);
         assert_eq!(result.status, HealthStatus::Degraded);
         assert!(result.message.contains("stale"));
     }
@@ -416,7 +483,7 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_golem_status(&snap);
+        let result = check_chain_status(&snap);
         assert_eq!(result.status, HealthStatus::Degraded);
     }
 
@@ -428,7 +495,7 @@ mod tests {
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
-        let result = check_golem_status(&snap);
+        let result = check_chain_status(&snap);
         assert_eq!(result.status, HealthStatus::Healthy);
     }
 
@@ -464,30 +531,30 @@ mod tests {
     #[test]
     fn coverage_drop_is_critical() {
         let snap = SystemSnapshot {
-            coverage_history: vec![80.0, 72.0],
-            now_ms: 100_000,
-            ..SystemSnapshot::default()
-        };
-        let result = check_coverage_trend(&snap);
-        assert_eq!(result.status, HealthStatus::Critical);
-        assert!(result.message.contains("dropped"));
-    }
-
-    #[test]
-    fn coverage_slight_decline_is_degraded() {
-        let snap = SystemSnapshot {
-            coverage_history: vec![80.0, 77.5],
+            coverage_history: vec![82.0, 81.0, 76.0, 74.0],
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
         let result = check_coverage_trend(&snap);
         assert_eq!(result.status, HealthStatus::Degraded);
+        assert!(result.message.contains("declining"));
+    }
+
+    #[test]
+    fn coverage_slight_decline_is_degraded() {
+        let snap = SystemSnapshot {
+            coverage_history: vec![80.0, 79.5, 79.0, 78.5],
+            now_ms: 100_000,
+            ..SystemSnapshot::default()
+        };
+        let result = check_coverage_trend(&snap);
+        assert_eq!(result.status, HealthStatus::Healthy);
     }
 
     #[test]
     fn coverage_improving_is_healthy() {
         let snap = SystemSnapshot {
-            coverage_history: vec![80.0, 85.0],
+            coverage_history: vec![80.0, 81.0, 84.0, 85.0],
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
@@ -498,7 +565,7 @@ mod tests {
     #[test]
     fn coverage_insufficient_data_is_healthy() {
         let snap = SystemSnapshot {
-            coverage_history: vec![80.0],
+            coverage_history: vec![80.0, 79.5],
             now_ms: 100_000,
             ..SystemSnapshot::default()
         };
@@ -564,5 +631,11 @@ mod tests {
         let json = serde_json::to_string(&snap).expect("serialize");
         let decoded: SystemSnapshot = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.active_agents, snap.active_agents);
+    }
+
+    #[test]
+    fn docs_facing_check_alias_matches_overall_status() {
+        let snap = healthy_snapshot();
+        assert_eq!(monitor().check(&snap), monitor().overall_status(&snap));
     }
 }

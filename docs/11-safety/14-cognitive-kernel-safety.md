@@ -254,8 +254,7 @@ pub trait Policy: Send + Sync {
     /// Decide whether to permit, deny, modify, or log an action.
     /// Receives a batch of Engrams (the action request + context)
     /// and emits new Engrams (the decision, audit records, etc.)
-    fn decide(&self, engrams: &[Signal]) -> Vec<Signal>;
-    // Note: Signal will be renamed to Engram in Tier 0D
+    fn decide(&self, engrams: &[Engram]) -> Vec<Engram>;
 }
 ```
 
@@ -467,7 +466,7 @@ impl NamespaceChannel {
     /// Checks kind filter, rate limit, and optionally logs to audit chain.
     pub fn transfer(
         &self,
-        engram: &Signal,
+        engram: &Engram,
         audit_chain: Option<&dyn Substrate>,
     ) -> Result<(), ChannelError> {
         let kind = Kind(engram.kind().to_string());
@@ -512,7 +511,7 @@ pub enum CognitiveSignal {
     /// Change current task priority.
     Reprioritize(TaskId),
     /// Add context mid-reasoning without interrupting.
-    InjectContext(Box<Signal>), // Engram injected into active context.
+    InjectContext(Box<Engram>), // Engram injected into active context.
     /// Switch to stronger model immediately.
     Escalate,
     /// Reduce arousal, slow down.
@@ -681,7 +680,7 @@ pub enum PolicyDecision {
     /// Block the action. Return an error Engram to the agent.
     Deny { reason: String },
     /// Allow but alter the action (e.g., reduce scope, scrub secrets).
-    Modify { modified_engram: Signal },
+    Modify { modified_engram: Engram },
     /// Allow but create a detailed audit record.
     Log { detail_level: AuditDetailLevel },
 }
@@ -703,7 +702,7 @@ pub struct CompositPolicy {
 }
 
 impl Policy for CompositPolicy {
-    fn decide(&self, engrams: &[Signal]) -> Vec<Signal> {
+    fn decide(&self, engrams: &[Engram]) -> Vec<Engram> {
         let mut all_decisions = Vec::new();
         for policy in &self.policies {
             let decisions = policy.decide(engrams);

@@ -3,9 +3,10 @@
 //!
 //! - [`CargoBuildSystem`]: produces `cargo check`, `cargo test`, `cargo clippy`,
 //!   `cargo fmt` commands as [`BuildCommand`] descriptors.
-//! - [`RustLanguageProvider`]: parses `use`/`mod`/`extern crate` imports and
-//!   extracts `fn`/`struct`/`enum`/`trait`/`impl`/`const`/`type`/`mod` symbols
-//!   from Rust source text.
+//! - [`RustLanguageProvider`]: parses `use`/`mod`/`extern crate` imports,
+//!   including simple brace-expanded `use` trees, and extracts
+//!   `fn`/`struct`/`enum`/`trait`/`impl`/`const`/`type`/`mod` symbols from Rust
+//!   source text.
 
 #![allow(clippy::module_name_repetitions)]
 // The trait signatures use `&str` returns; clippy suggests `&'static str` but the
@@ -15,6 +16,12 @@
 use roko_core::build::{BuildCommand, BuildSystem};
 use roko_core::language::{Import, ImportKind, LanguageProvider, Symbol, SymbolKind, Visibility};
 use std::path::Path;
+
+#[cfg(feature = "tree-sitter")]
+pub mod tree_sitter_parser;
+
+#[cfg(feature = "tree-sitter")]
+pub use tree_sitter_parser::TreeSitterRustProvider;
 
 // ─── CargoBuildSystem ────────────────────────────────────────────────────
 
@@ -82,9 +89,10 @@ impl BuildSystem for CargoBuildSystem {
 /// Language provider for Rust source files.
 ///
 /// Uses line-by-line heuristic parsing (not a full Rust parser) to extract
-/// imports and symbol definitions. This is intentionally simple and fast,
-/// suitable for IDE-like features and context assembly. It handles the vast
-/// majority of real-world Rust code.
+/// imports and symbol definitions. This includes simple brace-expanded `use`
+/// trees and both declaration (`mod foo;`) and block (`mod foo { ... }`)
+/// modules. The parser remains intentionally simple and fast, suitable for
+/// IDE-like features and context assembly.
 pub struct RustLanguageProvider;
 
 impl LanguageProvider for RustLanguageProvider {
@@ -100,8 +108,8 @@ impl LanguageProvider for RustLanguageProvider {
         let mut imports = Vec::new();
         for line in source.lines() {
             let trimmed = line.trim();
-            if let Some(imp) = parse_use_line(trimmed) {
-                imports.push(imp);
+            if let Some(parsed) = parse_use_line(trimmed) {
+                imports.extend(parsed);
             } else if let Some(imp) = parse_mod_line(trimmed) {
                 imports.push(imp);
             } else if let Some(imp) = parse_extern_crate_line(trimmed) {
@@ -126,27 +134,45 @@ impl LanguageProvider for RustLanguageProvider {
 // ─── Import parsing helpers ──────────────────────────────────────────────
 
 /// Parse a `use ...;` line.
-fn parse_use_line(trimmed: &str) -> Option<Import> {
+fn parse_use_line(trimmed: &str) -> Option<Vec<Import>> {
     // Strip optional `pub` / `pub(crate)` prefix.
     let rest = strip_visibility_prefix(trimmed);
     let rest = rest.strip_prefix("use ")?;
     let rest = rest.strip_suffix(';')?.trim();
 
-    // Handle `as` alias: `use foo::bar as baz;`
-    let (path, alias) = rest.rfind(" as ").map_or_else(
-        || (rest.to_string(), None),
-        |as_pos| {
-            let path = rest[..as_pos].trim();
-            let alias = rest[as_pos + 4..].trim();
-            (path.to_string(), Some(alias.to_string()))
-        },
-    );
+    if let Some((prefix, items)) = split_brace_use(rest) {
+        let imports = items
+            .split(',')
+            .filter_map(|item| {
+                let item = item.trim();
+                if item.is_empty() {
+                    return None;
+                }
 
-    Some(Import {
+                let (item_path, alias) = split_use_alias(item);
+                let path = if item_path == "self" {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix}::{item_path}")
+                };
+
+                Some(Import {
+                    path,
+                    alias,
+                    kind: ImportKind::Use,
+                })
+            })
+            .collect();
+        return Some(imports);
+    }
+
+    let (path, alias) = split_use_alias(rest);
+
+    Some(vec![Import {
         path,
         alias,
         kind: ImportKind::Use,
-    })
+    }])
 }
 
 /// Parse a `mod foo;` line (declaration, not inline block).
@@ -187,6 +213,27 @@ fn parse_extern_crate_line(trimmed: &str) -> Option<Import> {
         alias,
         kind: ImportKind::ExternCrate,
     })
+}
+
+fn split_use_alias(rest: &str) -> (String, Option<String>) {
+    rest.rfind(" as ").map_or_else(
+        || (rest.to_string(), None),
+        |as_pos| {
+            let path = rest[..as_pos].trim();
+            let alias = rest[as_pos + 4..].trim();
+            (path.to_string(), Some(alias.to_string()))
+        },
+    )
+}
+
+fn split_brace_use(rest: &str) -> Option<(&str, &str)> {
+    let open = rest.find("::{")?;
+    let prefix = rest[..open].trim();
+    let items = rest[open + 3..].strip_suffix('}')?.trim();
+    if prefix.is_empty() || items.is_empty() {
+        return None;
+    }
+    Some((prefix, items))
 }
 
 /// Strip a leading `pub`, `pub(crate)`, `pub(super)`, or `pub(in ...)` prefix.
@@ -274,6 +321,14 @@ fn extract_symbol_from_line(line: &str, line_num: usize) -> Option<Symbol> {
         return Some(Symbol {
             name,
             kind: SymbolKind::Type,
+            visibility: vis,
+            line: line_num,
+        });
+    }
+    if let Some(name) = try_extract_mod_decl(rest) {
+        return Some(Symbol {
+            name,
+            kind: SymbolKind::Module,
             visibility: vis,
             line: line_num,
         });
@@ -425,6 +480,16 @@ fn try_extract_mod_block(s: &str) -> Option<String> {
     }
 }
 
+/// Extract mod name from declaration `mod foo;`.
+fn try_extract_mod_decl(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("mod ")?;
+    let name = rest.strip_suffix(';')?.trim();
+    if name.contains('{') || name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// Extract a Rust identifier from the start of a string.
 /// Stops at the first non-identifier character.
 fn extract_identifier(s: &str) -> String {
@@ -565,6 +630,17 @@ mod tests {
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].path, "std::io::Result");
         assert_eq!(imports[0].alias.as_deref(), Some("IoResult"));
+    }
+
+    #[test]
+    fn parse_brace_expanded_use() {
+        let lang = RustLanguageProvider;
+        let imports = lang.parse_imports("use std::collections::{HashMap, HashSet as Set};\n");
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].path, "std::collections::HashMap");
+        assert!(imports[0].alias.is_none());
+        assert_eq!(imports[1].path, "std::collections::HashSet");
+        assert_eq!(imports[1].alias.as_deref(), Some("Set"));
     }
 
     #[test]
@@ -730,6 +806,16 @@ fn main() {}
         let mod_sym = syms.iter().find(|s| s.kind == SymbolKind::Module);
         assert!(mod_sym.is_some());
         assert_eq!(mod_sym.map(|s| s.name.as_str()), Some("tests"));
+    }
+
+    #[test]
+    fn extract_mod_declaration_symbol() {
+        let lang = RustLanguageProvider;
+        let syms = lang.extract_symbols("pub mod config;\n");
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].name, "config");
+        assert_eq!(syms[0].kind, SymbolKind::Module);
+        assert_eq!(syms[0].visibility, Visibility::Public);
     }
 
     #[test]

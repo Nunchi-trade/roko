@@ -1,6 +1,6 @@
 # Dreams (Offline Learning and Consolidation)
 
-> **Abstract:** Dreams are one of three cognitive cross-cuts in Roko — subsystems that span multiple architectural layers rather than living at a single layer. While Neuro provides persistent memory and Daimon provides emotional context, Dreams provide the offline consolidation mechanism that transforms raw episodic experience into durable semantic knowledge, creative hypotheses, and strategic insights. Dreams are the agent's sleep: a periodic offline process where the agent replays recent episodes, generates counterfactual scenarios, depotentiates emotional charge, discovers cross-episode patterns, and stages new knowledge for waking validation. Dreams are idle-triggered and scheduled — they fire when the agent has capacity, not in response to any mortality or termination signal.
+> **Abstract:** Dreams are one of three cognitive cross-cuts in Roko — subsystems that span multiple architectural layers rather than living at a single layer. While Neuro provides persistent memory and Daimon provides emotional context, Dreams provide the offline consolidation mechanism that transforms raw episodic experience into durable semantic knowledge, creative hypotheses, and strategic insights. In the two-fabric model, Dreams consume both Substrate scans and Bus subscriptions, so Delta-speed consolidation can wake on `substrate.engram.stored` instead of relying on fixed polling. Dreams are the agent's sleep: a periodic offline process where the agent replays recent episodes, generates counterfactual scenarios, depotentiates emotional charge, discovers cross-episode patterns, and stages new knowledge for waking validation. Dreams are idle-triggered and scheduled — they fire when the agent has capacity, not in response to any mortality or termination signal. See also [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md) and the naming glossary in [docs/00-architecture/01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 ---
 
@@ -10,7 +10,7 @@ Before reading this topic, familiarity with the following is helpful:
 
 - **Synapse Architecture**: The 6-trait system (Substrate, Scorer, Gate, Router, Composer, Policy) through which all capabilities flow
 - **5-Layer Taxonomy**: L0 Runtime, L1 Framework, L2 Scaffold, L3 Harness, L4 Orchestration
-- **Engram**: The content-addressed, scored, decaying unit of cognition (currently named `Signal` in the codebase)
+- **Engram**: The content-addressed, scored, decaying unit of cognition (legacy code name `Signal` still appears in parts of the codebase)
 - **Neuro / NeuroStore**: The agent's persistent knowledge base (episodes, insights, heuristics, causal links)
 - **Daimon**: The affect engine maintaining PAD (Pleasure-Arousal-Dominance) emotional state vectors
 
@@ -18,7 +18,7 @@ Before reading this topic, familiarity with the following is helpful:
 
 | # | Sub-Doc | Description |
 |---|---------|-------------|
-| 00 | [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md) | Vision document: what dreams are, why they exist, and the critical reframe from death-triggered to idle-triggered consolidation |
+| 00 | [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md) | Historical-title vision document: what dreams are, why they exist, and the critical reframe from lifecycle-triggered to idle-triggered consolidation |
 | 01 | [01-three-phase-cycle.md](01-three-phase-cycle.md) | Three-phase dream cycle: NREM replay → REM imagination → Integration staging. Phase descriptions, state machine, resource allocation |
 | 02 | [02-nrem-replay.md](02-nrem-replay.md) | NREM replay phase: Mattar-Daw utility formula, four replay modes, cross-episode pattern discovery, emotional modulation, replay fidelity spectrum, SM-2 scheduling, DRL experience replay connections |
 | 03 | [03-rem-imagination.md](03-rem-imagination.md) | REM imagination phase: Pearl SCM counterfactuals, Boden's three creativity modes, emotional depotentiation, conceptual blending, imagination validation (GIRL trust-region), imagination budget, world models (DreamerV3/IRIS/Genie) |
@@ -31,10 +31,10 @@ Before reading this topic, familiarity with the following is helpful:
 | 10 | [10-hauntology-in-dreams.md](10-hauntology-in-dreams.md) | Derrida hauntology, spectral traces, compound escape from monoculture, knowledge transfer as backup/restore |
 | 11 | [11-inner-worlds-and-rendering.md](11-inner-worlds-and-rendering.md) | Visual rendering for each dream phase: NREM theater, REM garden, hypnagogia phosphenes, integration crystallization |
 | 12 | [12-sleep-time-compute.md](12-sleep-time-compute.md) | Lin et al. 2025 sleep-time compute, budget allocation, CascadeRouter model selection, Sleepwalker mode |
-| 13 | [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md) | Three trigger types (idle, scheduled, manual), frequency adaptation, intensive mode, orchestrator coordination |
+| 13 | [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md) | Idle, scheduled, and Bus-reactive Delta triggers; frequency adaptation, intensive mode, orchestrator coordination |
 | 14 | [14-oneirography.md](14-oneirography.md) | Dream art and creative expression: image generation pipeline, self-appraisal, affect-reactive auctions, extended art forms |
-| 15 | [15-cross-system-integration.md](15-cross-system-integration.md) | Integration with Neuro, Daimon, Learn, Compose, Gate, Mesh, Orchestrator, Hypnagogia, Supervisor |
-| 16 | [16-implementation-status.md](16-implementation-status.md) | Current code status, implementation plan items, roko-golem dissolution plan, roadmap, open questions |
+| 15 | [15-cross-system-integration.md](15-cross-system-integration.md) | Two-fabric reactive input/output model across Neuro, Daimon, Learn, Compose, Gate, Mesh, Orchestrator, Hypnagogia, Supervisor |
+| 16 | [16-implementation-status.md](16-implementation-status.md) | Current code status, implementation plan items, legacy umbrella-crate dissolution plan, roadmap, open questions |
 | 17 | [17-advanced-dream-concepts.md](17-advanced-dream-concepts.md) | Dream sharing across mesh, nightmare detection and containment, persistent dream journals, lucid dream monitoring |
 
 ## Cross-References
@@ -129,23 +129,23 @@ The dream subsystem draws on extensive academic research:
 - **Sub-docs produced**: 18 (00 through 17) plus INDEX.md
 - **Total line count**: ~10,000+ lines across all sub-docs
 - **Key legacy sources consulted**:
-  - `bardo-backup/prd/05-dreams/` — dream cycle architecture, consolidation, scheduling
-  - `bardo-backup/prd/06-hypnagogia/` — hypnagogia engine, inner worlds, divergence
-  - `bardo-backup/prd/22-oneirography/` — creative expression (dream journals, self-appraisal, auctions, extended forms; `02-death-masks.md` skipped per instructions)
+  - legacy source: `bardo-backup/prd/05-dreams/` — dream cycle architecture, consolidation, scheduling
+  - legacy source: `bardo-backup/prd/06-hypnagogia/` — hypnagogia engine, inner worlds, divergence
+  - legacy source: `bardo-backup/prd/22-oneirography/` — creative expression (dream journals, self-appraisal, auctions, extended forms; historical-title `02-death-masks.md` skipped per instructions)
   - `refactoring-prd/03-cognitive-layer.md` — three cognitive speeds, dream phases, CLS theory
   - `refactoring-prd/04-systems-and-synapse-traits.md` — Synapse trait mapping for dreams
   - `tmp/implementation-plans/12a-cognitive-layer.md` §G — implementation plan items G1-G8
-  - Active code: `roko-dreams/src/runner.rs`, `roko-dreams/src/cycle.rs`, `roko-dreams/src/lib.rs`, `roko-golem/src/dreams.rs`, `roko-golem/src/hypnagogia.rs`, `roko-learn/src/pattern_discovery.rs`, `roko-learn/src/hdc_clustering.rs`
+  - Active code, including legacy umbrella-crate paths: `roko-dreams/src/runner.rs`, `roko-dreams/src/cycle.rs`, `roko-dreams/src/lib.rs`, `roko-golem/src/dreams.rs`, `roko-golem/src/hypnagogia.rs`, `roko-learn/src/pattern_discovery.rs`, `roko-learn/src/hdc_clustering.rs`
 - **Decisions requiring judgment calls**:
-  - **Death mask exclusion**: `22-oneirography/02-death-masks.md` was skipped entirely per prompt instructions. All references to death masks in other oneirography docs were reframed or removed.
+  - **Legacy death-mask exclusion**: historical-title `22-oneirography/02-death-masks.md` was skipped entirely per prompt instructions. All references to death masks in other oneirography docs were reframed or removed.
   - **EVOLUTION phase**: Presented as a fourth dream phase in `05-dream-evolution.md` based on source material, even though the primary cycle is three-phase (NREM/REM/Integration). The EVOLUTION phase is an extension, not a replacement.
   - **Oneirography domain-agnostic reframe**: The legacy oneirography spec was heavily blockchain/NFT-specific. The Roko version presents the core pipeline (dream→image→score) as domain-agnostic, with NFT minting as a blockchain domain extension.
-  - **Naming consistency**: All instances of "Golem" → "Agent", "Grimoire" → "Neuro/NeuroStore", "Signal" → "Engram" (with code-name notes where relevant), "Styx" → "Agent Mesh/Mesh", "GNOS" → "KORAI/DAEJI", "Clade" → "Collective/Mesh", "golem.toml" → "roko.toml".
+  - **Legacy naming consistency**: All legacy instances were mapped to current terms, including Agent, Neuro/NeuroStore, Engram, Agent Mesh/Mesh, KORAI/DAEJI, Collective/Mesh, and `roko.toml`.
   - **Vitality phases removed**: All references to Thriving/Stable/Conservation/Declining/Terminal behavioral phases have been reframed as continuous budget and knowledge metrics rather than discrete mortality phases.
 - **Unresolved tensions**:
-  - The `roko-golem` crate still exports `ScaffoldEngine` which `roko-dreams/src/lib.rs` re-exports. This dependency should be removed when `roko-golem` is dissolved.
+  - The legacy umbrella crate `roko-golem` still exports `ScaffoldEngine`, which `roko-dreams/src/lib.rs` re-exports. This dependency should be removed when that legacy crate is dissolved.
   - The Daimon (affect engine) is referenced extensively in dream design but is not yet implemented in the codebase.
-  - HDC vectors (`bardo-primitives`) are built but not called from the dream subsystem.
+  - HDC vectors in the legacy code path `bardo-primitives` are built but not called from the dream subsystem.
 - **2025-04 enhancement (pass 1)**: Added 25+ recent citations (2024-2025), Rust structs, pseudocode, test criteria, and configuration parameters throughout
 - **2025-04 enhancement (pass 2)**: Deep research enhancement of all 18 sub-docs. Key additions:
   - **02-nrem-replay**: Jensen et al. 2024 variable-length rollouts with full quantitative results (r=0.186±0.007 human correlation); Sagiv et al. 2025 goal-uncertain replay with Geodesic Representation formalism and extended utility formula; adaptive rollout pseudocode and test criteria

@@ -1,6 +1,6 @@
 # Roko — Executive Summary
 
-> A cognitive architecture for self-developing agents. 18 crates, ~177K LOC, 1,568 tests.
+> A cognitive architecture for self-developing agents. 36 workspace members, ~322K LOC, 3,761 tests.
 >
 > **Updated**: 2026-04-13 · **Audience**: Technical executives, investors, engineering leads
 
@@ -273,7 +273,7 @@ itself end-to-end without human intervention beyond initial PRD creation.
 | **Multi-agent** | Pheromone stigmergy, morphogenetic specialization | Agent executor | Single agent | None | Emergent Coordination (Riedl 2025) |
 | **Safety** | 6 guards + temporal logic + witness DAG + taint | None built-in | Container sandbox | None | CaMeL (Debenedetti 2025), OWASP Agentic Top 10 |
 | **Language** | Rust (performance, safety) | Python | Python | Python | — |
-| **Test coverage** | 1,568 tests across 11 crates | Varies | SWE-bench | Minimal | — |
+| **Test coverage** | 3,761 tests across 36 workspace members | Varies | SWE-bench | Minimal | — |
 
 **Roko's key differentiator**: It is the only framework that combines cognitive architecture
 (not just prompt chaining), temporal knowledge management, affect-driven compute allocation,
@@ -362,9 +362,9 @@ coordination, and remote monitoring. ~80% of heartbeat ticks require no LLM call
 
 | Metric | Current | 6-Month Target |
 |--------|---------|----------------|
-| Crates | 18 | 18 (consolidate, don't add) |
-| LOC | ~177K | ~200K |
-| Tests | 1,568 | 2,500+ |
+| Crates | 36 workspace members | 36 workspace members (consolidate, don't add) |
+| LOC | ~322K | ~200K |
+| Tests | 3,761 | 2,500+ |
 | Shipping sections | 6 of 22 | 12 of 22 |
 | Self-hosting steps automated | 6 of 8 | 8 of 8 |
 | Cognitive subsystems wired | 0 of 3 | 3 of 3 (Neuro, Daimon, Dreams) |
@@ -385,4 +385,4 @@ The full PRD corpus: 22 sections, 384+ documents, ~137K lines, 260+ academic cit
 
 ---
 
-*Generated 2026-04-13 · Roko v0.1 · 18 crates · 1,568 tests · [github.com/nunchi/roko](https://github.com/nunchi/roko)*
+*Generated 2026-04-13 · Roko v0.1 · 36 workspace members · 3,761 tests · [github.com/nunchi/roko](https://github.com/nunchi/roko)*

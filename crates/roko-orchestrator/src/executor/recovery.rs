@@ -148,7 +148,7 @@ impl RecoveryEngine {
         &self,
         snapshot_json: &str,
     ) -> Result<RecoveredState, RecoveryError> {
-        let snapshot: ExecutorSnapshot = serde_json::from_str(snapshot_json)
+        let snapshot = ExecutorSnapshot::from_json(snapshot_json)
             .map_err(|e| RecoveryError::CorruptedSnapshot(format!("JSON parse error: {e}")))?;
 
         let now_ms = current_timestamp_ms();
@@ -189,7 +189,7 @@ impl RecoveryEngine {
     /// # Errors
     ///
     /// Returns [`RecoveryError::InvalidEventSequence`] if event sequence
-    /// numbers are not monotonically increasing.
+    /// numbers are not contiguous from zero.
     pub fn recover_from_event_log(
         &self,
         events: &[EventEntry],
@@ -200,15 +200,7 @@ impl RecoveryEngine {
             return Ok(RecoveredState::empty(now_ms));
         }
 
-        // Validate monotonic sequence numbers.
-        for window in events.windows(2) {
-            if window[1].sequence_number <= window[0].sequence_number {
-                return Err(RecoveryError::InvalidEventSequence(format!(
-                    "sequence {} follows {} (expected strictly increasing)",
-                    window[1].sequence_number, window[0].sequence_number,
-                )));
-            }
-        }
+        validate_event_sequence(events)?;
 
         let mut plan_states: HashMap<String, PlanPhaseInfo> = HashMap::new();
         let mut queue_order: Vec<String> = Vec::new();
@@ -415,10 +407,11 @@ fn apply_event_to_plan(
                 reason: roko_core::FailureKind::Other(reason),
             };
         }
-        EventKind::MergeAttempted => {
-            if info.phase.kind() != PhaseKind::Complete && info.phase.kind() != PhaseKind::Failed {
-                info.phase = PlanPhase::Merging;
-            }
+        EventKind::MergeAttempted
+            if info.phase.kind() != PhaseKind::Complete
+                && info.phase.kind() != PhaseKind::Failed =>
+        {
+            info.phase = PlanPhase::Merging;
         }
         // All other event kinds (current and future) are no-ops for recovery.
         _ => {}
@@ -483,6 +476,30 @@ fn extract_phase(payload: &serde_json::Value) -> Option<PlanPhase> {
 /// Current wall-clock time in milliseconds since Unix epoch.
 fn current_timestamp_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+fn validate_event_sequence(events: &[EventEntry]) -> Result<(), RecoveryError> {
+    for (expected, event) in events.iter().enumerate() {
+        let expected = expected as u64;
+        if event.sequence_number != expected {
+            let message = if expected == 0 {
+                format!(
+                    "sequence {} starts event log (expected 0)",
+                    event.sequence_number
+                )
+            } else {
+                format!(
+                    "sequence {} follows {} (expected {})",
+                    event.sequence_number,
+                    expected - 1,
+                    expected
+                )
+            };
+            return Err(RecoveryError::InvalidEventSequence(message));
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -610,6 +627,28 @@ mod tests {
         assert!(gate_str.contains("3 failures"));
     }
 
+    #[test]
+    fn recovery_snapshot_uses_hardened_parser_path() {
+        let engine = RecoveryEngine::new();
+        let legacy_json = json!({
+            "tasks": [
+                {"plan_id": "legacy-a", "status": "completed"},
+                {"plan_id": "legacy-a", "status": "completed"},
+                {"plan_id": "legacy-b", "status": "running"}
+            ],
+            "queue_order": ["legacy-b", "legacy-a"],
+            "timestamp_ms": 42
+        });
+
+        let state = engine
+            .recover_from_snapshot(&legacy_json.to_string())
+            .unwrap();
+
+        assert_eq!(state.queue_order, vec!["legacy-b", "legacy-a"]);
+        assert_eq!(state.plan_states["legacy-a"].phase, PlanPhase::Complete);
+        assert_eq!(state.plan_states["legacy-b"].phase, PlanPhase::Implementing);
+    }
+
     // ── 4. Event-log recovery (basic) ───────────────────────────────────
 
     #[test]
@@ -659,8 +698,28 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             RecoveryError::InvalidEventSequence(msg) => {
-                assert!(msg.contains("3"));
+                assert!(msg.contains("0"));
                 assert!(msg.contains("5"));
+                assert!(msg.contains("expected 1"));
+            }
+            other => panic!("expected InvalidEventSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recovery_event_log_rejects_sequence_gap() {
+        let engine = RecoveryEngine::new();
+        let events = vec![
+            make_event(0, EventKind::PlanStarted, json!({"plan_id": "p1"})),
+            make_event(2, EventKind::PlanCompleted, json!({"plan_id": "p1"})),
+        ];
+
+        let result = engine.recover_from_event_log(&events);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RecoveryError::InvalidEventSequence(msg) => {
+                assert!(msg.contains("2"));
+                assert!(msg.contains("expected 1"));
             }
             other => panic!("expected InvalidEventSequence, got {other:?}"),
         }

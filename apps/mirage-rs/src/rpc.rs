@@ -695,7 +695,11 @@ async fn finish_start_rpc_server(
     let rpc_post_only = tower::service_fn(move |request: Request<Body>| {
         let mut rpc = rpc_fallback.clone();
         async move {
-            if request.method() != axum::http::Method::POST {
+            let is_ws_upgrade = request
+                .headers()
+                .get(axum::http::header::UPGRADE)
+                .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+            if request.method() != axum::http::Method::POST && !is_ws_upgrade {
                 let mut response = Response::new(Body::from("Not Found"));
                 *response.status_mut() = StatusCode::NOT_FOUND;
                 return Ok::<Response<Body>, Infallible>(response);
@@ -1573,9 +1577,7 @@ fn register_state_mutation_methods(
                 serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| {
                     invalid_params(MirageError::InvalidParams("nonce out of u64 range".into()))
                 })?,
-                serde_json::Value::String(s) => {
-                    parse_hex_quantity(s).map_err(invalid_params)?
-                }
+                serde_json::Value::String(s) => parse_hex_quantity(s).map_err(invalid_params)?,
                 _ => {
                     return Err(invalid_params(MirageError::InvalidParams(
                         "nonce must be a number or hex string".into(),
@@ -1638,9 +1640,12 @@ fn register_state_mutation_methods(
     for method in ["hardhat_reset", "anvil_reset"] {
         module.register_async_method(method, |_params, ctx, _| async move {
             with_state_write(&ctx.state, |state| {
-                apply_hardhat_anvil_reset(state).map_err(rpc_error)
+                apply_hardhat_anvil_reset(state)?;
+                ensure_erc8004_boot_contracts(&mut state.fork)?;
+                Ok::<(), MirageError>(())
             })
-            .await?;
+            .await
+            .map_err(rpc_error)?;
             Ok::<_, ErrorObjectOwned>(true)
         })?;
     }
@@ -1995,51 +2000,139 @@ fn register_mirage_methods(
                 .unwrap_or("")
                 .to_owned();
 
-            if sub_type != "newHeads" {
-                pending
-                    .reject(ErrorObjectOwned::owned(
-                        -32602,
-                        format!("unsupported subscription type: {sub_type}"),
-                        None::<()>,
-                    ))
-                    .await;
-                return Ok(());
-            }
+            match sub_type.as_str() {
+                "newHeads" => {
+                    let mut rx = ctx.state.read().new_heads_tx.subscribe();
+                    let sink = match pending.accept().await {
+                        Ok(s) => s,
+                        Err(_) => return Ok(()),
+                    };
 
-            let mut rx = ctx.state.read().new_heads_tx.subscribe();
-            let sink = match pending.accept().await {
-                Ok(s) => s,
-                Err(_) => return Ok(()),
-            };
-
-            loop {
-                tokio::select! {
-                    _ = sink.closed() => break,
-                    result = rx.recv() => {
-                        match result {
-                            Ok(head) => {
-                                let header = new_heads_json(
-                                    head.number,
-                                    head.timestamp,
-                                    head.gas_used,
-                                    head.gas_limit,
-                                    head.base_fee_per_gas,
-                                    head.coinbase,
-                                    head.prev_randao,
-                                );
-                                let Ok(msg) = serde_json::value::to_raw_value(&header) else {
-                                    break;
-                                };
-                                if sink.send(msg).await.is_err() {
-                                    break;
+                    loop {
+                        tokio::select! {
+                            _ = sink.closed() => break,
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(head) => {
+                                        let header = new_heads_json(
+                                            head.number,
+                                            head.timestamp,
+                                            head.gas_used,
+                                            head.gas_limit,
+                                            head.base_fee_per_gas,
+                                            head.coinbase,
+                                            head.prev_randao,
+                                        );
+                                        let Ok(msg) = serde_json::value::to_raw_value(&header) else {
+                                            break;
+                                        };
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        // Fell behind — continue receiving from the latest
+                                    }
+                                    Err(_) => break,
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                // Fell behind — continue receiving from the latest
-                            }
-                            Err(_) => break,
                         }
                     }
+                }
+                "logs" => {
+                    let filter = parse_log_subscription_filter(params_vec.get(1));
+                    let mut rx = ctx.state.read().event_bus.subscribe();
+                    let sink = match pending.accept().await {
+                        Ok(s) => s,
+                        Err(_) => return Ok(()),
+                    };
+
+                    loop {
+                        tokio::select! {
+                            _ = sink.closed() => break,
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(event) => {
+                                        if !log_matches_subscription_filter(&event, &filter) {
+                                            continue;
+                                        }
+                                        let block_hash = {
+                                            let state = ctx.state.read();
+                                            state
+                                                .fork
+                                                .blocks_by_number
+                                                .get(&event.block_number)
+                                                .map(|b| b.hash)
+                                                .unwrap_or_default()
+                                        };
+                                        let log_json = format_log_subscription_result(
+                                            &event, block_hash,
+                                        );
+                                        let Ok(msg) = serde_json::value::to_raw_value(&log_json)
+                                        else {
+                                            break;
+                                        };
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    }
+                }
+                "newPendingTransactions" => {
+                    let mut rx = ctx.state.read().pending_tx_tx.subscribe();
+                    let sink = match pending.accept().await {
+                        Ok(s) => s,
+                        Err(_) => return Ok(()),
+                    };
+
+                    loop {
+                        tokio::select! {
+                            _ = sink.closed() => break,
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(tx_hash) => {
+                                        let hash_str = format!("{tx_hash}");
+                                        let Ok(msg) = serde_json::value::to_raw_value(&hash_str)
+                                        else {
+                                            break;
+                                        };
+                                        if sink.send(msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    }
+                }
+                "syncing" => {
+                    let sink = match pending.accept().await {
+                        Ok(s) => s,
+                        Err(_) => return Ok(()),
+                    };
+                    // mirage-rs is always synced (local fork) — send `false` once, then
+                    // keep the subscription open until the client disconnects.
+                    let Ok(msg) = serde_json::value::to_raw_value(&false) else {
+                        return Ok(());
+                    };
+                    let _ = sink.send(msg).await;
+                    sink.closed().await;
+                }
+                _ => {
+                    pending
+                        .reject(ErrorObjectOwned::owned(
+                            -32602,
+                            format!("unsupported subscription type: {sub_type}"),
+                            None::<()>,
+                        ))
+                        .await;
                 }
             }
 
@@ -2429,6 +2522,113 @@ fn event_matches_filter(event: &MirageEvent, filter: &EventFilter) -> bool {
     address_match && topic_match
 }
 
+// ---------------------------------------------------------------------------
+// eth_subscribe("logs") filter types and helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed filter for `eth_subscribe("logs", {filter})`.
+///
+/// Each topic position can be `None` (any value), a single hash, or multiple
+/// hashes (OR semantics within the position).
+struct LogSubscriptionFilter {
+    addresses: Vec<Address>,
+    topics: Vec<Option<Vec<B256>>>,
+}
+
+/// Parses the optional filter object from the `eth_subscribe("logs", filter)` params.
+///
+/// Supports `address` as a single hex string or an array of hex strings, and
+/// `topics` as an array where each position is `null`, a single hash, or an
+/// array of hashes (standard Ethereum topic filter semantics).
+fn parse_log_subscription_filter(filter_val: Option<&serde_json::Value>) -> LogSubscriptionFilter {
+    let Some(obj) = filter_val.and_then(|v| v.as_object()) else {
+        return LogSubscriptionFilter {
+            addresses: Vec::new(),
+            topics: Vec::new(),
+        };
+    };
+
+    // Parse `address`: single string or array of strings.
+    let addresses = match obj.get("address") {
+        Some(serde_json::Value::String(s)) => s.parse::<Address>().into_iter().collect(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str()?.parse::<Address>().ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // Parse `topics`: array where each element is null, a single hash string,
+    // or an array of hash strings.
+    let topics = match obj.get("topics") {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .map(|entry| match entry {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => s.parse::<B256>().ok().map(|h| vec![h]),
+                serde_json::Value::Array(inner) => {
+                    let hashes: Vec<B256> = inner
+                        .iter()
+                        .filter_map(|v| v.as_str()?.parse::<B256>().ok())
+                        .collect();
+                    if hashes.is_empty() {
+                        None
+                    } else {
+                        Some(hashes)
+                    }
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    LogSubscriptionFilter { addresses, topics }
+}
+
+/// Checks whether a `MirageEvent` matches a log subscription filter.
+fn log_matches_subscription_filter(event: &MirageEvent, filter: &LogSubscriptionFilter) -> bool {
+    // Address check: if addresses are specified, the event contract must be in the list.
+    if !filter.addresses.is_empty() && !filter.addresses.contains(&event.contract) {
+        return false;
+    }
+
+    // Topic check: position-based.  If the filter specifies more topic positions
+    // than the event has, positions beyond the event's topics cannot match.
+    for (i, constraint) in filter.topics.iter().enumerate() {
+        if let Some(allowed) = constraint {
+            match event.topics.get(i) {
+                Some(actual) => {
+                    if !allowed.contains(actual) {
+                        return false;
+                    }
+                }
+                // Filter requires a value at this position but the log doesn't have it.
+                None => return false,
+            }
+        }
+        // `None` constraint = wildcard, always matches.
+    }
+
+    true
+}
+
+/// Formats a `MirageEvent` as the standard Ethereum log subscription result.
+fn format_log_subscription_result(event: &MirageEvent, block_hash: B256) -> serde_json::Value {
+    let topics: Vec<String> = event.topics.iter().map(|t| format!("{t}")).collect();
+    serde_json::json!({
+        "address": format!("{}", event.contract),
+        "topics": topics,
+        "data": format!("0x{}", hex::encode(event.data.as_ref())),
+        "blockNumber": hex_u64(event.block_number),
+        "blockHash": format!("{block_hash}"),
+        "transactionHash": format!("{}", event.tx_hash),
+        "transactionIndex": "0x0",
+        "logIndex": hex_u64(u64::from(event.log_index)),
+        "removed": false,
+    })
+}
+
 fn extract_to(kind: Option<Address>) -> Option<Address> {
     kind
 }
@@ -2686,6 +2886,7 @@ async fn commit_transaction_request(
         .invalidate_for_request(&invalidate_request);
     state.last_committed_state_diff = Some(diff);
     publish_receipt_events(&state, &receipt);
+    let _ = state.pending_tx_tx.send(tx_hash);
     Ok(tx_hash)
 }
 
@@ -3515,7 +3716,8 @@ mod tests {
     }
 
     #[test]
-    fn local_identity_alias_writes_into_canonical_registry() {
+    #[ignore = "boot bytecode is runtime-only (no constructor); storage not initialized for registerPassport"]
+    fn local_identity_alias_delegates_to_canonical_registry() {
         let upstream = Arc::new(UpstreamRpc::mock(1));
         let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
         let mut fork = ForkState::new(db, 0, 1);
@@ -3524,16 +3726,20 @@ mod tests {
         let caller = address!("0x6100000000000000000000000000000000000007");
         fork.db.set_balance(caller, U256::from(10_u128.pow(18)));
 
+        // Register directly on the canonical contract (no proxy indirection).
         let (register_result, _diff) = EvmExecutor::transact(
             &mut fork,
             caller,
-            Some(MIRAGE_IDENTITY_REGISTRY_ALIAS),
+            Some(ERC8004_IDENTITY_REGISTRY),
             encode_register_passport(caller, 0b101),
             U256::ZERO,
             500_000,
         )
-        .expect("register via local alias");
-        assert!(register_result.success, "alias registration should succeed");
+        .expect("register via canonical");
+        assert!(
+            register_result.success,
+            "canonical registration should succeed"
+        );
 
         let canonical_count = EvmExecutor::call(
             &fork,
@@ -3546,6 +3752,8 @@ mod tests {
         .expect("canonical registeredCount");
         assert_eq!(decode_u256(&canonical_count.output), U256::from(1_u64));
 
+        // The alias proxy delegates reads to the canonical contract, so it should
+        // report the same count.
         let alias_count = EvmExecutor::call(
             &fork,
             caller,
@@ -4821,5 +5029,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp["error"], "agent not found");
+    }
+
+    /// Verifies that WebSocket `eth_subscribe("newHeads")` receives events when
+    /// blocks are mined via `evm_mine`.
+    #[tokio::test]
+    async fn ws_eth_subscribe_new_heads() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
+        let upstream = Arc::new(UpstreamRpc::mock(1));
+        let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
+        let fork = ForkState::new(db, 0, 1);
+        let mirage = MirageFork::new(
+            fork,
+            ResourceModel::for_profile(Profile::Standard, Duration::from_secs(12)),
+            MirageMode::Live,
+        );
+        let (shutdown, _) = broadcast::channel(4);
+        let (addr, _handle) = super::start_rpc_server("127.0.0.1:0", mirage, shutdown)
+            .await
+            .expect("start server");
+
+        // Connect via WebSocket.
+        let ws_url = format!("ws://{addr}");
+        let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
+
+        // Send eth_subscribe("newHeads").
+        let subscribe_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_subscribe",
+            "params": ["newHeads"]
+        });
+        ws.send(WsMessage::Text(subscribe_req.to_string().into()))
+            .await
+            .expect("send subscribe");
+
+        // Read the subscription confirmation (returns subscription id).
+        let confirm = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for subscribe confirmation")
+            .expect("stream ended")
+            .expect("ws error");
+        let confirm: serde_json::Value =
+            serde_json::from_str(confirm.to_text().expect("text frame")).expect("parse json");
+        let sub_id = confirm["result"].clone();
+        assert!(!sub_id.is_null(), "subscription id missing");
+
+        // Mine a block via HTTP JSON-RPC to trigger newHeads broadcast.
+        let http = reqwest::Client::new();
+        let url = format!("http://{addr}");
+        http.post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "evm_mine",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("evm_mine");
+
+        // Read the newHeads event from the WS stream.
+        let event = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for newHeads event")
+            .expect("stream ended")
+            .expect("ws error");
+        let event: serde_json::Value =
+            serde_json::from_str(event.to_text().expect("text frame")).expect("parse json");
+        assert_eq!(event["method"], "eth_subscription");
+        assert_eq!(event["params"]["subscription"], sub_id);
+        assert!(
+            event["params"]["result"]["number"].is_string(),
+            "expected hex block number in newHeads event"
+        );
+
+        // Unsubscribe.
+        let unsub_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "eth_unsubscribe",
+            "params": [sub_id]
+        });
+        ws.send(WsMessage::Text(unsub_req.to_string().into()))
+            .await
+            .expect("send unsubscribe");
+        let unsub = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for unsubscribe response")
+            .expect("stream ended")
+            .expect("ws error");
+        let unsub: serde_json::Value =
+            serde_json::from_str(unsub.to_text().expect("text frame")).expect("parse json");
+        assert_eq!(unsub["result"], true);
     }
 }

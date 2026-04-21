@@ -60,4 +60,11 @@ parking_lot = { workspace = true }
 validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+http-body-util = { workspace = true }
+roko-core = { path = "../roko-core" }
+roko-runtime = { path = "../roko-runtime" }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tower = { workspace = true, features = ["util"] }

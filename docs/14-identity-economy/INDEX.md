@@ -2,7 +2,11 @@
 
 > Agent identity, reputation, knowledge marketplace, tokenomics, job market, clearing,
 > and regulatory compliance. Everything that makes agents economically accountable
-> participants in a collective intelligence network.
+> participants in a collective intelligence network. This topic covers the external economy;
+> REF12's internal attention economy for durable memory lives in
+> [../00-architecture/25-attention-as-currency.md](../00-architecture/25-attention-as-currency.md),
+> [../00-architecture/04-decay-variants.md](../00-architecture/04-decay-variants.md), and
+> [../../tmp/refinements/12-knowledge-demurrage.md](../../tmp/refinements/12-knowledge-demurrage.md).
 
 ---
 
@@ -153,6 +157,7 @@ Current focus: Tier 1 (model routing) and Tier 2 (cognitive integration).
 | Collusion detection | `04-reputation-7-domain-ema.md` §12 |
 | How agents get paid | `07-mpp-machine-payment-protocol.md` → `08-x402-micropayments.md` |
 | How the token economy works | `10-korai-tokenomics.md` |
+| How the internal attention economy works | `../00-architecture/25-attention-as-currency.md` → `../00-architecture/04-decay-variants.md` |
 | Bonding curves for curation | `10-korai-tokenomics.md` §12 |
 | Token simulation (cadCAD) | `10-korai-tokenomics.md` §13 |
 | How jobs are assigned | `12-three-hiring-models.md` → `11-vickrey-reputation-auction.md` |

@@ -62,7 +62,7 @@ Generated file (`gates/schema_validator.rs`):
 
 ```rust
 use async_trait::async_trait;
-use roko_core::{Context, Gate, Signal, Verdict};
+use roko_core::{Context, Engram, Gate, Verdict};
 
 /// SchemaValidator gate — validates output against a JSON schema.
 ///
@@ -85,7 +85,7 @@ impl SchemaValidatorGate {
 impl Gate for SchemaValidatorGate {
     async fn verify(
         &self,
-        output: &Signal, // will be renamed to Engram in Tier 0D
+        output: &Engram,
         _context: &Context,
     ) -> Verdict {
         // TODO: Replace with your validation logic
@@ -101,31 +101,31 @@ impl Gate for SchemaValidatorGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::{Body, Kind, Signal};
+    use roko_core::{Body, Engram, Kind};
 
     #[tokio::test]
     async fn passes_non_empty_output() {
         let gate = SchemaValidatorGate::new(serde_json::json!({}));
-        let signal = Signal::builder(Kind::AgentOutput)
+        let engram = Engram::builder(Kind::AgentOutput)
             .body(Body::text("valid output"))
             .build();
-        let verdict = gate.verify(&signal, &Context::now()).await;
+        let verdict = gate.verify(&engram, &Context::now()).await;
         assert!(verdict.passed);
     }
 
     #[tokio::test]
     async fn fails_empty_output() {
         let gate = SchemaValidatorGate::new(serde_json::json!({}));
-        let signal = Signal::builder(Kind::AgentOutput)
+        let engram = Engram::builder(Kind::AgentOutput)
             .body(Body::text(""))
             .build();
-        let verdict = gate.verify(&signal, &Context::now()).await;
+        let verdict = gate.verify(&engram, &Context::now()).await;
         assert!(!verdict.passed);
     }
 }
 ```
 
-The generated code uses `Signal` (the current Rust type name) with a comment noting the planned rename to `Engram` in Tier 0D.
+The generated code uses `Engram` as the current Rust type name.
 
 ### `roko new scorer <name>`
 

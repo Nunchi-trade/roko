@@ -2,6 +2,7 @@
 
 > Roko's tool system: ToolDef pattern, ToolContext, ToolResult, ToolExecutor, and the
 > principles governing how tools compose within the Synapse Architecture.
+> See also [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 
 > **Implementation**: Shipping
@@ -361,6 +362,12 @@ Note that chain-specific fields (`provider`, `signer`, `revm_fork`, `subgraph_cl
 `trading_api`, `sidecar`) are injected by the chain domain plugin. A coding agent or research
 agent would have a `ToolContext` with different (or absent) chain fields. The context is
 parameterized by domain.
+
+That domain parameterization is the bridge to `TypedContext` from the refinement path:
+structured context tells tools which situation they are operating in, and write paths can
+emit a `Custody` record to capture who acted, why the action was taken, and what evidence
+backed it. In practice, tool docs should describe both the category filter and the structured
+context keys the tool expects.
 
 ---
 

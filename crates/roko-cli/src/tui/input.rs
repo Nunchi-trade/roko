@@ -199,6 +199,9 @@ pub enum TuiAction {
 
     // -- tab navigation --
     SwitchTab(Tab),
+    /// Switch to a sub-view within the current tab region (UI-04).
+    /// The index is 0-based (number key `1` -> index 0, etc.).
+    SwitchSubView(usize),
 
     // -- plan list navigation --
     SelectPlanUp,
@@ -548,6 +551,15 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
     // F-keys switch tabs
     if let Some(tab) = Tab::from_key(key.code) {
         return Some(TuiAction::SwitchTab(tab));
+    }
+
+    // Number keys 1-9 switch sub-views within the current tab (UI-04).
+    // Only when no modifiers are held (plain digit press).
+    if key.modifiers.is_empty() {
+        if let KeyCode::Char(c @ '1'..='9') = key.code {
+            let index = (c as usize) - ('1' as usize); // 0-based
+            return Some(TuiAction::SwitchSubView(index));
+        }
     }
 
     match key.code {
@@ -915,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_tab_number_keys_toggle_expected_level() {
+    fn logs_tab_number_keys_switch_subview() {
         let action = handle_key(
             key(KeyCode::Char('3')),
             InputMode::Normal,
@@ -923,7 +935,8 @@ mod tests {
             FocusZone::PlanTree,
             &modals(None),
         );
-        assert_eq!(action, TuiAction::ToggleLogFilter(LogFilterLevel::Error));
+        // Number keys on logs tab switch sub-views (0-indexed from the key digit).
+        assert_eq!(action, TuiAction::SwitchSubView(2));
     }
 
     #[test]
@@ -1378,15 +1391,6 @@ mod tests {
             FocusZone::CommandOutput,
             &modals(None),
         );
-        assert_eq!(action, TuiAction::ScrollFocusedEnd);
-
-        let action = handle_key(
-            key(KeyCode::End),
-            InputMode::Normal,
-            Tab::Logs,
-            FocusZone::CommandOutput,
-            &modals(None),
-        );
         assert_eq!(action, TuiAction::ScrollLogEnd);
 
         let action = handle_key(
@@ -1438,6 +1442,7 @@ mod tests {
         assert_eq!(action, TuiAction::WaveNext);
     }
 
+    #[test]
     fn plans_tab_confirm_shortcuts_route_to_request_confirm() {
         let action = handle_key(
             key(KeyCode::Char('d')),

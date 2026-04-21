@@ -20,6 +20,8 @@ pub const METRIC_VALUE_TAG: &str = "value";
 
 /// Default budget when no budget metric is found (USD).
 pub const DEFAULT_BUDGET: f64 = 10.0;
+/// Docs-compatible alias for [`DEFAULT_BUDGET`].
+pub const DEFAULT_BUDGET_USD: f64 = DEFAULT_BUDGET;
 
 /// Fires when accumulated plan cost exceeds the plan budget.
 ///

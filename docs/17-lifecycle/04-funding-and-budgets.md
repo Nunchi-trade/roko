@@ -293,7 +293,7 @@ These metrics feed into the CascadeRouter (see `roko-learn` crate), which adjust
 
 ## KORAI Token Demurrage (Chain Domain)
 
-For chain-domain agents operating on the Korai chain, the KORAI token has a 1% annual demurrage rate. This means held KORAI tokens lose 1% of their value per year, implemented as:
+For chain-domain agents operating on the Korai chain, the KORAI token has a planned 1% annual demurrage rate. This means held KORAI tokens would lose 1% of their value per year, implemented as:
 
 ```
 balance_effective = balance_raw × (1 - 0.01)^(years_since_last_update)

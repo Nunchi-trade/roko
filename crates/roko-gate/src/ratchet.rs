@@ -9,10 +9,15 @@
 //! the compile error but breaks lint, then fixes lint but breaks compile
 //! again. The ratchet makes the second regression visible and blockable.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::Path;
 
 /// Tracks the highest rung passed per plan, preventing regression.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct GateRatchet {
     /// Map from plan identifier to the highest rung that plan has passed.
     passes: HashMap<String, u8>,
@@ -25,6 +30,48 @@ impl GateRatchet {
         Self {
             passes: HashMap::new(),
         }
+    }
+
+    /// Load a ratchet snapshot from a JSON file.
+    ///
+    /// # Errors
+    ///
+    /// Returns any filesystem error from opening `path`, or
+    /// [`io::ErrorKind::InvalidData`] if the file contents are not valid
+    /// ratchet JSON.
+    pub fn load(path: &Path) -> Result<Self, io::Error> {
+        let file = File::open(path)?;
+        serde_json::from_reader(file).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    /// Load a ratchet snapshot or return an empty ratchet if unavailable.
+    #[must_use]
+    pub fn load_or_new(path: &Path) -> Self {
+        Self::load(path).unwrap_or_default()
+    }
+
+    /// Save the ratchet snapshot to a JSON file using an atomic rename.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be serialized, the parent
+    /// directory cannot be created, or the temporary/output files cannot be
+    /// written and renamed.
+    pub fn save(&self, path: &Path) -> Result<(), io::Error> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        let mut tmp_file = File::create(&tmp)?;
+        tmp_file.write_all(json.as_bytes())?;
+        tmp_file.sync_all()?;
+        drop(tmp_file);
+        fs::rename(&tmp, path)?;
+        Ok(())
     }
 
     /// Record that `plan_id` passed `rung`.
@@ -78,6 +125,7 @@ impl GateRatchet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn ratchet_new_is_empty() {
@@ -202,5 +250,39 @@ mod tests {
         ratchet.record_pass("borrowed-id", 3);
         assert_eq!(ratchet.highest_pass("owned-id"), Some(2));
         assert_eq!(ratchet.highest_pass("borrowed-id"), Some(3));
+    }
+
+    #[test]
+    fn ratchet_save_and_load_roundtrip() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("state").join("ratchet.json");
+
+        let mut ratchet = GateRatchet::new();
+        ratchet.record_pass("plan-1", 2);
+        ratchet.record_pass("plan-2", 5);
+        ratchet.save(&path).expect("save ratchet");
+
+        let loaded = GateRatchet::load(&path).expect("load ratchet");
+        assert_eq!(loaded, ratchet);
+    }
+
+    #[test]
+    fn ratchet_load_or_new_missing_path_returns_empty() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("missing-ratchet.json");
+
+        let ratchet = GateRatchet::load_or_new(&path);
+        assert_eq!(ratchet.plan_count(), 0);
+        assert!(ratchet.highest_pass("plan-1").is_none());
+    }
+
+    #[test]
+    fn ratchet_load_rejects_invalid_json() {
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("ratchet.json");
+        fs::write(&path, b"{not valid json").expect("write invalid json");
+
+        let err = GateRatchet::load(&path).expect_err("invalid json should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

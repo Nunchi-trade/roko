@@ -1,0 +1,109 @@
+# Release workflow: build and publish prebuilt binaries on tag push.
+#
+# Triggers on version tags (v*). Uses cargo-dist to build binaries for
+# macOS (ARM + Intel) and Linux (x86_64 glibc + musl). Creates a GitHub
+# Release with the binaries attached.
+#
+# See: https://opensource.axo.dev/cargo-dist/
+#
+# DEPLOY-01: Release pipeline
+
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build the release artifacts on each target platform.
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux musl only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p roko-cli -p roko-mcp-code
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/roko dist/roko-${{ matrix.target }} || true
+          cp target/${{ matrix.target }}/release/roko-mcp-code dist/roko-mcp-code-${{ matrix.target }} || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  # Create GitHub Release with all artifacts.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Use git-cliff if available, otherwise use git log.
+          if command -v git-cliff &> /dev/null; then
+            git-cliff --latest --strip header > RELEASE_NOTES.md
+          else
+            echo "## Changes" > RELEASE_NOTES.md
+            git log --oneline --no-decorate $(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "HEAD~20")..HEAD >> RELEASE_NOTES.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

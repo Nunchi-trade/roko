@@ -1,7 +1,7 @@
 //! Shared system-prompt assembly helpers for CLI execution paths.
 
 use anyhow::Result;
-use roko_compose::{PadState, RoleSystemPromptSpec, TaskContext};
+use roko_compose::{Complexity, ContextChunk, PadState, RoleSystemPromptSpec, TaskContext};
 use roko_core::AgentRole;
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
@@ -12,6 +12,8 @@ use roko_learn::skill_library::Skill;
 pub struct PromptBuildOptions {
     /// Optional affect state for tone/focus guidance.
     pub affect_state: Option<PadState>,
+    /// Optional prompt-budget complexity band.
+    pub complexity: Option<Complexity>,
     /// Optional additional conventions appended to defaults.
     pub extra_conventions: Option<String>,
     /// Optional extra anti-patterns appended to defaults.
@@ -20,6 +22,10 @@ pub struct PromptBuildOptions {
     pub relevant_skills: Vec<Skill>,
     /// Optional relevant playbooks injected into the system prompt.
     pub relevant_playbooks: Vec<Playbook>,
+    /// Optional code-intelligence context chunks injected as domain context.
+    pub code_context: Vec<String>,
+    /// Optional ambient pheromone signals injected into the system prompt.
+    pub pheromones: Vec<ContextChunk>,
 }
 
 fn build_spec(
@@ -28,8 +34,18 @@ fn build_spec(
     tools_csv: impl Into<String>,
     options: PromptBuildOptions,
 ) -> RoleSystemPromptSpec {
+    let task_context = if options.code_context.is_empty() {
+        task_context
+    } else {
+        let combined = options.code_context.join("\n\n");
+        task_context.with_domain_notes(combined)
+    };
     let mut spec = RoleSystemPromptSpec::new(role, task_context, tools_csv)
-        .with_affect_state(options.affect_state);
+        .with_affect_state(options.affect_state)
+        .with_cache_markers();
+    if let Some(complexity) = options.complexity {
+        spec = spec.with_complexity(complexity);
+    }
     if let Some(conventions) = options.extra_conventions {
         spec = spec.with_extra_conventions(conventions);
     }

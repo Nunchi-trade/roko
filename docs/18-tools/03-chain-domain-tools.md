@@ -2,6 +2,7 @@
 
 > The chain domain plugin — 423+ DeFi tools as ONE domain plugin, not the core framework.
 > Two-layer tool model, adapter pattern, high-level architecture, protocol coverage.
+> See also [tmp/refinements/25-domain-specific-agents.md](../../tmp/refinements/25-domain-specific-agents.md).
 
 
 > **Implementation**: Built
@@ -19,7 +20,10 @@ domain plugin.
 
 This distinction is architecturally enforced: the chain tools are a separate crate that
 depends on `roko-core` (for ToolDef, ToolContext, ToolResult), but `roko-core` does NOT depend
-on the chain crate. Dependencies flow strictly downward per the five-layer architecture.
+on the chain crate. Dependencies flow strictly downward per the five-layer architecture. In
+the broader domain-agent model, this chain plugin is one profile bundle among many; its tool
+set is specialized, but the bundle shape is the same one used by coding, research, ops, and
+other domains.
 
 ---
 
@@ -126,6 +130,22 @@ tools, meaning the code path for executing trades doesn't exist at runtime — n
 a policy check, but **structurally absent**. The observatory agent watches the market, dreams
 about what it observes, publishes structural insights to the collective mesh, and consumes
 resources at 0.3× the rate of an active agent (no gas costs, reduced inference).
+
+---
+
+## Typed Context And Custody
+
+The chain domain is the clearest place to see the refinement path's new primitives.
+
+`TypedContext` is the structured input that drives adapter selection. Instead of inferring
+intent from a free-text episode summary, the chain bundle expects explicit keys such as
+`chain`, `wallet`, `intent`, `venue`, and `value_limit`. Adapter routing and safety hooks can
+then match on typed predicates, which is more stable than parsing prose.
+
+`Custody` is the target-state provenance record for any action that has consequences. A chain write should
+leave behind who authorized it, what simulation ran, what permit was used, and what outcome
+was verified. That record is what lets domain-specific agents remain auditable when they are
+used as installable bundles rather than ad hoc tool lists.
 
 ---
 

@@ -29,7 +29,9 @@
     clippy::uninlined_format_args,
     clippy::unused_self,
     clippy::unwrap_or_default,
-    clippy::use_self
+    clippy::use_self,
+    clippy::manual_midpoint,
+    clippy::suspicious_operation_groupings
 )]
 
 use std::path::Path;
@@ -55,16 +57,62 @@ const fn default_half_life_days() -> f64 {
     30.0
 }
 
+fn default_balance() -> f64 {
+    1.0
+}
+
 /// Default half-life for insights, in days.
+///
+/// On-chain spec: ~7 days (1,512,000 blocks). Off-chain is intentionally longer
+/// because local knowledge isn't subject to demurrage and agents benefit from
+/// retaining insights until contradicted.
 pub const INSIGHT_HALF_LIFE_DAYS: f64 = 30.0;
+
 /// Default half-life for heuristics, in days.
+///
+/// On-chain spec: ~15 days (3,240,000 blocks). Off-chain is longer because
+/// behavioral strategies that work locally remain valuable longer without
+/// on-chain competition pressure.
 pub const HEURISTIC_HALF_LIFE_DAYS: f64 = 90.0;
+
 /// Default half-life for warnings, in days.
-pub const WARNING_HALF_LIFE_DAYS: f64 = 7.0;
+///
+/// On-chain spec: ~3 minutes (450 blocks). Off-chain uses 1 hour (1/24 day)
+/// to balance urgency with practical usefulness. Warnings are transient by
+/// nature but need enough persistence for the agent to act on them within
+/// a task cycle. Previously 7 days, which was far too long (warnings that
+/// persist for a week are no longer warnings -- they're constraints).
+pub const WARNING_HALF_LIFE_DAYS: f64 = 1.0 / 24.0; // 1 hour
+
 /// Default half-life for causal links, in days.
+///
+/// On-chain spec: ~15 days. Off-chain is longer (60 days) because causal
+/// models need time to be tested against varied situations before expiring.
 pub const CAUSAL_LINK_HALF_LIFE_DAYS: f64 = 60.0;
+
 /// Default half-life for strategy fragments, in days.
+///
+/// On-chain spec: ~15 days. Off-chain roughly matches because strategies
+/// in rapidly evolving codebases do become stale relatively quickly.
 pub const STRATEGY_FRAGMENT_HALF_LIFE_DAYS: f64 = 14.0;
+
+// ─── On-chain half-life constants (spec-aligned, in blocks) ─────────
+
+/// On-chain block time assumption: 1 block every 2 seconds.
+pub const BLOCKS_PER_DAY: u64 = 43_200;
+
+/// On-chain half-life for Insight entries: ~7 days (1,512,000 blocks at 2s/block).
+pub const INSIGHT_HALF_LIFE_BLOCKS: u64 = 7 * BLOCKS_PER_DAY;
+/// On-chain half-life for Heuristic entries: ~15 days.
+pub const HEURISTIC_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for Warning entries: ~3 minutes (90 blocks at 2s/block).
+pub const WARNING_HALF_LIFE_BLOCKS: u64 = 90;
+/// On-chain half-life for CausalLink entries: ~15 days.
+pub const CAUSAL_LINK_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for StrategyFragment entries: ~15 days.
+pub const STRATEGY_FRAGMENT_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
+/// On-chain half-life for AntiKnowledge entries: ~15 days.
+pub const ANTI_KNOWLEDGE_HALF_LIFE_BLOCKS: u64 = 15 * BLOCKS_PER_DAY;
 
 /// Semantic category for a knowledge item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +257,79 @@ impl EmotionalProvenance {
         };
         format!("{valence}_{arousal}")
     }
+
+    /// Compute emotional diversity from a set of emotional tags (P1-29).
+    ///
+    /// Uses normalized Shannon entropy of coarse emotion labels.
+    /// Returns 0.0 for 0-1 tags, up to 1.0 for maximum diversity.
+    ///
+    /// This is used as a supplementary quality signal: knowledge validated
+    /// under diverse emotional conditions is more likely to be robust.
+    #[must_use]
+    pub fn compute_diversity(tags: &[EmotionalTag]) -> f64 {
+        if tags.len() <= 1 {
+            return 0.0;
+        }
+
+        // Count occurrences of each coarse emotion label.
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for tag in tags {
+            let label = Self::coarse_emotion_label(tag.pad);
+            *counts.entry(label).or_default() += 1;
+        }
+
+        let n = tags.len() as f64;
+        let k = counts.len();
+        if k <= 1 {
+            return 0.0;
+        }
+
+        // Shannon entropy.
+        let entropy: f64 = counts
+            .values()
+            .map(|&c| {
+                let p = c as f64 / n;
+                if p > 0.0 { -p * p.ln() } else { 0.0 }
+            })
+            .sum();
+
+        // Normalize by max possible entropy (log(k)).
+        let max_entropy = (k as f64).ln();
+        if max_entropy > 0.0 {
+            (entropy / max_entropy).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Build provenance from multiple emotional tags (e.g., all source episodes).
+    ///
+    /// Computes average PAD, diversity, and discovery emotion from the set.
+    #[must_use]
+    pub fn from_tags(tags: &[EmotionalTag]) -> Self {
+        if tags.is_empty() {
+            return Self {
+                average_pad: PadVector::neutral(),
+                discovery_emotion: "neutral_mid_arousal".to_string(),
+                validation_arc: None,
+                emotional_diversity: 0.0,
+            };
+        }
+
+        let n = tags.len() as f64;
+        let avg_pad = PadVector {
+            pleasure: tags.iter().map(|t| t.pad.pleasure).sum::<f64>() / n,
+            arousal: tags.iter().map(|t| t.pad.arousal).sum::<f64>() / n,
+            dominance: tags.iter().map(|t| t.pad.dominance).sum::<f64>() / n,
+        };
+
+        Self {
+            discovery_emotion: Self::coarse_emotion_label(tags[0].pad),
+            average_pad: avg_pad,
+            validation_arc: None,
+            emotional_diversity: Self::compute_diversity(tags),
+        }
+    }
 }
 
 /// A durable unit of knowledge used for retrieval and memory.
@@ -270,6 +391,71 @@ pub struct KnowledgeEntry {
     /// Optional HDC fingerprint for similarity search.
     #[serde(default)]
     pub hdc_vector: Option<Vec<u8>>,
+    /// Number of independent confirmations from different episodes.
+    /// Used for tier promotion: 2+ for Transient->Working.
+    #[serde(default)]
+    pub confirmation_count: u32,
+    /// Distinct context IDs (e.g. plan/task combos) that confirmed this entry.
+    /// Used for tier promotion: 3+ distinct contexts for Working->Consolidated.
+    #[serde(default)]
+    pub distinct_contexts: Vec<String>,
+    /// Whether this entry has been explicitly deprecated.
+    /// Required for demoting Persistent entries.
+    #[serde(default)]
+    pub deprecated: bool,
+    /// NEURO-10: Freshness reserve balance for demurrage model.
+    ///
+    /// Balance represents the entry's freshness reserve. It decreases via
+    /// demurrage tax over time and increases via reinforcement signals
+    /// (Retrieved, Cited, Gated, Surprised, AgentQuoted). Initial value 1.0.
+    #[serde(default = "default_balance")]
+    pub balance: f64,
+    /// NEURO-11: Whether this entry has been frozen into cold storage.
+    ///
+    /// Frozen entries are excluded from hot query results but retain their
+    /// content address, lineage, and provenance. They can be thawed to
+    /// restore a starter balance.
+    #[serde(default)]
+    pub frozen: bool,
+    /// Catalytic score: how many new knowledge entries this entry helped create (P1-58).
+    ///
+    /// Incremented each time this entry is in the context pack during a task
+    /// that produces new knowledge. When the average catalytic score across
+    /// the store exceeds 1.5, the knowledge network is autocatalytic
+    /// (self-sustaining growth).
+    #[serde(default)]
+    pub catalytic_score: u32,
+}
+
+impl Default for KnowledgeEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: KnowledgeKind::default(),
+            source: None,
+            content: String::new(),
+            confidence: default_confidence(),
+            confidence_weight: default_confidence_weight(),
+            refuted_insight_id: None,
+            refutation_evidence: None,
+            source_episodes: Vec::new(),
+            tags: Vec::new(),
+            source_model: None,
+            model_generality: default_model_generality(),
+            created_at: Utc::now(),
+            half_life_days: default_half_life_days(),
+            tier: KnowledgeTier::default(),
+            emotional_tag: None,
+            emotional_provenance: None,
+            hdc_vector: None,
+            confirmation_count: 0,
+            distinct_contexts: Vec::new(),
+            deprecated: false,
+            balance: default_balance(),
+            frozen: false,
+            catalytic_score: 0,
+        }
+    }
 }
 
 impl KnowledgeEntry {
@@ -328,15 +514,38 @@ impl KnowledgeEntry {
 
     /// Consolidation multiplier derived from emotional provenance.
     ///
-    /// Entries that were validated across varied emotional states and
-    /// resolved through a redemptive or progressive arc are retained
-    /// slightly more aggressively.
+    /// Implements three affect-based consolidation biases:
+    ///
+    /// 1. **Arousal priority** (McGaugh 2004, P0-22): high-arousal episodes
+    ///    get up to 1.3x consolidation priority. The arousal signal from the
+    ///    emotional tag's PAD vector or mood snapshot drives this.
+    ///
+    /// 2. **Emotional diversity** (P1-29): entries validated across varied
+    ///    emotional states (high Shannon entropy) are retained more aggressively.
+    ///    Diversity signals broader applicability of the knowledge.
+    ///
+    /// 3. **Narrative arc**: redemptive/progressive arcs get slight boosts,
+    ///    contaminating arcs are slightly penalized.
     #[must_use]
     pub fn emotional_consolidation_boost(&self) -> f64 {
         let mut boost = 1.0;
 
+        // McGaugh 2004 arousal-based consolidation priority (P0-22).
+        // High-arousal episodes are more memorable and should be consolidated
+        // with higher priority. Max boost: 1.3x at arousal = 1.0.
+        if let Some(tag) = self.emotional_tag.as_ref() {
+            let arousal = tag.pad.arousal.abs().clamp(0.0, 1.0);
+            boost *= 1.0 + arousal * 0.30; // 1.0x at calm, 1.3x at max arousal
+        }
+
         if let Some(provenance) = self.emotional_provenance.as_ref() {
+            // Emotional diversity boost (P1-29).
+            // Shannon entropy of emotions across supporting episodes as quality signal.
+            // High diversity (close to 1.0) means knowledge was validated under
+            // varied emotional conditions → more robust.
             boost *= 1.0 + provenance.emotional_diversity.clamp(0.0, 1.0) * 0.15;
+
+            // Narrative arc weighting.
             boost *= match provenance.validation_arc {
                 Some(ValidationArc::Redemptive) => 1.06,
                 Some(ValidationArc::Progressive) => 1.04,
@@ -345,6 +554,8 @@ impl KnowledgeEntry {
             };
         }
 
+        // Intensity boost (smaller than arousal — intensity is the subjective
+        // salience, arousal is the physiological activation).
         if let Some(tag) = self.emotional_tag.as_ref() {
             boost *= 1.0 + f64::from(tag.intensity).clamp(0.0, 1.0) * 0.05;
         }
@@ -373,6 +584,687 @@ impl KnowledgeEntry {
     pub fn emotional_reliability_boost(&self) -> f64 {
         self.emotional_consolidation_boost()
     }
+
+    /// Enrich this entry with emotional metadata from a source episode.
+    ///
+    /// Call this when creating knowledge entries from episodes to ensure
+    /// the emotional retrieval boost is active (otherwise `emotional_tag`
+    /// stays `None` and the boost is always 1.0).
+    ///
+    /// If the entry already has an `emotional_tag`, this is a no-op.
+    pub fn enrich_from_emotional_tag(&mut self, tag: EmotionalTag) {
+        if self.emotional_tag.is_none() {
+            // Build provenance from the tag if not already present.
+            if self.emotional_provenance.is_none() {
+                self.emotional_provenance = Some(EmotionalProvenance::from_tag(&tag));
+            }
+            self.emotional_tag = Some(tag);
+        }
+    }
+
+    /// NEURO-10: Apply a reinforcement signal to bump this entry's balance.
+    ///
+    /// The bump is `signal.base_value() * (1.0 + novelty)` where `novelty`
+    /// is typically `1.0 - max_hdc_similarity` against top-K neighbors.
+    /// Common entries get small bumps; rare-but-useful ones get larger bumps.
+    pub fn reinforce(&mut self, signal: ReinforcementSignal, novelty: f64) {
+        let bump = signal.base_value() * (1.0 + novelty.clamp(0.0, 1.0));
+        self.balance = (self.balance + bump).min(5.0);
+    }
+
+    /// NEURO-10: Apply demurrage tax, deducting balance proportionally to
+    /// elapsed time.
+    ///
+    /// The demurrage rate is `DEMURRAGE_RATE_PER_HOUR` (default 0.005).
+    pub fn apply_demurrage(&mut self, elapsed_hours: f64) {
+        if elapsed_hours <= 0.0 {
+            return;
+        }
+        let deduction = DEMURRAGE_RATE_PER_HOUR * elapsed_hours;
+        self.balance = (self.balance - deduction).max(0.0);
+    }
+
+    /// NEURO-10: Freshness score combining balance with Ebbinghaus decay.
+    ///
+    /// `freshness(t) = balance(t) * ebbinghaus_weight(age, type_half_life, tier_multiplier)`
+    #[must_use]
+    pub fn freshness(&self, now: DateTime<Utc>) -> f64 {
+        let age_hours = now.signed_duration_since(self.created_at).num_seconds() as f64 / 3600.0;
+        if age_hours <= 0.0 {
+            return self.balance;
+        }
+        let half_life_hours = self.effective_half_life_days() * 24.0;
+        let ebbinghaus = if half_life_hours > 0.0 {
+            (-(age_hours * 2.0_f64.ln()) / half_life_hours).exp()
+        } else {
+            0.0
+        };
+        self.balance * ebbinghaus
+    }
+
+    /// NEURO-11: Freeze this entry into cold storage.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    /// NEURO-11: Thaw this entry from cold storage with a starter balance.
+    pub fn thaw(&mut self, starter_balance: f64) {
+        self.frozen = false;
+        self.balance = starter_balance.clamp(0.0, 5.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-10: Demurrage balance model and reinforcement signals.
+// ---------------------------------------------------------------------------
+
+/// Hourly demurrage rate deducted from knowledge entry balances.
+pub const DEMURRAGE_RATE_PER_HOUR: f64 = 0.005;
+
+/// Default balance floor below which entries are frozen by GC.
+pub const BALANCE_GC_FLOOR: f64 = 0.05;
+
+/// Default starter balance for thawed entries.
+pub const THAW_STARTER_BALANCE: f64 = 0.3;
+
+/// Reinforcement signal types that bump a knowledge entry's balance.
+///
+/// The 5 signals correspond to different ways knowledge proves its worth:
+/// being retrieved, being cited, surviving a gate check, explaining a novel
+/// outcome, or being explicitly reused by an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReinforcementSignal {
+    /// Entry was selected for use during context assembly.
+    Retrieved,
+    /// Another entry references this one.
+    Cited,
+    /// Entry survived a verification gate.
+    Gated,
+    /// Entry explained a novel or unexpected outcome.
+    Surprised,
+    /// Agent explicitly reused this entry's content.
+    AgentQuoted,
+}
+
+impl ReinforcementSignal {
+    /// Base balance bump for each signal type.
+    #[must_use]
+    pub const fn base_value(self) -> f64 {
+        match self {
+            Self::Retrieved => 0.05,
+            Self::Cited => 0.08,
+            Self::Gated => 0.10,
+            Self::Surprised => 0.15,
+            Self::AgentQuoted => 0.12,
+        }
+    }
+
+    /// Human-readable label for this signal type.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retrieved => "retrieved",
+            Self::Cited => "cited",
+            Self::Gated => "gated",
+            Self::Surprised => "surprised",
+            Self::AgentQuoted => "agent_quoted",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-07: Source channel confidence discounting.
+// ---------------------------------------------------------------------------
+
+/// Provenance channel for ingested knowledge entries.
+///
+/// Each channel carries a different trust discount reflecting the reliability
+/// of the data source. On ingest, the entry's confidence is multiplied by
+/// the channel's discount factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceChannel {
+    /// Direct user input -- fully trusted.
+    UserInput,
+    /// Gate verdicts from the validation pipeline.
+    GateVerdict,
+    /// Output produced by an LLM agent.
+    AgentOutput,
+    /// Data retrieved from an external API.
+    ExternalApi,
+    /// Speculative knowledge from dream consolidation.
+    DreamConsolidation,
+}
+
+impl SourceChannel {
+    /// Default trust discount factor for this channel.
+    ///
+    /// The entry's raw confidence is multiplied by this value on ingest.
+    #[must_use]
+    pub const fn discount_factor(self) -> f64 {
+        match self {
+            Self::UserInput => 1.0,
+            Self::GateVerdict => 0.95,
+            Self::AgentOutput => 0.8,
+            Self::ExternalApi => 0.6,
+            Self::DreamConsolidation => 0.5,
+        }
+    }
+
+    /// Apply the channel's discount to a raw confidence value.
+    #[must_use]
+    pub fn apply(self, confidence: f64) -> f64 {
+        (confidence * self.discount_factor()).clamp(0.0, 1.0)
+    }
+
+    /// Infer the source channel from a source label string.
+    #[must_use]
+    pub fn from_source_label(label: &str) -> Self {
+        let normalized = label.trim().to_ascii_lowercase();
+        if normalized.contains("user") || normalized.contains("manual") {
+            Self::UserInput
+        } else if normalized.contains("gate") || normalized.contains("verdict") {
+            Self::GateVerdict
+        } else if normalized.contains("agent") || normalized.contains("llm") {
+            Self::AgentOutput
+        } else if normalized.contains("api") || normalized.contains("external") {
+            Self::ExternalApi
+        } else if normalized.contains("dream") || normalized.contains("consolidat") {
+            Self::DreamConsolidation
+        } else {
+            // Default to agent output for unknown sources.
+            Self::AgentOutput
+        }
+    }
+}
+
+/// Apply source-channel confidence discounting to a batch of entries.
+///
+/// Each entry's confidence is multiplied by the discount factor of the
+/// given source channel.
+pub fn apply_source_discount(entries: &mut [KnowledgeEntry], channel: SourceChannel) {
+    let factor = channel.discount_factor();
+    for entry in entries.iter_mut() {
+        entry.confidence = (entry.confidence * factor).clamp(0.0, 1.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-08: Worldview clustering and cold-tier preservation.
+// ---------------------------------------------------------------------------
+
+/// A cluster of related knowledge entries grouped by tag similarity.
+///
+/// During garbage collection, if an entry is the last representative of
+/// its worldview cluster, it is preserved to prevent losing an entire
+/// conceptual domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorldviewCluster {
+    /// Stable identifier for this cluster.
+    pub id: String,
+    /// Representative tags that define this worldview.
+    pub representative_tags: Vec<String>,
+    /// Number of entries currently in this cluster.
+    pub entry_count: usize,
+}
+
+/// Assign each knowledge entry to a worldview cluster based on tag overlap.
+///
+/// Two entries share a cluster when they have at least `min_tag_overlap`
+/// tags in common. The algorithm uses a simple union-find approach:
+/// entries with shared tags get merged into the same cluster.
+#[must_use]
+pub fn cluster_worldviews(
+    entries: &[KnowledgeEntry],
+    min_tag_overlap: usize,
+) -> Vec<WorldviewCluster> {
+    fn uf_find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]]; // path compression
+            i = parent[i];
+        }
+        i
+    }
+
+    fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = uf_find(parent, a);
+        let rb = uf_find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let min_overlap = min_tag_overlap.max(1);
+    let mut parent: Vec<usize> = (0..entries.len()).collect();
+
+    // O(n^2) pairwise tag overlap -- acceptable for typical knowledge store sizes.
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let overlap = entries[i]
+                .tags
+                .iter()
+                .filter(|tag| entries[j].tags.contains(tag))
+                .count();
+            if overlap >= min_overlap {
+                uf_union(&mut parent, i, j);
+            }
+        }
+    }
+
+    // Group entries by their root representative.
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..entries.len() {
+        let root = uf_find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    groups
+        .into_iter()
+        .map(|(root, members)| {
+            // Collect the union of all tags in this cluster.
+            let mut all_tags: Vec<String> = Vec::new();
+            for &idx in &members {
+                for tag in &entries[idx].tags {
+                    if !all_tags.contains(tag) {
+                        all_tags.push(tag.clone());
+                    }
+                }
+            }
+            all_tags.sort();
+
+            WorldviewCluster {
+                id: format!("wv-{}", entries[root].id),
+                representative_tags: all_tags,
+                entry_count: members.len(),
+            }
+        })
+        .collect()
+}
+
+/// Filter entries for GC, preserving the last representative of each
+/// worldview cluster to prevent losing entire conceptual domains.
+///
+/// Returns entries that should be retained (those above threshold plus
+/// any "last survivor" entries from worldview clusters).
+#[must_use]
+pub fn gc_with_worldview_preservation(
+    entries: Vec<KnowledgeEntry>,
+    min_confidence: f64,
+    min_tag_overlap: usize,
+) -> Vec<KnowledgeEntry> {
+    fn uf_find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = uf_find(parent, a);
+        let rb = uf_find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let threshold = min_confidence.max(0.0);
+
+    // Determine which entries survive the confidence threshold.
+    let mut surviving_indices: Vec<bool> = entries
+        .iter()
+        .map(|entry| {
+            entry.kind == KnowledgeKind::AntiKnowledge
+                || effective_confidence_for_gc(entry) >= threshold
+        })
+        .collect();
+
+    // Build union-find clusters from tag overlap.
+    let mut parent: Vec<usize> = (0..entries.len()).collect();
+    let min_overlap = min_tag_overlap.max(1);
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let overlap = entries[i]
+                .tags
+                .iter()
+                .filter(|tag| entries[j].tags.contains(tag))
+                .count();
+            if overlap >= min_overlap {
+                uf_union(&mut parent, i, j);
+            }
+        }
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..entries.len() {
+        let root = uf_find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    // For each cluster, if no entry survives, preserve the best one.
+    for members in groups.values() {
+        let any_survive = members.iter().any(|&idx| surviving_indices[idx]);
+        if !any_survive && !members.is_empty() {
+            let best = members
+                .iter()
+                .copied()
+                .max_by(|&a, &b| {
+                    entries[a]
+                        .confidence
+                        .partial_cmp(&entries[b].confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(members[0]);
+            surviving_indices[best] = true;
+        }
+    }
+
+    entries
+        .into_iter()
+        .zip(surviving_indices)
+        .filter(|(_, survives)| *survives)
+        .map(|(entry, _)| entry)
+        .collect()
+}
+
+/// Effective confidence used for GC threshold comparison.
+///
+/// This mirrors the knowledge store's internal effective_confidence logic.
+fn effective_confidence_for_gc(entry: &KnowledgeEntry) -> f64 {
+    let base = entry.confidence.max(0.0);
+    let boost = entry.emotional_consolidation_boost();
+    let confirmation_factor = if entry.confirmation_count >= 2 {
+        1.5
+    } else {
+        1.0
+    };
+    base * boost * confirmation_factor
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-09: Distillation D2 HDC clustering.
+// ---------------------------------------------------------------------------
+
+/// A cluster of knowledge entries grouped by HDC vector similarity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HdcCluster {
+    /// Cluster identifier (0-indexed).
+    pub id: usize,
+    /// Entry IDs belonging to this cluster.
+    pub entry_ids: Vec<String>,
+    /// Number of entries in this cluster.
+    pub entry_count: usize,
+}
+
+/// Group knowledge entries by HDC vector similarity using k-means with
+/// Hamming distance.
+///
+/// Entries without a valid HDC vector are assigned to cluster 0.
+/// The algorithm runs for at most 20 iterations or until convergence.
+#[must_use]
+pub fn hdc_cluster(entries: &[KnowledgeEntry], k: usize) -> Vec<HdcCluster> {
+    const HDC_BYTES: usize = 1280;
+    const MAX_ITERATIONS: usize = 20;
+
+    if entries.is_empty() || k == 0 {
+        return Vec::new();
+    }
+
+    let k = k.min(entries.len());
+
+    // Extract valid HDC vectors; entries without vectors get mapped to cluster 0.
+    let vectors: Vec<Option<&[u8]>> = entries
+        .iter()
+        .map(|e| e.hdc_vector.as_deref().filter(|v| v.len() == HDC_BYTES))
+        .collect();
+
+    // Count entries with valid vectors.
+    let valid_count = vectors.iter().filter(|v| v.is_some()).count();
+    if valid_count == 0 || k <= 1 {
+        return vec![HdcCluster {
+            id: 0,
+            entry_ids: entries.iter().map(|e| e.id.clone()).collect(),
+            entry_count: entries.len(),
+        }];
+    }
+
+    // Initialize centroids: pick first k entries with valid vectors.
+    let mut centroids: Vec<Vec<u8>> = vectors
+        .iter()
+        .filter_map(|v| v.map(|bytes| bytes.to_vec()))
+        .take(k)
+        .collect();
+
+    let mut assignments = vec![0_usize; entries.len()];
+
+    for _iter in 0..MAX_ITERATIONS {
+        let mut changed = false;
+
+        // Assignment step: assign each entry to nearest centroid by Hamming distance.
+        for (i, vec_opt) in vectors.iter().enumerate() {
+            let Some(vec) = vec_opt else {
+                if assignments[i] != 0 {
+                    assignments[i] = 0;
+                    changed = true;
+                }
+                continue;
+            };
+
+            let mut best_cluster = 0;
+            let mut best_dist = u32::MAX;
+            for (c, centroid) in centroids.iter().enumerate() {
+                let dist: u32 = vec
+                    .iter()
+                    .zip(centroid.iter())
+                    .map(|(a, b)| (a ^ b).count_ones())
+                    .sum();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_cluster = c;
+                }
+            }
+
+            if assignments[i] != best_cluster {
+                assignments[i] = best_cluster;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Update step: majority vote for each centroid bit.
+        for (c, centroid) in centroids.iter_mut().enumerate() {
+            let members: Vec<&[u8]> = assignments
+                .iter()
+                .zip(vectors.iter())
+                .filter_map(|(&a, v)| if a == c { v.as_deref() } else { None })
+                .collect();
+
+            if members.is_empty() {
+                continue;
+            }
+
+            for byte_idx in 0..HDC_BYTES {
+                let mut new_byte = 0u8;
+                for bit in 0..8 {
+                    let ones: usize = members
+                        .iter()
+                        .filter(|m| (m[byte_idx] >> bit) & 1 == 1)
+                        .count();
+                    if ones * 2 > members.len() {
+                        new_byte |= 1 << bit;
+                    }
+                }
+                centroid[byte_idx] = new_byte;
+            }
+        }
+    }
+
+    // Build cluster output.
+    let mut clusters: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (i, &cluster_id) in assignments.iter().enumerate() {
+        clusters
+            .entry(cluster_id)
+            .or_default()
+            .push(entries[i].id.clone());
+    }
+
+    clusters
+        .into_iter()
+        .map(|(id, entry_ids)| HdcCluster {
+            id,
+            entry_count: entry_ids.len(),
+            entry_ids,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-10: Demurrage balance model for knowledge entries.
+// ---------------------------------------------------------------------------
+
+/// Apply demurrage (relevance decay) to knowledge entries.
+///
+/// Each entry loses `decay_rate` fraction of its confidence per tick unless
+/// actively referenced. Returns the number of entries that had their
+/// confidence reduced.
+#[must_use]
+pub fn apply_demurrage(entries: &mut [KnowledgeEntry], decay_rate: f64) -> usize {
+    let rate = decay_rate.clamp(0.0, 1.0);
+    let mut count = 0;
+    for entry in entries.iter_mut() {
+        let old = entry.confidence;
+        entry.confidence = (entry.confidence * (1.0 - rate)).max(0.0);
+        if (old - entry.confidence).abs() > f64::EPSILON {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Boost a knowledge entry's confidence when it is actively referenced.
+///
+/// This is the counterpart to demurrage: entries that are used regain
+/// relevance. The boost is additive and capped at 1.0.
+pub fn demurrage_reference_boost(entry: &mut KnowledgeEntry, boost: f64) {
+    entry.confidence = (entry.confidence + boost.abs()).min(1.0);
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-11: Cold-tier freeze/thaw.
+// ---------------------------------------------------------------------------
+
+/// Freeze a knowledge entry for cold storage.
+///
+/// Frozen entries are marked with `deprecated = true` and their confidence
+/// is preserved but they should not appear in active search results.
+/// The original confidence is recorded in a tag for thaw restoration.
+pub fn freeze_entry(entry: &mut KnowledgeEntry) {
+    if entry.deprecated {
+        return; // Already frozen.
+    }
+    // Record pre-freeze confidence as a tag for thaw.
+    entry
+        .tags
+        .push(format!("__frozen_confidence:{:.6}", entry.confidence));
+    entry.deprecated = true;
+}
+
+/// Thaw a frozen knowledge entry, restoring it to active status.
+///
+/// Restores the pre-freeze confidence from the saved tag.
+/// Returns `true` if the entry was actually thawed.
+pub fn thaw_entry(entry: &mut KnowledgeEntry) -> bool {
+    if !entry.deprecated {
+        return false; // Not frozen.
+    }
+
+    // Restore pre-freeze confidence.
+    let mut restored_confidence = None;
+    entry.tags.retain(|tag| {
+        if let Some(val) = tag.strip_prefix("__frozen_confidence:") {
+            restored_confidence = val.parse::<f64>().ok();
+            false
+        } else {
+            true
+        }
+    });
+
+    if let Some(conf) = restored_confidence {
+        entry.confidence = conf.clamp(0.0, 1.0);
+    }
+    entry.deprecated = false;
+    true
+}
+
+/// Check if a knowledge entry is frozen (in cold storage).
+#[must_use]
+pub fn is_frozen(entry: &KnowledgeEntry) -> bool {
+    entry.deprecated
+        && entry
+            .tags
+            .iter()
+            .any(|t| t.starts_with("__frozen_confidence:"))
+}
+
+// ---------------------------------------------------------------------------
+// NEURO-12: Falsifier records.
+// ---------------------------------------------------------------------------
+
+/// Record tracking when a knowledge entry is contradicted by new evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FalsifierRecord {
+    /// ID of the knowledge entry that was falsified.
+    pub entry_id: String,
+    /// Evidence text explaining the contradiction.
+    pub evidence: String,
+    /// Timestamp when the falsification was recorded.
+    pub falsified_at_ms: i64,
+}
+
+/// Append a falsification record to a collection and mark the entry.
+///
+/// When a falsified entry is later referenced, callers should check the
+/// records and surface a warning.
+pub fn record_falsification(
+    records: &mut Vec<FalsifierRecord>,
+    entries: &mut [KnowledgeEntry],
+    entry_id: &str,
+    evidence: &str,
+) {
+    records.push(FalsifierRecord {
+        entry_id: entry_id.to_string(),
+        evidence: evidence.to_string(),
+        falsified_at_ms: Utc::now().timestamp_millis(),
+    });
+
+    // Halve the confidence of the falsified entry.
+    if let Some(entry) = entries.iter_mut().find(|e| e.id == entry_id) {
+        entry.confidence *= 0.5;
+    }
+}
+
+/// Check if a knowledge entry has been falsified and return the warning.
+#[must_use]
+pub fn falsification_warning<'a>(
+    records: &'a [FalsifierRecord],
+    entry_id: &str,
+) -> Option<&'a FalsifierRecord> {
+    records.iter().find(|r| r.entry_id == entry_id)
 }
 
 /// Single entry point for durable knowledge storage backends.
@@ -392,6 +1284,19 @@ pub trait NeuroStore: Sized {
     /// Returns an error if the backend cannot read or decode the stored
     /// knowledge entries needed to answer the query.
     fn query(&self, topic: &str, limit: usize) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Query by a serialized 10,240-bit fingerprint and return the nearest
+    /// durable records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fingerprint length is invalid or the backend
+    /// cannot read the stored knowledge entries needed to answer the query.
+    fn query_similar(
+        &self,
+        fingerprint: &[u8],
+        limit: usize,
+    ) -> Result<Vec<crate::knowledge_store::KnowledgeSimilarityHit>>;
 
     /// Ingest a batch of knowledge entries.
     ///
@@ -425,6 +1330,8 @@ pub mod episode_completion;
 #[cfg(feature = "hdc")]
 mod hdc;
 pub mod knowledge_store;
+/// Temporal knowledge topology -- Allen interval algebra over knowledge states.
+pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
@@ -435,10 +1342,15 @@ pub use context::{
 pub use distiller::{DistillationBackend, Distiller};
 pub use episode_completion::spawn_episode_distillation;
 pub use knowledge_store::{
-    DEFAULT_GC_MIN_CONFIDENCE, KnowledgeConfirmationRecord, KnowledgeStats, KnowledgeStore,
+    AntiKnowledgeConflict, BackupHeader, DEFAULT_GC_MIN_CONFIDENCE, ExportFilter, ImportOptions,
+    KnowledgeConfirmationRecord, KnowledgeQueryBreakdown, KnowledgeQueryHit,
+    KnowledgeSimilarityHit, KnowledgeStats, KnowledgeStore, QUERY_SCORE_FLOOR,
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};
+pub use temporal::{
+    AllenRelation, KnowledgeEpoch, TemporalIndex, TemporalInterval, TemporalRelation,
+};
 
 #[cfg(test)]
 mod tests {
@@ -473,6 +1385,15 @@ mod tests {
             emotional_tag: None,
             emotional_provenance: None,
             hdc_vector: None,
+
+            confirmation_count: 0,
+
+            distinct_contexts: Vec::new(),
+
+            deprecated: false,
+            balance: 1.0,
+            frozen: false,
+            catalytic_score: 0,
         };
 
         assert_eq!(entry.effective_half_life_days(), 100.0);
@@ -505,7 +1426,8 @@ mod tests {
 
     #[test]
     fn new_knowledge_kinds_have_expected_defaults() {
-        assert_eq!(KnowledgeKind::Warning.default_half_life_days(), 7.0);
+        // Warning half-life: 1/24 day = 1 hour (was 7 days, fixed per spec).
+        assert!((KnowledgeKind::Warning.default_half_life_days() - 1.0 / 24.0).abs() < 1e-9);
         assert_eq!(KnowledgeKind::CausalLink.default_half_life_days(), 60.0);
         assert_eq!(
             KnowledgeKind::StrategyFragment.default_half_life_days(),
@@ -517,6 +1439,110 @@ mod tests {
             KnowledgeKind::StrategyFragment.as_str(),
             "strategy_fragment"
         );
+    }
+
+    #[test]
+    fn hdc_cluster_single_cluster_when_k1() {
+        let entries = vec![
+            KnowledgeEntry {
+                id: "e1".to_string(),
+                kind: KnowledgeKind::Insight,
+                content: "test".to_string(),
+                confidence: 0.8,
+                ..Default::default()
+            },
+            KnowledgeEntry {
+                id: "e2".to_string(),
+                kind: KnowledgeKind::Heuristic,
+                content: "test2".to_string(),
+                confidence: 0.7,
+                ..Default::default()
+            },
+        ];
+        let clusters = hdc_cluster(&entries, 1);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].entry_count, 2);
+    }
+
+    #[test]
+    fn hdc_cluster_empty_input() {
+        let clusters = hdc_cluster(&[], 3);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn demurrage_reduces_confidence() {
+        let mut entries = vec![KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 1.0,
+            ..Default::default()
+        }];
+        let affected = apply_demurrage(&mut entries, 0.1);
+        assert_eq!(affected, 1);
+        assert!((entries[0].confidence - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn demurrage_reference_boost_restores() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.5,
+            ..Default::default()
+        };
+        demurrage_reference_boost(&mut entry, 0.3);
+        assert!((entry.confidence - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn freeze_thaw_roundtrip() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.75,
+            ..Default::default()
+        };
+        assert!(!is_frozen(&entry));
+        freeze_entry(&mut entry);
+        assert!(is_frozen(&entry));
+        assert!(entry.deprecated);
+
+        let thawed = thaw_entry(&mut entry);
+        assert!(thawed);
+        assert!(!is_frozen(&entry));
+        assert!(!entry.deprecated);
+        assert!((entry.confidence - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn freeze_is_idempotent() {
+        let mut entry = KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.5,
+            ..Default::default()
+        };
+        freeze_entry(&mut entry);
+        let tag_count = entry.tags.len();
+        freeze_entry(&mut entry); // second freeze should be no-op
+        assert_eq!(entry.tags.len(), tag_count);
+    }
+
+    #[test]
+    fn falsifier_record_halves_confidence() {
+        let mut records = Vec::new();
+        let mut entries = vec![KnowledgeEntry {
+            id: "e1".to_string(),
+            confidence: 0.8,
+            ..Default::default()
+        }];
+        record_falsification(&mut records, &mut entries, "e1", "new data contradicts");
+        assert_eq!(records.len(), 1);
+        assert!((entries[0].confidence - 0.4).abs() < 1e-10);
+
+        let warning = falsification_warning(&records, "e1");
+        assert!(warning.is_some());
+        assert_eq!(warning.unwrap().evidence, "new data contradicts");
+
+        let no_warning = falsification_warning(&records, "e2");
+        assert!(no_warning.is_none());
     }
 
     #[test]

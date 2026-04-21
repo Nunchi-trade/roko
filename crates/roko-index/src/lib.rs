@@ -11,8 +11,11 @@
 //!   search.
 
 #![allow(
+    clippy::cast_precision_loss,
+    clippy::doc_markdown,
     clippy::expect_used,
     clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
     clippy::needless_pass_by_value,
     clippy::similar_names,
     clippy::too_many_lines
@@ -21,15 +24,24 @@
 pub mod graph;
 pub mod hdc;
 pub mod parser;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod symbol;
 pub mod workspace;
 
 // ─── Convenience re-exports ─────────────────────────────────────────────
 
-pub use graph::{EdgeKind, SymbolEdge, SymbolGraph, build_graph, pagerank};
+pub use graph::{
+    EdgeKind, SymbolEdge, SymbolGraph, build_graph, pagerank, personalized_pagerank,
+    weighted_pagerank,
+};
 pub use hdc::{HdcFingerprint, fingerprint_file, fingerprint_symbol, similarity};
 pub use parser::{SourceFile, parse_source};
 pub use symbol::{SymbolId, SymbolRef, find_symbol};
 pub use workspace::{
-    CallGraph, CallGraphDirection, CallGraphEdge, SearchResult, SymbolInfo, WorkspaceIndex,
+    AssembledContext, CallGraph, CallGraphDirection, CallGraphEdge, CodeIndex, CodeSlice,
+    ContextOverlay, EmbeddingQuery, FileAst, HdcQuery, ImplementationMatch, IndexStats,
+    KeywordQuery, PrivacyConfig, ReferenceKind, ReferenceMatch, SearchResult, SearchScope,
+    SearchStrategy, StructuralQuery, SymbolContext, SymbolInfo, WorkspaceIndex, WorkspaceMap,
+    WorkspaceMapEntry,
 };

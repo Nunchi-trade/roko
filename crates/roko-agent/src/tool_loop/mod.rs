@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::dispatcher::ToolDispatcher;
 use crate::introspection::{Intervention, MetacognitiveMonitor, Turn};
+use crate::lifecycle::{BudgetStatus, BudgetTracker, CognitiveTier, TurnCostRecord};
 use crate::provider::ProviderError;
 use crate::retry::RetryPolicy;
 use crate::streaming::StreamChunk;
@@ -127,6 +128,8 @@ pub enum StopReason {
     Cancelled,
     /// The backend returned an error (API, parse, or network).
     BackendError(String),
+    /// The cost budget was exhausted (daily or lifetime limit reached).
+    BudgetExhausted,
 }
 
 /// Output from a completed [`ToolLoop::run`] or [`ToolLoop::resume`].
@@ -160,6 +163,10 @@ enum OverflowAction {
 /// Drives the `prompt -> LLM -> tool_calls -> dispatch -> results -> LLM`
 /// cycle until the LLM stops calling tools, the iteration cap is
 /// reached, the cancel token fires, or the backend errors.
+/// Shared budget guard that can be attached to a [`ToolLoop`] to enforce
+/// budget constraints before each LLM invocation.
+pub type SharedBudgetTracker = Arc<std::sync::Mutex<BudgetTracker>>;
+
 #[derive(Clone)]
 pub struct ToolLoop {
     translator: Arc<dyn Translator>,
@@ -171,6 +178,8 @@ pub struct ToolLoop {
     model_profile: Option<ModelProfile>,
     retry_policy: RetryPolicy,
     monitor: Option<MetacognitiveMonitor>,
+    /// Optional budget tracker checked before each LLM call (LIFE-03).
+    budget: Option<SharedBudgetTracker>,
 }
 
 impl ToolLoop {
@@ -191,6 +200,7 @@ impl ToolLoop {
             model_profile: None,
             retry_policy: RetryPolicy::default(),
             monitor: None,
+            budget: None,
         }
     }
 
@@ -242,6 +252,17 @@ impl ToolLoop {
         self
     }
 
+    /// Attach a shared budget tracker checked before each LLM call.
+    ///
+    /// When the tracker reports [`BudgetStatus::Exhausted`], the loop
+    /// terminates with [`StopReason::BudgetExhausted`]. After each
+    /// successful LLM call, the turn cost is recorded into the tracker.
+    #[must_use]
+    pub fn with_budget(mut self, budget: SharedBudgetTracker) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
     /// Run a fresh tool loop from an initial system + user prompt.
     pub async fn run(
         &self,
@@ -270,8 +291,17 @@ impl ToolLoop {
         }
 
         let messages = result_msg::initial_messages(system, user);
-        self.run_inner(messages, 0, Vec::new(), Usage::default(), tools, ctx, None)
-            .await
+        self.run_inner(
+            messages,
+            0,
+            Vec::new(),
+            Usage::default(),
+            tools,
+            ctx,
+            None,
+            SessionState::default(),
+        )
+        .await
     }
 
     /// Run a fresh tool loop and forward streaming chunks as each backend turn arrives.
@@ -292,6 +322,7 @@ impl ToolLoop {
             tools,
             ctx,
             Some(event_tx),
+            SessionState::default(),
         )
         .await
     }
@@ -311,6 +342,7 @@ impl ToolLoop {
             tools,
             ctx,
             None,
+            cp.session,
         )
         .await
     }
@@ -325,9 +357,10 @@ impl ToolLoop {
         tools: &[ToolDef],
         ctx: &ToolContext,
         event_tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+        initial_session: SessionState,
     ) -> ToolLoopOutput {
         let rendered_tools = self.translator.render_tools(tools);
-        let mut session = SessionState::default();
+        let mut session = initial_session;
         let mut turn_history: Vec<Turn> = Vec::new();
 
         loop {
@@ -335,7 +368,8 @@ impl ToolLoop {
 
             // §36.54 — iteration cap.
             if max_iter::is_exhausted(iterations, self.max_iterations) {
-                let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                    .with_session(session.clone());
                 return ToolLoopOutput {
                     final_text: String::new(),
                     iterations,
@@ -348,7 +382,8 @@ impl ToolLoop {
 
             // §36.45 — cancellation between turns.
             if ctx.is_cancelled() {
-                let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                    .with_session(session.clone());
                 return ToolLoopOutput {
                     final_text: String::new(),
                     iterations,
@@ -357,6 +392,24 @@ impl ToolLoop {
                     stop_reason: StopReason::Cancelled,
                     checkpoint: Some(cp),
                 };
+            }
+
+            // LIFE-03: Budget check before each LLM invocation.
+            if let Some(ref budget) = self.budget {
+                if let Ok(guard) = budget.lock() {
+                    if guard.check() == BudgetStatus::Exhausted {
+                        let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                            .with_session(session.clone());
+                        return ToolLoopOutput {
+                            final_text: String::new(),
+                            iterations,
+                            tool_calls: all_calls,
+                            total_usage,
+                            stop_reason: StopReason::BudgetExhausted,
+                            checkpoint: Some(cp),
+                        };
+                    }
+                }
             }
 
             // Send current conversation to the backend.
@@ -373,7 +426,8 @@ impl ToolLoop {
             } {
                 Ok(r) => r,
                 Err(e) => {
-                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
                     return ToolLoopOutput {
                         final_text: String::new(),
                         iterations,
@@ -385,13 +439,41 @@ impl ToolLoop {
                 }
             };
             merge_session_state(&mut session, self.backend.extract_session(&response));
-            total_usage.add(&response.extract_usage());
+            let turn_usage = response.extract_usage();
+            total_usage.add(&turn_usage);
+
+            // LIFE-03: Record turn cost in budget tracker after LLM call.
+            if let Some(ref budget) = self.budget {
+                if let Ok(mut guard) = budget.lock() {
+                    let model_name = self
+                        .model_profile
+                        .as_ref()
+                        .map(|p| p.slug.clone())
+                        .unwrap_or_default();
+                    let cost_record = TurnCostRecord {
+                        turn_id: format!("turn-{iterations}"),
+                        model: model_name,
+                        input_tokens: u64::from(turn_usage.input_tokens),
+                        output_tokens: u64::from(turn_usage.output_tokens),
+                        cache_read_tokens: u64::from(turn_usage.cache_read_tokens),
+                        estimated_cost_usd: f64::from(turn_usage.cost_usd),
+                        cognitive_tier: CognitiveTier::Gamma,
+                        t0_suppressed: false,
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    };
+                    guard.record_turn(&cost_record);
+                }
+            }
 
             // Parse tool calls from the response.
             let calls = match self.translator.parse_calls(&response) {
                 Ok(c) => c,
                 Err(e) => {
-                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                    let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                        .with_session(session.clone());
                     return ToolLoopOutput {
                         final_text: String::new(),
                         iterations,
@@ -447,7 +529,8 @@ impl ToolLoop {
                         Intervention::EscalateModel
                         | Intervention::HumanHandoff
                         | Intervention::Abort => {
-                            let cp = Checkpoint::new(iterations, all_calls.clone(), messages);
+                            let cp = Checkpoint::new(iterations, all_calls.clone(), messages)
+                                .with_session(session.clone());
                             return ToolLoopOutput {
                                 final_text: String::new(),
                                 iterations,
@@ -467,7 +550,7 @@ impl ToolLoop {
             self.prune_context_if_needed(&mut messages);
 
             iterations += 1;
-            self.save_checkpoint_snapshot(iterations, &all_calls, &messages);
+            self.save_checkpoint_snapshot(iterations, &all_calls, &messages, &session);
         }
     }
 
@@ -547,12 +630,14 @@ impl ToolLoop {
         iterations: usize,
         all_calls: &[ToolCall],
         messages: &[serde_json::Value],
+        session: &SessionState,
     ) {
         let Some(path) = self.checkpoint_path.as_deref() else {
             return;
         };
 
-        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec());
+        let cp = Checkpoint::new(iterations, all_calls.to_vec(), messages.to_vec())
+            .with_session(session.clone());
         if let Err(err) = cp.save(path) {
             tracing::warn!(path = %path.display(), error = %err, "failed to persist tool loop checkpoint");
         }

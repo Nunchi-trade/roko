@@ -316,11 +316,12 @@ impl AgentServerBuilder {
             .agent_id
             .ok_or_else(|| anyhow!("agent_id is required"))?;
         let bind = self.bind.unwrap_or_else(|| "0.0.0.0:0".to_string());
+        let capabilities = normalize_capabilities(self.capabilities, self.features);
         let mut state = AgentState::new(
             agent_id,
             self.owner,
             self.version.unwrap_or_else(|| "0.1.0".to_string()),
-            dedupe(self.capabilities),
+            capabilities,
             self.chain_client,
             self.llm_backend,
             self.knowledge_store,
@@ -357,6 +358,23 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
     out
 }
 
+fn normalize_capabilities(values: Vec<String>, features: FeatureFlags) -> Vec<String> {
+    dedupe(values)
+        .into_iter()
+        .filter(|value| capability_is_live(value, features))
+        .collect()
+}
+
+fn capability_is_live(value: &str, features: FeatureFlags) -> bool {
+    match value {
+        "messaging" => features.messaging,
+        "predictions" => features.predictions,
+        "research" => features.research,
+        "tasks" => features.tasks,
+        _ => true,
+    }
+}
+
 fn resolve_addr(bind: &str) -> Result<SocketAddr> {
     bind.to_socket_addrs()?
         .next()
@@ -369,6 +387,7 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use serde_json::json;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -448,5 +467,60 @@ mod tests {
             .expect("list body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload.as_array().map_or(0, Vec::len), 1);
+    }
+
+    #[tokio::test]
+    async fn reserved_feature_capability_does_not_overclaim_routes() {
+        let server = AgentServer::builder()
+            .agent_id("agent-1")
+            .capability("messaging")
+            .capability("custom-skill")
+            .build()
+            .expect("server");
+        let router = server.router();
+
+        let capabilities = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capabilities")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("capabilities response");
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let body = to_bytes(capabilities.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        assert_eq!(payload["features"], json!(["custom-skill"]));
+        assert_eq!(
+            payload["routes"],
+            json!(["/health", "/capabilities", "/stats", "/logs"])
+        );
+        assert_eq!(
+            payload["skills"],
+            json!({
+                "custom-skill": {
+                    "enabled": true,
+                    "config": {}
+                }
+            })
+        );
+
+        let message = router
+            .oneshot(
+                Request::builder()
+                    .uri("/message")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"hello"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("message response");
+        assert_eq!(message.status(), StatusCode::NOT_FOUND);
     }
 }

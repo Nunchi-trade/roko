@@ -100,7 +100,7 @@ pub struct Receipt {
 }
 
 /// A single event log entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     /// Address that emitted the log.
     pub address: String,

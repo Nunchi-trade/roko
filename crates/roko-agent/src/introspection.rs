@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use roko_core::{AgentRole, ToolPermissions, tool::ToolCall};
+use roko_core::{AgentRole, Temperament, ToolPermissions, tool::ToolCall};
 
 use crate::translate::BackendResponse;
 
@@ -14,22 +14,31 @@ pub struct AgentIdentity {
     pub role: AgentRole,
     /// Default model tier for the role.
     pub model_tier: roko_core::ModelTier,
-    /// Human-readable temperament label.
-    pub temperament: String,
+    /// Typed execution temperament.
+    pub temperament: Temperament,
     /// Runtime capability mask.
     pub capabilities: ToolPermissions,
 }
 
 impl AgentIdentity {
-    /// Build an identity from a role plus an optional temperament label.
+    /// Build an identity from a role plus a typed temperament.
     #[must_use]
-    pub fn new(role: AgentRole, temperament: impl Into<String>) -> Self {
+    pub fn new(role: AgentRole, temperament: Temperament) -> Self {
         Self {
             role,
             model_tier: role.model_tier(),
-            temperament: temperament.into(),
+            temperament,
             capabilities: role.tool_permissions(),
         }
+    }
+
+    /// Build an identity from a role plus a temperament label.
+    #[must_use]
+    pub fn from_label(role: AgentRole, temperament: &str) -> Self {
+        Self::new(
+            role,
+            Temperament::from_label(temperament).unwrap_or_default(),
+        )
     }
 }
 
@@ -288,9 +297,10 @@ mod tests {
 
     #[test]
     fn agent_identity_uses_role_defaults() {
-        let identity = AgentIdentity::new(AgentRole::Implementer, "steady");
+        let identity = AgentIdentity::new(AgentRole::Implementer, Temperament::Balanced);
         assert_eq!(identity.role, AgentRole::Implementer);
         assert_eq!(identity.model_tier, AgentRole::Implementer.model_tier());
+        assert_eq!(identity.temperament, Temperament::Balanced);
         assert!(identity.capabilities.read);
     }
 }

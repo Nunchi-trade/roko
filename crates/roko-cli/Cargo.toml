@@ -31,6 +31,7 @@ roko-conductor = { path = "../roko-conductor" }
 roko-plugin = { path = "../roko-plugin" }
 roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
+roko-index = { path = "../roko-index" }
 
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }

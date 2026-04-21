@@ -3,14 +3,25 @@
 > **Crate:** `roko-learn` · **Path:** `crates/roko-learn/src/`
 > **Persistence root:** `.roko/learn/`
 > **Entry point:** `LearningRuntime` in `runtime_feedback.rs`
+>
+> **Implementation status**
+> - **Shipping**: `roko-learn` is already one of the largest subsystems in the repo at roughly 42 modules and 35,847 LOC. Shipping pieces include `cascade_router`, `runtime_feedback`, `skill_library`, `episode_logger`, bandits, prediction tracking, active inference, drift detection, pattern discovery, and provider health.
+> - **Target-state**: Bus-backed cross-operator calibration, typed heuristic specs, and richer provenance-backed research ingestion.
+> - **Deferred**: demurrage as the governing memory model, worldview clustering and dissonance algebra as a canonical layer, and the full Paper/Claim/replication-ledger stack.
 
 ---
 
 ## Overview
 
-The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, each routing decision produces a new episode — closing the loop. The compound effect of 11+ interconnected learning subsystems operating simultaneously is that Roko improves autonomously: better prompts, cheaper model routing, fewer repeated mistakes, monotonically growing capabilities.
+The learning subsystem turns every agent execution into training data. Each agent turn produces an episode, each episode updates baselines, each baseline informs routing, and each routing decision produces a new episode. That core loop already ships in a substantial form rather than as a nascent sketch: `roko-learn` currently spans roughly 42 modules and 35,847 LOC, including `cascade_router` (3-stage model routing), `runtime_feedback`, `skill_library`, `episode_logger`, bandits, prediction tracking, active inference, drift detection, pattern discovery, and provider-health circuit breaking.
 
-The subsystem is organized around three tiers of memory (episodes → patterns → playbook rules), three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops that connect the subsystems into a self-regulating whole.
+REF10, REF14, and REF16 still matter here, but mainly as target-state design docs layered on top of that existing crate. REF10 describes a Bus-backed predict-publish-correct architecture for broader cross-operator calibration; today active inference and prediction tracking are real, but the Router has the richest prediction/outcome signal and the universal Bus/Pulse doctrine remains planned. REF16 similarly describes a richer provenance path from research into runtime behavior, but the Paper/Claim/replication-ledger stack is still deferred.
+
+REF12's demurrage framing is explicitly deferred. Current learning and memory code uses existing decay, confidence, and store-specific retention behavior rather than a balance-bearing attention economy. See also [04-decay-variants](../00-architecture/04-decay-variants.md) and [25-attention-as-currency](../00-architecture/25-attention-as-currency.md) for the deferred design.
+
+REF14 is most useful in a narrower form. `HeuristicRule` already exists in `roko-neuro`, and near-term value comes from typed heuristic specs plus contradiction and calibration tracking. Worldview clustering, dissonance algebra, and heuristic export/import remain target-state rather than current runtime behavior. See [19-heuristics-worldviews-and-falsifiers](19-heuristics-worldviews-and-falsifiers.md) and [20-research-to-runtime](20-research-to-runtime.md) for those scoped designs.
+
+The docs describe four durable learning surfaces, but they are not all equally mature yet: episodes and metrics are **shipping**; patterns, bandits, and routing baselines are **shipping**; heuristic/playbook distillation exists in partial form today and is the main **ship soon** layer; worldviews and replication-ledger-backed research ingestion are **planned/deferred**. The crate also includes three bandit algorithms for online decision-making (UCB1, LinUCB, Track-and-Stop), a three-stage cascade router for model selection (Static → Confidence → UCB), and eight cybernetic feedback loops described as a target architecture rather than a fully unified present-tense doctrine.
 
 ---
 
@@ -21,7 +32,7 @@ The subsystem is organized around three tiers of memory (episodes → patterns �
 | # | Document | What it covers |
 |---|----------|---------------|
 | [00](00-episode-logger.md) | **Episode Logger** | Append-only JSONL episode log, HDC fingerprinting, crash-safe writes, tolerant reader. The foundational data substrate for all learning. |
-| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), TOML persistence. Three-tier memory: episodes → patterns → rules. |
+| [01](01-playbook-system.md) | **Playbook System** | Playbook rules with globset trigger matching, bounded confidence dynamics (validate +0.05, contradict −0.10, ceiling 0.95), and TOML persistence. Demurrage-style freshness remains a deferred design rather than current behavior. |
 | [02](02-skill-library-voyager.md) | **Skill Library (Voyager)** | Voyager-style skill accumulation (Wang et al. 2023). Monotonically growing library of reusable capabilities with prompt templates, tool dependencies, usage telemetry, and deduplication. |
 
 ### Bandit Algorithms
@@ -54,16 +65,23 @@ The subsystem is organized around three tiers of memory (episodes → patterns �
 | [11](11-thompson-sampling-drift.md) | **Thompson Sampling with Drift** | Bayesian bandit with discount factor γ for non-stationary environments. Beta distribution per arm, discounted updates, drift detection and arm reset. |
 | [12](12-self-improvement-frameworks.md) | **Self-Improvement Frameworks** | Survey: Reflexion (Shinn et al. 2023), ExpeL (Zhao et al. 2023), DSPy (Khattab et al. 2023), RouteLLM (ICLR 2025), FrugalGPT (arXiv:2305.05176), AutoMix (NeurIPS 2024), Karpathy autoresearch. External verifier requirement. |
 
+### Research and Evidence
+
+| # | Document | What it covers |
+|---|----------|---------------|
+| [20](20-research-to-runtime.md) | **Research-to-Runtime Pipeline** | Target-state provenance flow from paper-backed ideas into heuristics and calibration. The full Paper/Claim/replication-ledger model is deferred. |
+
 ### Cybernetic Architecture
 
 | # | Document | What it covers |
 |---|----------|---------------|
 | [13](13-8-missing-feedback-loops.md) | **Eight Missing Feedback Loops** | Health→Routing, Conductor→Routing, Section→Scaffold, Failure→Replanning, Skills→Prompts, Cost→Routing, Latency→Reward, Experiments→Static. Status of each loop. |
-| [14](14-stability-mechanisms.md) | **Stability Mechanisms** | Hysteresis (10% score delta to switch), frequency separation (every 1/5/20/50 episodes), EMA damping, anti-patterns (lock-in, explosion, death spiral, collapse). |
+| [14](14-stability-mechanisms.md) | **Stability Mechanisms** | Hysteresis (10% score delta to switch), frequency separation (every 1/5/20/50 episodes), EMA damping, anti-patterns (lock-in, explosion, feedback collapse). |
 | [15](15-collective-calibration-31x.md) | **Collective Calibration (31.6×)** | CLT-inspired heuristic `accuracy(t) = 1 − 1/√(N×t)`. Explicit caveats (independence, stationarity, aggregation). C-Factor composite metric with 11 components and leave-one-out agent contributions. |
 | [16](16-predictive-foraging.md) | **Predictive Foraging** | Falsifiable predictions (duration, complexity, gate outcome, conflict). CalibrationTracker, arithmetic corrector (~50ns). Brier score calibration metric, reliability diagrams. |
 | [17](17-adas-and-autocatalytic.md) | **ADAS and Autocatalytic Thesis** | ADAS meta-architecture search (Hu et al. ICLR 2025, +14% ARC). EvoSkills (Chen et al. 2023). Autocatalytic sets (Kauffman 1993). Compound math: 0.9⁴ = 0.656. Ten flywheel mechanisms. Empirical testability via C-Factor trend. |
-
+| [18](18-self-learning-cybernetic-loops.md) | **Self-Learning & Cybernetic Feedback Loops** | Target-state predict-publish-correct architecture. Shipping today: routing-side active inference and prediction tracking; deferred: universal per-operator Bus calibration. |
+| [19](19-heuristics-worldviews-and-falsifiers.md) | **Heuristics, Worldviews, and Falsifiers** | Near-term value: typed heuristic specs and contradiction tracking around existing heuristic distillation. Deferred: worldview clustering, dissonance algebra, and belief export/import. |
 ---
 
 ## LearningRuntime: The Integration Hub
@@ -111,7 +129,7 @@ CompletedRunInput
 
 | Topic | Relationship |
 |-------|-------------|
-| [00-architecture](../00-architecture/INDEX.md) | Engram/Signal data model that episodes extend |
+| [00-architecture](../00-architecture/INDEX.md) | Engram data model that episodes extend |
 | [02-agents](../02-agents/INDEX.md) | Agent dispatch produces the episodes that learning consumes |
 | [03-composition](../03-composition/INDEX.md) | Prompt assembly uses skills and playbook rules from learning |
 | [04-verification](../04-verification/INDEX.md) | Gate pipeline produces GateVerdict records consumed by learning |

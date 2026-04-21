@@ -32,15 +32,28 @@ use roko_core::{AgentRole, PlanPhase};
 
 pub mod action;
 pub mod plan_state;
+pub mod priority_ceiling;
 pub mod recovery;
 pub mod reorder;
+pub mod resource_budget;
 pub mod snapshot;
 pub mod state_machine;
 
 pub use action::ExecutorAction;
 pub use plan_state::{GateResult, PlanState};
+pub use priority_ceiling::{
+    EffectivePriorityTracker, PlanResourceInfo, PriorityCeiling, ResourceId,
+};
 pub use reorder::{priority_reorder, reorder_queue};
-pub use snapshot::{CURRENT_SCHEMA_VERSION, ExecutorSnapshot, current_schema_version};
+pub use resource_budget::{
+    CostBudget, FullResourceBudget, RateLimitResource, ResourceCheck, ResourcePool,
+    ResourceReservation, TaskResourceRequest, TokenBudget,
+};
+pub use snapshot::{
+    CURRENT_SCHEMA_VERSION, DeltaSnapshot, ExecutorSnapshot, PersistedCircuitBreakerFailureRecord,
+    PersistedCircuitBreakerState, SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier,
+    current_schema_version,
+};
 pub use state_machine::{ExecutorEvent, PlanStateMachine, TransitionError};
 
 /// Live speculative execution tracking for dashboard and recovery.
@@ -62,6 +75,72 @@ pub struct SpeculativeExecution {
     pub started_at_ms: u64,
 }
 
+/// Current resource usage snapshot for budget-aware dispatch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceUsage {
+    /// Current spend in USD.
+    pub spent_usd: f64,
+    /// Number of agents currently running.
+    pub active_agents: usize,
+    /// Estimated memory usage in MB.
+    pub memory_mb: u64,
+}
+
+/// Resource budget for a session or plan execution.
+///
+/// Encapsulates all resource limits in a single struct, replacing
+/// the flat `budget_usd` field on [`ExecutorConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceBudget {
+    /// Maximum spend in USD (None = unlimited).
+    pub budget_usd: Option<f64>,
+    /// Maximum number of concurrent agents.
+    pub max_concurrent: usize,
+    /// Maximum memory usage in MB (None = unlimited).
+    pub max_memory_mb: Option<u64>,
+}
+
+impl Default for ResourceBudget {
+    fn default() -> Self {
+        Self {
+            budget_usd: None,
+            max_concurrent: 8,
+            max_memory_mb: None,
+        }
+    }
+}
+
+impl ResourceBudget {
+    /// Check whether a new dispatch is allowed given current usage.
+    ///
+    /// Returns `true` if all resource limits permit another dispatch.
+    #[must_use]
+    pub fn can_dispatch(&self, current: &ResourceUsage) -> bool {
+        if let Some(budget) = self.budget_usd {
+            if current.spent_usd >= budget {
+                return false;
+            }
+        }
+        if current.active_agents >= self.max_concurrent {
+            return false;
+        }
+        if let Some(max_mem) = self.max_memory_mb {
+            if current.memory_mb >= max_mem {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// How much budget remains in USD (None if unlimited).
+    #[must_use]
+    pub fn remaining_usd(&self, current: &ResourceUsage) -> Option<f64> {
+        self.budget_usd
+            .map(|budget| (budget - current.spent_usd).max(0.0))
+    }
+}
+
 /// Configuration for the parallel executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -79,8 +158,12 @@ pub struct ExecutorConfig {
     #[serde(default = "ExecutorConfig::default_task_timeout_secs")]
     pub task_timeout_secs: u64,
     /// Optional per-session budget cap in USD.
+    /// Deprecated: prefer `resource_budget.budget_usd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+    /// Composite resource budget (ORCH-08).
+    #[serde(default)]
+    pub resource_budget: ResourceBudget,
     /// Multiplier applied to the expected duration before speculation starts.
     #[serde(default = "ExecutorConfig::default_speculative_threshold_multiplier")]
     pub speculative_threshold_multiplier: f64,
@@ -101,6 +184,7 @@ impl Default for ExecutorConfig {
             max_merge_attempts: 3,
             task_timeout_secs: Self::default_task_timeout_secs(),
             budget_usd: None,
+            resource_budget: ResourceBudget::default(),
             speculative_threshold_multiplier: Self::default_speculative_threshold_multiplier(),
             auto_replan: Self::default_auto_replan(),
             use_worktrees: Self::default_use_worktrees(),
@@ -109,8 +193,17 @@ impl Default for ExecutorConfig {
 }
 
 impl ExecutorConfig {
+    /// Return the effective budget in USD, preferring `resource_budget` over
+    /// the legacy `budget_usd` field.
+    #[must_use]
+    pub fn effective_budget_usd(&self) -> Option<f64> {
+        self.resource_budget.budget_usd.or(self.budget_usd)
+    }
+}
+
+impl ExecutorConfig {
     const fn default_max_concurrent_tasks() -> usize {
-        4
+        8
     }
 
     const fn default_task_timeout_secs() -> u64 {
@@ -122,7 +215,7 @@ impl ExecutorConfig {
     }
 
     const fn default_auto_replan() -> bool {
-        true
+        false
     }
 
     const fn default_use_worktrees() -> bool {
@@ -513,6 +606,7 @@ impl ParallelExecutor {
             schema_version: current_schema_version(),
             plan_states: self.plans.clone(),
             queue_order: self.queue.clone(),
+            conductor_circuit_breaker: None,
             speculative_executions: self.speculative_executions.clone(),
             timestamp_ms,
         }
@@ -563,6 +657,8 @@ mod tests {
     #[test]
     fn executor_config_disables_worktrees_by_default() {
         assert!(!ExecutorConfig::default().use_worktrees);
+        assert_eq!(ExecutorConfig::default().max_concurrent_tasks, 8);
+        assert!(!ExecutorConfig::default().auto_replan);
     }
 
     #[test]
@@ -911,5 +1007,130 @@ mod tests {
         assert!(!state.paused);
         assert!(state.assigned_agents.is_empty());
         assert_eq!(state.merge_attempts, 0);
+    }
+
+    // ── ORCH-08: ResourceBudget tests ───────────────────────────────
+
+    #[test]
+    fn resource_budget_allows_dispatch_when_under_limits() {
+        let budget = ResourceBudget {
+            budget_usd: Some(100.0),
+            max_concurrent: 4,
+            max_memory_mb: Some(8192),
+        };
+        let usage = ResourceUsage {
+            spent_usd: 50.0,
+            active_agents: 2,
+            memory_mb: 4096,
+        };
+        assert!(budget.can_dispatch(&usage));
+    }
+
+    #[test]
+    fn resource_budget_blocks_over_budget() {
+        let budget = ResourceBudget {
+            budget_usd: Some(100.0),
+            max_concurrent: 4,
+            max_memory_mb: None,
+        };
+        let usage = ResourceUsage {
+            spent_usd: 100.0,
+            active_agents: 1,
+            memory_mb: 0,
+        };
+        assert!(!budget.can_dispatch(&usage));
+    }
+
+    #[test]
+    fn resource_budget_blocks_over_concurrency() {
+        let budget = ResourceBudget {
+            budget_usd: None,
+            max_concurrent: 4,
+            max_memory_mb: None,
+        };
+        let usage = ResourceUsage {
+            spent_usd: 0.0,
+            active_agents: 4,
+            memory_mb: 0,
+        };
+        assert!(!budget.can_dispatch(&usage));
+    }
+
+    #[test]
+    fn resource_budget_blocks_over_memory() {
+        let budget = ResourceBudget {
+            budget_usd: None,
+            max_concurrent: 100,
+            max_memory_mb: Some(4096),
+        };
+        let usage = ResourceUsage {
+            spent_usd: 0.0,
+            active_agents: 0,
+            memory_mb: 4096,
+        };
+        assert!(!budget.can_dispatch(&usage));
+    }
+
+    #[test]
+    fn resource_budget_unlimited_always_allows() {
+        let budget = ResourceBudget::default();
+        let usage = ResourceUsage {
+            spent_usd: 999.0,
+            active_agents: 0,
+            memory_mb: 99999,
+        };
+        assert!(budget.can_dispatch(&usage));
+    }
+
+    #[test]
+    fn resource_budget_remaining_usd() {
+        let budget = ResourceBudget {
+            budget_usd: Some(100.0),
+            max_concurrent: 4,
+            max_memory_mb: None,
+        };
+        let usage = ResourceUsage {
+            spent_usd: 30.0,
+            active_agents: 0,
+            memory_mb: 0,
+        };
+        assert_eq!(budget.remaining_usd(&usage), Some(70.0));
+    }
+
+    #[test]
+    fn resource_budget_remaining_usd_unlimited() {
+        let budget = ResourceBudget::default();
+        let usage = ResourceUsage::default();
+        assert_eq!(budget.remaining_usd(&usage), None);
+    }
+
+    #[test]
+    fn executor_config_effective_budget_prefers_resource_budget() {
+        let config = ExecutorConfig {
+            budget_usd: Some(50.0),
+            resource_budget: ResourceBudget {
+                budget_usd: Some(100.0),
+                ..ResourceBudget::default()
+            },
+            ..ExecutorConfig::default()
+        };
+        assert_eq!(config.effective_budget_usd(), Some(100.0));
+    }
+
+    #[test]
+    fn executor_config_effective_budget_falls_back_to_legacy() {
+        let config = ExecutorConfig {
+            budget_usd: Some(50.0),
+            resource_budget: ResourceBudget::default(),
+            ..ExecutorConfig::default()
+        };
+        assert_eq!(config.effective_budget_usd(), Some(50.0));
+    }
+
+    #[test]
+    fn executor_config_has_default_resource_budget() {
+        let config = ExecutorConfig::default();
+        assert!(config.resource_budget.budget_usd.is_none());
+        assert_eq!(config.resource_budget.max_concurrent, 8);
     }
 }

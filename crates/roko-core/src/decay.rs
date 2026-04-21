@@ -7,6 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+fn finite_weight(weight: f32) -> f32 {
+    if weight.is_finite() {
+        weight.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// How a signal's weight diminishes over time.
 ///
 /// `Decay::apply(age_ms)` returns a multiplier in `[0.0, 1.0]` that scales
@@ -31,8 +39,20 @@ pub enum Decay {
 
     /// Hard cutoff: full weight until `ttl_ms`, then zero.
     /// Useful for signals with strict time windows (offers, bounties).
+    ///
+    /// # Design note — relative vs absolute
+    ///
+    /// The doc spec (04-decay-variants.md) specifies `expires_at_ms: i64` (absolute
+    /// timestamp), but `Decay::apply()` takes a **relative age** (`age_ms` since
+    /// emission), making a relative duration the correct semantic here.  Absolute
+    /// deadlines are handled at a higher layer: the emitter computes
+    /// `ttl_ms = deadline - now` at construction time, or uses
+    /// `roko_agent::lifecycle::DecayModel::Ttl { expires_at }` for storage formats
+    /// that need absolute timestamps.
     Ttl {
-        /// Milliseconds of full validity before weight drops to zero.
+        /// Relative duration in milliseconds of full validity before weight drops
+        /// to zero.  This is **not** an absolute timestamp — see the design note
+        /// above.
         ttl_ms: u64,
     },
 
@@ -49,6 +69,15 @@ pub enum Decay {
 }
 
 impl Decay {
+    /// Returns `true` when this decay function's parameters are finite.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Self::None | Self::HalfLife { .. } | Self::Ttl { .. } => true,
+            Self::Ebbinghaus { strength, .. } => strength.is_finite(),
+        }
+    }
+
     /// Apply decay to get a weight multiplier at the given age (milliseconds since emission).
     ///
     /// Clamped to `[0.0, 1.0]`. Negative ages (clock skew) return `1.0`.
@@ -66,7 +95,7 @@ impl Decay {
                     return 0.0;
                 }
                 let hl = *half_life_ms as f32;
-                (0.5_f32).powf(age_ms / hl)
+                finite_weight((0.5_f32).powf(age_ms / hl))
             }
             Self::Ttl { ttl_ms } => {
                 if age_ms >= *ttl_ms as f32 {
@@ -76,11 +105,11 @@ impl Decay {
                 }
             }
             Self::Ebbinghaus { strength, scale_ms } => {
-                if *scale_ms == 0 || *strength <= 0.0 {
+                if *scale_ms == 0 || !strength.is_finite() || *strength <= 0.0 {
                     return 0.0;
                 }
                 let scale = (*strength) * (*scale_ms as f32);
-                (-age_ms / scale).exp()
+                finite_weight((-age_ms / scale).exp())
             }
         }
     }
@@ -88,7 +117,7 @@ impl Decay {
     /// Is this signal still meaningfully alive (weight > threshold)?
     #[must_use]
     pub fn is_alive(&self, age_ms: i64, threshold: f32) -> bool {
-        self.apply(age_ms) > threshold
+        threshold.is_finite() && self.apply(age_ms) > threshold
     }
 
     // ─── Convenience constructors matching agent-chain pheromone half-lives ────
@@ -103,6 +132,13 @@ impl Decay {
     };
     /// WISDOM pheromone half-life (24 hours).
     pub const WISDOM: Self = Self::HalfLife {
+        half_life_ms: 86_400_000,
+    };
+    /// Gate verdict half-life (24 hours).
+    ///
+    /// Verdict signals should stay queryable across the current workday and the
+    /// next orchestration cycle, but still fade without explicit reinforcement.
+    pub const GATE_VERDICT: Self = Self::HalfLife {
         half_life_ms: 86_400_000,
     };
 }
@@ -175,8 +211,36 @@ mod tests {
     }
 
     #[test]
+    fn gate_verdict_constant_halves_after_one_day() {
+        assert_eq!(
+            Decay::GATE_VERDICT,
+            Decay::HalfLife {
+                half_life_ms: 86_400_000
+            }
+        );
+        assert!((Decay::GATE_VERDICT.apply(86_400_000) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn zero_half_life_decays_immediately() {
         let d = Decay::HalfLife { half_life_ms: 0 };
         assert_eq!(d.apply(1), 0.0);
+    }
+
+    #[test]
+    fn non_finite_ebbinghaus_strength_decays_to_zero() {
+        let d = Decay::Ebbinghaus {
+            strength: f32::NAN,
+            scale_ms: 1000,
+        };
+        assert!(!d.is_finite());
+        assert_eq!(d.apply(1000), 0.0);
+    }
+
+    #[test]
+    fn is_alive_rejects_non_finite_thresholds() {
+        let d = Decay::HalfLife { half_life_ms: 1000 };
+        assert!(!d.is_alive(100, f32::NAN));
+        assert!(!d.is_alive(100, f32::INFINITY));
     }
 }

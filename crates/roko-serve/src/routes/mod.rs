@@ -6,13 +6,15 @@
 
 mod agents;
 mod aggregator;
-mod config;
+pub(crate) mod config;
 mod deployments;
 mod diagnosis;
+mod integrations;
 mod learning;
 mod middleware;
 mod plans;
 pub(crate) mod prds;
+mod projections;
 mod providers;
 mod research;
 mod run;
@@ -40,6 +42,7 @@ pub fn build_router(
     api_auth: ServeAuthConfig,
 ) -> Router {
     let cors = middleware::cors_layer(cors_origins);
+    let ws_auth = api_auth.clone();
 
     let api = Router::new()
         .merge(crate::openapi::routes())
@@ -56,6 +59,8 @@ pub fn build_router(
         .merge(config::routes())
         .merge(deployments::routes())
         .merge(diagnosis::routes())
+        .merge(integrations::routes())
+        .merge(projections::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
@@ -77,10 +82,19 @@ pub fn build_router(
         middleware::scrub_secrets,
     ));
 
+    let ws = if ws_auth.enabled {
+        ws::routes().layer(axum::middleware::from_fn_with_state(
+            ws_auth,
+            middleware::require_api_key,
+        ))
+    } else {
+        ws::routes()
+    };
+
     Router::new()
         .merge(webhooks::routes())
         .nest("/api", api)
-        .merge(ws::routes())
+        .merge(ws)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

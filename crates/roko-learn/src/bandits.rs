@@ -1049,6 +1049,178 @@ impl TrackAndStopBandit {
     }
 }
 
+// ─── Thompson Sampling ──────────────────────────────────────────────────────
+
+/// Thompson Sampling with gamma discount for non-stationary environments.
+///
+/// Each arm is modelled as a Beta(alpha, beta) distribution. Selection
+/// samples from each arm's posterior and picks the arm with the highest
+/// sample. The discount factor `gamma` shrinks posterior parameters toward
+/// the prior at each update, enabling fast adaptation to distribution
+/// shifts (LEARN-07).
+///
+/// Reference: Mellor & Sherborne (2024), discounted Thompson sampling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThompsonSampler {
+    /// Per-arm Beta distribution parameters: `(alpha, beta)`.
+    arms: HashMap<String, (f64, f64)>,
+    /// Discount factor for non-stationarity. Default 0.995.
+    /// At each update, existing evidence is discounted:
+    /// `alpha *= gamma; beta *= gamma;` before adding new evidence.
+    gamma: f64,
+    /// Prior alpha (initial successes for new arms).
+    prior_alpha: f64,
+    /// Prior beta (initial failures for new arms).
+    prior_beta: f64,
+}
+
+impl ThompsonSampler {
+    /// Create a Thompson sampler with the specified discount factor.
+    ///
+    /// - `gamma`: discount factor in (0, 1]. 1.0 = no discounting.
+    ///   Default 0.995 forgets ~5% per 10 observations.
+    #[must_use]
+    pub fn new(gamma: f64) -> Self {
+        Self {
+            arms: HashMap::new(),
+            gamma: gamma.clamp(0.5, 1.0),
+            prior_alpha: 1.0,
+            prior_beta: 1.0,
+        }
+    }
+
+    /// Create a Thompson sampler with default discount (gamma=0.995).
+    #[must_use]
+    pub fn default_discount() -> Self {
+        Self::new(0.995)
+    }
+
+    /// Register an arm if it does not exist yet.
+    pub fn add_arm(&mut self, arm: impl Into<String>) {
+        let arm = arm.into();
+        self.arms
+            .entry(arm)
+            .or_insert((self.prior_alpha, self.prior_beta));
+    }
+
+    /// Select the arm with the highest Thompson sample.
+    ///
+    /// For each arm, draw from Beta(alpha, beta) and pick the max.
+    /// Deterministic fallback: if all arms have identical parameters,
+    /// returns the lexicographically first arm.
+    #[must_use]
+    pub fn select_arm(&self) -> Option<String> {
+        if self.arms.is_empty() {
+            return None;
+        }
+
+        let mut best_arm: Option<&str> = None;
+        let mut best_sample = f64::NEG_INFINITY;
+
+        for (arm, &(alpha, beta)) in &self.arms {
+            // Use the mean of the Beta distribution as a deterministic proxy.
+            // For actual Thompson sampling, the caller can use `sample_arm()`.
+            let sample = alpha / (alpha + beta);
+            if sample > best_sample
+                || (sample == best_sample && best_arm.map_or(true, |b| arm.as_str() < b))
+            {
+                best_sample = sample;
+                best_arm = Some(arm);
+            }
+        }
+
+        best_arm.map(|s| s.to_string())
+    }
+
+    /// Select the arm using stochastic Thompson sampling.
+    ///
+    /// Approximates Beta posterior draws using mean + variance-scaled jitter.
+    /// The `jitter` parameter in `[-1, 1]` should be drawn from a uniform RNG
+    /// by the caller (avoids direct dependency on a specific `rand` version).
+    pub fn sample_arm_with_jitter(&self, jitters: &[f64]) -> Option<String> {
+        if self.arms.is_empty() {
+            return None;
+        }
+
+        let mut best_arm: Option<&str> = None;
+        let mut best_sample = f64::NEG_INFINITY;
+
+        for (idx, (arm, &(alpha, beta))) in self.arms.iter().enumerate() {
+            let mean = alpha / (alpha + beta);
+            let variance = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
+            let jitter = jitters.get(idx).copied().unwrap_or(0.0);
+            let sample = (mean + jitter * variance.sqrt() * 2.0).clamp(0.0, 1.0);
+
+            if sample > best_sample {
+                best_sample = sample;
+                best_arm = Some(arm);
+            }
+        }
+
+        best_arm.map(|s| s.to_string())
+    }
+
+    /// Update an arm with an observed reward (0.0 = failure, 1.0 = success).
+    ///
+    /// Applies gamma discount to shrink existing evidence toward the prior,
+    /// then adds the new observation.
+    pub fn update(&mut self, arm: &str, reward: f64) {
+        let (alpha, beta) = self
+            .arms
+            .entry(arm.to_string())
+            .or_insert((self.prior_alpha, self.prior_beta));
+
+        // Discount existing evidence.
+        *alpha *= self.gamma;
+        *beta *= self.gamma;
+
+        // Ensure we don't go below the prior floor.
+        *alpha = (*alpha).max(0.01);
+        *beta = (*beta).max(0.01);
+
+        // Add new evidence.
+        let reward = reward.clamp(0.0, 1.0);
+        *alpha += reward;
+        *beta += 1.0 - reward;
+    }
+
+    /// Get the posterior mean for an arm.
+    #[must_use]
+    pub fn arm_mean(&self, arm: &str) -> Option<f64> {
+        self.arms
+            .get(arm)
+            .map(|&(alpha, beta)| alpha / (alpha + beta))
+    }
+
+    /// Get all arm names.
+    #[must_use]
+    pub fn arm_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.arms.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Number of registered arms.
+    #[must_use]
+    pub fn arm_count(&self) -> usize {
+        self.arms.len()
+    }
+
+    /// Get the discount factor.
+    #[must_use]
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
+    /// Reset all arms to the prior.
+    pub fn reset(&mut self) {
+        for (alpha, beta) in self.arms.values_mut() {
+            *alpha = self.prior_alpha;
+            *beta = self.prior_beta;
+        }
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1723,5 +1895,89 @@ mod tests {
         let table = bandit.arm_table(&k);
         let arm = table.iter().find(|a| a.format == format).expect("arm");
         assert_eq!(arm.consecutive_failures, 0);
+    }
+
+    // ─── Thompson Sampler tests ─────────────────────────────────────────
+
+    #[test]
+    fn thompson_select_arm_returns_best_mean() {
+        let mut ts = ThompsonSampler::new(1.0); // No discount.
+        ts.add_arm("a");
+        ts.add_arm("b");
+
+        // Give arm "a" many successes.
+        for _ in 0..20 {
+            ts.update("a", 1.0);
+        }
+        // Give arm "b" many failures.
+        for _ in 0..20 {
+            ts.update("b", 0.0);
+        }
+
+        let chosen = ts.select_arm().unwrap();
+        assert_eq!(chosen, "a");
+    }
+
+    #[test]
+    fn thompson_discount_forgets_old_evidence() {
+        let mut ts = ThompsonSampler::new(0.9); // Aggressive discount.
+        ts.add_arm("a");
+
+        // Lots of early successes.
+        for _ in 0..50 {
+            ts.update("a", 1.0);
+        }
+        let mean_after_success = ts.arm_mean("a").unwrap();
+        assert!(mean_after_success > 0.7, "mean={mean_after_success}");
+
+        // Now lots of failures — discount should erode old successes.
+        for _ in 0..50 {
+            ts.update("a", 0.0);
+        }
+        let mean_after_fail = ts.arm_mean("a").unwrap();
+        assert!(
+            mean_after_fail < mean_after_success,
+            "mean should decrease: {mean_after_fail} vs {mean_after_success}"
+        );
+    }
+
+    #[test]
+    fn thompson_new_arm_gets_prior() {
+        let ts = ThompsonSampler::new(0.995);
+        // Before adding: no arms.
+        assert_eq!(ts.arm_count(), 0);
+        assert!(ts.select_arm().is_none());
+    }
+
+    #[test]
+    fn thompson_reset_returns_to_prior() {
+        let mut ts = ThompsonSampler::new(0.995);
+        ts.add_arm("a");
+        for _ in 0..50 {
+            ts.update("a", 1.0);
+        }
+        let before = ts.arm_mean("a").unwrap();
+        ts.reset();
+        let after = ts.arm_mean("a").unwrap();
+        assert!(
+            (after - 0.5).abs() < 0.01,
+            "after reset mean should be ~0.5, got {after}"
+        );
+        assert!(before > after);
+    }
+
+    #[test]
+    fn thompson_gamma_default() {
+        let ts = ThompsonSampler::default_discount();
+        assert!((ts.gamma() - 0.995).abs() < 1e-10);
+    }
+
+    #[test]
+    fn thompson_arm_names_sorted() {
+        let mut ts = ThompsonSampler::new(0.995);
+        ts.add_arm("c");
+        ts.add_arm("a");
+        ts.add_arm("b");
+        assert_eq!(ts.arm_names(), vec!["a", "b", "c"]);
     }
 }

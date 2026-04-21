@@ -1,11 +1,10 @@
-//! Conductor decision type and intervention classification.
+//! Conductor decision type, cognitive signals, and intervention classification.
 //!
 //! The conductor is Roko's meta-watcher: it observes the stream of
 //! orchestration signals and emits a [`ConductorDecision`] that tells the
-//! event loop what to do. Per §11.2 of the parity checklist, the
-//! conductor has **exactly three outcomes**: `Continue`, `Restart`, `Fail`.
-//! There are no "nudges" — Mori's tiered-intervention model was simplified
-//! to reduce false-positive agent interrupts.
+//! event loop what to do. The decision carries both a primary action
+//! (Continue/Restart/Fail) and optional [`CognitiveSignal`]s — modulatory
+//! hints that can be active simultaneously without changing the primary action.
 //!
 //! The actual decision function lives in `roko-conductor` (once created).
 //! These types live here because they're pure data, used by both the
@@ -14,11 +13,78 @@
 use crate::phase::FailureKind;
 use serde::{Deserialize, Serialize};
 
-/// The three possible outcomes the conductor emits per tick.
+// ─── CognitiveSignal ────────────────────────────────────────────────────
+
+/// Rich cognitive signal — modulations richer than binary decisions.
 ///
-/// Simplified from Mori's `InterventionTier { Nudge, Restart, Abort }` —
-/// this is §11.2 of the parity checklist: **no nudges**. Either the work
-/// continues, we tear down and restart, or we fail terminally.
+/// Unlike [`ConductorDecision`] variants (which are final: restart/continue/fail),
+/// cognitive signals are modulatory hints that can be active simultaneously.
+/// For example, `Escalate` + `InjectContext` can both be emitted in a single
+/// evaluation tick without changing the primary Continue/Restart/Fail action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CognitiveSignal {
+    /// Temporarily suspend execution, preserve state.
+    Pause,
+    /// Resume from paused state.
+    Resume,
+    /// Reorder task queue based on new information.
+    Reprioritize {
+        /// Why the queue should be reordered.
+        reason: String,
+    },
+    /// Add context without restarting.
+    InjectContext {
+        /// The context to inject into the next turn.
+        context: String,
+    },
+    /// Promote to stronger model tier or request human review.
+    Escalate {
+        /// Target tier to escalate to (0 = fastest, higher = stronger).
+        to_tier: u8,
+    },
+    /// Reduce pressure: extend deadlines, lower expectations.
+    Cooldown {
+        /// Multiplicative factor to extend budgets by (e.g. 1.5 = 50% more).
+        factor: f64,
+    },
+    /// Switch to exploratory mode.
+    Explore {
+        /// Multiplier on the exploration budget (e.g. 2.0 = double).
+        budget_multiplier: f64,
+    },
+    /// Graceful termination with state persistence.
+    Shutdown {
+        /// Why shutdown was requested.
+        reason: String,
+    },
+}
+
+impl CognitiveSignal {
+    /// One-word label for logging and dashboards.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Reprioritize { .. } => "reprioritize",
+            Self::InjectContext { .. } => "inject_context",
+            Self::Escalate { .. } => "escalate",
+            Self::Cooldown { .. } => "cooldown",
+            Self::Explore { .. } => "explore",
+            Self::Shutdown { .. } => "shutdown",
+        }
+    }
+}
+
+// ─── ConductorDecision ──────────────────────────────────────────────────
+
+/// The possible outcomes the conductor emits per tick.
+///
+/// Each decision carries a primary action (continue, restart, or fail) plus
+/// zero or more [`CognitiveSignal`]s that modulate behavior without changing
+/// the primary action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -87,6 +153,64 @@ impl ConductorDecision {
             Self::Fail { .. } => "fail",
         }
     }
+
+    /// Pair this decision with cognitive signals to form a full evaluation.
+    #[must_use]
+    pub fn with_signals(self, signals: Vec<CognitiveSignal>) -> ConductorEvaluation {
+        ConductorEvaluation {
+            decision: self,
+            signals,
+        }
+    }
+}
+
+/// A full conductor evaluation: the primary decision plus any cognitive signals.
+///
+/// `ConductorDecision` is the primary action (continue/restart/fail), while
+/// `signals` carry modulatory hints that can be active simultaneously.
+/// For example, a `Continue` decision may come with an `Escalate` signal
+/// suggesting a model-tier bump without requiring a restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConductorEvaluation {
+    /// The primary action: continue, restart, or fail.
+    pub decision: ConductorDecision,
+    /// Zero or more cognitive signals emitted alongside the decision.
+    pub signals: Vec<CognitiveSignal>,
+}
+
+impl ConductorEvaluation {
+    /// Create an evaluation with no signals.
+    #[must_use]
+    pub fn from_decision(decision: ConductorDecision) -> Self {
+        Self {
+            decision,
+            signals: Vec::new(),
+        }
+    }
+
+    /// Convenience: continue with no signals.
+    #[must_use]
+    pub fn cont() -> Self {
+        Self::from_decision(ConductorDecision::Continue)
+    }
+
+    /// True if the primary decision is terminal.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        self.decision.is_terminal()
+    }
+
+    /// True if the primary decision is continue.
+    #[must_use]
+    pub const fn is_continue(&self) -> bool {
+        self.decision.is_continue()
+    }
+
+    /// Whether any signal of the given label is present.
+    #[must_use]
+    pub fn has_signal(&self, label: &str) -> bool {
+        self.signals.iter().any(|s| s.label() == label)
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +270,68 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let decoded: ConductorDecision = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, d);
+    }
+
+    #[test]
+    fn cognitive_signal_labels() {
+        assert_eq!(CognitiveSignal::Pause.label(), "pause");
+        assert_eq!(CognitiveSignal::Resume.label(), "resume");
+        assert_eq!(CognitiveSignal::Escalate { to_tier: 2 }.label(), "escalate");
+        assert_eq!(
+            CognitiveSignal::Shutdown {
+                reason: "done".into()
+            }
+            .label(),
+            "shutdown"
+        );
+    }
+
+    #[test]
+    fn cognitive_signal_serde_roundtrip() {
+        let signals = vec![
+            CognitiveSignal::Pause,
+            CognitiveSignal::Escalate { to_tier: 3 },
+            CognitiveSignal::InjectContext {
+                context: "extra info".into(),
+            },
+            CognitiveSignal::Cooldown { factor: 1.5 },
+            CognitiveSignal::Explore {
+                budget_multiplier: 2.0,
+            },
+        ];
+        for s in &signals {
+            let json = serde_json::to_string(s).unwrap();
+            let decoded: CognitiveSignal = serde_json::from_str(&json).unwrap();
+            assert_eq!(&decoded, s);
+        }
+    }
+
+    #[test]
+    fn evaluation_with_signals() {
+        let eval = ConductorDecision::cont().with_signals(vec![
+            CognitiveSignal::Escalate { to_tier: 2 },
+            CognitiveSignal::Cooldown { factor: 1.5 },
+        ]);
+        assert!(eval.is_continue());
+        assert!(!eval.is_terminal());
+        assert!(eval.has_signal("escalate"));
+        assert!(eval.has_signal("cooldown"));
+        assert!(!eval.has_signal("pause"));
+        assert_eq!(eval.signals.len(), 2);
+    }
+
+    #[test]
+    fn evaluation_from_decision() {
+        let eval = ConductorEvaluation::from_decision(ConductorDecision::restart("w", "r"));
+        assert!(!eval.is_continue());
+        assert!(eval.signals.is_empty());
+    }
+
+    #[test]
+    fn evaluation_serde_roundtrip() {
+        let eval = ConductorDecision::cont().with_signals(vec![CognitiveSignal::Pause]);
+        let json = serde_json::to_string(&eval).unwrap();
+        let decoded: ConductorEvaluation = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, eval);
     }
 }

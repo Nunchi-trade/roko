@@ -30,10 +30,14 @@
 //! Anti-pattern #8: **no `std::fs`**. All content arrives via builder methods.
 
 use crate::prompt::estimate_tokens;
-use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
+use crate::prompt::{
+    AttentionBidder, CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority,
+};
+use crate::templates::common::PromptBudget;
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
+use roko_core::{Budget, Composer, Context, Engram, Result, Scorer};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -69,14 +73,20 @@ pub struct SystemPromptBuilder {
     relevant_skills: Vec<Skill>,
     /// Layer 6: Relevant playbooks — reusable prior task sequences.
     relevant_playbooks: Vec<Playbook>,
+    /// Layer 6b: Tool usage hints from learned profiles (LEARN-12).
+    tool_hints: Option<String>,
     /// Layer 7: Anti-patterns — things the agent must NOT do.
     anti_patterns: Vec<String>,
     /// Layer 8: Affect guidance — current emotional tone and focus.
     affect_state: Option<PadState>,
+    /// Optional temperament dial for role-behavior tuning (AGT-06).
+    temperament: Option<roko_core::Temperament>,
     /// Whether to insert cache alignment markers between tiers.
     cache_markers: bool,
     /// Optional token budget enforced by [`build_with_counter`](Self::build_with_counter).
     token_budget: Option<usize>,
+    /// Optional per-layer section caps derived from role/complexity budget policy.
+    budget_profile: Option<PromptBudget>,
     /// Learned section-effectiveness data scoped to one role.
     section_effectiveness: Option<SectionEffectivenessConfig>,
 }
@@ -128,10 +138,13 @@ impl SystemPromptBuilder {
             tools: None,
             relevant_skills: Vec::new(),
             relevant_playbooks: Vec::new(),
+            tool_hints: None,
             anti_patterns: Vec::new(),
             affect_state: None,
+            temperament: None,
             cache_markers: false,
             token_budget: None,
+            budget_profile: None,
             section_effectiveness: None,
         }
     }
@@ -192,6 +205,19 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Set layer 6b: tool usage hints from learned profiles (LEARN-12).
+    ///
+    /// These hints are injected between Skills and Anti-patterns to guide
+    /// the agent toward effective tool sequences for the current task type.
+    #[must_use]
+    pub fn with_tool_hints(mut self, hints: impl Into<String>) -> Self {
+        let hints = normalize_owned(hints);
+        if !hints.is_empty() {
+            self.tool_hints = Some(hints);
+        }
+        self
+    }
+
     /// Set layer 7: anti-patterns (things the agent must NOT do).
     #[must_use]
     pub fn with_anti_patterns(mut self, patterns: Vec<String>) -> Self {
@@ -213,6 +239,20 @@ impl SystemPromptBuilder {
         self
     }
 
+    /// Set the temperament dial for role-behavior tuning (AGT-06).
+    ///
+    /// When set, temperament guidance is injected into the role identity
+    /// layer to steer the agent's behavior:
+    /// - **Conservative**: careful, thorough, prefer safe approaches
+    /// - **Balanced**: no additional guidance (default)
+    /// - **Aggressive**: decisive, efficient, prefer speed
+    /// - **Exploratory**: creative, try alternative approaches
+    #[must_use]
+    pub const fn with_temperament(mut self, temperament: roko_core::Temperament) -> Self {
+        self.temperament = Some(temperament);
+        self
+    }
+
     /// Enable cache alignment markers between stability tiers.
     ///
     /// When enabled, the builder inserts `<!-- cache:TIER -->` markers
@@ -228,6 +268,13 @@ impl SystemPromptBuilder {
     #[must_use]
     pub const fn with_token_budget(mut self, token_budget: usize) -> Self {
         self.token_budget = Some(token_budget);
+        self
+    }
+
+    /// Apply per-layer section caps from the shared role budget table.
+    #[must_use]
+    pub const fn with_budget_profile(mut self, budget_profile: PromptBudget) -> Self {
+        self.budget_profile = Some(budget_profile);
         self
     }
 
@@ -336,67 +383,87 @@ impl SystemPromptBuilder {
     pub fn build_sections(&self) -> Vec<PromptSection> {
         let mut sections = Vec::with_capacity(10);
 
-        // Layer 1: Role Identity
-        sections.push(
-            PromptSection::new("role_identity", &self.role_identity)
+        // Layer 1: Role Identity (with optional temperament guidance)
+        let role_content = if let Some(temperament) = self.temperament {
+            let guidance = temperament_guidance(temperament);
+            if guidance.is_empty() {
+                self.role_identity.clone()
+            } else {
+                format!("{}\n\n{guidance}", self.role_identity)
+            }
+        } else {
+            self.role_identity.clone()
+        };
+        if let Some(section) = self.apply_budget_profile(
+            PromptSection::new("role_identity", &role_content)
                 .with_priority(self.effective_priority("role_identity", SectionPriority::Critical))
                 .with_cache_layer(CacheLayer::Role)
                 .with_placement(Placement::Start),
-        );
+        ) {
+            sections.push(section);
+        }
 
         // Layer 2: Conventions
         if let Some(ref conv) = self.conventions {
             if !conv.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("conventions", conv)
                         .with_priority(
                             self.effective_priority("conventions", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 5: Tool Instructions (grouped in System cache tier)
         if let Some(ref tools) = self.tools {
             if !tools.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("tool_instructions", tools)
                         .with_priority(
                             self.effective_priority("tool_instructions", SectionPriority::Normal),
                         )
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 3: Domain Context
         if let Some(ref domain) = self.domain {
             if !domain.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("domain_context", domain)
                         .with_priority(
                             self.effective_priority("domain_context", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 3b: Relevant Context
         if let Some(ref context) = self.context {
             if !context.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("context_layer", format!("## Relevant Context\n{context}"))
                         .with_priority(
                             self.effective_priority("context_layer", SectionPriority::High),
                         )
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
@@ -408,20 +475,34 @@ impl SystemPromptBuilder {
         // Layer 4: Task Context
         if let Some(ref task) = self.task {
             if !task.is_empty() {
-                sections.push(
+                if let Some(section) = self.apply_budget_profile(
                     PromptSection::new("task_context", task)
                         .with_priority(
                             self.effective_priority("task_context", SectionPriority::Critical),
                         )
                         .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
-                );
+                ) {
+                    sections.push(section);
+                }
             }
         }
 
         // Layer 6: Relevant Techniques
         if let Some(skills) = self.relevant_techniques_section() {
             sections.push(skills);
+        }
+
+        // Layer 6b: Tool Usage Hints (LEARN-12)
+        if let Some(ref hints) = self.tool_hints {
+            if let Some(section) = self.apply_budget_profile(
+                PromptSection::new("tool_hints", hints.clone())
+                    .with_priority(self.effective_priority("tool_hints", SectionPriority::Low))
+                    .with_cache_layer(CacheLayer::Plan)
+                    .with_placement(Placement::Middle),
+            ) {
+                sections.push(section);
+            }
         }
 
         // Layer 7: Anti-Patterns
@@ -432,26 +513,30 @@ impl SystemPromptBuilder {
                 .map(|p| format!("- {p}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(
+            if let Some(section) = self.apply_budget_profile(
                 PromptSection::new("anti_patterns", format!("Do NOT:\n{anti_text}"))
                     .with_priority(
                         self.effective_priority("anti_patterns", SectionPriority::Normal),
                     )
                     .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::End),
-            );
+            ) {
+                sections.push(section);
+            }
         }
 
         // Layer 8: Affect Guidance
         if let Some(affect) = self.affect_guidance() {
-            sections.push(
+            if let Some(section) = self.apply_budget_profile(
                 PromptSection::new("affect_guidance", affect)
                     .with_priority(
                         self.effective_priority("affect_guidance", SectionPriority::Normal),
                     )
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::End),
-            );
+            ) {
+                sections.push(section);
+            }
         }
 
         sort_sections(&mut sections);
@@ -510,10 +595,31 @@ impl SystemPromptBuilder {
             guidance.push("Keep the solution lean and avoid over-engineering.");
         }
 
-        if affect.dominance <= -0.20 {
-            guidance.push("Reduce scope until the next concrete checkpoint is clear.");
+        // Dominance modulates both prompt tone and retrieval bias (COMP-06).
+        // Low dominance: prefer diverse sources, seek guidance, reduce scope.
+        // High dominance: prefer authoritative sources, execute autonomously.
+        if affect.dominance <= -0.50 {
+            guidance.push(
+                "Low confidence detected. Reduce scope until the next concrete checkpoint is clear. \
+                 Prefer diverse sources and cross-reference multiple approaches before committing. \
+                 Seek corroboration from tests, docs, and prior episodes.",
+            );
+        } else if affect.dominance <= -0.20 {
+            guidance.push(
+                "Reduce scope until the next concrete checkpoint is clear. \
+                 Consider multiple sources before choosing an approach.",
+            );
+        } else if affect.dominance >= 0.60 {
+            guidance.push(
+                "High confidence. Execute decisively and prefer authoritative sources \
+                 (official docs, tested code paths) over exploratory alternatives. \
+                 Keep claims grounded in evidence.",
+            );
         } else if affect.dominance >= 0.30 {
-            guidance.push("Execute decisively, but keep claims grounded in evidence.");
+            guidance.push(
+                "Execute decisively, but keep claims grounded in evidence. \
+                 Prefer proven patterns over experimental approaches.",
+            );
         }
 
         if affect.somatic_intensity >= 0.25 {
@@ -615,7 +721,7 @@ impl SystemPromptBuilder {
             );
         }
 
-        Some(
+        self.apply_budget_profile(
             PromptSection::new("relevant_techniques", rendered)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
@@ -623,6 +729,52 @@ impl SystemPromptBuilder {
                 .with_bidder(AttentionBidder::PlaybookRules)
                 .with_hard_cap(RELEVANT_TECHNIQUES_TOKEN_BUDGET),
         )
+    }
+
+    fn apply_budget_profile(&self, mut section: PromptSection) -> Option<PromptSection> {
+        let Some(cap) = self.section_budget_cap(&section.name) else {
+            return Some(section);
+        };
+        if cap == 0 {
+            return None;
+        }
+        section.hard_cap = Some(match section.hard_cap {
+            Some(existing) => existing.min(cap),
+            None => cap,
+        });
+        Some(section)
+    }
+
+    fn section_budget_cap(&self, section_name: &str) -> Option<usize> {
+        let budget = self.budget_profile?;
+        match section_name {
+            "conventions" | "tool_instructions" | "anti_patterns" => Some(budget.instructions),
+            "domain_context" | "context_layer" | "pheromone_signals" => Some(budget.context),
+            "relevant_techniques" => Some(budget.skills),
+            _ => None,
+        }
+    }
+}
+
+impl Composer for SystemPromptBuilder {
+    fn compose(
+        &self,
+        signals: &[Engram],
+        budget: &Budget,
+        scorer: &dyn Scorer,
+        ctx: &Context,
+    ) -> Result<Engram> {
+        let mut built_sections = self
+            .build_sections()
+            .into_iter()
+            .map(PromptSection::into_signal)
+            .collect::<Result<Vec<_>>>()?;
+        built_sections.extend(signals.iter().cloned());
+        PromptComposer::new().compose(&built_sections, budget, scorer, ctx)
+    }
+
+    fn name(&self) -> &str {
+        "system_prompt_builder"
     }
 }
 
@@ -690,7 +842,8 @@ impl SystemPromptBuilder {
             })
             .collect::<Vec<_>>();
 
-        let mut assigned = caps.iter().sum::<usize>();
+        let assigned: usize = caps.iter().sum();
+        let remaining = token_budget.saturating_sub(assigned);
         let mut remainders = data
             .iter()
             .enumerate()
@@ -701,12 +854,8 @@ impl SystemPromptBuilder {
             .collect::<Vec<_>>();
         remainders.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0).then_with(|| lhs.1.cmp(&rhs.1)));
 
-        for (_, index) in remainders {
-            if assigned >= token_budget {
-                break;
-            }
-            caps[index] = caps[index].saturating_add(1);
-            assigned += 1;
+        for (_, index) in remainders.iter().take(remaining) {
+            caps[*index] = caps[*index].saturating_add(1);
         }
 
         for (index, section) in sections.iter_mut().enumerate() {
@@ -789,6 +938,33 @@ fn render_playbook(playbook: &Playbook) -> String {
 struct RenderedSection {
     section: PromptSection,
     rendered: String,
+}
+
+/// Generate temperament-specific guidance text for the role identity layer.
+///
+/// Returns an empty string for `Balanced` (no additional guidance needed).
+fn temperament_guidance(temperament: roko_core::Temperament) -> &'static str {
+    match temperament {
+        roko_core::Temperament::Conservative => {
+            "Execution temperament: CONSERVATIVE. Favor safe, well-tested approaches. \
+             Prefer proven patterns over novel solutions. Double-check assumptions before \
+             acting. Minimize blast radius of changes. Ask for clarification when uncertain \
+             rather than guessing."
+        }
+        roko_core::Temperament::Balanced => "",
+        roko_core::Temperament::Aggressive => {
+            "Execution temperament: AGGRESSIVE. Favor speed and decisiveness. Make bold \
+             changes when the path is clear. Skip optional verification when confident. \
+             Prefer direct solutions over elaborate abstractions. Act quickly on high-confidence \
+             decisions."
+        }
+        roko_core::Temperament::Exploratory => {
+            "Execution temperament: EXPLORATORY. Try alternative approaches when the obvious \
+             path is unclear. Experiment with novel patterns. Consider multiple solutions \
+             before committing. Document discoveries and trade-offs. Prefer learning over \
+             certainty."
+        }
+    }
 }
 
 fn sort_sections(sections: &mut [PromptSection]) {
@@ -1021,7 +1197,8 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
     match layer {
         CacheLayer::Role => Some("<!-- cache:system -->"),
         CacheLayer::Workspace => Some("<!-- cache:session -->"),
-        CacheLayer::Plan | CacheLayer::Volatile => None,
+        CacheLayer::Plan => Some("<!-- cache:task -->"),
+        CacheLayer::Volatile => Some("<!-- cache:dynamic -->"),
     }
 }
 
@@ -1029,9 +1206,18 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
 mod tests {
     use super::*;
     use roko_core::tool::{ToolCategory, ToolPermission};
+    use roko_core::{Budget, Context, Kind, Score, Scorer};
     use roko_learn::playbook::{Playbook, PlaybookStep};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
     use roko_learn::skill_library::Skill;
+
+    struct ConstScorer;
+
+    impl Scorer for ConstScorer {
+        fn score(&self, _signal: &Engram, _ctx: &Context) -> Score {
+            Score::NEUTRAL
+        }
+    }
 
     fn test_tool(name: &str) -> ToolDef {
         ToolDef::new(
@@ -1099,6 +1285,24 @@ mod tests {
         assert!(!prompt.contains("Conventions"));
         assert!(!prompt.contains("Domain"));
         assert!(!prompt.contains("Anti-Patterns"));
+    }
+
+    #[test]
+    fn composer_impl_merges_builder_sections_with_input_signals() {
+        let builder =
+            SystemPromptBuilder::new("You are an implementer.").with_conventions("Use snake_case.");
+        let extra = PromptSection::new("extra_context", "Ship the migration.")
+            .into_signal()
+            .expect("section signal");
+        let prompt = builder
+            .compose(&[extra], &Budget::default(), &ConstScorer, &Context::now())
+            .expect("composed prompt");
+
+        assert_eq!(prompt.kind, Kind::Prompt);
+        let rendered = prompt.body.as_text().expect("text prompt");
+        assert!(rendered.contains("You are an implementer."));
+        assert!(rendered.contains("Use snake_case."));
+        assert!(rendered.contains("Ship the migration."));
     }
 
     #[test]
@@ -1389,6 +1593,33 @@ mod tests {
 
         assert!(prompt.contains("prior failure territory"));
         assert!(prompt.contains("known-safe sequences"));
+    }
+
+    #[test]
+    fn affect_guidance_reflects_dominance_modulation() {
+        // High dominance: authoritative sources, decisive execution.
+        let high = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, 0.7)))
+            .build();
+        assert!(high.contains("authoritative sources"));
+        assert!(high.contains("decisively"));
+
+        // Low dominance: diverse sources, reduce scope.
+        let low = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, -0.6)))
+            .build();
+        assert!(low.contains("diverse sources"));
+        assert!(low.contains("cross-reference"));
+
+        // Very low dominance (below -0.50): even more cautious.
+        assert!(low.contains("Reduce scope"));
+
+        // Neutral dominance: no dominance guidance.
+        let neutral = SystemPromptBuilder::new("Role")
+            .with_affect_state(Some(PadState::new(0.0, 0.0, 0.0)))
+            .build();
+        assert!(!neutral.contains("authoritative sources"));
+        assert!(!neutral.contains("diverse sources"));
     }
 
     #[test]

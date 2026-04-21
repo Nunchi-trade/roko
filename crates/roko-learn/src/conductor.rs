@@ -204,6 +204,12 @@ impl ConductorBandit {
         Ok(())
     }
 
+    /// Total observations across all arms (used for warmup detection).
+    #[must_use]
+    pub fn total_observations(&self) -> u64 {
+        self.arms.values().map(|arm| arm.observations).sum()
+    }
+
     /// Choose the highest-scoring intervention for the current state.
     #[must_use]
     pub fn select_action(&self, state: &ConductorState) -> ConductorAction {

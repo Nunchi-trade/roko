@@ -10,6 +10,155 @@ has its own folder with multiple sub-docs. For naming conventions, reframe rules
 and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 `/Users/will/dev/nunchi/roko/refactoring-prd/`.
 
+See also `tmp/refinements/01-critique-one-noun.md`, `tmp/refinements/02-engram-vs-pulse.md`,
+and `tmp/refinements/03-bus-as-first-class.md`; REF02-REF05 and REF07 continue the reframing
+from the retired "one noun, six verbs" mnemonic into the current two-medium, two-fabric
+architecture story, and
+`tmp/refinements/06-refactoring-plan.md` records the phased landing sequence now summarized
+in [`00-architecture/33-refactor-plan-phases.md`](00-architecture/33-refactor-plan-phases.md).
+`tmp/refinements/10-self-learning-cybernetic-loops.md` extends that story by making prediction,
+outcome, calibration, and `prediction.error.*` topics first-class across learning and heartbeat.
+`tmp/refinements/11-hyperdimensional-substrate.md` extends it further by making the HDC
+fingerprint a first-class Engram field and a native Substrate query primitive.
+`tmp/refinements/12-knowledge-demurrage.md` then recasts durable memory as a target-state attention
+economy: Engrams would carry `balance`, demurrage would tax idle knowledge, reinforcement would keep useful
+knowledge warm, and cold-tier freeze/thaw replaces blunt prune-only decay for long-lived stores.
+`tmp/refinements/13-collective-intelligence-c-factor.md` adds c-factor as a continuously
+measured cohort diagnostic derived from Bus and Substrate statistics, with conditional Policy
+interventions when degraded group process correlates with worse outcomes.
+`tmp/refinements/14-worldview-validation.md` adds a first-class heuristic library with
+falsifier-driven calibration, target-state worldview clustering, and target-state inspectable belief export/import;
+start with [`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
+[`06-neuro/12-4-tier-distillation-pipeline.md`](06-neuro/12-4-tier-distillation-pipeline.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/16-research-to-runtime.md` adds the target-state paper-to-calibration pipeline:
+papers would become Engrams, claims would become falsifiable hypotheses, heuristics would carry provenance,
+and replication ledgers would track whether the system's own trials replicate the source. Start with
+[`21-references/25-research-to-runtime.md`](21-references/25-research-to-runtime.md),
+[`05-learning/20-research-to-runtime.md`](05-learning/20-research-to-runtime.md),
+[`05-learning/19-heuristics-worldviews-and-falsifiers.md`](05-learning/19-heuristics-worldviews-and-falsifiers.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/17-plugin-extension-architecture.md` adds a target-state five-tier plugin SPI so prompts,
+profiles, declarative tools, native trait implementations, and WASM extensions can all be
+discovered, audited, and sandboxed without forking core. Start with
+[`18-tools/14-plugin-sdk.md`](18-tools/14-plugin-sdk.md),
+[`18-tools/16-plugin-loading.md`](18-tools/16-plugin-loading.md),
+[`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
+[`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
+and [`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md).
+`tmp/refinements/20-modularity-composability.md` then tightens the crate boundary story: the
+target dep graph adds `roko-bus`, `roko-hdc`, and `roko-spi` as explicit kernel crates and
+splits `roko-std` / `roko-compose` so tools and templates stop leaking across layers. Start
+with [`00-architecture/12-five-layer-taxonomy.md`](00-architecture/12-five-layer-taxonomy.md),
+[`00-architecture/15-crate-map.md`](00-architecture/15-crate-map.md),
+[`00-architecture/23-architectural-analysis-improvements.md`](00-architecture/23-architectural-analysis-improvements.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/22-developer-ux-rust.md` adds the four-layer Rust SDK: a one-liner for time to
+first working agent, a builder surface for daily use, stable trait impl contracts for custom
+kernel parts, and a runtime impl boundary for alternate execution hosts. Start with
+[`12-interfaces/19-rust-sdk-developer-ux.md`](12-interfaces/19-rust-sdk-developer-ux.md),
+[`02-agents/12-extensibility.md`](02-agents/12-extensibility.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/23-user-ux-running-agents.md` then unifies user operation around one verb set
+across four surfaces: CLI, TUI, Chat, and Web. It makes interactive first-run, live `watch`
+streams, checkpoints, undo, and shareable sessions first-class instead of per-surface accidents.
+Start with [`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
+[`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),
+[`17-lifecycle/05-knowledge-backup-export.md`](17-lifecycle/05-knowledge-backup-export.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/24-deployment-ux.md` makes the deployment story equally explicit: one Rust
+binary should run in five shapes, `laptop`, `single-server`, `container`, `clustered`, and
+`edge`, with profile-driven config, portable state archives, layered secret resolution, standard
+observability, and explicit multi-tenancy instead of bespoke platform forks. Start with
+[`19-deployment/INDEX.md`](19-deployment/INDEX.md),
+[`19-deployment/10-secret-management.md`](19-deployment/10-secret-management.md),
+[`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md),
+[`12-interfaces/04-configuration-layered-resolution.md`](12-interfaces/04-configuration-layered-resolution.md),
+[`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/25-domain-specific-agents.md` adds six canonical domain profiles on top of the
+shared kernel: coding, research, blockchain, data/ML, ops, and writing. It also introduces
+`TypedContext` as the typed situation payload that domains share and `Custody` as the target-state shared
+chain-of-custody record for auditable actions. Start with
+[`02-agents/INDEX.md`](02-agents/INDEX.md),
+[`12-interfaces/14-agent-onboarding-flow.md`](12-interfaces/14-agent-onboarding-flow.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
+[`18-tools/05-tool-profiles.md`](18-tools/05-tool-profiles.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/32-safety-sandbox-provenance.md` pulls the scattered safety material into one
+defensive spine: role authorization, tiered sandboxes, pre/post checks, taint propagation,
+attestation, custody, network egress, secrets, and multi-tenant isolation all share one audit
+vocabulary. Start with [`11-safety/INDEX.md`](11-safety/INDEX.md),
+[`00-architecture/05-provenance-and-attestation.md`](00-architecture/05-provenance-and-attestation.md),
+[`00-architecture/26-cognitive-immune-system.md`](00-architecture/26-cognitive-immune-system.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/33-observability-telemetry.md` consolidates the operator-facing legibility
+story: structured logs, Prometheus-compatible metrics, OpenTelemetry traces, Bus-backed event
+telemetry, replay, and first-class cost visibility become one instrumentation contract instead
+of deployment-specific fragments. It also makes the Roko-specific surfaces explicit, especially
+`roko.c_factor`, demurrage balance histograms, heuristic calibration drift, and projection-fed
+cost dashboards. Start with [`19-deployment/INDEX.md`](19-deployment/INDEX.md),
+[`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md),
+[`00-architecture/21-performance-numerical-stability.md`](00-architecture/21-performance-numerical-stability.md),
+[`00-architecture/32-comprehensive-test-strategy.md`](00-architecture/32-comprehensive-test-strategy.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/26-statehub-rearchitecture.md` promotes `StateHub` from a TUI helper to the
+kernel projection layer that folds Bus Pulses and Substrate state into typed, filterable,
+replayable views for every surface. Start with
+[`12-interfaces/22-statehub-projection-layer.md`](12-interfaces/22-statehub-projection-layer.md),
+[`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md),
+[`12-interfaces/06-websocket-streaming.md`](12-interfaces/06-websocket-streaming.md),
+[`00-architecture/24-cross-section-integration-map.md`](00-architecture/24-cross-section-integration-map.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/27-realtime-event-surface.md` then adds the shared realtime surface that carries
+those projections and filtered Topic views over WebSocket, SSE, and optional gRPC with one
+cursor-aware protocol for browsers, bots, dashboards, and peer Roko instances. Start with
+[`12-interfaces/06-websocket-streaming.md`](12-interfaces/06-websocket-streaming.md),
+[`12-interfaces/05-http-api-roko-serve.md`](12-interfaces/05-http-api-roko-serve.md),
+[`12-interfaces/13-web-portal.md`](12-interfaces/13-web-portal.md),
+[`19-deployment/11-remote-orchestrator.md`](19-deployment/11-remote-orchestrator.md),
+[`19-deployment/12-production-hardening.md`](19-deployment/12-production-hardening.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/28-cli-parity-familiar-workflows.md` then makes the default interactive CLI feel
+familiar to users of other agent tools without flattening Roko's distinct model: bare `roko`
+becomes the primary entry, slash commands and diff-first review become first-class, transcripts
+and resumption become normal rather than advanced, and the same verbs stay available in non-
+interactive automation. Start with
+[`12-interfaces/00-cli-overview.md`](12-interfaces/00-cli-overview.md),
+[`12-interfaces/01-cli-command-reference.md`](12-interfaces/01-cli-command-reference.md),
+[`12-interfaces/03-progressive-help-and-explain.md`](12-interfaces/03-progressive-help-and-explain.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/29-web-ui-architecture.md` then fixes the first-party browser scope: the web
+surface is a deliberate five-page UI built on `StateHub` and the shared realtime surface, with
+`Home`, `Chat`, `Plans`, `Beliefs`, and `Settings` as the release-one contract rather than an
+unbounded dashboard suite. Start with
+[`12-interfaces/13-web-portal.md`](12-interfaces/13-web-portal.md),
+[`12-interfaces/22-statehub-projection-layer.md`](12-interfaces/22-statehub-projection-layer.md),
+[`12-interfaces/06-websocket-streaming.md`](12-interfaces/06-websocket-streaming.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md), and
+[`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/30-rich-ux-primitives.md` then turns that surface story into a reusable UI
+vocabulary: reasoning streams, tool-call banners, gate badges, heuristic footnotes,
+uncertainty bars, replay scrubbers, confidence-weighted aggregation, progressive disclosure,
+and spatial memory become shared primitives rather than ad hoc page widgets. Start with
+[`12-interfaces/23-rich-ux-primitives.md`](12-interfaces/23-rich-ux-primitives.md),
+[`12-interfaces/21-user-ux-running-agents.md`](12-interfaces/21-user-ux-running-agents.md),
+[`12-interfaces/13-web-portal.md`](12-interfaces/13-web-portal.md),
+[`12-interfaces/22-statehub-projection-layer.md`](12-interfaces/22-statehub-projection-layer.md),
+and [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md).
+`tmp/refinements/19-net-new-innovations.md` then adds the honesty layer for novelty claims:
+which primitives are genuinely new, which are integrations of prior art, and which claims
+deserve publication-grade evidence. Start with
+[`00-architecture/17-design-principles-and-frontier-summary.md`](00-architecture/17-design-principles-and-frontier-summary.md),
+[`00-architecture/30-cross-pollination-innovations.md`](00-architecture/30-cross-pollination-innovations.md),
+and [`20-technical-analysis/00-vision-ta-generalized.md`](20-technical-analysis/00-vision-ta-generalized.md).
+`tmp/refinements/31-synergy-integration-map.md` then makes the interaction-density moat
+explicit: the architecture's edge comes from the synergy matrix across the load-bearing
+primitives, not from any single feature in isolation. Start with
+[`00-architecture/24-cross-section-integration-map.md`](00-architecture/24-cross-section-integration-map.md)
+and [`00-architecture/34-synergy-integration-map.md`](00-architecture/34-synergy-integration-map.md).
+
 ## Start Here
 
 - **[EXECUTIVE-SUMMARY.md](EXECUTIVE-SUMMARY.md)** — 10-minute overview: thesis, section summaries, innovations, roadmap
@@ -17,36 +166,44 @@ and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 - **[STATUS.md](STATUS.md)** — Implementation status matrix (what's shipping vs. specified)
 - **[COMPARISON.md](COMPARISON.md)** — How Roko compares to LangChain, CrewAI, SWE-Agent, AutoGPT
 
-## Signal / Engram Naming
+## Current Framing
 
-> **Code ↔ Docs:** The universal data type is called **`Signal`** in the Rust codebase
-> (`crates/roko-core/src/signal.rs`) and **Engram** in these PRD documents. They are the
-> same concept. `Signal` = Engram. See [`00-architecture/01-naming-and-glossary.md`](00-architecture/01-naming-and-glossary.md)
-> for the full naming map including all legacy-to-current renames.
+> The architecture is organized around:
+>
+> | Concept | What | Key docs |
+> |---|---|---|
+> | **Two mediums** | `Engram` (durable) + `Pulse` (ephemeral, planned) | [02-engram](00-architecture/02-engram-data-type.md), [02b-pulse](00-architecture/02b-pulse-ephemeral-event.md) |
+> | **Two fabrics** | `Substrate` (storage) + `Bus` (transport, planned) | [07-substrate](00-architecture/07-substrate-trait.md), [07b-bus](00-architecture/07b-bus-transport-fabric.md) |
+> | **Six operators** | `Scorer`, `Gate`, `Router`, `Composer`, `Policy`, and `Substrate` | [06-traits](00-architecture/06-synapse-traits.md) |
+> | **Learning** | Prediction/outcome loops, bandits, and a growing heuristic library | [05-learning/INDEX](05-learning/INDEX.md) |
+> | **HDC** | 10,240-bit fingerprints for similarity and clustering | [02-engram](00-architecture/02-engram-data-type.md), [06-neuro/INDEX](06-neuro/INDEX.md) |
+> | **Safety** | Contracts, warrants, attestation, and policy checks | [11-safety/INDEX](11-safety/INDEX.md) |
+>
+> For canonical vocabulary and public aliases, see [Naming and Glossary](00-architecture/01-naming-and-glossary.md).
 
 ## Topics
 
-- [`00-architecture/`](00-architecture/INDEX.md) — Architecture
+- [`00-architecture/`](00-architecture/INDEX.md) — Architecture, synergy matrix, and interaction-density moat
 - [`01-orchestration/`](01-orchestration/INDEX.md) — 01-orchestration — L4 Orchestration Layer
-- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents
+- [`02-agents/`](02-agents/INDEX.md) — 02 — Agents, role taxonomy, domain profiles, Situation (`TypedContext`), and Custody-aware agent composition
 - [`03-composition/`](03-composition/INDEX.md) — 03 — Composition: Scaffold Layer (L2) — Prompt Assembly & Context Engineering
 - [`04-verification/`](04-verification/INDEX.md) — 04 — Verification (L3 Harness)
-- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning
-- [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer
+- [`05-learning/`](05-learning/INDEX.md) — 05 — Learning, heuristics, belief-bundle (`worldview`) calibration, and prediction-error feedback
+- [`06-neuro/`](06-neuro/INDEX.md) — Neuro — Cognitive Knowledge Layer and durable heuristic library
 - [`07-conductor/`](07-conductor/INDEX.md) — 07 — Conductor Subsystem
 - [`08-chain/`](08-chain/INDEX.md) — Topic 08: Chain Layer (Korai)
 - [`09-daimon/`](09-daimon/INDEX.md) — Topic 09: Daimon — Affect Engine
 - [`10-dreams/`](10-dreams/INDEX.md) — Dreams (Offline Learning and Consolidation)
-- [`11-safety/`](11-safety/INDEX.md) — Safety & Provenance
-- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces
+- [`11-safety/`](11-safety/INDEX.md) — Safety spine: authorization, sandboxing, taint, attestation, custody, and audit tooling
+- [`12-interfaces/`](12-interfaces/INDEX.md) — Topic 12: Interfaces, four surfaces, unified verb set, familiar workflow parity, five-page first-party web UI, StateHub projection layer, shared realtime surface, rich UX primitives, runtime-shape-aware config surfaces, domain-profile onboarding, and Rust SDK developer UX
 - [`13-coordination/`](13-coordination/INDEX.md) — Coordination: Stigmergy, Pheromones, and Collective Intelligence
 - [`14-identity-economy/`](14-identity-economy/INDEX.md) — 14 — Identity & Economy Layer
 - [`15-code-intelligence/`](15-code-intelligence/INDEX.md) — Code Intelligence
 - [`16-heartbeat/`](16-heartbeat/INDEX.md) — Heartbeat: The Cognitive Clock
 - [`17-lifecycle/`](17-lifecycle/INDEX.md) — Agent Lifecycle
-- [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations
-- [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment
-- [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives
+- [`18-tools/`](18-tools/INDEX.md) — Topic 18 — Tools, Plugins & Integrations, including domain profile bundles and per-domain tool/gate composition
+- [`19-deployment/`](19-deployment/INDEX.md) — 19 — Deployment, five shapes, portable state, shared realtime ingress, secrets, observability, and multi-tenancy
+- [`20-technical-analysis/`](20-technical-analysis/INDEX.md) — Topic 20: Technical Analysis — Universal Oracle Primitives, compounding telemetry, and REF19 publishable-claims evidence
 - [`21-references/`](21-references/INDEX.md) — References — Master Citation Index
 
 ## How this was built
@@ -54,7 +211,7 @@ and the authoritative source of truth, see `tmp/prd-migration/README.md` and
 - Each topic folder contains multiple sub-docs broken down for easy navigation and maintenance.
 - Content is generated from three source layers:
   1. `/Users/will/dev/nunchi/roko/refactoring-prd/` — canonical new-architecture spec
-  2. `/Users/will/dev/nunchi/roko/bardo-backup/prd/` and `bardo-backup/tmp/` — legacy research and PRDs
+  2. historical archive: legacy research notes and PRDs from the pre-refactor source corpus
   3. `/Users/will/dev/nunchi/roko/roko/tmp/implementation-plans/` — active work items
 - Every academic citation from the sources is preserved.
 - See `tmp/prd-migration/SOURCE-INDEX.md` for the full source mapping per topic.

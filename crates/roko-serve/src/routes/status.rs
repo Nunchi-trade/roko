@@ -36,6 +36,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/metrics/feedback_latency", get(feedback_latency))
         .route("/metrics/velocity", get(velocity))
         .route("/metrics/coverage", get(coverage))
+        .route("/metrics/prometheus", get(prometheus_metrics))
         .route("/dashboard", get(dashboard))
         .route("/gates/summary", get(gate_summary))
         .route("/gates/history", get(gates_history))
@@ -142,7 +143,7 @@ async fn model_efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Val
 
 /// `GET /api/metrics/gate_rate` — passed / total per gate with a trend delta.
 async fn gate_rate(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     Ok(Json(build_gate_rate_response(&entries)))
 }
@@ -156,7 +157,7 @@ async fn experiments_metric(State(state): State<Arc<AppState>>) -> Result<Json<V
 
 /// `GET /api/metrics/feedback_latency` — median hours from action to first feedback signal.
 async fn feedback_latency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     Ok(Json(build_feedback_latency_response(&entries)))
 }
@@ -175,6 +176,138 @@ async fn velocity(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
 async fn coverage(State(state): State<Arc<AppState>>) -> Json<Value> {
     let backlog = state.event_bus.replay_from(0);
     Json(build_coverage_response(&backlog))
+}
+
+/// `GET /api/metrics/prometheus` — Prometheus text exposition format.
+///
+/// Exposes key counters, gauges, and summaries in the standard Prometheus text
+/// format so that a Prometheus scraper can pull metrics directly from roko-serve.
+///
+/// Metric names follow the `roko_` prefix convention:
+///   - `roko_gate_pass_total` / `roko_gate_fail_total` (counters)
+///   - `roko_agents_active` (gauge)
+///   - `roko_plans_active` / `roko_plans_completed` / `roko_plans_failed` (counters)
+///   - `roko_tasks_active` / `roko_tasks_completed` / `roko_tasks_failed` (counters)
+///   - `roko_errors_total` (counter)
+///   - `roko_episodes_total` (counter)
+///   - `roko_uptime_seconds` (gauge)
+async fn prometheus_metrics(
+    State(state): State<Arc<AppState>>,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    let snapshot = state.state_hub.current_snapshot();
+    let s = &snapshot.stats;
+    let uptime = state.started_at.elapsed().as_secs();
+    let active_agents = state.supervisor.count().await;
+    let active_plans = state.active_plans.read().await.len();
+
+    // Episode count from JSONL file (best-effort).
+    let episodes_path = state.layout.episodes_path();
+    let episode_count = tokio::fs::read_to_string(&episodes_path)
+        .await
+        .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+
+    let mut out = String::with_capacity(2048);
+
+    // Helper macro for Prometheus lines.
+    macro_rules! prom {
+        (counter, $name:expr, $help:expr, $val:expr) => {{
+            out.push_str(&format!("# HELP {} {}\n", $name, $help));
+            out.push_str(&format!("# TYPE {} counter\n", $name));
+            out.push_str(&format!("{} {}\n", $name, $val));
+        }};
+        (gauge, $name:expr, $help:expr, $val:expr) => {{
+            out.push_str(&format!("# HELP {} {}\n", $name, $help));
+            out.push_str(&format!("# TYPE {} gauge\n", $name));
+            out.push_str(&format!("{} {}\n", $name, $val));
+        }};
+    }
+
+    prom!(
+        gauge,
+        "roko_uptime_seconds",
+        "Seconds since roko-serve started",
+        uptime
+    );
+    prom!(
+        gauge,
+        "roko_agents_active",
+        "Number of currently active agents",
+        active_agents
+    );
+    prom!(
+        gauge,
+        "roko_plans_active",
+        "Number of currently executing plans",
+        active_plans
+    );
+    prom!(
+        counter,
+        "roko_plans_completed_total",
+        "Total plans completed successfully",
+        s.plans_completed
+    );
+    prom!(
+        counter,
+        "roko_plans_failed_total",
+        "Total plans that failed",
+        s.plans_failed
+    );
+    prom!(
+        counter,
+        "roko_tasks_completed_total",
+        "Total tasks completed",
+        s.tasks_completed
+    );
+    prom!(
+        counter,
+        "roko_tasks_failed_total",
+        "Total tasks that failed",
+        s.tasks_failed
+    );
+    prom!(
+        gauge,
+        "roko_tasks_active",
+        "Number of currently executing tasks",
+        s.tasks_active
+    );
+    prom!(
+        counter,
+        "roko_gate_pass_total",
+        "Total gate checks that passed",
+        s.gates_passed
+    );
+    prom!(
+        counter,
+        "roko_gate_fail_total",
+        "Total gate checks that failed",
+        s.gates_failed
+    );
+    prom!(
+        counter,
+        "roko_errors_total",
+        "Total error events recorded",
+        s.errors_total
+    );
+    prom!(
+        counter,
+        "roko_episodes_total",
+        "Total episodes recorded",
+        episode_count
+    );
+
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    )
 }
 
 /// `GET /api/dashboard` — dashboard scaffold as JSON.
@@ -198,9 +331,9 @@ async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
     Ok(Json(Value::Array(capped)))
 }
 
-/// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/signals.jsonl`.
+/// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/engrams.jsonl`.
 async fn gate_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let mut summary = summarize_gate_entries(&entries);
     if let Some(obj) = summary.as_object_mut() {
@@ -222,7 +355,7 @@ async fn gates_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GateHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let gate_filter = query.gate.as_deref();
     let limit = query.limit.unwrap_or(100).min(MAX_JSONL_RESULTS);
@@ -244,7 +377,7 @@ async fn gate_history(
     State(state): State<Arc<AppState>>,
     Path(gate_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let mut history: Vec<Value> = entries
         .into_iter()
@@ -302,7 +435,7 @@ async fn signals(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SignalQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("signals.jsonl");
+    let path = state.workdir.join(".roko").join("engrams.jsonl");
     let entries = read_jsonl_entries(&path).await?;
     let cap = q.limit.unwrap_or(MAX_JSONL_RESULTS).min(MAX_JSONL_RESULTS);
     let limited: Vec<Value> = entries
@@ -1810,7 +1943,7 @@ mod tests {
     #[tokio::test]
     async fn gates_history_collection_is_mounted_under_api_grouping() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -1874,7 +2007,7 @@ mod tests {
     #[tokio::test]
     async fn gate_summary_includes_rung_breakdown_under_api_grouping() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -2012,10 +2145,10 @@ mod tests {
                 "first_try_rate": 0.20,
                 "knowledge_growth": 0.20,
                 "knowledge_integration_rate": 0.20,
-                "task_diversity_coverage": 0.20,
+                "hdc_diversity": 0.20,
                 "convergence_velocity": 0.20,
                 "turn_taking_equality": 0.20,
-                "social_sensitivity": 0.20
+                "social_perceptiveness": 0.20
             },
             "agent_contributions": [
                 {
@@ -2038,10 +2171,10 @@ mod tests {
                 "first_try_rate": 0.75,
                 "knowledge_growth": 0.30,
                 "knowledge_integration_rate": 0.25,
-                "task_diversity_coverage": 0.35,
+                "hdc_diversity": 0.35,
                 "convergence_velocity": 0.45,
                 "turn_taking_equality": 0.50,
-                "social_sensitivity": 0.65
+                "social_perceptiveness": 0.65
             },
             "agent_contributions": [
                 {
@@ -2210,7 +2343,7 @@ mod tests {
     #[tokio::test]
     async fn gate_history_returns_500_for_invalid_jsonl() {
         let (dir, state) = test_state();
-        let signals = dir.path().join(".roko").join("signals.jsonl");
+        let signals = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals.parent().expect("signals parent"))
             .await
             .expect("create signals dir");
@@ -2228,7 +2361,7 @@ mod tests {
     #[tokio::test]
     async fn signals_returns_500_for_invalid_jsonl() {
         let (dir, state) = test_state();
-        let signals_path = dir.path().join(".roko").join("signals.jsonl");
+        let signals_path = dir.path().join(".roko").join("engrams.jsonl");
         tokio::fs::create_dir_all(signals_path.parent().expect("signals parent"))
             .await
             .expect("create signals dir");

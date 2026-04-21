@@ -10,7 +10,13 @@ description = "Rust/Cargo language provider and build system for roko-core trait
 [lints]
 workspace = true
 
+[features]
+default = []
+tree-sitter = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+
 [dependencies]
 roko-core = { path = "../roko-core" }
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
 
 [dev-dependencies]

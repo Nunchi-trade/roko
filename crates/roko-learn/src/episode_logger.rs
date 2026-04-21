@@ -454,6 +454,99 @@ impl EpisodePriorityTier {
     }
 }
 
+/// Compatibility alias for the decomposed importance score components.
+pub type ImportanceComponents = EpisodeImportanceComponents;
+
+/// Aggregate importance record for one episode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeImportance {
+    /// Stable episode identifier.
+    pub episode_id: String,
+    /// Weighted importance score in `[0, 1]`.
+    pub score: f64,
+    /// Interpretable contributing components.
+    pub components: EpisodeImportanceComponents,
+    /// Priority tier derived from the score.
+    pub tier: EpisodePriorityTier,
+}
+
+impl EpisodeImportance {
+    /// Compute an importance record for `episode` relative to `history`.
+    #[must_use]
+    pub fn from_episode(episode: &Episode, history: &[Episode]) -> Self {
+        let components = importance_components(episode, history);
+        Self {
+            episode_id: episode.id.clone(),
+            score: components.score(),
+            components,
+            tier: importance_tier(episode, history),
+        }
+    }
+}
+
+/// Configuration for future hot/warm/cold episode compaction tiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpisodeStorageConfig {
+    /// Days to keep episodes in the hot JSONL tier.
+    pub hot_retention_days: u32,
+    /// Days to keep episodes in the warm compressed tier.
+    pub warm_retention_days: u32,
+    /// Compression level for the warm tier.
+    pub zstd_level: i32,
+    /// Maximum cold-tier summaries per slice.
+    pub cold_max_summaries: usize,
+}
+
+/// Cold-tier summary of many compressed episodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompressedEpisodeSummary {
+    /// HDC superposition across the summarized episodes.
+    pub hdc_superposition: HdcVector,
+    /// Number of merged episodes.
+    pub episode_count: u32,
+    /// Aggregate pass rate.
+    pub pass_rate: f64,
+    /// Average cost in USD across summarized episodes.
+    pub avg_cost_usd: f64,
+    /// Average duration in milliseconds across summarized episodes.
+    pub avg_duration_ms: f64,
+}
+
+/// Configuration for future cluster-level consolidation of episodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeClusterConfig {
+    /// Minimum similarity required to join a cluster.
+    pub min_similarity: f64,
+    /// Minimum number of members before surfacing a cluster.
+    pub min_cluster_size: usize,
+}
+
+/// Cluster of structurally similar episodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeCluster {
+    /// Stable cluster identifier.
+    pub cluster_id: String,
+    /// Episode ids assigned to the cluster.
+    pub episode_ids: Vec<String>,
+    /// Medoid fingerprint representing the cluster.
+    pub medoid: Option<HdcVector>,
+    /// Aggregate pass rate for cluster members.
+    pub pass_rate: f64,
+}
+
+/// Summary of how an episode cluster changed over time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterEvolution {
+    /// Cluster identifier.
+    pub cluster_id: String,
+    /// Number of members in the prior snapshot.
+    pub previous_size: usize,
+    /// Number of members in the new snapshot.
+    pub current_size: usize,
+    /// Whether the cluster remained active.
+    pub still_active: bool,
+}
+
 /// Derive a stable id by hashing `(agent_id, task_id, timestamp)` with
 /// Rust's default hasher. Not cryptographic — collisions are acceptable
 /// because ids are scoped to a single log file.
@@ -1007,7 +1100,7 @@ impl EpisodeLogger {
 
             // Sort normals by timestamp descending so we can truncate the
             // tail (oldest).
-            normals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            normals.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
             let keep_normals = policy.max_episodes.saturating_sub(headlines.len());
             normals.truncate(keep_normals);
@@ -1015,7 +1108,7 @@ impl EpisodeLogger {
             // Recombine and sort by timestamp ascending (original write
             // order) for the rewritten file.
             survivors = headlines.into_iter().chain(normals).collect();
-            survivors.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            survivors.sort_by_key(|a| a.timestamp);
         }
 
         let after = survivors.len();

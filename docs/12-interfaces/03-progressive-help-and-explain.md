@@ -17,6 +17,8 @@ Roko's CLI help system is designed around **progressive disclosure** — the pri
 
 The help system is inspired by Karpathy's observation (2025) that context engineering is fundamentally about presenting the right information at the right level of detail at the right time. The same principle applies to developer experience — a user who just installed Roko needs different information than one who is debugging a failing gate pipeline.
 
+REF28 adds a familiar-workflow constraint to this chapter: explanations should be available on demand from the same places users already expect them. In practice that means `/help`, `/explain`, diff-review prompts with an `explain` branch, and error messages that point directly at the next command instead of sending the user back to a long manual. See [00-cli-overview.md](./00-cli-overview.md), [01-cli-command-reference.md](./01-cli-command-reference.md), [21-user-ux-running-agents.md](./21-user-ux-running-agents.md), and [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md).
+
 ---
 
 ## `roko status` — Glanceable Project Health
@@ -133,7 +135,7 @@ roko new gate <name>    # generates a working Gate implementation
 
 See the developer guide for the full Gate trait:
   trait Gate {
-      async fn verify(&self, output: &Signal, context: &Context) -> Verdict;
+      async fn verify(&self, output: &Engram, context: &Context) -> Verdict;
   }
 ```
 
@@ -191,6 +193,39 @@ FIX: No action needed — the cascade router will try the next
        roko provider health
 CTX: Rate limiting and circuit breakers: roko explain routing
 ```
+
+```
+ERROR: tool 'cargo.test' not allowed for role 'reader'
+─────────────────────────────────────────────────────
+WHY: This role excludes test execution, so the requested `/run cargo test`
+     action would violate the current capability policy.
+FIX: Try one of:
+       roko ask --role implementer "run cargo test"
+       roko config set roles.reader.tools +=cargo.test
+       roko init --profile coding
+CTX: Permission recovery: roko explain tools
+```
+
+The important UX rule is that errors teach a recovery path in the vocabulary the user is already using. If the operator came through `/edit` or `/run`, the error should still point at the equivalent direct CLI command and the relevant profile or role fix.
+
+---
+
+## On-Demand Explainability During Review
+
+Help should not be trapped behind a separate command. During interactive review, Roko should expose an `explain` affordance anywhere the operator is deciding whether to trust the next action:
+
+```text
+Apply? [y/N/edit/explain]
+```
+
+Selecting `explain` should reveal:
+
+- which heuristic or target-state worldview pushed the agent toward this step
+- which Engrams, episodes, or transcripts were cited as support
+- what gate or role policy is constraining the action
+- what direct command would reproduce or override the decision
+
+This keeps the familiar diff-first loop intact while making Roko's additional reasoning and provenance visible only when requested.
 
 ### Implementation
 
@@ -276,6 +311,8 @@ ROKO CONFIGURATION WIZARD
 ## Cross-References
 
 - See [00-cli-overview.md](./00-cli-overview.md) for CLI design principles
+- See [01-cli-command-reference.md](./01-cli-command-reference.md) for slash commands, diff-first review, and completion
 - See [04-configuration-layered-resolution.md](./04-configuration-layered-resolution.md) for config resolution
 - See topic [04-verification](../04-verification/INDEX.md) for gate pipeline details
 - See topic [02-agents](../02-agents/INDEX.md) for model routing
+- See [tmp/refinements/28-cli-parity-familiar-workflows.md](../../tmp/refinements/28-cli-parity-familiar-workflows.md) for the canonical familiar-workflow proposal

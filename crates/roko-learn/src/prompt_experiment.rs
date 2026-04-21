@@ -496,6 +496,23 @@ impl ExperimentStore {
         winners
     }
 
+    /// Return the winning variant of a concluded experiment, if it reached
+    /// statistical significance (confidence >= 0.95).
+    ///
+    /// This is a convenience accessor; the auto-promotion in
+    /// `LearningRuntime::record_completed_run` calls `on_experiment_concluded`
+    /// which already promotes winners into the cascade router. This method
+    /// exposes the winner for callers that need the variant content directly.
+    pub fn promote_winner(&self, experiment_id: &str) -> Option<ExperimentWinner> {
+        let experiment = self.experiments.get(experiment_id)?;
+        let winner = experiment.concluded_winner()?;
+        if winner.confidence >= 0.95 {
+            Some(winner)
+        } else {
+            None
+        }
+    }
+
     /// Write concluded winners to the static-overrides file.
     ///
     /// # Errors
@@ -538,6 +555,35 @@ impl ExperimentStore {
         let map = serde_json::from_str::<HashMap<String, String>>(&contents)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Ok(map)
+    }
+
+    /// Promote all concluded experiment winners to the static config overrides
+    /// file (INT-10: Experiments -> Static config).
+    ///
+    /// Returns the number of winners promoted. Only winners with confidence
+    /// >= 0.95 are written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the static-overrides file cannot be written.
+    pub fn promote_all_to_config(&self) -> io::Result<usize> {
+        self.promote_all_to_config_at(Path::new(DEFAULT_STATIC_OVERRIDES_PATH))
+    }
+
+    /// Promote all concluded experiment winners to a specific path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the overrides file cannot be written.
+    pub fn promote_all_to_config_at(&self, path: &Path) -> io::Result<usize> {
+        let winners = self.concluded_winners();
+        let promotable: Vec<_> = winners
+            .into_iter()
+            .filter(|w| w.confidence >= 0.95)
+            .collect();
+        let count = promotable.len();
+        self.apply_winners_to(&promotable, path)?;
+        Ok(count)
     }
 
     /// Record an outcome by `variant_id` (searches all experiments).

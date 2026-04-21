@@ -1208,8 +1208,8 @@ impl App {
                 self.tui_state.input_mode = InputMode::Normal;
                 self.tui_state.message_input.clear();
                 if !msg.is_empty() {
-                    // Write inject signal to .roko/signals.jsonl for the orchestrator
-                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    // Write inject signal to .roko/engrams.jsonl for the orchestrator
+                    let signal_path = self.workdir.join(".roko").join("engrams.jsonl");
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1310,7 +1310,7 @@ impl App {
                 // Execute the confirmed action by writing a signal
                 if let Some(action) = &self.tui_state.pending_confirm {
                     let action_str = action.to_string();
-                    let signal_path = self.workdir.join(".roko").join("signals.jsonl");
+                    let signal_path = self.workdir.join(".roko").join("engrams.jsonl");
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1638,6 +1638,26 @@ impl App {
             TuiAction::MouseScrollUp { .. } => self.scroll_focused(-3),
             TuiAction::MouseScrollDown { .. } => self.scroll_focused(3),
             TuiAction::Refresh => self.refresh_snapshot(),
+            TuiAction::SwitchSubView(idx) => {
+                // UI-04: switch sub-view within the current tab region.
+                // Map the sub-view index to the appropriate TuiState field
+                // based on which tab is active. The sub_tab in ViewState
+                // is derived from these fields via current_view_state().
+                let max = views::SubView::for_tab(self.tui_state.active_tab).len();
+                if idx < max {
+                    match self.tui_state.active_tab {
+                        Tab::Plans => self.tui_state.plan_detail_tab = idx,
+                        Tab::Agents => self.tui_state.selected_agent_tab = idx,
+                        _ => {
+                            // For tabs without a dedicated sub-tab field,
+                            // we store the selection in plan_detail_tab as
+                            // a generic sub-view index (it will be picked up
+                            // by current_view_state).
+                            self.tui_state.plan_detail_tab = idx;
+                        }
+                    }
+                }
+            }
             TuiAction::None => {}
         }
 
@@ -2894,7 +2914,7 @@ fn resolve_agent_stream_server_url() -> String {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or_else(|| "http://localhost:6677".to_string())
+        .unwrap_or_else(|| roko_cli::DEFAULT_SERVE_URL.to_string())
 }
 
 fn resolve_agent_stream_auth_token() -> Option<String> {

@@ -218,17 +218,17 @@ Cognitive Signals can be encoded as standard Signals using the
 `Kind::Custom` variant:
 
 ```rust
-// Encoding a cognitive signal as a standard signal
-fn cognitive_to_signal(cs: &CognitiveSignal) -> Signal {
+// Encoding a cognitive signal as a standard engram
+fn cognitive_to_engram(cs: &CognitiveSignal) -> Engram {
     match cs {
         CognitiveSignal::Pause => {
-            Signal::builder(Kind::Custom("conductor.cognitive.pause".into()))
+            Engram::builder(Kind::Custom("conductor.cognitive.pause".into()))
                 .body(Body::text("pause execution"))
                 .tag("cognitive_signal", "pause")
                 .build()
         }
         CognitiveSignal::Escalate => {
-            Signal::builder(Kind::Custom("conductor.cognitive.escalate".into()))
+            Engram::builder(Kind::Custom("conductor.cognitive.escalate".into()))
                 .body(Body::text("escalate to higher tier"))
                 .tag("cognitive_signal", "escalate")
                 .build()

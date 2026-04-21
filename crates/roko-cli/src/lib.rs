@@ -23,6 +23,11 @@
 
 extern crate self as roko_cli;
 
+/// Canonical default port for the shipping `roko-serve` control plane.
+pub const DEFAULT_SERVE_PORT: u16 = 9090;
+/// Canonical default base URL for CLI and TUI calls into `roko-serve`.
+pub const DEFAULT_SERVE_URL: &str = "http://localhost:9090";
+
 pub mod agent_config;
 pub mod agent_episode;
 pub mod agent_exec;
@@ -31,9 +36,12 @@ pub mod chat;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
+pub mod custody;
 pub mod daemon;
+pub mod deployment;
 pub mod episode;
 pub mod event_sources;
+pub mod explain;
 mod heartbeat;
 pub mod index;
 pub mod inject;
@@ -48,6 +56,7 @@ pub mod prompting;
 pub mod repl;
 pub mod research;
 pub mod run;
+pub mod scaffold;
 pub mod secrets;
 pub mod snapshot_migrate;
 pub mod snapshot_reconcile;
@@ -70,13 +79,14 @@ pub use config::{
 };
 pub use config_cmd::{EditTarget, WizardInputs, run_init_wizard};
 pub use daemon::{DaemonConfig, DaemonMode, DaemonState, DaemonStatus};
+pub use deployment::SigstoreVerifier;
 pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use oneshot::{OneshotMode, OneshotResult};
 pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
 pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};
-pub use repl::{ReplCommand, ReplMode};
+pub use repl::{ReplCommand, ReplMode, WorkspaceContext};
 pub use run::{RunReport, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;

@@ -15,7 +15,7 @@
 
 ## Overview
 
-Dreams do not exist in isolation. The dream subsystem is a cognitive cross-cut — it touches every layer of the Roko architecture, injecting learned knowledge, emotional modulation, and creative insights into the agent's waking operation. This document maps every integration point between the dream subsystem and other Roko subsystems, documenting the data flows, event channels, and trait implementations that connect dreams to the rest of the cognitive architecture.
+Dreams do not exist in isolation. The dream subsystem is a cognitive cross-cut — it touches every layer of the Roko architecture, injecting learned knowledge, emotional modulation, and creative insights into the agent's waking operation. In the two-fabric model, Dreams consume Substrate scans for completeness and Bus subscriptions for reactivity, so Delta-speed consolidation can wake on `substrate.engram.stored` instead of fixed polling. This document maps every integration point between the dream subsystem and other Roko subsystems, documenting the data flows, Bus channels, and trait implementations that connect dreams to the rest of the cognitive architecture. See also [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md) and [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md).
 
 The five layers of the Roko architecture:
 - **L0 Runtime**: Process lifecycle, events, supervision, adaptive clock
@@ -25,6 +25,19 @@ The five layers of the Roko architecture:
 - **L4 Orchestration**: DAGs, scheduling, multi-agent coordination
 
 Dreams operate primarily at L0 (scheduling, process lifecycle) and L4 (orchestration, coordination), but inject results into L1 (model routing updates), L2 (context enrichment), and L3 (gate threshold adaptation).
+
+### Reactive Input / Output Model
+
+Dreams use both durable storage and live transport:
+
+| Direction | Fabric | Channel | Purpose |
+|-----------|--------|---------|---------|
+| Substrate → Dreams | Substrate | Query / scan | Completeness pass over durable Engrams during consolidation |
+| Bus → Dreams | Bus | `substrate.engram.stored` | Pulse-triggered Delta wakeup when new durable material lands |
+| Dreams → Substrate | Substrate | `put()` | Persist consolidated Engrams and staged knowledge |
+| Dreams → Bus | Bus | `engram.promoted`, `neuro.insight.promoted` | Broadcast promotion so Neuro and Compose can refresh without re-querying |
+
+This is the key Phase 2+ simplification: the Delta loop becomes reactive without becoming a separate subsystem. The Bus notification wakes the cycle; the Substrate scan finishes the batch.
 
 ---
 
@@ -41,7 +54,7 @@ The Neuro subsystem (`roko-neuro`) is the agent's persistent knowledge base — 
 | Knowledge entries by tier | Neuro → Integration phase | Existing knowledge for deduplication and confidence updates |
 | Embedding vectors | Neuro → HDC synthesis | Source material for counterfactual blending via XOR binding and majority bundling |
 
-The `DreamEngine::schedule()` method reads episodes from the Neuro store to determine whether enough unprocessed material has accumulated to justify a dream cycle. The current implementation in `roko-dreams/src/runner.rs` reads from `EpisodeLogger`:
+The `DreamEngine::schedule()` method reads episodes from the Neuro store to determine whether enough unprocessed material has accumulated to justify a dream cycle. The current scaffold in `roko-dreams/src/runner.rs` still reads from `EpisodeLogger`, but the intended two-fabric path pairs that completeness scan with Bus notifications from `substrate.engram.stored`:
 
 ```rust
 let episodes_path = self.workdir.join(".roko").join("episodes.jsonl");
@@ -77,7 +90,7 @@ The `TierProgression` system in `roko-neuro` classifies dream-generated insights
 | T3 (Validated Insight) | 0.60–0.79 | Gate-validated dream discoveries |
 | T4 (Established Knowledge) | 0.80–1.00 | Repeatedly confirmed, multi-dream validated |
 
-Dreams primarily generate T1 and T2 entries. Promotion to T3+ requires waking validation — dreams propose, experience disposes.
+Dreams primarily generate T1 and T2 entries. Promotion to T3+ requires waking validation — dreams propose, experience disposes. When consolidation finishes, Dreams emit the durable Engram and also publish promotion Pulses (`engram.promoted` for the generic promotion Pulse and `neuro.insight.promoted` for Neuro-specific cache refresh) so downstream consumers can react without polling.
 
 ### Bidirectional Feedback Loop
 
@@ -87,6 +100,7 @@ The dream-Neuro integration creates a continuous refinement loop:
 Episodes accumulate in Neuro
   → Dreams replay and consolidate episodes
     → Insights written back to Neuro at T1-T2
+      → Promotion Pulses (`engram.promoted`, `neuro.insight.promoted`) broadcast on the Bus
       → Waking experience validates or refutes
         → Validated insights promoted to T3+
           → T3+ insights influence future dream replay priority
@@ -209,7 +223,7 @@ The `ExperimentStore` tracks A/B prompt experiments. Dreams can analyze experime
 
 ## Dreams × Context Engineering (roko-compose)
 
-The context engineering subsystem (`roko-compose`) assembles prompts for agent inference using the `SystemPromptBuilder`. Dreams integrate with context engineering in two ways.
+The context engineering subsystem (`roko-compose`) assembles prompts for agent inference using the `SystemPromptBuilder`. Dreams integrate with context engineering in two ways, and it listens for promotion Pulses so it can refresh cached enrichment instead of re-querying after every consolidation cycle.
 
 ### Dream Context Injection
 
@@ -217,7 +231,7 @@ When an agent's context is assembled for a waking task, recent dream insights ca
 
 | Context Layer | Dream Contribution |
 |--------------|--------------------|
-| Knowledge context | Recently promoted dream insights (T3+) added to knowledge section |
+| Knowledge context | Recently promoted dream insights (T3+) added to knowledge section after `neuro.insight.promoted` |
 | Emotional context | Post-dream PAD state (with depotentiation applied) |
 | Strategy context | Dream-generated playbook revisions that have been validated |
 | Warning context | Threat simulation results from dream REM phase |
@@ -247,7 +261,7 @@ pub struct DreamAgentConfig {
 }
 ```
 
-Dreams typically use a cheaper, faster model (e.g., Haiku) with low effort settings and bare mode (no tool use), since dream consolidation is a reasoning task that doesn't require tool execution.
+Dreams typically use a cheaper, faster model (e.g., Haiku) with low effort settings and bare mode (no tool use), since dream consolidation is a reasoning task that doesn't require tool execution. The Compose path can consume `neuro.insight.promoted` Pulses to refresh prompt enrichment caches without waiting for another substrate scan.
 
 ---
 
@@ -278,7 +292,7 @@ The adaptive gate threshold system uses EMA (Exponential Moving Average) per run
 
 ## Dreams × Agent Mesh (Coordination)
 
-In multi-agent deployments, dreams interact with the agent mesh (formerly "Styx" (now Agent Mesh / Mesh)) for knowledge sharing and collective intelligence.
+In multi-agent deployments, Dreams interact with the Mesh as a pair of ordinary fabrics: `MeshSubstrate` replicates durable dream outputs, and `MeshBus` publishes the live Pulses that let peers react without polling.
 
 ### Knowledge Sharing via Mesh
 
@@ -286,8 +300,8 @@ Dream-generated insights can be shared across the mesh:
 
 | Sharing Direction | Mechanism | Content |
 |------------------|-----------|---------|
-| Agent → Mesh | Publish after dream consolidation | High-confidence insights (T3+), validated heuristics |
-| Mesh → Agent | Subscribe to peer dream outputs | Peer insights for potential integration (at reduced confidence, ×0.85 per hop) |
+| Agent → Mesh | `MeshSubstrate.put()` plus `MeshBus.publish()` | High-confidence insights (T3+), validated heuristics, and promotion Pulses |
+| Mesh → Agent | `MeshBus` subscription plus `MeshSubstrate` query | Peer insights for potential integration (at reduced confidence, ×0.85 per hop) |
 
 The confidence reduction on shared knowledge follows the Weismann barrier principle: inherited knowledge is always less trusted than self-discovered knowledge. An insight that is T4 (0.90 confidence) in the originating agent enters the receiving agent at T3 (0.90 × 0.85 = 0.765).
 
@@ -300,7 +314,7 @@ When multiple agents dream about similar episodes (because they share overlappin
 3. Mesh detects P₁ and P₂ are semantically similar (via HDC cosine similarity)
 4. Both agents receive a "collective confirmation" signal, boosting confidence in the shared pattern
 
-This is analogous to the Grossman-Stiglitz information paradox (Grossman & Stiglitz, "On the Impossibility of Informationally Efficient Markets," *AER*, 1980): individually discovered information has value precisely because it's not universally known. The mesh creates a marketplace where dream insights have economic value — agents that dream more effectively contribute more to collective intelligence.
+This is analogous to the Grossman-Stiglitz information paradox (Grossman & Stiglitz, "On the Impossibility of Informationally Efficient Markets," *AER*, 1980): individually discovered information has value precisely because it's not universally known. The mesh creates a marketplace where dream insights have economic value — agents that dream more effectively contribute more to collective intelligence. In REF09 terms, that marketplace is pub/sub topology over `MeshBus` plus durable replication in `MeshSubstrate`, not a separate coordination mechanism.
 
 ### Pheromone Field Integration
 
@@ -308,9 +322,9 @@ The mesh's pheromone field (a diffusing scalar field encoding collective emotion
 
 | Pheromone Signal | Dream Effect |
 |-----------------|-------------|
-| High threat pheromone (> 0.7) | Prioritize threat simulation in REM phase |
+| High threat pheromone (> 0.7) on `mesh.pheromone.deposited` | Prioritize threat simulation in REM phase |
 | Low activity pheromone | Extend NREM consolidation (more time for thorough replay) |
-| Knowledge pheromone spike | Prioritize integration of newly received mesh insights |
+| Knowledge pheromone spike | Prioritize integration of newly received mesh insights from `MeshSubstrate` |
 
 ---
 
@@ -380,15 +394,15 @@ The Hypnagogia engine uses controlled noise injection (Gammaitoni et al., "Stoch
 
 ---
 
-## Dreams × Process Supervisor (bardo-runtime)
+## Dreams × Runtime Process Supervisor
 
-The `ProcessSupervisor` from `bardo-runtime` manages agent process lifecycle. Dream cycles interact with the supervisor for resource management:
+The runtime process supervisor manages agent process lifecycle. Dream cycles interact with that supervisor for resource management:
 
 | Supervisor Function | Dream Integration |
 |--------------------|-------------------|
 | Process tracking | Dream agent processes tracked and cleaned up on completion |
 | Cancellation tokens | Dream cycles can be cancelled if a higher-priority task arrives |
-| Event bus | Dream completion events published for other subsystems to observe |
+| Bus | Dream completion and promotion Pulses published for other subsystems to observe |
 | Resource limits | Dream inference constrained by supervisor memory/CPU limits |
 
 ---
@@ -397,13 +411,13 @@ The `ProcessSupervisor` from `bardo-runtime` manages agent process lifecycle. Dr
 
 | Subsystem | Layer | Direction | Key Data |
 |-----------|-------|-----------|----------|
-| **Neuro** (Knowledge) | L1 | Bidirectional | Episodes → dreams; insights → Neuro |
+| **Neuro** (Knowledge) | L1 | Bidirectional | Substrate scans + `substrate.engram.stored`; insights → Neuro; promotion Pulses → refresh |
 | **Daimon** (Affect) | L1 | Bidirectional | PAD context → dreams; depotentiation → Daimon |
 | **Learn** (Episodes) | L1 | Neuro-mediated | Episodes, playbooks, patterns, routing |
-| **Compose** (Context) | L2 | Dreams → Context | Post-dream insights injected into context |
+| **Compose** (Context) | L2 | Dreams → Context | Post-dream insights injected into context; `neuro.insight.promoted` refreshes enrichment |
 | **Gate** (Validation) | L3 | Bidirectional | Gate results → dreams; threshold updates → gates |
-| **Mesh** (Coordination) | L4 | Bidirectional | Dream insights → mesh; peer insights → dreams |
-| **Orchestrator** (Plans) | L4 | Bidirectional | Idle windows → dreams; feedback → plans |
+| **Mesh** (Coordination) | L4 | Bidirectional | Dream insights → `MeshSubstrate` + `MeshBus`; peer insights → Dreams via Bus subscription + durable query |
+| **Orchestrator** (Plans) | L4 | Bidirectional | Idle windows + Bus wakeups → dreams; feedback → plans |
 | **Hypnagogia** (Creativity) | L0/L1 | Unidirectional | Hypnagogic fragments → dream seeds |
 | **Supervisor** (Process) | L0 | Supervisor → Dreams | Lifecycle, cancellation, resource limits |
 | **Oneirography** (Art) | L1/L2 | Dreams → Art | DreamCycleReport → image generation |
@@ -416,10 +430,10 @@ The complete event flow for a dream cycle touching all subsystems:
 
 ```
 1. Orchestrator detects idle gap after task completion
-2. Calls DreamRunner::schedule_next()
-3. DreamRunner reads episodes from EpisodeLogger (roko-learn)
-4. DreamRunner reads last dream report from .roko/dreams/
-5. If threshold met: dream cycle fires
+2. Calls `DreamRunner::schedule_next()` and remains subscribed to `substrate.engram.stored`
+3. DreamRunner reads episodes from `EpisodeLogger` (roko-learn)
+4. DreamRunner scans the Substrate for durable Engrams that have not yet been consolidated
+5. If the batch threshold is met, or enough `substrate.engram.stored` Pulses have arrived, the dream cycle fires
 
 6. NREM Phase:
    a. PatternMiner discovers trigram patterns (roko-learn)
@@ -440,6 +454,7 @@ The complete event flow for a dream cycle touching all subsystems:
    c. Playbook revisions written to PlaybookStore
    d. Gate threshold proposals generated
    e. CascadeRouter updates proposed
+   f. `engram.promoted` and `neuro.insight.promoted` Pulses published for downstream refresh
 
 9. Post-Dream:
    a. DreamCycleReport persisted to .roko/dreams/
@@ -548,3 +563,5 @@ The configuration is loaded by `DreamLoopConfig::from_roko_toml()` and propagate
 | [12-sleep-time-compute.md](12-sleep-time-compute.md) | Compute budget constraining dream inference |
 | [13-scheduling-and-triggers.md](13-scheduling-and-triggers.md) | Scheduling coordinated with orchestrator |
 | [14-oneirography.md](14-oneirography.md) | Art generation consuming DreamCycleReport |
+| [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) | Canonical Engram, Pulse, Bus, and Topic terminology |
+| [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md) | Phase-2 two-fabric implications for Dreams, Mesh, Chain, and Heartbeat |

@@ -62,7 +62,7 @@ L4 depends on every layer below it. It imports:
   `roko_gate::compile::CompileGate`, `roko_gate::test_gate::TestGate`,
   `roko_gate::clippy_gate::ClippyGate`,
   `roko_gate::adaptive_threshold::AdaptiveThresholds`
-- **L1**: `roko_core::Signal`, `roko_core::AgentRole`, `roko_core::PlanPhase`,
+- **L1**: `roko_core::Engram`, `roko_core::AgentRole`, `roko_core::PlanPhase`,
   `roko_core::Verdict`, `roko_core::Budget`, `roko_core::Substrate`
 - **L0**: `roko_fs::FileSubstrate`, `roko_fs::RokoLayout`
 

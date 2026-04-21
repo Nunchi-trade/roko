@@ -1,7 +1,7 @@
 //! End-to-end CLI test.
 //!
 //! Spawns the `roko` binary against a tempdir: runs `init`, then `run`
-//! with `cat` as the agent backend, and asserts that `.roko/signals.jsonl`
+//! with `cat` as the agent backend, and asserts that `.roko/engrams.jsonl`
 //! contains the full signal set (`Prompt`, `AgentOutput`, `Episode`, etc.).
 
 use assert_cmd::Command;
@@ -24,8 +24,8 @@ fn init_run_produces_expected_signals() {
     // Verify the init artifacts exist.
     assert!(workdir.join(".roko").is_dir(), ".roko directory missing");
     assert!(
-        workdir.join(".roko/signals.jsonl").exists(),
-        "signals.jsonl missing"
+        workdir.join(".roko/engrams.jsonl").exists(),
+        "engrams.jsonl missing"
     );
     assert!(workdir.join("roko.toml").exists(), "roko.toml missing");
 
@@ -61,8 +61,8 @@ timeout_ms = 5000
         .success();
 
     // Read the JSONL log and check that every required kind is present.
-    let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
-    assert!(!log.is_empty(), "signals.jsonl is empty after run");
+    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
+    assert!(!log.is_empty(), "engrams.jsonl is empty after run");
 
     let mut saw_prompt_section = false;
     let mut saw_prompt = false;
@@ -282,7 +282,7 @@ timeout_ms = 5000
         .failure();
 
     // But the signals should still be persisted — the failure is reported, not swallowed.
-    let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
+    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
     assert!(log.contains("\"gate_verdict\""));
     assert!(log.contains("\"episode\""));
 }
@@ -344,7 +344,7 @@ timeout_ms = 5000
         "expected agent output header: {stdout}"
     );
 
-    let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
+    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
     assert!(
         log.contains("Bug report"),
         "file contents should have reached the prompt: {log}"
@@ -400,7 +400,7 @@ timeout_ms = 5000
         .success();
 
     // The cleaned AgentOutput should contain only "Final answer: 42".
-    let log = fs::read_to_string(workdir.join(".roko/signals.jsonl")).unwrap();
+    let log = fs::read_to_string(workdir.join(".roko/engrams.jsonl")).unwrap();
     // Raw AgentMessage trace has the full thinking block
     assert!(
         log.contains("...done thinking."),

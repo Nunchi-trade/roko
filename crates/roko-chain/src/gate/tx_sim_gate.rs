@@ -232,26 +232,23 @@ impl TxSimulator for MockTxSimulator {
     }
 }
 
-/// Alternate simulator that always returns an error — used by tests to
-/// exercise the "simulator error" code path.
-#[derive(Clone, Debug)]
-pub struct FailingSimulator {
-    /// The `ChainError::Rpc` message every call returns.
-    pub message: String,
-}
-
-#[async_trait]
-impl TxSimulator for FailingSimulator {
-    async fn simulate(&self, _tx: &TxRequest) -> Result<SimulationOutcome, ChainError> {
-        Err(ChainError::Rpc(self.message.clone()))
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use roko_core::{Body, Context, Engram, Kind, Provenance};
+
+    #[derive(Clone, Debug)]
+    struct FailingSimulator {
+        message: String,
+    }
+
+    #[async_trait]
+    impl TxSimulator for FailingSimulator {
+        async fn simulate(&self, _tx: &TxRequest) -> Result<SimulationOutcome, ChainError> {
+            Err(ChainError::Rpc(self.message.clone()))
+        }
+    }
 
     fn tx_signal_json(v: serde_json::Value) -> Engram {
         Engram::builder(Kind::Transaction)

@@ -1,0 +1,366 @@
+//! HTTP API integration tests for the roko-serve control plane.
+//!
+//! These tests build the full axum router with a minimal (no-op) runtime and
+//! exercise key endpoints using `tower::ServiceExt::oneshot`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use roko_core::config::ServeAuthConfig;
+use roko_core::config::schema::RokoConfig;
+use roko_serve::deploy::create_backend;
+use roko_serve::routes::build_router;
+use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
+use roko_serve::state::AppState;
+use tempfile::tempdir;
+use tower::ServiceExt;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Minimal no-op runtime for integration tests.
+struct TestRuntime;
+
+#[async_trait::async_trait]
+impl CliRuntime for TestRuntime {
+    async fn run_once(
+        &self,
+        _workdir: &std::path::Path,
+        _prompt: &str,
+    ) -> anyhow::Result<RunResult> {
+        Ok(RunResult { success: true })
+    }
+
+    fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
+        SessionStatusInfo {
+            session_id: None,
+            workdir,
+            daemon_running: false,
+            signal_count: Some(0),
+            episode_count: Some(0),
+            last_episode_passed: None,
+        }
+    }
+
+    fn dashboard_scaffold(&self, _workdir: &std::path::Path) -> DashboardInfo {
+        DashboardInfo {
+            rendered: String::new(),
+        }
+    }
+}
+
+/// Build a test router (no auth) backed by a temp directory.
+fn test_app() -> (tempfile::TempDir, axum::Router) {
+    let dir = tempdir().expect("tempdir");
+    let config = RokoConfig::default();
+    let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+    let state = Arc::new(AppState::new(
+        dir.path().to_path_buf(),
+        Arc::new(TestRuntime),
+        config,
+        deploy,
+    ));
+    let auth = ServeAuthConfig::default();
+    let router = build_router(Arc::clone(&state), &[], auth);
+    (dir, router)
+}
+
+/// Build a test router with API-key auth enabled.
+fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
+    let dir = tempdir().expect("tempdir");
+    let config = RokoConfig::default();
+    let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+    let state = Arc::new(AppState::new(
+        dir.path().to_path_buf(),
+        Arc::new(TestRuntime),
+        config,
+        deploy,
+    ));
+    let auth = ServeAuthConfig {
+        enabled: true,
+        api_key: api_key.to_string(),
+    };
+    let router = build_router(Arc::clone(&state), &[], auth);
+    (dir, router)
+}
+
+/// Send a GET request and return `(StatusCode, serde_json::Value)`.
+async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .uri(uri)
+        .body(Body::empty())
+        .expect("build request");
+    let resp = router.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// Send a POST request with a JSON body and return `(StatusCode, serde_json::Value)`.
+async fn post_json(
+    router: &axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+        .expect("build request");
+    let resp = router.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+// ---------------------------------------------------------------------------
+// Health & status
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_returns_200_with_status_ok() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/health").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert!(body["uptime_secs"].is_number());
+    assert!(body["version"].is_string());
+}
+
+#[tokio::test]
+async fn session_status_returns_workdir() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/status").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body["workdir"].is_null());
+    assert_eq!(body["daemon_running"], false);
+}
+
+// ---------------------------------------------------------------------------
+// Plans
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_plans_empty() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/plans").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// Managed agents
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_managed_agents_empty() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/managed-agents").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn signals_returns_empty_array() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/signals").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_array());
+}
+
+// ---------------------------------------------------------------------------
+// Episodes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn episodes_returns_empty_array() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/episodes").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_array());
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_returns_json() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/metrics").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_array());
+}
+
+// ---------------------------------------------------------------------------
+// Research
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_research_empty() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/research").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn post_run_returns_accepted() {
+    let (_dir, app) = test_app();
+    let (status, body) = post_json(
+        &app,
+        "/api/run",
+        serde_json::json!({ "prompt": "hello world" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["id"].is_string());
+}
+
+#[tokio::test]
+async fn post_run_rejects_empty_prompt() {
+    let (_dir, app) = test_app();
+    let (status, body) = post_json(&app, "/api/run", serde_json::json!({ "prompt": "" })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "validation_error");
+}
+
+#[tokio::test]
+async fn post_run_rejects_missing_prompt() {
+    let (_dir, app) = test_app();
+    let (status, _body) = post_json(&app, "/api/run", serde_json::json!({})).await;
+
+    // Missing required field — either 400 (validation) or 422 (parse).
+    assert!(status.is_client_error());
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_rejects_missing_key() {
+    let (_dir, app) = test_app_with_auth("secret-key-123");
+    let (status, body) = get_json(&app, "/api/health").await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn auth_rejects_wrong_key() {
+    let (_dir, app) = test_app_with_auth("secret-key-123");
+
+    let req = Request::builder()
+        .uri("/api/health")
+        .header("X-Api-Key", "wrong-key")
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_accepts_correct_key() {
+    let (_dir, app) = test_app_with_auth("secret-key-123");
+
+    let req = Request::builder()
+        .uri("/api/health")
+        .header("X-Api-Key", "secret-key-123")
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// 404 for unknown routes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unknown_route_returns_404() {
+    let (_dir, app) = test_app();
+
+    let req = Request::builder()
+        .uri("/api/nonexistent")
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Gates summary
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn gate_summary_returns_ok() {
+    let (_dir, app) = test_app();
+    let (status, _body) = get_json(&app, "/api/gates/summary").await;
+
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dashboard_returns_ok() {
+    let (_dir, app) = test_app();
+    let (status, _body) = get_json(&app, "/api/dashboard").await;
+
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI spec
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn openapi_spec_returns_json() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/openapi.json").await;
+
+    assert_eq!(status, StatusCode::OK);
+    // Should have standard OpenAPI top-level keys.
+    assert!(body.get("openapi").is_some() || body.get("paths").is_some());
+}

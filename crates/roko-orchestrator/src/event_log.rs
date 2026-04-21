@@ -122,6 +122,30 @@ fn push_lp(buf: &mut Vec<u8>, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
+fn verify_entry_sequences(entries: &[EventEntry]) -> Result<(), IntegrityError> {
+    for (expected, entry) in entries.iter().enumerate() {
+        let expected = expected as u64;
+        if entry.sequence_number != expected {
+            let reason = if expected == 0 {
+                format!("sequence starts at {} (expected 0)", entry.sequence_number)
+            } else {
+                format!(
+                    "sequence {} follows {} (expected {})",
+                    entry.sequence_number,
+                    expected - 1,
+                    expected
+                )
+            };
+            return Err(IntegrityError {
+                at_sequence: entry.sequence_number,
+                reason,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 // ─── Integrity error ────────────────────────────────────────────────────
 
 /// Error returned by [`EventLog::verify_integrity`] when tampering is
@@ -244,6 +268,7 @@ impl EventLog {
     #[allow(clippy::significant_drop_tightening)]
     pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
         let guard = self.inner.lock();
+        verify_entry_sequences(&guard.entries)?;
         let mut prev_hash = ZERO_HASH;
 
         for entry in &guard.entries {
@@ -286,7 +311,7 @@ impl EventLog {
         }
     }
 
-    /// Restore a log from a previously created snapshot.
+    /// Restore a log from a previously created snapshot without validation.
     pub fn restore(snapshot: EventLogSnapshot) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LogInner {
@@ -294,6 +319,18 @@ impl EventLog {
                 tip: snapshot.tip,
             })),
         }
+    }
+
+    /// Restore a log from a previously created snapshot and verify integrity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntegrityError`] if the snapshot contains a broken hash
+    /// chain, a mismatched tip hash, or non-contiguous sequence numbers.
+    pub fn restore_verified(snapshot: EventLogSnapshot) -> Result<Self, IntegrityError> {
+        let log = Self::restore(snapshot);
+        log.verify_integrity()?;
+        Ok(log)
     }
 
     /// Return entries filtered by kind.
@@ -446,7 +483,7 @@ mod tests {
         log.append(EventKind::GateResult, json!({"pass": false}));
 
         let snap = log.snapshot();
-        let restored = EventLog::restore(snap);
+        let restored = EventLog::restore_verified(snap).unwrap();
 
         assert_eq!(restored.len(), 3);
         assert_eq!(restored.tip(), log.tip());
@@ -462,11 +499,52 @@ mod tests {
         log.append(EventKind::PlanStarted, json!({}));
         let snap = log.snapshot();
 
-        let restored = EventLog::restore(snap);
+        let restored = EventLog::restore_verified(snap).unwrap();
         restored.append(EventKind::PlanCompleted, json!({}));
 
         assert_eq!(restored.len(), 2);
         assert!(restored.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_rejects_non_zero_start() {
+        let log = EventLog::new();
+        log.append(EventKind::PlanStarted, json!({"plan": "p1"}));
+        log.test_mutate(0, |entry| {
+            entry.sequence_number = 1;
+        });
+
+        let err = log.verify_integrity().unwrap_err();
+        assert_eq!(err.at_sequence, 1);
+        assert!(err.reason.contains("expected 0"));
+    }
+
+    #[test]
+    fn verify_integrity_rejects_sequence_gap() {
+        let log = EventLog::new();
+        log.append(EventKind::PlanStarted, json!({"plan": "p1"}));
+        log.append(EventKind::TaskAssigned, json!({"task": "t1"}));
+        log.test_mutate(1, |entry| {
+            entry.sequence_number = 2;
+        });
+
+        let err = log.verify_integrity().unwrap_err();
+        assert_eq!(err.at_sequence, 2);
+        assert!(err.reason.contains("expected 1"));
+    }
+
+    #[test]
+    fn restore_verified_rejects_invalid_snapshot_sequences() {
+        let log = EventLog::new();
+        log.append(EventKind::PlanStarted, json!({"plan": "p1"}));
+        log.append(EventKind::TaskAssigned, json!({"task": "t1"}));
+
+        let mut snapshot = log.snapshot();
+        snapshot.entries[1].sequence_number = 3;
+
+        let err = EventLog::restore_verified(snapshot).unwrap_err();
+        assert_eq!(err.at_sequence, 3);
+        assert!(err.reason.contains("expected 1"));
     }
 
     #[test]

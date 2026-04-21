@@ -21,7 +21,7 @@ machinery to improve themselves over time.
 | **Architecture model** | Cognitive (1 noun + 6 traits) | DAG/chain | Role-based crews | Single agent + ACI | Loop-based |
 | **Universal data type** | Engram (content-addressed, decaying, scored) | Varies per chain | Messages | Observations | Messages |
 | **Content addressing** | BLAKE3 hash on every datum | No | No | No | No |
-| **Verification pipeline** | 11 gates, 6-rung pipeline, adaptive thresholds | Optional callbacks | No built-in | SWE-bench evaluation | No built-in |
+| **Verification pipeline** | 14 gates, 7-rung pipeline, adaptive thresholds | Optional callbacks | No built-in | SWE-bench evaluation | No built-in |
 | **Knowledge management** | 6 types × 4 tiers, HDC similarity, decay | Vector store (external) | No built-in | No built-in | No built-in |
 | **Affect/emotion model** | PAD vectors, 6 behavioral states, somatic markers | No | No | No | No |
 | **Offline learning** | NREM replay, REM imagination, hypnagogia | No | No | No | No |
@@ -30,7 +30,7 @@ machinery to improve themselves over time.
 | **Self-development** | Reads own PRDs, generates plans, executes, validates | No | No | No | No |
 | **Session persistence** | Snapshot + resume, append-only JSONL | Checkpointers (optional) | No built-in | No built-in | No built-in |
 | **Safety model** | Role auth, pre/post checks, taint tracking, capability tokens | No built-in | No built-in | Container sandbox | No built-in |
-| **Test suite** | 1,568 tests across 11 crates | Varies | Minimal | SWE-bench | Minimal |
+| **Test suite** | 3,761 tests across 36 workspace members | Varies | Minimal | SWE-bench | Minimal |
 | **Token budget management** | VCG attention auction, per-section bidding | Manual truncation | No built-in | Context window | No built-in |
 | **Temporal dynamics** | 4 decay models, knowledge half-lives, Ebbinghaus curves | No | No | No | No |
 
@@ -41,7 +41,7 @@ machinery to improve themselves over time.
 ### 1. One Noun, Six Verbs
 
 Most frameworks have many types: tasks, messages, tools, observations, actions, memories.
-Roko has exactly one data type (Engram/Signal) and six trait operations. This enables
+Roko has exactly one data type (Engram) and six trait operations. This enables
 universal composability — any Scorer scores any Engram, any Substrate stores any Engram,
 any Gate verifies any Engram. Components compose freely.
 
@@ -70,7 +70,7 @@ experience into validated knowledge — something no other agent framework does.
 
 ### 5. Self-Verification at Every Step
 
-Roko's 6-rung gate pipeline (syntax → compile → test → lint → diff → semantic) verifies
+Roko's 7-rung gate pipeline (syntax → compile → test → lint → diff → semantic → integration) verifies
 every agent output before it enters the knowledge base. Adaptive thresholds (EMA per rung)
 learn expected pass rates and flag anomalies. Gate verdicts are themselves Engrams that
 re-enter the cognitive loop — "verification as cognition."
@@ -106,7 +106,7 @@ Roko is honest about its limitations:
   Dreams, and Coordination are built or scaffolded but not yet wired into the runtime. See
   [`STATUS.md`](STATUS.md) for the full breakdown.
 - **Rust-only**: No Python SDK. If your stack is Python, this is a barrier.
-- **Steep learning curve**: 22 documentation sections, 18 crates, cognitive science concepts.
+- **Steep learning curve**: 22 documentation sections, 36 workspace members, cognitive science concepts.
   The architecture is powerful but not simple.
 - **Single-developer origin**: Roko was built by one person migrating a prior 108K LOC system.
   Community and ecosystem are nascent.

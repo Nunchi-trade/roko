@@ -434,6 +434,14 @@ impl PlaybookStore {
         Ok(out)
     }
 
+    /// Load all persisted playbooks.
+    ///
+    /// This is a compatibility alias for callers expecting the documented
+    /// `load_all()` surface.
+    pub async fn load_all(&self) -> io::Result<Vec<Playbook>> {
+        self.list().await
+    }
+
     /// Record the outcome of executing the playbook identified by `id`.
     ///
     /// On success, increments [`Playbook::success_count`]; on failure,

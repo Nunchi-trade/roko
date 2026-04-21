@@ -128,49 +128,43 @@ pub fn build_for_rung(rung: u8, build_system: &str, working_dir: impl Into<PathB
     let wd = working_dir.into();
     let mut builder = GateEnvBuilder::new(wd).build_system_name(build_system);
 
+    let is_cargo = build_system == BuildSystem::Cargo.program();
+    let is_go = build_system == BuildSystem::Go.program();
+
     #[allow(clippy::match_same_arms)]
     match rung {
         // Compile: suppress warnings for speed
-        0 => {
-            if build_system == BuildSystem::Cargo.program() {
-                builder = builder.env("RUSTFLAGS", "-Awarnings");
-            }
+        0 if is_cargo => {
+            builder = builder.env("RUSTFLAGS", "-Awarnings");
         }
         // Lint: promote warnings to errors
-        1 => {
-            if build_system == BuildSystem::Cargo.program() {
-                builder = builder.env("RUSTFLAGS", "-Dwarnings");
-            } else if build_system == BuildSystem::Go.program() {
-                builder = builder.env("GOFLAGS", "-v");
-            }
+        1 if is_cargo => {
+            builder = builder.env("RUSTFLAGS", "-Dwarnings");
+        }
+        1 if is_go => {
+            builder = builder.env("GOFLAGS", "-v");
         }
         // Test: enable backtraces
-        2 => {
-            if build_system == BuildSystem::Cargo.program() {
-                builder = builder.env("RUST_BACKTRACE", "1");
-            }
+        2 if is_cargo => {
+            builder = builder.env("RUST_BACKTRACE", "1");
         }
         // Symbol: no special env (intentionally distinct from wildcard)
         3 => {}
         // Generated test: backtraces + no retries
-        4 => {
-            if build_system == BuildSystem::Cargo.program() {
-                builder = builder
-                    .env("RUST_BACKTRACE", "1")
-                    .env("NEXTEST_RETRIES", "0");
-            }
+        4 if is_cargo => {
+            builder = builder
+                .env("RUST_BACKTRACE", "1")
+                .env("NEXTEST_RETRIES", "0");
         }
         // Property test: higher iteration count hint
-        5 => {
-            if build_system == BuildSystem::Cargo.program() {
-                builder = builder.env("PROPTEST_CASES", "256");
-            }
+        5 if is_cargo => {
+            builder = builder.env("PROPTEST_CASES", "256");
         }
         // Integration: marker flag
         6 => {
             builder = builder.env("INTEGRATION", "1");
         }
-        // Unknown rung: no special env
+        // Unknown rung or non-matching build system: no special env
         _ => {}
     }
 

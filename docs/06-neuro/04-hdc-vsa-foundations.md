@@ -14,8 +14,12 @@
 - `bardo-backup/tmp/agent-chain/04-hdc.md` (HDC math from first principles)
 - `refactoring-prd/03-cognitive-subsystems.md` §1 (HDC Encoding section)
 - `refactoring-prd/09-innovations.md` §XIII (Cross-Domain Insight Resonance), §XIX.D (False Positive Rate)
-- `crates/bardo-primitives/src/hdc.rs` (HdcVector implementation)
+- `crates/roko-primitives/src/hdc.rs` (HdcVector implementation)
 - `crates/roko-index/src/hdc.rs` (code symbol fingerprinting)
+- `docs/00-architecture/02-engram-data-type.md` (first-class Engram fingerprint field)
+- `docs/00-architecture/07-substrate-trait.md` (native similarity query surface)
+- `docs/00-architecture/27-temporal-knowledge-topology.md` (HDC-cluster-driven tier progression)
+- `../../tmp/refinements/11-hyperdimensional-substrate.md` (canonical refinement source)
 
 ---
 
@@ -23,9 +27,9 @@
 
 Hyperdimensional Computing (HDC), also called Vector Symbolic Architectures (VSA), represents information as high-dimensional binary vectors and manipulates them with a small set of algebraic operations. The idea rests on a geometric fact: in spaces of dimension D ≥ 8,000, randomly sampled vectors are quasi-orthogonal with overwhelming probability. For D = 10,240 binary vectors (the dimension Roko uses), the probability that two independent vectors share more than 55% of their bits is less than 10⁻⁹. Thousands of distinct concepts can coexist in the same vector space without collision.
 
-HDC is not a replacement for neural network embeddings or traditional database indices. It is a **complementary computational substrate** — a 1,280-byte algebraic representation that unifies knowledge fingerprinting, memory compression, similarity search, cross-domain transfer, and collective consensus under a single set of operations. Neuro uses HDC vectors as optional annotations on `KnowledgeEntry` objects, enabling sub-millisecond similarity queries without any external vector database, GPU, or API calls.
+HDC is not a replacement for neural network embeddings or traditional database indices. It is a **complementary computational substrate** - a 1,280-byte algebraic representation that now lives on every Engram as a first-class `fingerprint` field. The fingerprint is populated by a deterministic default encoder at insert time, with room for kind-specific encoders when a domain needs specialized structure. That single field unifies similarity search, consensus, analogy, memory compression, and cluster-driven tier progression without a side-table.
 
-This document covers the mathematical foundations of HDC, the selection of Binary Spatter Codes (BSC) as the specific HDC family, the dimension choice of D = 10,240, the four core algebraic operations, capacity bounds, and the Rust implementation in `roko-primitives` (currently `bardo-primitives`).
+This document covers the mathematical foundations of HDC, the selection of Binary Spatter Codes (BSC) as the specific HDC family, the dimension choice of D = 10,240, the four core algebraic operations, capacity bounds, the default encoder plus specialization model, and the Rust implementation in `roko-primitives`.
 
 ---
 
@@ -65,6 +69,14 @@ For Neuro, HDC provides:
 3. **Cross-domain transfer**: Detect structural analogies across domains via vector similarity
 4. **Memory compression**: Bundle thousands of entries into a single 1,280-byte summary
 5. **Collective consensus**: Privacy-preserving vote aggregation via HDC bundling
+
+### Engram fingerprints are first-class
+
+Every Engram carries a 10,240-bit HDC fingerprint field. The default encoder derives that fingerprint deterministically from the Engram's kind, body, and tags when the record is inserted into the Substrate. Kind-specific encoders can extend that base representation for domains that need extra structure, but they do not replace the base contract.
+
+That framing matters because similarity, consensus, analogy, and HDC-cluster promotion all operate on the stored record itself. The fingerprint is not an optional annotation or a side-table lookup key; it is part of the durable record.
+
+See also [tmp/refinements/11-hyperdimensional-substrate.md](../../tmp/refinements/11-hyperdimensional-substrate.md), [Engram data type](../00-architecture/02-engram-data-type.md), and [Substrate trait](../00-architecture/07-substrate-trait.md).
 
 ---
 
@@ -205,7 +217,7 @@ HDC vectors are ~2.4× more storage-efficient than 768-dimensional float32 embed
 
 ### HdcVector (`roko-primitives/src/hdc.rs`)
 
-The current implementation in `bardo-primitives` (to be renamed `roko-primitives`) provides the core `HdcVector` struct:
+The current implementation in `roko-primitives` provides the core `HdcVector` struct:
 
 ```rust
 /// 10,240-bit binary sparse distributed vector.
@@ -1248,7 +1260,7 @@ pub struct HdcBackendConfig {
 - K-medoids (PAM) clustering over `HdcVector` in `roko-learn/src/hdc_clustering.rs`
 
 **Missing**:
-- `BundleAccumulator` (designed above; not in current `bardo-primitives`)
+- `BundleAccumulator` (designed above; not in current `roko-primitives`)
 - `ItemMemory` / codebook (designed above; not implemented)
 - `ResonatorNetwork` (Frady et al. 2020; designed above; not implemented)
 - `DecayingBundleAccumulator` (designed above; vote decay for controlled forgetting)

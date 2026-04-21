@@ -527,7 +527,7 @@ mod tests {
             .expect("read malformed response body");
         let body_text = String::from_utf8(body.to_vec()).expect("decode malformed response body");
         assert!(
-            body_text.contains("Failed to parse the request body as JSON"),
+            body_text.contains("request body must be valid JSON"),
             "malformed template response should explain the JSON parse failure: {body_text}"
         );
     }

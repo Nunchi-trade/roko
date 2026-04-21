@@ -4,10 +4,49 @@
 > Each connects two or more orthogonal systems—Daimon, Neuro, Dreams, coordination,
 > code intelligence, learning, safety—to produce capabilities no single subsystem provides.
 > These are not incremental improvements. They are **structural compositions**: the Synapse
-> Architecture's trait-based design means each innovation is a new `impl` block that wires
-> existing traits together, not a new subsystem to build from scratch.
+> Architecture's trait-based design means each innovation can often be expressed as trait
+> composition rather than a wholly separate subsystem, even though several examples in this
+> chapter would still require substantial new code.
+>
+> That same composition is part of the moat. The advantage does not come from any isolated
+> primitive. Pulse, HDC fingerprinting, demurrage, the heuristic-with-falsifier pattern,
+> replication ledger, c-factor, worldview clusters, two-fabric operator generalization, and
+> plugin tiers each have prior art or close analogues. The net-new artifact is the composition:
+> the reinforcing weave across Substrate, Bus, shared traits, and shared evidence loops that
+> makes those primitives compound into a single system. A competitor can copy one primitive;
+> copying the aligned kernel decisions that make the whole architecture reinforce itself is a
+> much harder, slower rewrite. See also
+> [tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md)
+> and [tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
 
-> **Implementation**: Specified
+> **Implementation**: Mixed
+
+> **Reality check**: Most compositions in this chapter depend on primitives that
+> are still target-state. Read this as a research-hypothesis catalog over a
+> partially shipping base, not as a list of fully realized capabilities.
+>
+> **Actual edge today**: the product advantage comes from the working Rust
+> orchestration stack, gates, HDC-enabled learning/neuro pieces, feedback loops,
+> and interfaces already in code.
+
+---
+
+## REF19 Alignment: Net-New vs Carefully Integrated
+
+The right way to read this chapter is not "which primitive is unique by itself?" but "which
+composition is net-new?" Most primitives are valuable because they are carefully integrated
+with the rest of the runtime, not because they are novel in isolation. In several rows below,
+the composition is still target-state rather than shipping behavior.
+
+| Primitive cluster | Composition role | Net-new claim |
+|---|---|---|
+| `Pulse` + two-fabric operator generalization | One operator algebra spans ephemeral and durable artifacts | Medium polymorphism becomes a first-class runtime property, not a framework convention |
+| HDC fingerprint + c-factor + worldview clusters | Similarity, collective signal, and emergent domains reinforce routing | The system can compare, organize, and steer knowledge with structural evidence instead of ad hoc metadata |
+| Demurrage + heuristic with falsifier + replication ledger | Ideas decay unless justified; claims stay auditable | Beliefs, heuristics, and research assumptions could be continuously corrected by lived evidence once the supporting runtime surfaces exist |
+| Plugin tiers | Risk-aware extension boundaries | Extensibility is native to the kernel instead of bolted on as a single security model |
+
+This is the core REF19 claim: the primitives are the building blocks, but the **net-new**
+innovation is the composition.
 
 ---
 
@@ -142,7 +181,7 @@ operations per belief update. At ~50ns per operation: **~8μs total per tick**.
 ### Rust Sketch
 
 ```rust
-use roko_core::{Signal, Score, Context, ContentHash};
+use roko_core::{Engram, Score, Context, ContentHash};
 use bardo_primitives::hdc::{HdcVector, hamming_distance, bind, bundle, majority_vote};
 
 /// Belief state encoded as HDC vector with active inference dynamics.
@@ -326,8 +365,8 @@ impl HdcBeliefState {
 
 /// Scorer implementation: beliefs inform scoring via prediction confidence.
 impl Scorer for HdcBeliefState {
-    fn score(&self, signal: &Signal, ctx: &Context) -> Score {
-        let signal_vec = encode_signal_hdc(signal);
+    fn score(&self, engram: &Engram, ctx: &Context) -> Score {
+        let signal_vec = encode_signal_hdc(engram);
         let similarity = 1.0 - (hamming_distance(&self.mu, &signal_vec) as f32
             / HdcVector::TOTAL_BITS as f32);
 
@@ -355,9 +394,10 @@ impl Scorer for HdcBeliefState {
 | 6 | Persist belief state across sessions | `.roko/state/beliefs.bin` | Binary HDC vector (1,280 bytes) |
 | 7 | Dream consolidation updates μ_prior | `roko-dreams` (NREM phase) | Slow prior update during Delta |
 
-**Key insight**: The belief vector μ is the agent's **world model compressed to 1,280 bytes**.
-It can be persisted, transmitted between agents, compared via Hamming distance, and composed
-via bundling. No other framework has a world model this compact and algebraically composable.
+**Key insight**: The belief vector μ is the agent's **target-state world model compressed to
+1,280 bytes**. It could be persisted, transmitted between agents, compared via Hamming
+distance, and composed via bundling. If built end-to-end, this would be an unusually compact
+and algebraically composable world-model representation.
 
 ### Test Criteria
 
@@ -501,7 +541,7 @@ Steps:
 ### Rust Sketch
 
 ```rust
-use roko_core::Signal;
+use roko_core::Engram;
 use roko_learn::episode::Episode;
 
 /// A node in the affective causal graph.
@@ -823,14 +863,14 @@ Steps:
        verdict = Inconclusive  // Non-critical violations, may still stage
 
   8. EMIT SIGNALS:
-     Signal::new(Kind::GateVerdict, dream_verification_body)
-     If violated: Signal::new(Kind::Custom("DreamVerificationFailure"), details)
+     Engram::new(Kind::GateVerdict, dream_verification_body)
+     If violated: Engram::new(Kind::Custom("DreamVerificationFailure"), details)
 ```
 
 ### Rust Sketch
 
 ```rust
-use roko_core::{Signal, Kind};
+use roko_core::{Engram, Kind};
 use roko_gate::Verdict;
 
 /// An invariant that must hold before, during, or after a strategy.
@@ -1030,7 +1070,9 @@ Agents specialize based on whether they succeed at tasks, not based on *what the
 The insight: **knowledge concentration should drive specialization**. An agent that has deep
 Consolidated knowledge about testing should specialize in testing. An agent with rich
 CausalLink knowledge about performance should specialize in optimization. The knowledge
-landscape *is* the morphogenetic field.
+landscape *is* the morphogenetic field. In REF19 terms, the net-new object is the resulting
+**worldview cluster**: a stable bundle of co-citing heuristics, claims, and behavioral priors
+that can be routed and compared as a unit, rather than just a bag of isolated facts.
 
 ### Research Basis
 
@@ -1150,7 +1192,7 @@ Steps:
 ### Rust Sketch
 
 ```rust
-use roko_core::Signal;
+use roko_core::Engram;
 
 /// Knowledge concentration across strategy dimensions.
 ///
@@ -2785,6 +2827,15 @@ impl DreamBudget {
 
 These eight innovations are not isolated. They form a **reinforcing network**:
 
+That network is also the chapter's moat claim: each innovation becomes materially more
+defensible because it depends on aligned decisions across the kernel stack. Substrate,
+Bus, Pulse, HDC fingerprints, demurrage, the heuristic with falsifier, c-factor measurement,
+worldview clusters, two-fabric operator generalization, plugin tiers, and the replication
+ledger reinforce one another. Competitors can approximate the isolated primitive, but they do
+not get the same architecture-wide compound effect without rebuilding the weave. See also
+[tmp/refinements/18-competitive-moat.md](../../tmp/refinements/18-competitive-moat.md) and
+[tmp/refinements/19-net-new-innovations.md](../../tmp/refinements/19-net-new-innovations.md).
+
 ```
    ┌─────────────────────────────────────────────────────────┐
    │                                                         │
@@ -2830,6 +2881,11 @@ These eight innovations are not isolated. They form a **reinforcing network**:
    agent specialization via reaction-diffusion; pheromone trails encode the collective's
    exploration history as bandit arms. Specialized agents deposit stronger pheromones in
    their niche, reinforcing the specialization gradient.
+
+The full interaction set is what makes the moat durable: the primitives are valuable alone,
+but the cross-pollinated architecture is net-new because each subsystem improves the others'
+signals, routing, persistence, and calibration. That architectural coherence is expensive to
+copy because it depends on aligned kernel choices, not just feature parity.
 
 ---
 

@@ -1,7 +1,7 @@
 //! Multi-server tool deduplication (SS36.60).
 //!
 //! When multiple MCP servers are active, their tool lists may overlap.
-//! [`dedup_tools`] merges them using a prefix strategy (`server__tool`)
+//! [`dedup_tools`] merges them using a prefix strategy (`server.tool`)
 //! and a last-writer-wins conflict policy.
 
 use roko_core::tool::ToolDef;
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// list.
 ///
 /// Each entry in `tools` is `(server_name, tool_defs)`. Tools are
-/// expected to already be prefixed with `server_name__` (by
+/// expected to already be prefixed with `server_name.` (by
 /// [`super::to_tool_def::mcp_to_tool_def`]).
 ///
 /// When two servers provide a tool with the same canonical name (after
@@ -61,25 +61,25 @@ mod tests {
     fn mcp_dedup_single_server() {
         let tools = vec![(
             "fs".to_string(),
-            vec![tool("fs__read", "read"), tool("fs__write", "write")],
+            vec![tool("fs.read", "read"), tool("fs.write", "write")],
         )];
         let result = dedup_tools(tools);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "fs__read");
-        assert_eq!(result[1].name, "fs__write");
+        assert_eq!(result[0].name, "fs.read");
+        assert_eq!(result[1].name, "fs.write");
     }
 
     #[test]
     fn mcp_dedup_multiple_servers_no_overlap() {
         let tools = vec![
-            ("fs".to_string(), vec![tool("fs__read", "read")]),
-            ("git".to_string(), vec![tool("git__status", "status")]),
+            ("fs".to_string(), vec![tool("fs.read", "read")]),
+            ("git".to_string(), vec![tool("git.status", "status")]),
         ];
         let result = dedup_tools(tools);
         assert_eq!(result.len(), 2);
         let names: Vec<&str> = result.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"fs__read"));
-        assert!(names.contains(&"git__status"));
+        assert!(names.contains(&"fs.read"));
+        assert!(names.contains(&"git.status"));
     }
 
     #[test]
@@ -87,11 +87,11 @@ mod tests {
         let tools = vec![
             (
                 "server_a".to_string(),
-                vec![tool("shared__search", "search v1")],
+                vec![tool("shared.search", "search v1")],
             ),
             (
                 "server_b".to_string(),
-                vec![tool("shared__search", "search v2")],
+                vec![tool("shared.search", "search v2")],
             ),
         ];
         let result = dedup_tools(tools);
@@ -102,12 +102,12 @@ mod tests {
     #[test]
     fn mcp_dedup_preserves_insertion_order() {
         let tools = vec![
-            ("a".to_string(), vec![tool("a__x", "x"), tool("a__y", "y")]),
-            ("b".to_string(), vec![tool("b__z", "z"), tool("b__w", "w")]),
+            ("a".to_string(), vec![tool("a.x", "x"), tool("a.y", "y")]),
+            ("b".to_string(), vec![tool("b.z", "z"), tool("b.w", "w")]),
         ];
         let result = dedup_tools(tools);
         let names: Vec<&str> = result.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["a__x", "a__y", "b__z", "b__w"]);
+        assert_eq!(names, vec!["a.x", "a.y", "b.z", "b.w"]);
     }
 
     #[test]
@@ -115,19 +115,19 @@ mod tests {
         let tools = vec![
             (
                 "a".to_string(),
-                vec![tool("shared__read", "v1"), tool("a__only", "only a")],
+                vec![tool("shared.read", "v1"), tool("a.only", "only a")],
             ),
             (
                 "b".to_string(),
-                vec![tool("shared__read", "v2"), tool("b__only", "only b")],
+                vec![tool("shared.read", "v2"), tool("b.only", "only b")],
             ),
         ];
         let result = dedup_tools(tools);
         assert_eq!(result.len(), 3);
-        // shared__read should be the v2 version (last writer wins), in original position
-        assert_eq!(result[0].name, "shared__read");
+        // shared.read should be the v2 version (last writer wins), in original position
+        assert_eq!(result[0].name, "shared.read");
         assert_eq!(result[0].description, "v2");
-        assert_eq!(result[1].name, "a__only");
-        assert_eq!(result[2].name, "b__only");
+        assert_eq!(result[1].name, "a.only");
+        assert_eq!(result[2].name, "b.only");
     }
 }

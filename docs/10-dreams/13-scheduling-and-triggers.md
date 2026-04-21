@@ -11,11 +11,14 @@
 
 > **Implementation**: Scaffold
 
+> **See also**: `../../tmp/refinements/09-phase-2-implications.md`,
+> `../00-architecture/01-naming-and-glossary.md`
+
 ---
 
 ## Trigger Conditions
 
-Dreams in Roko are triggered by two mechanisms. Both are idle-based — dreams fire when the agent has capacity, not when a clock runs down.
+Dreams in Roko are triggered by two mechanisms. Both are idle-based — dreams fire when the agent has capacity, not when a clock runs down. In the two-fabric model, Delta-speed consolidation is also Bus-aware: the runner can wake on `substrate.engram.stored` Pulses instead of relying on fixed polling.
 
 ### 1. Idle-Time Trigger (Primary)
 
@@ -57,14 +60,14 @@ pub fn schedule(&self) -> Option<Duration> {
 
 ### 2. Scheduled Trigger (Secondary)
 
-The scheduled trigger fires dreams at fixed intervals regardless of idle state. This ensures that busy agents with continuous task queues still consolidate periodically:
+The scheduled trigger is the fallback cadence. In the two-fabric model, Delta-speed consolidation is usually Pulse-triggered: the dream runner subscribes to `substrate.engram.stored` and wakes when enough durable Engrams have landed to justify a consolidation batch. Fixed intervals remain as a safety net for deployments where notifications are delayed or the Bus is temporarily unavailable:
 
 ```toml
 [dreams]
 scheduled_interval_hours = 4  # Dream every 4 hours regardless of idle state
 ```
 
-When the scheduled trigger fires during active task execution, the dream is queued and executed at the next available idle gap. Dreams never interrupt active tasks.
+When the scheduled trigger fires during active task execution, the dream is queued and executed at the next available idle gap. Dreams never interrupt active tasks, and Pulse-triggered Delta wakeups still respect the same idle boundary before they run.
 
 ### 3. Manual Trigger
 
@@ -76,6 +79,18 @@ roko dream report      # Show the latest dream report
 roko dream history     # List all dream reports
 ```
 
+### 4. Dream Outputs
+
+The trigger side is only half of the two-fabric story. When a dream cycle runs, it writes durable consolidation results and also emits live promotion Pulses:
+
+| Output | Fabric | Purpose |
+|--------|--------|---------|
+| Consolidated `Kind::Insight` / `Kind::Heuristic` Engrams | Substrate | Persist durable dream results with lineage so later cycles can query them completely |
+| `engram.promoted` Pulse | Bus | Notify generic subscribers that a durable Engram graduated (target-state) |
+| `neuro.insight.promoted` Pulse | Bus | Wake Neuro and Compose refresh paths without waiting for another full Substrate scan (target-state) |
+
+This means Dreams stay complete on the durable side and reactive on the live side. Delta-speed does not poll for its own downstream effects any more than it polls for its wakeup conditions.
+
 ---
 
 ## What Does NOT Trigger Dreams
@@ -84,15 +99,15 @@ These are mechanisms from the legacy Bardo architecture that are **removed** in 
 
 | Legacy Trigger | Legacy Description | Why Removed |
 |----------------|-------------------|-------------|
-| **Death clock proximity** | Dream frequency increased as stochastic death clocks approached zero | No death clocks in Roko. Dreams fire based on idle time and backlog, not mortality. |
-| **Vitality score thresholds** | Dreams triggered when vitality dropped below thresholds (Conservation, Declining, Terminal phases) | No vitality phases in Roko. Budget exhaustion and knowledge plateau are continuous metrics, not dream triggers. |
-| **Terminal phase frantic dreaming** | Every 67 ticks in Terminal phase | No Terminal phase dreaming. If the agent has a large unprocessed backlog, it dreams more frequently through the standard mechanism — not because of approaching termination. |
+| **Legacy death-clock proximity** | Legacy dream frequency increased as stochastic death clocks approached zero | Legacy death-clock logic is retired in Roko. Dreams fire based on idle time and backlog, not on end-of-life framing. |
+| **Legacy vitality score thresholds** | Legacy dreams triggered when vitality dropped below thresholds (Conservation, Declining, Terminal phases) | Legacy vitality phases are retired in Roko. Budget exhaustion and knowledge plateau are continuous metrics, not dream triggers. |
+| **Legacy terminal-phase frantic dreaming** | Legacy every-67-ticks cadence in Terminal phase | Legacy terminal-phase dreaming is retired. If the agent has a large unprocessed backlog, it dreams more frequently through the standard mechanism rather than through termination framing. |
 
 ---
 
 ## Dream Frequency Adaptation
 
-While dreams are not death-triggered, their frequency does adapt to the agent's operational state:
+While dreams are not driven by any end-of-life trigger, their frequency does adapt to the agent's operational state:
 
 | State | Dream Frequency | Mechanism |
 |-------|----------------|-----------|
@@ -141,7 +156,7 @@ Plan Executor                    Dream Scheduler
     |-- Task C starts ----------------->|
 ```
 
-The orchestrator calls `dream_runner.schedule()` after each task completion. If the scheduler returns `Some(Duration::ZERO)`, the dream fires immediately. If it returns `Some(d)` where `d > 0`, the orchestrator sets a timer. If it returns `None`, no dream is needed.
+The orchestrator calls `dream_runner.schedule()` after each task completion, but the scheduler is also fed by Bus notifications from `substrate.engram.stored`. If the scheduler returns `Some(Duration::ZERO)`, the dream fires immediately. If it returns `Some(d)` where `d > 0`, the orchestrator sets a timer. If it returns `None`, no dream is needed.
 
 ---
 
@@ -158,7 +173,7 @@ idle_threshold_mins = 15
 # Minimum unprocessed episodes required before a dream can fire
 min_episodes_for_dream = 5
 
-# Fixed-interval scheduled dreaming (0 = disabled)
+# Fallback scheduled dreaming (0 = disabled)
 scheduled_interval_hours = 4
 
 # Fraction of inference budget allocated to dreams
@@ -228,4 +243,6 @@ pub struct CircadianScheduler {
 |----------|-----------|
 | [01-three-phase-cycle.md](01-three-phase-cycle.md) | Dream cycle structure that scheduling triggers |
 | [12-sleep-time-compute.md](12-sleep-time-compute.md) | Compute budget that constrains dream frequency |
-| [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md) | Why dreams are idle-triggered, not death-triggered |
+| [00-vision-and-dream-as-death-reframe.md](00-vision-and-dream-as-death-reframe.md) | Historical-title note on why dreams are idle-triggered, not lifecycle-triggered |
+| [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) | Canonical Engram, Pulse, Bus, Topic, and TopicFilter definitions |
+| [tmp/refinements/09-phase-2-implications.md](../../tmp/refinements/09-phase-2-implications.md) | Phase-2 two-fabric implications for dreams, chain, coordination, and heartbeat |

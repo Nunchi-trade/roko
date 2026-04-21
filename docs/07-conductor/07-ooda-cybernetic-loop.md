@@ -381,7 +381,7 @@ pub struct ImplicitRule {
     /// Pattern name for logging/observability.
     pub name: &'static str,
     /// Fast check: does this pattern match the current signal stream?
-    pub matcher: Box<dyn Fn(&[Signal]) -> bool + Send + Sync>,
+    pub matcher: Box<dyn Fn(&[Engram]) -> bool + Send + Sync>,
     /// Pre-computed action to take when the pattern matches.
     pub action: ConductorDecision,
     /// Minimum confidence from bandit training before this rule activates.

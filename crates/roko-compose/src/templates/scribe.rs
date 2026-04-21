@@ -4,8 +4,10 @@
 //! into a single template. The Critic is treated as a scribe-variant (same
 //! section set, different role identity).
 
+use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, truncate};
 use crate::prompt::{CacheLayer, Placement, PromptSection, SectionPriority};
+use roko_core::AgentRole;
 
 /// A source file snippet for the scribe to document.
 #[derive(Clone, Debug)]
@@ -108,6 +110,10 @@ impl RolePromptTemplate for ScribeTemplate {
     type Input = ScribeInput;
 
     fn sections(&self, input: &Self::Input) -> Vec<PromptSection> {
+        let budget = match input.variant {
+            ScribeVariant::Critic => budget_for(AgentRole::Critic),
+            ScribeVariant::Initial | ScribeVariant::Revision => budget_for(AgentRole::Scribe),
+        };
         let mut sections = Vec::with_capacity(8);
 
         // 1. agents_instructions — System / Critical
@@ -120,20 +126,20 @@ impl RolePromptTemplate for ScribeTemplate {
 
         // 2. plan_spec — Session / Critical / hard_cap 50k
         sections.push(
-            PromptSection::new("plan_spec", truncate(&input.plan.content, 50_000))
+            PromptSection::new("plan_spec", truncate(&input.plan.content, budget.plan))
                 .with_priority(SectionPriority::Critical)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Start)
-                .with_hard_cap(50_000),
+                .with_hard_cap(budget.plan),
         );
 
         // 3. prd2_extract — Session / High / hard_cap 16k (scribe gets the largest prd2 budget)
         sections.push(
-            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, 16_000))
+            PromptSection::new("prd2_extract", truncate(&input.prd2_extract, budget.prd2))
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
-                .with_hard_cap(16_000),
+                .with_hard_cap(budget.prd2),
         );
 
         // 4. brief — Session / High

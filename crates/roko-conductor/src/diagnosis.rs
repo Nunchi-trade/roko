@@ -127,6 +127,10 @@ pub struct DiagnosisResult {
     pub matched_excerpt: String,
 }
 
+/// Backwards-compatible alias for the structured diagnosis payload described in
+/// the conductor docs.
+pub type Diagnosis = DiagnosisResult;
+
 // ---- DiagnosisEngine --------------------------------------------------------
 
 /// The diagnosis engine: holds a registry of error patterns and matches
@@ -296,42 +300,56 @@ fn built_in_patterns() -> Vec<ErrorPattern> {
             name: "rust-borrow-conflict",
             needle: "error[E0502]",
             category: ErrorCategory::BorrowCheckerError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::RestartAgent,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "rust-use-after-move",
             needle: "error[E0382]",
             category: ErrorCategory::BorrowCheckerError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::RestartAgent,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "rust-moved-value",
             needle: "error[E0505]",
             category: ErrorCategory::BorrowCheckerError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::RestartAgent,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "rust-lifetime-missing",
             needle: "error[E0106]",
             category: ErrorCategory::LifetimeError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::RestartAgent,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "rust-lifetime-mismatch",
             needle: "error[E0621]",
             category: ErrorCategory::LifetimeError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::RestartAgent,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "rust-unresolved-import",
             needle: "error[E0432]",
             category: ErrorCategory::ImportError,
-            suggested_action: SuggestedIntervention::RetryWithContext,
+            suggested_action: SuggestedIntervention::AutoFix,
+            case_insensitive: false,
+        },
+        ErrorPattern {
+            name: "rust-unresolved-path",
+            needle: "error[E0433]",
+            category: ErrorCategory::ImportError,
+            suggested_action: SuggestedIntervention::AutoFix,
+            case_insensitive: false,
+        },
+        ErrorPattern {
+            name: "rust-missing-field",
+            needle: "error[E0063]",
+            category: ErrorCategory::CompileError,
+            suggested_action: SuggestedIntervention::AutoFix,
             case_insensitive: false,
         },
         ErrorPattern {
@@ -346,14 +364,14 @@ fn built_in_patterns() -> Vec<ErrorPattern> {
             name: "rust-test-failure",
             needle: "test result: FAILED",
             category: ErrorCategory::TestFailure,
-            suggested_action: SuggestedIntervention::AutoFix,
+            suggested_action: SuggestedIntervention::RetryWithContext,
             case_insensitive: false,
         },
         ErrorPattern {
             name: "assertion-failed",
             needle: "assertion failed",
             category: ErrorCategory::TestFailure,
-            suggested_action: SuggestedIntervention::AutoFix,
+            suggested_action: SuggestedIntervention::RetryWithContext,
             case_insensitive: true,
         },
         // ---- Clippy ----
@@ -361,7 +379,14 @@ fn built_in_patterns() -> Vec<ErrorPattern> {
             name: "clippy-warning",
             needle: "warning: ",
             category: ErrorCategory::ClippyWarning,
-            suggested_action: SuggestedIntervention::AutoFix,
+            suggested_action: SuggestedIntervention::WarnAndContinue,
+            case_insensitive: false,
+        },
+        ErrorPattern {
+            name: "clippy-lint",
+            needle: "clippy::",
+            category: ErrorCategory::ClippyWarning,
+            suggested_action: SuggestedIntervention::WarnAndContinue,
             case_insensitive: false,
         },
         // ---- Git conflicts ----
@@ -737,7 +762,7 @@ mod tests {
 
     #[test]
     fn no_match_returns_empty() {
-        let results = engine().diagnose("everything is fine, all tests passed");
+        let _results = engine().diagnose("everything is fine, all tests passed");
         // May match some general patterns but let's check a totally clean string.
         let results2 = engine().diagnose("success 42");
         assert!(results2.is_empty());

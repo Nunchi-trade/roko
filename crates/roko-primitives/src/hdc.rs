@@ -1,7 +1,13 @@
 //! 10,240-bit hyperdimensional computing (HDC) vector.
 
 use core::convert::TryFrom;
+use std::collections::HashMap;
 use uuid::Uuid;
+
+/// Number of bits in one [`HdcVector`].
+pub const HDC_BITS: usize = 10_240;
+/// Number of serialized bytes in one [`HdcVector`].
+pub const HDC_BYTES: usize = 1_280;
 
 const fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -112,6 +118,12 @@ impl HdcVector {
         Self { bits }
     }
 
+    /// Alias for [`HdcVector::bind`] using the XOR terminology from TA docs.
+    #[must_use]
+    pub fn xor(&self, other: &Self) -> Self {
+        self.bind(other)
+    }
+
     /// Bundles a slice of vectors using majority vote (tie → 0).
     #[must_use]
     pub fn bundle(vectors: &[&Self]) -> Self {
@@ -217,6 +229,11 @@ impl HdcVector {
         1.0_f32 - (f32::from(differing_bits) / 10_240.0_f32)
     }
 
+    /// Alias for [`HdcVector::similarity`] using the TA docs' Hamming name.
+    pub fn hamming_similarity(&self, other: &Self) -> f32 {
+        self.similarity(other)
+    }
+
     /// Returns Hamming similarity against an rkyv-archived vector (zero-copy).
     ///
     /// On little-endian platforms, the archived representation of `[u64; 160]`
@@ -231,6 +248,257 @@ impl HdcVector {
         }
         let differing_bits = u16::try_from(differing_bits).unwrap_or(u16::MAX);
         1.0_f32 - (f32::from(differing_bits) / 10_240.0_f32)
+    }
+}
+
+/// Incremental majority-vote accumulator for HDC bundling.
+///
+/// Each added vector contributes `+1` for set bits and `-1` for unset bits.
+/// [`BundleAccumulator::finish`] thresholds the vote tally at zero to produce a
+/// bundled [`HdcVector`].
+#[derive(Debug, Clone)]
+pub struct BundleAccumulator {
+    votes: Vec<i32>,
+    /// Number of vectors added so far.
+    pub count: usize,
+}
+
+impl Default for BundleAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BundleAccumulator {
+    /// Create an empty accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            votes: vec![0; HDC_BITS],
+            count: 0,
+        }
+    }
+
+    /// Add one vector to the running vote tally.
+    pub fn add(&mut self, hv: &HdcVector) {
+        self.count = self.count.saturating_add(1);
+        update_votes_i32(&mut self.votes, hv, 1);
+    }
+
+    /// Add one vector with integer weight.
+    ///
+    /// Negative weights subtract the vector's contribution.
+    pub fn add_weighted(&mut self, hv: &HdcVector, weight: i32) {
+        self.count = self
+            .count
+            .saturating_add(usize::try_from(weight.unsigned_abs()).unwrap_or(usize::MAX));
+        update_votes_i32(&mut self.votes, hv, weight);
+    }
+
+    /// Apply multiplicative decay to the vote tally.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is negative.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn decay(&mut self, factor: f32) {
+        assert!(factor >= 0.0, "decay factor must be non-negative");
+        for vote in &mut self.votes {
+            *vote = (*vote as f32 * factor) as i32;
+        }
+    }
+
+    /// Collapse the vote tally into a bundled [`HdcVector`].
+    #[must_use]
+    pub fn finish(&self) -> HdcVector {
+        let mut bits = [0u64; 160];
+        for (word_index, slot) in bits.iter_mut().enumerate() {
+            let mut word = 0u64;
+            for bit_index in 0..64 {
+                let position = word_index * 64 + bit_index;
+                if self.votes[position] > 0 {
+                    word |= 1u64 << bit_index;
+                }
+            }
+            *slot = word;
+        }
+        HdcVector { bits }
+    }
+}
+
+/// Bundle accumulator with automatic temporal decay.
+///
+/// Each call to [`DecayingBundleAccumulator::add`] decays prior votes before
+/// applying the new vector, which biases the finished bundle toward more
+/// recent additions.
+#[derive(Debug, Clone)]
+pub struct DecayingBundleAccumulator {
+    votes: Vec<f32>,
+    /// Number of vectors added so far.
+    pub count: usize,
+    decay_factor: f32,
+}
+
+impl DecayingBundleAccumulator {
+    /// Create a new decaying accumulator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `decay_factor` is outside `(0.0, 1.0]`.
+    #[must_use]
+    pub fn new(decay_factor: f32) -> Self {
+        assert!(
+            decay_factor > 0.0 && decay_factor <= 1.0,
+            "decay_factor must be in (0.0, 1.0], got {decay_factor}"
+        );
+        Self {
+            votes: vec![0.0; HDC_BITS],
+            count: 0,
+            decay_factor,
+        }
+    }
+
+    /// Add one vector after decaying prior votes.
+    pub fn add(&mut self, hv: &HdcVector) {
+        self.count = self.count.saturating_add(1);
+        for vote in &mut self.votes {
+            *vote *= self.decay_factor;
+        }
+        update_votes_f32(&mut self.votes, hv, 1.0);
+    }
+
+    /// Return the configured decay factor.
+    #[must_use]
+    pub const fn decay_factor(&self) -> f32 {
+        self.decay_factor
+    }
+
+    /// Effective half-life in number of additions.
+    #[must_use]
+    pub fn half_life(&self) -> f32 {
+        -(2.0_f32.ln()) / self.decay_factor.ln()
+    }
+
+    /// Collapse the vote tally into a bundled [`HdcVector`].
+    #[must_use]
+    pub fn finish(&self) -> HdcVector {
+        let mut bits = [0u64; 160];
+        for (word_index, slot) in bits.iter_mut().enumerate() {
+            let mut word = 0u64;
+            for bit_index in 0..64 {
+                let position = word_index * 64 + bit_index;
+                if self.votes[position] > 0.0 {
+                    word |= 1u64 << bit_index;
+                }
+            }
+            *slot = word;
+        }
+        HdcVector { bits }
+    }
+}
+
+/// Named HDC codebook with brute-force nearest-neighbor lookup.
+#[derive(Debug, Clone, Default)]
+pub struct ItemMemory {
+    entries: HashMap<String, HdcVector>,
+}
+
+impl ItemMemory {
+    /// Create an empty codebook.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a named concept and its vector.
+    pub fn insert(&mut self, name: impl Into<String>, hv: HdcVector) -> Option<HdcVector> {
+        self.entries.insert(name.into(), hv)
+    }
+
+    /// Insert a deterministic seed-based vector for `name`.
+    pub fn insert_seeded(&mut self, name: &str) -> Option<HdcVector> {
+        self.insert(name, HdcVector::from_seed(name.as_bytes()))
+    }
+
+    /// Look up a concept by exact name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&HdcVector> {
+        self.entries.get(name)
+    }
+
+    /// Find the `k` nearest named concepts to `query`.
+    #[must_use]
+    pub fn top_k(&self, query: &HdcVector, k: usize) -> Vec<(&str, f32)> {
+        if k == 0 || self.entries.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scored = self
+            .entries
+            .iter()
+            .map(|(name, hv)| (name.as_str(), query.similarity(hv)))
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.cmp(right.0))
+        });
+        scored.truncate(k);
+        scored
+    }
+
+    /// Return the nearest named concept to `query`.
+    #[must_use]
+    pub fn nearest(&self, query: &HdcVector) -> Option<(&str, f32)> {
+        self.top_k(query, 1).into_iter().next()
+    }
+
+    /// Number of concepts stored in the codebook.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the codebook is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+fn update_votes_i32(votes: &mut [i32], hv: &HdcVector, weight: i32) {
+    if weight == 0 {
+        return;
+    }
+
+    for (word_index, word) in hv.bits.iter().enumerate() {
+        for bit_index in 0..64 {
+            let position = word_index * 64 + bit_index;
+            if (word >> bit_index) & 1 == 1 {
+                votes[position] += weight;
+            } else {
+                votes[position] -= weight;
+            }
+        }
+    }
+}
+
+fn update_votes_f32(votes: &mut [f32], hv: &HdcVector, weight: f32) {
+    if weight == 0.0 {
+        return;
+    }
+
+    for (word_index, word) in hv.bits.iter().enumerate() {
+        for bit_index in 0..64 {
+            let position = word_index * 64 + bit_index;
+            if (word >> bit_index) & 1 == 1 {
+                votes[position] += weight;
+            } else {
+                votes[position] -= weight;
+            }
+        }
     }
 }
 
@@ -256,7 +524,10 @@ pub fn text_fingerprint(text: &str) -> HdcVector {
 
 #[cfg(test)]
 mod tests {
-    use super::{HdcVector, fingerprint, text_fingerprint};
+    use super::{
+        BundleAccumulator, DecayingBundleAccumulator, HDC_BITS, HDC_BYTES, HdcVector, ItemMemory,
+        fingerprint, text_fingerprint,
+    };
 
     #[test]
     fn hdc_bind_involution() {
@@ -341,5 +612,107 @@ mod tests {
         let left = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
         let right = text_fingerprint("trigger_kind=webhook_dispatch\nagent_template=a");
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn hdc_constants_match_shape() {
+        assert_eq!(HDC_BITS, 10_240);
+        assert_eq!(HDC_BYTES, 1_280);
+    }
+
+    #[test]
+    fn bundle_accumulator_empty_finishes_to_zero() {
+        let accumulator = BundleAccumulator::new();
+        assert_eq!(accumulator.finish(), HdcVector::zeros());
+    }
+
+    #[test]
+    fn bundle_accumulator_single_vector_round_trips() {
+        let vector = HdcVector::from_seed(b"bundle-single");
+        let mut accumulator = BundleAccumulator::new();
+        accumulator.add(&vector);
+        assert_eq!(accumulator.finish(), vector);
+    }
+
+    #[test]
+    fn bundle_accumulator_weight_matches_repeated_adds() {
+        let a = HdcVector::from_seed(b"bundle-a");
+        let b = HdcVector::from_seed(b"bundle-b");
+
+        let mut repeated = BundleAccumulator::new();
+        repeated.add(&a);
+        repeated.add(&a);
+        repeated.add(&a);
+        repeated.add(&b);
+        repeated.add(&b);
+
+        let mut weighted = BundleAccumulator::new();
+        weighted.add_weighted(&a, 3);
+        weighted.add_weighted(&b, 2);
+
+        assert_eq!(weighted.finish(), repeated.finish());
+    }
+
+    #[test]
+    fn bundle_accumulator_decay_extremes_behave() {
+        let vector = HdcVector::from_seed(b"bundle-decay");
+        let mut accumulator = BundleAccumulator::new();
+        accumulator.add(&vector);
+        let original = accumulator.finish();
+
+        accumulator.decay(1.0);
+        assert_eq!(accumulator.finish(), original);
+
+        accumulator.decay(0.0);
+        assert_eq!(accumulator.finish(), HdcVector::zeros());
+    }
+
+    #[test]
+    fn item_memory_seeded_insert_matches_from_seed() {
+        let mut memory = ItemMemory::new();
+        memory.insert_seeded("rust");
+        assert_eq!(memory.get("rust"), Some(&HdcVector::from_seed(b"rust")));
+    }
+
+    #[test]
+    fn item_memory_nearest_returns_exact_match() {
+        let rust = HdcVector::from_seed(b"rust");
+        let mut memory = ItemMemory::new();
+        memory.insert("rust", rust);
+        memory.insert_seeded("python");
+
+        let nearest = memory.nearest(&rust).expect("nearest match");
+        assert_eq!(nearest.0, "rust");
+        assert!((nearest.1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn item_memory_top_k_limits_results() {
+        let mut memory = ItemMemory::new();
+        for name in ["rust", "python", "go", "zig"] {
+            memory.insert_seeded(name);
+        }
+
+        let results = memory.top_k(&HdcVector::from_seed(b"rust"), 3);
+        assert_eq!(results.len(), 3);
+        assert!(results.windows(2).all(|window| window[0].1 >= window[1].1));
+    }
+
+    #[test]
+    fn decaying_bundle_accumulator_tracks_recent_vectors() {
+        let a = HdcVector::from_seed(b"decay-a");
+        let b = HdcVector::from_seed(b"decay-b");
+        let mut accumulator = DecayingBundleAccumulator::new(0.0001);
+        accumulator.add(&a);
+        accumulator.add(&b);
+
+        let bundled = accumulator.finish();
+        assert!(bundled.similarity(&b) > bundled.similarity(&a));
+    }
+
+    #[test]
+    fn decaying_bundle_half_life_matches_docs() {
+        let accumulator = DecayingBundleAccumulator::new(0.95);
+        assert!((accumulator.half_life() - 13.5).abs() < 0.5);
     }
 }

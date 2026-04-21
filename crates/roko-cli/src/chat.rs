@@ -9,7 +9,12 @@ use serde_json::json;
 
 #[derive(Debug, Deserialize)]
 struct SendMessageResponse {
-    run_id: String,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    response: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,14 +66,29 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
             continue;
         }
 
-        let body: SendMessageResponse = response.json().await.context("decode chat response")?;
-        if body.run_id.trim().is_empty() {
-            bail!("agent message response did not include run_id");
-        }
-
         print!("{agent_id}> ");
         io::stdout().flush().context("flush agent prompt")?;
-        wait_for_run_completion(&client, serve_url, &body.run_id).await?;
+        let body: SendMessageResponse = response.json().await.context("decode chat response")?;
+        if let Some(run_id) = body
+            .run_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            wait_for_run_completion(&client, serve_url, run_id).await?;
+        } else if let Some(reply) = body.response.as_deref() {
+            println!("{reply}");
+            if let Some(reasoning) = body
+                .reasoning
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                println!();
+                println!("[reasoning]");
+                println!("{reasoning}");
+            }
+        } else {
+            bail!("agent message response did not include run_id or direct response");
+        }
         println!();
     }
 
@@ -127,5 +147,25 @@ mod tests {
             serde_json::from_value(json!({ "finished": true })).expect("decode run status");
         assert!(status.finished);
         assert!(status.status.is_empty());
+    }
+
+    #[test]
+    fn send_message_response_accepts_background_run_shape() {
+        let response: SendMessageResponse =
+            serde_json::from_value(json!({ "run_id": "run-123" })).expect("decode run response");
+        assert_eq!(response.run_id.as_deref(), Some("run-123"));
+        assert!(response.response.is_none());
+    }
+
+    #[test]
+    fn send_message_response_accepts_direct_sidecar_shape() {
+        let response: SendMessageResponse = serde_json::from_value(json!({
+            "response": "done",
+            "reasoning": "looked at the diff"
+        }))
+        .expect("decode direct response");
+        assert!(response.run_id.is_none());
+        assert_eq!(response.response.as_deref(), Some("done"));
+        assert_eq!(response.reasoning.as_deref(), Some("looked at the diff"));
     }
 }

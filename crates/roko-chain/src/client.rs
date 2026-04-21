@@ -1,7 +1,9 @@
 //! The [`ChainClient`] trait: read-only access to an EVM-compatible chain.
 //!
-//! Implementations may wrap a JSON-RPC provider (alloy), an in-process fork
-//! simulator (mirage-rs), or an in-memory mock ([`crate::MockChainClient`]).
+//! Shipped implementations in this crate are the optional Alloy-backed
+//! JSON-RPC client and the in-memory mock ([`crate::MockChainClient`]).
+//! Callers may adapt other substrates, including mirage-rs, behind the same
+//! trait, but that adapter does not live here today.
 
 use crate::types::{
     BlockNumber, CallResult, ChainHeader, ChainResult, LogEntry, Receipt, TxHash, TxRequest,
@@ -29,10 +31,12 @@ pub trait ChainClient: Send + Sync {
     /// Look up a transaction receipt by hash. `Ok(None)` if not yet mined.
     async fn get_receipt(&self, tx: &TxHash) -> ChainResult<Option<Receipt>>;
 
-    /// Fetch logs in `[from, to]` (inclusive) filtered by address + topic.
+    /// Fetch logs using the requested block bounds and address/topic filters.
     ///
     /// An empty `addresses` slice means "any address"; an empty `topics`
-    /// slice means "any topic[0]".
+    /// slice means "any topic[0]". Lightweight backends may return
+    /// [`ChainError::Unsupported`](crate::ChainError::Unsupported) until full
+    /// `eth_getLogs` semantics are needed.
     async fn get_logs(
         &self,
         from: BlockNumber,

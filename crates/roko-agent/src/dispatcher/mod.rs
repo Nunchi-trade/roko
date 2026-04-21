@@ -41,9 +41,14 @@ use crate::safety::SafetyLayer;
 
 pub mod alert;
 pub mod cancel;
+/// Dispatch-level dedup cache for idempotent agent dispatch (DEPLOY-09).
+pub mod dedup_cache;
 pub mod emit_metric;
+pub mod hook_chain;
 pub mod parallel;
+pub mod result_cache;
 pub mod timeout;
+pub mod tool_selector;
 pub mod truncate;
 pub mod validate;
 
@@ -82,6 +87,18 @@ pub struct ToolDispatcher {
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
     safety: Option<SafetyLayer>,
+    /// Optional tool result cache for deterministic tools (AGT-10).
+    tool_cache: Option<std::sync::Mutex<result_cache::ToolResultCache>>,
+    /// Optional sequential safety hook chain (TOOL-02).
+    ///
+    /// When present, each tool call passes through every hook in order
+    /// before the handler executes. Rejections short-circuit the chain.
+    hook_chain: Option<hook_chain::SafetyHookChain>,
+    /// Optional profile-based tool selector (TOOL-03).
+    ///
+    /// When set, tool calls are filtered against the selector before dispatch.
+    /// Tools not allowed by the selector are rejected with `PermissionDenied`.
+    tool_selector: Option<tool_selector::ToolSelector>,
 }
 
 impl ToolDispatcher {
@@ -94,6 +111,9 @@ impl ToolDispatcher {
             resolver,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
             safety: None,
+            tool_cache: None,
+            hook_chain: None,
+            tool_selector: None,
         }
     }
 
@@ -116,6 +136,58 @@ impl ToolDispatcher {
     #[must_use]
     pub const fn safety(&self) -> Option<&SafetyLayer> {
         self.safety.as_ref()
+    }
+
+    /// Attach a sequential safety hook chain (TOOL-02).
+    ///
+    /// When attached, every dispatched tool call passes through each hook
+    /// in order before the handler executes. The first rejection
+    /// short-circuits the chain and returns `ToolError::PermissionDenied`.
+    ///
+    /// Audit records from each hook decision are emitted as Engram signals.
+    #[must_use]
+    pub fn with_hook_chain(mut self, chain: hook_chain::SafetyHookChain) -> Self {
+        self.hook_chain = Some(chain);
+        self
+    }
+
+    /// Attach a profile-based tool selector (TOOL-03).
+    ///
+    /// When attached, every dispatched tool call is checked against the
+    /// selector. Tools not allowed are rejected with `PermissionDenied`.
+    #[must_use]
+    pub fn with_tool_selector(mut self, selector: tool_selector::ToolSelector) -> Self {
+        self.tool_selector = Some(selector);
+        self
+    }
+
+    /// Returns the attached tool selector, if any.
+    #[must_use]
+    pub const fn tool_selector(&self) -> Option<&tool_selector::ToolSelector> {
+        self.tool_selector.as_ref()
+    }
+
+    /// Returns the hook chain, if one is attached.
+    #[must_use]
+    pub const fn hook_chain(&self) -> Option<&hook_chain::SafetyHookChain> {
+        self.hook_chain.as_ref()
+    }
+
+    /// Enable cross-turn tool result caching for deterministic tools (AGT-10).
+    ///
+    /// When enabled, results from deterministic tools (Read, Glob, Grep) are
+    /// cached by argument hash. Write/Edit calls invalidate affected entries.
+    #[must_use]
+    pub fn with_tool_cache(mut self, cache: result_cache::ToolResultCache) -> Self {
+        self.tool_cache = Some(std::sync::Mutex::new(cache));
+        self
+    }
+
+    /// Returns tool cache statistics, if caching is enabled.
+    #[must_use]
+    pub fn cache_stats(&self) -> Option<(u64, u64, f64)> {
+        let cache = self.tool_cache.as_ref()?.lock().ok()?;
+        Some((cache.hits(), cache.misses(), cache.hit_rate()))
     }
 
     /// Configured cap on content bytes for a single `Ok` result.
@@ -168,6 +240,28 @@ impl ToolDispatcher {
             Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
             return ToolResult::err(err);
         };
+        // 2b. Profile-based tool selector check (TOOL-03).
+        if let Some(ref selector) = self.tool_selector {
+            if !selector.is_allowed(&call.name) {
+                let err = ToolError::PermissionDenied(format!(
+                    "tool `{}` not allowed by agent profile",
+                    call.name
+                ));
+                Self::emit_audit(
+                    ctx,
+                    &call,
+                    "tool_selector",
+                    "denied",
+                    &json!({
+                        "tool": call.name,
+                        "error": err.to_string(),
+                        "error_kind": tool_error_kind(&err),
+                    }),
+                );
+                Self::emit_terminal_audit(ctx, &call, &ToolResult::err(err.clone()), timeout_ms);
+                return ToolResult::err(err);
+            }
+        }
         // 3. Apply task-level tool filters before capability checks.
         if let Some(reason) = tool_filter_block_reason(
             &call.name,
@@ -262,6 +356,57 @@ impl ToolDispatcher {
                 );
                 Self::emit_terminal_audit(ctx, &call, &ToolResult::err(e.clone()), timeout_ms);
                 return ToolResult::err(e);
+            }
+        }
+        // 3c. Safety hook chain — if a chain is attached, run each hook
+        //     sequentially. The first rejection short-circuits. Audit records
+        //     are emitted for every hook decision.
+        if let Some(ref chain) = self.hook_chain {
+            match chain.evaluate(&def, call.arguments.clone(), ctx).await {
+                Ok((_params, audit_records)) => {
+                    for record in &audit_records {
+                        Self::emit_audit(
+                            ctx,
+                            &call,
+                            "hook_chain",
+                            match &record.decision {
+                                crate::safety::hooks::HookDecision::Allow => "allow",
+                                crate::safety::hooks::HookDecision::AllowModified(_) => "modified",
+                                crate::safety::hooks::HookDecision::Reject(_) => "rejected",
+                            },
+                            &json!({
+                                "hook": record.hook_name,
+                                "decision": format!("{:?}", record.decision),
+                            }),
+                        );
+                    }
+                }
+                Err((err, audit_records)) => {
+                    for record in &audit_records {
+                        Self::emit_audit(
+                            ctx,
+                            &call,
+                            "hook_chain",
+                            match &record.decision {
+                                crate::safety::hooks::HookDecision::Allow => "allow",
+                                crate::safety::hooks::HookDecision::AllowModified(_) => "modified",
+                                crate::safety::hooks::HookDecision::Reject(_) => "rejected",
+                            },
+                            &json!({
+                                "hook": record.hook_name,
+                                "decision": format!("{:?}", record.decision),
+                                "reason": record.reason.as_deref().unwrap_or(""),
+                            }),
+                        );
+                    }
+                    Self::emit_terminal_audit(
+                        ctx,
+                        &call,
+                        &ToolResult::err(err.clone()),
+                        timeout_ms,
+                    );
+                    return ToolResult::err(err);
+                }
             }
         }
         // 4. Resolve handler.
@@ -517,6 +662,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
             .field("safety", &self.safety.is_some())
+            .field("hook_chain", &self.hook_chain)
             .finish()
     }
 }

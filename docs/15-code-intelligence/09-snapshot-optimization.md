@@ -34,7 +34,7 @@ Session start
   Enumerate files (~50ms for 300 files)
      │
      ▼
-  Parse all files (~100ms for 177K lines)
+  Parse all files (~100ms for ~322K lines)
      │
      ▼
   Build graph (~1ms for 5K symbols)
