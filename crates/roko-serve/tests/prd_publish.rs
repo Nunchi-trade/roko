@@ -44,7 +44,10 @@ impl CliRuntime for RecordingRuntime {
         }
 
         self.notify.notify_waiters();
-        Ok(RunResult { success: true })
+        Ok(RunResult {
+            success: true,
+            output_text: None,
+        })
     }
 
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {

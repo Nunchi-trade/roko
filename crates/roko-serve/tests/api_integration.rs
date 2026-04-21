@@ -36,7 +36,10 @@ impl CliRuntime for TestRuntime {
         _workdir: &std::path::Path,
         _prompt: &str,
     ) -> anyhow::Result<RunResult> {
-        Ok(RunResult { success: true })
+        Ok(RunResult {
+            success: true,
+            output_text: Some("test runtime output".to_string()),
+        })
     }
 
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
@@ -207,6 +210,28 @@ async fn session_status_returns_workdir() {
     assert_eq!(status, StatusCode::OK);
     assert!(!body["workdir"].is_null());
     assert_eq!(body["daemon_running"], false);
+}
+
+#[tokio::test]
+async fn run_status_returns_terminal_output_text() {
+    let (_dir, app) = test_app();
+    let (status, body) = post_json(&app, "/api/run", serde_json::json!({ "prompt": "hello" })).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let run_id = body["id"].as_str().expect("run id");
+
+    for _ in 0..20 {
+        let (status, body) = get_json(&app, &format!("/api/run/{run_id}/status")).await;
+        assert_eq!(status, StatusCode::OK);
+        if body["finished"] == true {
+            assert_eq!(body["status"], "completed");
+            assert_eq!(body["output_text"], "test runtime output");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!("timed out waiting for run completion");
 }
 
 // ---------------------------------------------------------------------------

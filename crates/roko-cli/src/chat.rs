@@ -23,6 +23,10 @@ struct RunStatusResponse {
     finished: bool,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    output_text: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// Run the chat REPL against a roko-serve instance.
@@ -126,9 +130,21 @@ async fn wait_for_run_completion(
             .context("decode run status response")?;
         if status.finished {
             if status.status.eq_ignore_ascii_case("failed") {
-                println!("[failed]");
+                if let Some(error) = status.error.as_deref().filter(|value| !value.trim().is_empty())
+                {
+                    println!("[failed] {error}");
+                } else {
+                    println!("[failed]");
+                }
             } else {
-                println!("[completed]");
+                match status
+                    .output_text
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    Some(output) => println!("{output}"),
+                    None => println!("[completed]"),
+                }
             }
             break;
         }
@@ -147,6 +163,8 @@ mod tests {
             serde_json::from_value(json!({ "finished": true })).expect("decode run status");
         assert!(status.finished);
         assert!(status.status.is_empty());
+        assert!(status.output_text.is_none());
+        assert!(status.error.is_none());
     }
 
     #[test]

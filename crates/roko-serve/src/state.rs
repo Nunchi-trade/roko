@@ -32,6 +32,7 @@ use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
 use crate::event_bus::EventBus;
 use crate::runtime::CliRuntime;
+use crate::runtime::RunResult;
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
@@ -187,6 +188,8 @@ pub struct RunHandle {
     pub prompt: String,
     /// Current execution status.
     pub status: OperationStatus,
+    /// Final result payload once the run has completed.
+    pub result: Option<RunResult>,
     /// Background task driving the run.
     pub handle: JoinHandle<()>,
 }

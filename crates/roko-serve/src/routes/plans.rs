@@ -180,7 +180,7 @@ async fn execute_plan(
                 plan_id: plan_id.clone(),
             });
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success }) => success,
+                Ok(RunResult { success, .. }) => success,
                 Err(err) => {
                     bus.publish(ServerEvent::Error {
                         message: format!("plan execution failed for {plan_id}: {err}"),
@@ -262,7 +262,7 @@ async fn generate_plan(
         let op_id = op_id.clone();
         async move {
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success }) => success,
+                Ok(RunResult { success, .. }) => success,
                 Err(err) => {
                     bus.publish(ServerEvent::Error {
                         message: format!("plan generation failed for {slug_for_task}: {err}"),
@@ -483,6 +483,7 @@ mod tests {
             self.notify.notify_waiters();
             Ok(RunResult {
                 success: self.success,
+                output_text: None,
             })
         }
 

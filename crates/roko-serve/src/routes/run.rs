@@ -14,6 +14,7 @@ use validator::Validate;
 use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
+use crate::runtime::RunResult;
 use crate::state::{AppState, OperationStatus, RunHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -68,10 +69,14 @@ async fn run_status(
         .get(&id)
         .ok_or_else(|| ApiError::not_found("run not found"))?;
 
+    let (status, error) = operation_status_parts(&handle.status);
     let result = Json(json!({
         "id": handle.id,
         "prompt": handle.prompt,
-        "status": format!("{:?}", handle.status),
+        "status": status,
+        "success": handle.result.as_ref().map(|result| result.success),
+        "output_text": handle.result.as_ref().and_then(|result| result.output_text.clone()),
+        "error": error,
         "finished": handle.handle.is_finished(),
     }));
     drop(runs);
@@ -89,6 +94,7 @@ pub(crate) async fn spawn_background_run(
     let workdir = workdir.unwrap_or_else(|| state.workdir.clone());
     let bus = state.event_bus.clone();
     let runtime = state.runtime.clone();
+    let state_for_task = Arc::clone(state);
 
     let handle = tokio::spawn({
         let run_id = run_id.clone();
@@ -101,16 +107,20 @@ pub(crate) async fn spawn_background_run(
                 .await
             {
                 Ok(result) => {
+                    record_run_result(&state_for_task, &run_id, result.clone()).await;
                     publish_run_completed(
                         &bus,
                         &run_id,
                         agent_target.as_deref(),
                         result.success,
-                        None,
+                        result.output_text.as_ref().map(|output| json!({
+                            "output_text": output,
+                        })),
                     );
                 }
                 Err(e) => {
                     let error_message = format!("run failed: {e}");
+                    record_run_failure(&state_for_task, &run_id, &error_message).await;
                     bus.publish(ServerEvent::Error {
                         message: error_message.clone(),
                     });
@@ -130,6 +140,7 @@ pub(crate) async fn spawn_background_run(
         id: run_id.clone(),
         prompt,
         status: OperationStatus::Running,
+        result: None,
         handle,
     };
 
@@ -139,6 +150,35 @@ pub(crate) async fn spawn_background_run(
         .await
         .insert(run_id.clone(), run_handle);
     run_id
+}
+
+async fn record_run_result(state: &AppState, run_id: &str, result: RunResult) {
+    if let Some(handle) = state.active_runs.write().await.get_mut(run_id) {
+        handle.status = OperationStatus::Completed {
+            result: result.output_text.clone(),
+        };
+        handle.result = Some(result);
+    }
+}
+
+async fn record_run_failure(state: &AppState, run_id: &str, error_message: &str) {
+    if let Some(handle) = state.active_runs.write().await.get_mut(run_id) {
+        handle.status = OperationStatus::Failed {
+            error: error_message.to_string(),
+        };
+        handle.result = Some(RunResult {
+            success: false,
+            output_text: None,
+        });
+    }
+}
+
+fn operation_status_parts(status: &OperationStatus) -> (&'static str, Option<&str>) {
+    match status {
+        OperationStatus::Running => ("running", None),
+        OperationStatus::Completed { .. } => ("completed", None),
+        OperationStatus::Failed { error } => ("failed", Some(error.as_str())),
+    }
 }
 
 fn publish_run_started(

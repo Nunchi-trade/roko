@@ -591,7 +591,10 @@ mod tests {
                 .lock()
                 .expect("lock runs")
                 .push((workdir.to_path_buf(), prompt.to_string()));
-            Ok(RunResult { success: true })
+            Ok(RunResult {
+                success: true,
+                output_text: None,
+            })
         }
 
         fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {

@@ -18673,7 +18673,10 @@ mod tests {
             _workdir: &std::path::Path,
             _prompt: &str,
         ) -> anyhow::Result<roko_serve::runtime::RunResult> {
-            Ok(roko_serve::runtime::RunResult { success: true })
+            Ok(roko_serve::runtime::RunResult {
+                success: true,
+                output_text: None,
+            })
         }
 
         fn session_status(&self, workdir: PathBuf) -> roko_serve::runtime::SessionStatusInfo {

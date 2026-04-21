@@ -9,7 +9,7 @@ use roko_serve::runtime::{CliRuntime, DashboardInfo, RepoInfo, RunResult, Sessio
 
 use crate::config::{Config, RepoRegistry};
 use crate::run::run_once;
-use crate::status::SessionStatus;
+use crate::status::collect_session_status;
 use crate::tui::DashboardScaffold;
 
 /// Concrete runtime that delegates to the real CLI functions.
@@ -38,11 +38,12 @@ impl CliRuntime for RokoCliRuntime {
         let report = run_once(workdir, &self.config, prompt).await?;
         Ok(RunResult {
             success: report.overall_success(),
+            output_text: report.output_text,
         })
     }
 
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
-        let ss = SessionStatus::offline(workdir);
+        let ss = collect_session_status(&workdir);
         SessionStatusInfo {
             session_id: ss.session_id,
             workdir: ss.workdir,

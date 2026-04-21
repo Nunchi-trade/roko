@@ -49,6 +49,8 @@ pub struct RunReport {
     pub gate_verdicts: Vec<(String, bool)>,
     /// How many signals are now in the substrate.
     pub total_signals: usize,
+    /// Final agent output text, if it was a text payload.
+    pub output_text: Option<String>,
 }
 
 impl RunReport {
@@ -216,6 +218,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         agent_success: agent_result.success,
         gate_verdicts: verdict_summary,
         total_signals,
+        output_text: final_output_sig.body.as_text().ok().map(ToOwned::to_owned),
     })
 }
 
@@ -1004,6 +1007,7 @@ mod tests {
             agent_success: true,
             gate_verdicts: vec![("g1".into(), true), ("g2".into(), true)],
             total_signals: 5,
+            output_text: Some("done".into()),
         };
         assert!(r.overall_success());
 

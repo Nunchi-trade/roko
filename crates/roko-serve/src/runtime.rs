@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 pub struct RunResult {
     /// Whether the overall run succeeded (all gates passed).
     pub success: bool,
+    /// Final text output produced by the run, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_text: Option<String>,
 }
 
 /// Summary info for a configured repository, used to give agents
@@ -64,7 +67,10 @@ impl CliRuntime for NoOpRuntime {
         _workdir: &std::path::Path,
         _prompt: &str,
     ) -> anyhow::Result<RunResult> {
-        Ok(RunResult { success: true })
+        Ok(RunResult {
+            success: true,
+            output_text: None,
+        })
     }
 
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {

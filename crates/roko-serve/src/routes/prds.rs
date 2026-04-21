@@ -851,6 +851,7 @@ mod tests {
             self.notify.notify_waiters();
             Ok(RunResult {
                 success: self.success,
+                output_text: None,
             })
         }
 
