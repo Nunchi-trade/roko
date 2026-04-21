@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::Request;
+use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use roko_core::config::ServeAuthConfig;
@@ -13,22 +15,62 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::ApiError;
 
-/// Require a matching `X-Api-Key` header for the request to continue.
+enum ApiCredential<'a> {
+    Missing,
+    XApiKey(&'a str),
+    InvalidXApiKey,
+    Bearer(&'a str),
+    InvalidAuthorization,
+}
+
+fn api_credential(headers: &HeaderMap) -> ApiCredential<'_> {
+    if let Some(value) = headers.get("X-Api-Key") {
+        return match value.to_str() {
+            Ok(value) => ApiCredential::XApiKey(value),
+            Err(_) => ApiCredential::InvalidXApiKey,
+        };
+    }
+
+    if let Some(value) = headers.get(AUTHORIZATION) {
+        return match value.to_str() {
+            Ok(value) => match value.strip_prefix("Bearer ") {
+                Some(token) => ApiCredential::Bearer(token),
+                None => ApiCredential::InvalidAuthorization,
+            },
+            Err(_) => ApiCredential::InvalidAuthorization,
+        };
+    }
+
+    ApiCredential::Missing
+}
+
+/// Require a matching API credential for the request to continue.
+///
+/// `X-Api-Key` retains precedence when both auth headers are present so
+/// credential resolution stays deterministic for existing clients.
 pub async fn require_api_key(
     State(auth): State<ServeAuthConfig>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let supplied = req
-        .headers()
-        .get("X-Api-Key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-
-    if supplied != auth.api_key {
-        return Err(ApiError::unauthorized(
-            "invalid or missing X-Api-Key header",
-        ));
+    match api_credential(req.headers()) {
+        ApiCredential::XApiKey(supplied) if supplied == auth.api_key => {}
+        ApiCredential::Bearer(supplied) if supplied == auth.api_key => {}
+        ApiCredential::XApiKey(_) | ApiCredential::InvalidXApiKey => {
+            return Err(ApiError::unauthorized(
+                "invalid or missing X-Api-Key header",
+            ));
+        }
+        ApiCredential::Bearer(_) | ApiCredential::InvalidAuthorization => {
+            return Err(ApiError::unauthorized(
+                "invalid or missing Authorization bearer token",
+            ));
+        }
+        ApiCredential::Missing => {
+            return Err(ApiError::unauthorized(
+                "missing X-Api-Key header or Authorization bearer token",
+            ));
+        }
     }
 
     Ok(next.run(req).await)
@@ -113,8 +155,11 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::http::StatusCode;
+    use axum::http::header::AUTHORIZATION;
     use axum::http::header::CONTENT_TYPE;
     use axum::routing::get;
+    use roko_core::config::ServeAuthConfig;
+    use serde_json::Value;
     use tower::ServiceExt;
 
     /// Build a test router that echoes the provided body, with the scrub
@@ -138,6 +183,115 @@ mod tests {
                 scrubber,
                 scrub_secrets,
             ))
+    }
+
+    fn auth_test_app(auth: ServeAuthConfig) -> Router {
+        Router::new()
+            .route("/test", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(axum::middleware::from_fn_with_state(auth, require_api_key))
+    }
+
+    async fn auth_response(
+        app: Router,
+        build: impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder,
+    ) -> Response {
+        let req = build(Request::builder().uri("/test"))
+            .body(Body::empty())
+            .expect("invariant: auth test request builds");
+        app.oneshot(req)
+            .await
+            .expect("invariant: auth test router responds")
+    }
+
+    async fn auth_error_body(response: Response) -> Value {
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("invariant: auth test response body buffers");
+        serde_json::from_slice(&body).expect("invariant: auth error payload is valid json")
+    }
+
+    #[tokio::test]
+    async fn require_api_key_accepts_matching_x_api_key_header() {
+        let app = auth_test_app(ServeAuthConfig {
+            enabled: true,
+            api_key: "secret-key-123".into(),
+        });
+
+        let response = auth_response(app, |req| req.header("X-Api-Key", "secret-key-123")).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn require_api_key_accepts_matching_bearer_token() {
+        let app = auth_test_app(ServeAuthConfig {
+            enabled: true,
+            api_key: "secret-key-123".into(),
+        });
+
+        let response = auth_response(app, |req| {
+            req.header(AUTHORIZATION, "Bearer secret-key-123")
+        })
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn require_api_key_rejects_missing_credentials() {
+        let app = auth_test_app(ServeAuthConfig {
+            enabled: true,
+            api_key: "secret-key-123".into(),
+        });
+
+        let response = auth_response(app, |req| req).await;
+        let status = response.status();
+        let body = auth_error_body(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "unauthorized");
+        assert_eq!(
+            body["message"],
+            "missing X-Api-Key header or Authorization bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_api_key_rejects_invalid_bearer_token() {
+        let app = auth_test_app(ServeAuthConfig {
+            enabled: true,
+            api_key: "secret-key-123".into(),
+        });
+
+        let response =
+            auth_response(app, |req| req.header(AUTHORIZATION, "Bearer wrong-key")).await;
+        let status = response.status();
+        let body = auth_error_body(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            body["message"],
+            "invalid or missing Authorization bearer token"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_api_key_prefers_x_api_key_when_both_headers_are_present() {
+        let app = auth_test_app(ServeAuthConfig {
+            enabled: true,
+            api_key: "secret-key-123".into(),
+        });
+
+        let response = auth_response(app, |req| {
+            req.header("X-Api-Key", "wrong-key")
+                .header(AUTHORIZATION, "Bearer secret-key-123")
+        })
+        .await;
+        let status = response.status();
+        let body = auth_error_body(response).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["message"], "invalid or missing X-Api-Key header");
     }
 
     #[tokio::test]
