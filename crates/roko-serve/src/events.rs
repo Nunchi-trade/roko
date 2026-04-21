@@ -179,6 +179,12 @@ pub enum ServerEvent {
     /// A cloud deployment was torn down.
     DeploymentTornDown { id: String },
 
+    /// A marketplace job was created.
+    JobCreated { job: Value },
+
+    /// A marketplace job was updated.
+    JobUpdated { job: Value },
+
     /// A worker started executing a task.
     WorkerTaskStarted {
         deployment_id: String,

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use futures::StreamExt;
 use http_body_util::BodyExt;
 use roko_core::config::ServeAuthConfig;
 use roko_core::config::schema::RokoConfig;
@@ -16,6 +17,9 @@ use roko_serve::routes::build_router;
 use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
 use roko_serve::state::AppState;
 use tempfile::tempdir;
+use tokio::net::TcpListener;
+use tokio::time::{Duration, timeout};
+use tokio_tungstenite::connect_async;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +59,12 @@ impl CliRuntime for TestRuntime {
 
 /// Build a test router (no auth) backed by a temp directory.
 fn test_app() -> (tempfile::TempDir, axum::Router) {
+    let (dir, _state, router) = test_app_state();
+    (dir, router)
+}
+
+/// Build a test router and expose its shared app state.
+fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
     let dir = tempdir().expect("tempdir");
     let config = RokoConfig::default();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
@@ -66,7 +76,7 @@ fn test_app() -> (tempfile::TempDir, axum::Router) {
     ));
     let auth = ServeAuthConfig::default();
     let router = build_router(Arc::clone(&state), &[], auth);
-    (dir, router)
+    (dir, state, router)
 }
 
 /// Build a test router with API-key auth enabled.
@@ -130,6 +140,50 @@ async fn post_json(
     (status, json)
 }
 
+/// Send a PATCH request with a JSON body and return `(StatusCode, serde_json::Value)`.
+async fn patch_json(
+    router: &axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+        .expect("build request");
+    let resp = router.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+async fn next_ws_text(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
+    loop {
+        let message = timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("wait for websocket message");
+        match message {
+            Some(Ok(message)) if message.is_text() => {
+                return message.into_text().expect("text frame").to_string();
+            }
+            Some(Ok(_)) => {}
+            Some(Err(error)) => panic!("websocket error: {error}"),
+            None => panic!("websocket closed"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Health & status
 // ---------------------------------------------------------------------------
@@ -166,6 +220,132 @@ async fn list_plans_empty() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, serde_json::json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jobs_create_list_get_and_update_round_trip() {
+    let (dir, app) = test_app();
+    let (status, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "title": "Implement marketplace filters",
+            "description": "Add durable jobs API support.",
+            "job_type": "coding_task",
+            "posted_by": "operator",
+            "priority": "high",
+            "tags": ["marketplace", "serve"],
+            "reward": "bounty-7",
+            "plan_id": "plan-42"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id");
+    assert_eq!(created["title"], "Implement marketplace filters");
+    assert_eq!(created["status"], "open");
+    assert_eq!(created["job_type"], "coding_task");
+
+    let persisted = dir
+        .path()
+        .join(".roko")
+        .join("jobs")
+        .join(format!("{job_id}.json"));
+    assert!(persisted.exists());
+
+    let (status, listed) = get_json(&app, "/api/jobs").await;
+    assert_eq!(status, StatusCode::OK);
+    let jobs = listed.as_array().expect("jobs array");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["id"], job_id);
+    assert_eq!(jobs[0]["posted_by"], "operator");
+
+    let (status, fetched) = get_json(&app, &format!("/api/jobs/{job_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["plan_id"], "plan-42");
+    assert_eq!(fetched["reward"], "bounty-7");
+
+    let (status, updated) = patch_json(
+        &app,
+        &format!("/api/jobs/{job_id}"),
+        serde_json::json!({
+            "status": "in_progress",
+            "assigned_to": "implementer-1"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["status"], "in_progress");
+    assert_eq!(updated["assigned_to"], "implementer-1");
+
+    let (status, fetched_again) = get_json(&app, &format!("/api/jobs/{job_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched_again["status"], "in_progress");
+    assert_eq!(fetched_again["assigned_to"], "implementer-1");
+}
+
+#[tokio::test]
+async fn jobs_events_are_visible_over_websocket() {
+    let (_dir, _state, app) = test_app_state();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ws server");
+    let addr = listener.local_addr().expect("listener addr");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app)
+            .await
+            .expect("serve test app");
+    });
+
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("connect websocket");
+
+    let (_status, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "id": "job-ws-1",
+            "title": "Broadcast me",
+            "description": "Verify websocket visibility."
+        }),
+    )
+    .await;
+    assert_eq!(created["id"], "job-ws-1");
+
+    let create_event: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse create event");
+    assert_eq!(create_event["type"], "job_created");
+    assert_eq!(create_event["job"]["id"], "job-ws-1");
+    assert_eq!(create_event["job"]["status"], "open");
+
+    let (_status, _updated) = patch_json(
+        &app,
+        "/api/jobs/job-ws-1",
+        serde_json::json!({
+            "status": "assigned",
+            "assigned_to": "agent-7"
+        }),
+    )
+    .await;
+
+    let update_event: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse update event");
+    assert_eq!(update_event["type"], "job_updated");
+    assert_eq!(update_event["job"]["id"], "job-ws-1");
+    assert_eq!(update_event["job"]["status"], "assigned");
+    assert_eq!(update_event["job"]["assigned_to"], "agent-7");
+
+    let _ = socket.close(None).await;
+    server.abort();
 }
 
 // ---------------------------------------------------------------------------

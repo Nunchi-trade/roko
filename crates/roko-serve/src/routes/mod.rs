@@ -10,6 +10,7 @@ pub(crate) mod config;
 mod deployments;
 mod diagnosis;
 mod integrations;
+mod jobs;
 mod learning;
 mod middleware;
 mod plans;
@@ -47,6 +48,7 @@ pub fn build_router(
     let api = Router::new()
         .merge(crate::openapi::routes())
         .merge(status::routes())
+        .merge(jobs::routes())
         .merge(plans::routes())
         .merge(prds::routes())
         .merge(run::routes())
