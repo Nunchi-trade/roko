@@ -5449,10 +5449,27 @@ impl PlanRunner {
     }
 
     fn emit_execution_event(&self, plan_id: &str, event: crate::serve::events::ExecutionEvent) {
+        // Also publish as a dashboard event log entry.
+        let (event_type, task_id, message) = execution_event_summary(&event);
+        self.publish_dashboard_event(roko_core::DashboardEvent::EventLogEntry {
+            timestamp_ms: now_unix_ms_u64(),
+            event_type,
+            plan_id: plan_id.to_string(),
+            task_id,
+            message,
+        });
         self.emit_server_event(crate::serve::events::ServerEvent::Execution {
             plan_id: plan_id.to_string(),
             event,
         });
+    }
+
+    /// Publish a dashboard event directly to the state hub, bypassing the
+    /// `ServerEvent` conversion path.
+    fn publish_dashboard_event(&self, event: roko_core::DashboardEvent) {
+        if let Some(hub) = &self.state_hub_sender {
+            hub.publish(event);
+        }
     }
 
     fn approval_command_display(&self, selected_model: &str) -> String {
@@ -5573,6 +5590,10 @@ impl PlanRunner {
             .join("gate-thresholds.json");
         if let Err(e) = self.adaptive_thresholds.save(&thresholds_path) {
             tracing::error!("[orchestrate] save adaptive thresholds: {e}");
+        } else if let Ok(json) = std::fs::read_to_string(&thresholds_path) {
+            self.publish_dashboard_event(roko_core::DashboardEvent::GateThresholdsUpdated {
+                snapshot_json: json,
+            });
         }
         if let Err(e) = self.gate_ratchet.save(&gate_ratchet_path(&self.workdir)) {
             tracing::error!("[orchestrate] save gate ratchet: {e}");
@@ -5580,6 +5601,17 @@ impl PlanRunner {
         // Persist cascade router observations.
         if let Err(e) = self.learning.save_cascade_router() {
             tracing::error!("[orchestrate] save cascade router: {e}");
+        } else {
+            let router_path = self
+                .workdir
+                .join(".roko")
+                .join("learn")
+                .join("cascade-router.json");
+            if let Ok(json) = std::fs::read_to_string(&router_path) {
+                self.publish_dashboard_event(roko_core::DashboardEvent::CascadeRouterUpdated {
+                    snapshot_json: json,
+                });
+            }
         }
         let mut mcp_state = self.mcp_state.lock().await;
         mcp_state.clients.clear();
@@ -10140,7 +10172,7 @@ impl PlanRunner {
         self.agent_calls += 1;
 
         if let Ok(text) = result.output.body.as_text() {
-            save_task_output(&self.workdir, task_id, text);
+            save_task_output(&self.workdir, task_id, text, self.state_hub_sender.as_ref());
         }
 
         let task_def = self
@@ -10419,6 +10451,11 @@ impl PlanRunner {
             },
         );
 
+        // Mark the agent as completed so the TUI can reflect inactivity.
+        self.publish_dashboard_event(roko_core::DashboardEvent::AgentCompleted {
+            agent_id: result.output.id.to_string(),
+        });
+
         // Appraise task outcome for affect modulation.
         let _ = self.daimon.appraise(AffectEvent::TaskOutcome {
             task_id: task_id.to_string(),
@@ -10444,8 +10481,20 @@ impl PlanRunner {
     /// Record a completed run and check the returned `LearningUpdate` for
     /// regression alerts.
     async fn record_and_check_learning(&mut self, input: CompletedRunInput, plan_id: &str) {
+        let agent_id = input.episode.agent_id.clone();
+        let role = input.episode.agent_template.clone();
+        let episode_id = input.episode.episode_id.clone();
+        let passed = input.episode.success;
         match self.learning.record_completed_run(input).await {
-            Ok(update) => self.handle_learning_update(&update, plan_id),
+            Ok(update) => {
+                self.publish_dashboard_event(roko_core::DashboardEvent::EpisodeRecorded {
+                    agent_id,
+                    role,
+                    episode_id,
+                    passed,
+                });
+                self.handle_learning_update(&update, plan_id);
+            }
             Err(e) => tracing::error!("[orchestrate] episode log failed: {e}"),
         }
     }
@@ -10468,6 +10517,25 @@ impl PlanRunner {
         }
         if let Some(ref skill_id) = update.extracted_skill_id {
             tracing::info!(plan_id = %plan_id, skill = %skill_id, "skill extracted from agent output");
+        }
+
+        // Refresh experiment winners from the store and push to dashboard.
+        let learn_dir = self.workdir.join(".roko").join("learn");
+        if let Ok(winners) = read_experiment_winners_for_dashboard(&learn_dir) {
+            if !winners.is_empty() {
+                self.publish_dashboard_event(roko_core::DashboardEvent::ExperimentWinnersUpdated {
+                    winners,
+                });
+            }
+        }
+
+        // Refresh c-factor trend buckets and push to dashboard.
+        if let Ok(buckets) = read_cfactor_trend_for_dashboard(&learn_dir) {
+            if !buckets.is_empty() {
+                self.publish_dashboard_event(roko_core::DashboardEvent::CFactorTrendUpdated {
+                    buckets,
+                });
+            }
         }
     }
 
@@ -16175,6 +16243,27 @@ impl PlanRunner {
         if let Err(e) = self.learning.append_efficiency_event(&event).await {
             tracing::warn!("failed to persist efficiency event: {e}");
         }
+
+        // Publish token/cost metrics to the dashboard hub so the TUI can
+        // update agent stats without polling.
+        self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            metric: "input_tokens".to_string(),
+            value: event.input_tokens as f64,
+        });
+        self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            metric: "output_tokens".to_string(),
+            value: event.output_tokens as f64,
+        });
+        self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            metric: "cost_usd".to_string(),
+            value: event.cost_usd,
+        });
     }
 
     /// Construct and persist a failure efficiency event for a task that did not succeed.
@@ -17044,6 +17133,70 @@ fn now_unix_ms_i64() -> i64 {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0_i64, |d| d.as_millis() as i64)
     }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn now_unix_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Extract a summary triple `(event_type, task_id, message)` from an execution event.
+fn execution_event_summary(
+    event: &crate::serve::events::ExecutionEvent,
+) -> (String, String, String) {
+    use crate::serve::events::ExecutionEvent;
+    match event {
+        ExecutionEvent::TaskStarted { task_id, phase } => (
+            "task_started".to_string(),
+            task_id.clone(),
+            format!("Task started: phase={phase}"),
+        ),
+        ExecutionEvent::TaskCompleted { task_id, outcome } => (
+            "task_completed".to_string(),
+            task_id.clone(),
+            format!("Task completed: outcome={outcome}"),
+        ),
+        ExecutionEvent::TaskPhaseChanged {
+            task_id,
+            old_phase,
+            new_phase,
+        } => (
+            "phase_changed".to_string(),
+            task_id.clone(),
+            format!("Phase changed: {old_phase} -> {new_phase}"),
+        ),
+        ExecutionEvent::GateResult {
+            task_id,
+            gate,
+            passed,
+            ..
+        } => (
+            "gate_result".to_string(),
+            task_id.clone(),
+            format!("Gate {gate}: {}", if *passed { "passed" } else { "failed" }),
+        ),
+        _ => ("execution".to_string(), String::new(), String::new()),
+    }
+}
+
+/// Read experiment winners from the learn directory for dashboard push.
+fn read_experiment_winners_for_dashboard(
+    learn_dir: &Path,
+) -> Result<Vec<roko_core::ExperimentWinnerSummary>> {
+    let snap =
+        roko_core::DashboardSnapshot::load_from_workdir(learn_dir.parent().unwrap_or(learn_dir))
+            .map_err(|e| anyhow!("load snapshot for experiment winners: {e}"))?;
+    Ok(snap.experiment_winners)
+}
+
+/// Read c-factor trend from the learn directory for dashboard push.
+fn read_cfactor_trend_for_dashboard(learn_dir: &Path) -> Result<Vec<roko_core::CFactorBucket>> {
+    let snap =
+        roko_core::DashboardSnapshot::load_from_workdir(learn_dir.parent().unwrap_or(learn_dir))
+            .map_err(|e| anyhow!("load snapshot for cfactor trend: {e}"))?;
+    Ok(snap.cfactor_trend)
 }
 
 fn diagnosis_severity(
@@ -18420,12 +18573,25 @@ fn with_task_failure_context(
 }
 
 /// Persist a task's output summary so downstream tasks can reference it.
-fn save_task_output(workdir: &Path, task_id: &str, output: &str) {
+fn save_task_output(
+    workdir: &Path,
+    task_id: &str,
+    output: &str,
+    hub: Option<&roko_core::StateHubSender>,
+) {
     let output_dir = workdir.join(".roko").join("task-outputs");
     let _ = std::fs::create_dir_all(&output_dir);
     let output_path = output_dir.join(format!("{task_id}.txt"));
     let summary = truncate_output(output);
-    let _ = std::fs::write(output_path, summary);
+    let _ = std::fs::write(output_path, &summary);
+
+    if let Some(hub) = hub {
+        let lines: Vec<String> = summary.lines().map(String::from).collect();
+        hub.publish(roko_core::DashboardEvent::TaskOutputAppended {
+            task_id: task_id.to_string(),
+            lines,
+        });
+    }
 }
 
 fn attestation_signing_key_from_env() -> Option<SigningKey> {

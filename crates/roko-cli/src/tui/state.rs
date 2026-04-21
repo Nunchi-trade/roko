@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -15,7 +15,11 @@ use ratatui::text::Line;
 use roko_core::OperatingFrequency;
 
 use super::atmosphere::Atmosphere;
-use super::dashboard::{DashboardData, GateResultSummary, PlanTaskListSnapshot, Theme};
+use super::dashboard::{
+    AgentSummary, AlertSummary, CascadeRouterState, DashboardData, EfficiencySummary,
+    ExperimentSummary, GateResultSummary, GateResultsPageData, PlanExecutionSnapshot,
+    PlanTaskListSnapshot, SignalSummary, TaskSummary, Theme,
+};
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
 use super::modals::ModalState;
 use super::segment::{CachedRender, output_byte_len, render_cached_output};
@@ -942,6 +946,54 @@ pub struct TuiState {
     /// Active agent pane display group (cycles through available groups).
     pub agent_pane_group: usize,
 
+    // -- push-path state (from DashboardSnapshot) --
+    /// Orchestrator event log entries.
+    pub event_log: Vec<roko_core::DashboardEventLogEntry>,
+    /// Cascade router state as opaque JSON.
+    pub cascade_router_json: String,
+    /// Adaptive gate thresholds as opaque JSON.
+    pub gate_thresholds_json: String,
+
+    // -- view data (migrated from DashboardData) --
+    /// Workspace root path for config file loading.
+    pub workdir: PathBuf,
+    /// Efficiency summary stats.
+    pub efficiency_summary: EfficiencySummary,
+    /// Raw efficiency events for per-agent metrics and aggregation.
+    pub efficiency_events: Vec<roko_learn::efficiency::AgentEfficiencyEvent>,
+    /// Efficiency trend buckets for charts.
+    pub efficiency_trend: Vec<roko_learn::aggregate::EfficiencyBucket>,
+    /// C-factor trend buckets for charts.
+    pub cfactor_trend_buckets: Vec<roko_learn::aggregate::CFactorBucket>,
+    /// Cascade router state for model routing display.
+    pub cascade_router: CascadeRouterState,
+    /// Recent signals for the logs tab.
+    pub recent_signals: Vec<SignalSummary>,
+    /// Current plan execution snapshot for the plan detail view.
+    pub current_plan_execution: Option<PlanExecutionSnapshot>,
+    /// Conductor alerts for the inspect tab.
+    pub conductor_alerts: Vec<AlertSummary>,
+    /// C-factor snapshot for the inspect tab.
+    pub cfactor: Option<roko_learn::cfactor::CFactor>,
+    /// Gate results page data (gate_rows, failure_rows, threshold_rows).
+    pub gate_results_page: GateResultsPageData,
+    /// Experiment summaries for the config tab.
+    pub experiments: Vec<ExperimentSummary>,
+    /// Per-task output tails.
+    pub task_output_tails: HashMap<String, Vec<String>>,
+    /// Git diff content.
+    pub git_diff: String,
+    /// Plan summaries (legacy format from DashboardData).
+    pub plan_summaries: Vec<PlanSummary>,
+    /// Agent summaries (legacy format from DashboardData).
+    pub agent_summaries: Vec<AgentSummary>,
+    /// Active task summaries (legacy format from DashboardData).
+    pub active_task_summaries: Vec<TaskSummary>,
+    /// Gate result summaries (legacy format from DashboardData).
+    pub gate_result_summaries: Vec<GateResultSummary>,
+    /// Cached episodes for the logs tab.
+    pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
+
     cpu_pct_smoothed: SmoothedValue,
     token_rate_smoothed: SmoothedValue,
     cost_rate_smoothed: SmoothedValue,
@@ -1045,6 +1097,30 @@ impl Default for TuiState {
             config_edit_key: None,
 
             agent_pane_group: 0,
+
+            event_log: Vec::new(),
+            cascade_router_json: String::new(),
+            gate_thresholds_json: String::new(),
+
+            workdir: PathBuf::new(),
+            efficiency_summary: EfficiencySummary::default(),
+            efficiency_events: Vec::new(),
+            efficiency_trend: Vec::new(),
+            cfactor_trend_buckets: Vec::new(),
+            cascade_router: CascadeRouterState::default(),
+            recent_signals: Vec::new(),
+            current_plan_execution: None,
+            conductor_alerts: Vec::new(),
+            cfactor: None,
+            gate_results_page: GateResultsPageData::default(),
+            experiments: Vec::new(),
+            task_output_tails: HashMap::new(),
+            git_diff: String::new(),
+            plan_summaries: Vec::new(),
+            agent_summaries: Vec::new(),
+            active_task_summaries: Vec::new(),
+            gate_result_summaries: Vec::new(),
+            episodes_cache: Vec::new(),
 
             cpu_pct_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
             token_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
@@ -1450,6 +1526,27 @@ impl TuiState {
                 || compute_token_rate(&data.efficiency_events),
                 compute_windowed_token_rate,
             );
+
+        // -- view data (migrated from DashboardData) --
+        self.workdir = data.root().to_path_buf();
+        self.efficiency_summary = data.efficiency.clone();
+        self.efficiency_events = data.efficiency_events.clone();
+        self.efficiency_trend = data.efficiency_trend.clone();
+        self.cfactor_trend_buckets = data.cfactor_trend.clone();
+        self.cascade_router = data.cascade_router.clone();
+        self.recent_signals = data.recent_signals.clone();
+        self.current_plan_execution = data.current_plan_execution.clone();
+        self.conductor_alerts = data.conductor_alerts.clone();
+        self.cfactor = data.cfactor.clone();
+        self.gate_results_page = data.gate_results_page.clone();
+        self.experiments = data.experiments.clone();
+        self.task_output_tails = data.task_outputs().clone();
+        self.git_diff = data.git_diff.clone();
+        self.plan_summaries = data.plans.clone();
+        self.agent_summaries = data.agents.clone();
+        self.active_task_summaries = data.active_tasks.clone();
+        self.gate_result_summaries = data.gate_results.clone();
+        self.episodes_cache = data.episodes().to_vec();
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.
@@ -1633,6 +1730,58 @@ impl TuiState {
                     .filter(|limit| *limit > 0)
                     .unwrap_or_else(|| model_context_limit(&model));
 
+                // Prefer snapshot values for model/tokens/cost/task/plan, fall
+                // back to previously cached values.
+                let snap_model = if agent.model.is_empty() {
+                    model
+                } else {
+                    agent.model.clone()
+                };
+                let snap_input_tokens = if agent.input_tokens > 0 {
+                    agent.input_tokens
+                } else {
+                    prev_row.map(|row| row.input_tokens).unwrap_or(0)
+                };
+                let snap_output_tokens = if agent.output_tokens > 0 {
+                    agent.output_tokens
+                } else {
+                    prev_row
+                        .map(|row| row.output_tokens)
+                        .unwrap_or(0)
+                        .max(agent.output_bytes as u64)
+                };
+                let snap_current_plan = if agent.current_plan.is_empty() {
+                    prev_row
+                        .map(|row| row.current_plan.clone())
+                        .unwrap_or_default()
+                } else {
+                    agent.current_plan.clone()
+                };
+                let snap_current_task = if agent.current_task.is_empty() {
+                    prev_row
+                        .map(|row| row.current_task.clone())
+                        .unwrap_or_default()
+                } else {
+                    agent.current_task.clone()
+                };
+
+                // Merge task output lines from the snapshot ring buffer.
+                let mut output_lines = prev_row
+                    .map(|row| row.output_lines.clone())
+                    .unwrap_or_default();
+                if let Some(task_lines) = snap
+                    .task_outputs
+                    .get(&snap_current_task)
+                    .filter(|lines| !lines.is_empty())
+                {
+                    output_lines.extend(task_lines.iter().cloned());
+                }
+                let last_output_line = output_lines
+                    .last()
+                    .cloned()
+                    .or_else(|| prev_row.map(|row| row.last_output_line.clone()))
+                    .unwrap_or_default();
+
                 AgentRow {
                     id: agent.agent_id.clone(),
                     active: agent.active,
@@ -1642,25 +1791,14 @@ impl TuiState {
                         AgentStatus::Idle
                     },
                     role: agent.role.clone(),
-                    model,
-                    input_tokens: prev_row.map(|row| row.input_tokens).unwrap_or(0),
-                    output_tokens: prev_row
-                        .map(|row| row.output_tokens)
-                        .unwrap_or(0)
-                        .max(agent.output_bytes as u64),
+                    model: snap_model,
+                    input_tokens: snap_input_tokens,
+                    output_tokens: snap_output_tokens,
                     context_limit,
-                    current_plan: prev_row
-                        .map(|row| row.current_plan.clone())
-                        .unwrap_or_default(),
-                    current_task: prev_row
-                        .map(|row| row.current_task.clone())
-                        .unwrap_or_default(),
-                    output_lines: prev_row
-                        .map(|row| row.output_lines.clone())
-                        .unwrap_or_default(),
-                    last_output_line: prev_row
-                        .map(|row| row.last_output_line.clone())
-                        .unwrap_or_default(),
+                    current_plan: snap_current_plan,
+                    current_task: snap_current_task,
+                    output_lines,
+                    last_output_line,
                 }
             })
             .collect();
@@ -1717,6 +1855,21 @@ impl TuiState {
             self.agent_topology = snap.agent_topology.clone();
         }
 
+        // --- Event log from snapshot ---
+        self.event_log = snap.event_log.iter().cloned().collect();
+
+        // --- Learning data (opaque JSON for now) ---
+        self.cascade_router_json = snap.cascade_router_json.clone();
+        self.gate_thresholds_json = snap.gate_thresholds_json.clone();
+
+        // --- Token/cost aggregation across agents ---
+        self.cumulative_input_tokens = self.agents.iter().map(|a| a.input_tokens).sum();
+        self.cumulative_output_tokens = self.agents.iter().map(|a| a.output_tokens).sum();
+        self.token_total = self.cumulative_input_tokens + self.cumulative_output_tokens;
+        if snap.stats.cost_usd_total > 0.0 {
+            self.cost_dollars = snap.stats.cost_usd_total;
+        }
+
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
 
@@ -1756,6 +1909,12 @@ impl TuiState {
         self.selected_agent_tab = self.selected_agent_tab.min(6);
         self.selected_wave_idx =
             clamp_selected_wave_idx(self.selected_wave_idx, self.execution_waves.len());
+
+        // Task outputs from push path
+        for (task_id, lines) in &snap.task_outputs {
+            self.task_output_tails
+                .insert(task_id.clone(), lines.iter().cloned().collect());
+        }
     }
 
     /// Return cached, styled agent output lines for the selected agent pane.
@@ -3649,6 +3808,12 @@ tier = "focused"
                         role: "implementer".into(),
                         active: true,
                         output_bytes: 128,
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                        current_task: String::new(),
+                        current_plan: String::new(),
                     },
                 ),
                 (
@@ -3658,6 +3823,12 @@ tier = "focused"
                         role: "reviewer".into(),
                         active: false,
                         output_bytes: 0,
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                        current_task: String::new(),
+                        current_plan: String::new(),
                     },
                 ),
             ]
@@ -3697,6 +3868,10 @@ tier = "focused"
                     ts_millis: 4_000,
                 },
             ],
+            event_log: Default::default(),
+            task_outputs: Default::default(),
+            cascade_router_json: String::new(),
+            gate_thresholds_json: String::new(),
             stats: Default::default(),
         };
 
@@ -3949,6 +4124,12 @@ tier = "focused"
                 role: "implementer".into(),
                 active: true,
                 output_bytes: 42,
+                model: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                current_task: String::new(),
+                current_plan: String::new(),
             },
         );
         snap.gates.push(roko_core::dashboard_snapshot::GateVerdict {
@@ -4116,6 +4297,12 @@ tier = "focused"
                 role: "reviewer".into(),
                 active: true,
                 output_bytes: 3,
+                model: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                current_task: String::new(),
+                current_plan: String::new(),
             },
         );
         snap.agents.insert(
@@ -4125,6 +4312,12 @@ tier = "focused"
                 role: "implementer".into(),
                 active: false,
                 output_bytes: 0,
+                model: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+                current_task: String::new(),
+                current_plan: String::new(),
             },
         );
         snap.stats.plans_active = 1;

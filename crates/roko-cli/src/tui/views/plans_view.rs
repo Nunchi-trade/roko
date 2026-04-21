@@ -37,7 +37,7 @@ const BLOCKS: &[char] = &[
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -45,8 +45,8 @@ pub(crate) fn render(
     let panels =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
-    render_left_panel(frame, panels[0], data, tui_state, view_state, theme);
-    render_right_panel(frame, panels[1], data, tui_state, view_state, theme);
+    render_left_panel(frame, panels[0], _data, tui_state, view_state, theme);
+    render_right_panel(frame, panels[1], _data, tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ pub(crate) fn render(
 fn render_left_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -73,14 +73,14 @@ fn render_left_panel(
         FocusZone::PlanTree | FocusZone::TaskProgress
     );
 
-    render_pipeline_header(frame, sections[0], data, tui_state, focused, theme);
+    render_pipeline_header(frame, sections[0], _data, tui_state, focused, theme);
     if let Some(plan) = tui_state.plans.get(tui_state.selected_plan_idx) {
-        let plan_summary = data
-            .plans
+        let plan_summary = tui_state
+            .plan_summaries
             .iter()
             .find(|summary| summary.id == plan.id)
-            .or_else(|| data.plans.get(tui_state.selected_plan_idx));
-        let plan_execution = data
+            .or_else(|| tui_state.plan_summaries.get(tui_state.selected_plan_idx));
+        let plan_execution = tui_state
             .current_plan_execution
             .as_ref()
             .filter(|exec| exec.plan_id == plan.id);
@@ -90,12 +90,12 @@ fn render_left_panel(
             plan,
             plan_summary,
             plan_execution,
-            data,
+            tui_state,
             view_state,
             theme,
         );
     }
-    render_wave_tree(frame, sections[2], data, tui_state, view_state, theme);
+    render_wave_tree(frame, sections[2], _data, tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,13 +105,17 @@ fn render_left_panel(
 fn render_pipeline_header(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
-    let total_plans = data.plans.len();
-    let completed = data.plans.iter().filter(|p| p.completed).count();
+    let total_plans = tui_state.plan_summaries.len();
+    let completed = tui_state
+        .plan_summaries
+        .iter()
+        .filter(|p| p.completed)
+        .count();
     let active_count = tui_state
         .plans
         .iter()
@@ -176,14 +180,18 @@ fn render_pipeline_header(
 fn render_wave_tree(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let focused = matches!(tui_state.focus, FocusZone::PlanTree);
-    let total_plans = data.plans.len();
-    let completed = data.plans.iter().filter(|p| p.completed).count();
+    let total_plans = tui_state.plan_summaries.len();
+    let completed = tui_state
+        .plan_summaries
+        .iter()
+        .filter(|p| p.completed)
+        .count();
     let failed = tui_state
         .plans
         .iter()
@@ -233,7 +241,7 @@ fn render_wave_tree(
         return;
     }
 
-    if data.plans.is_empty() {
+    if tui_state.plan_summaries.is_empty() {
         let v_pad = inner.height / 2;
         let mut empty_lines: Vec<Line<'_>> = Vec::new();
         for _ in 0..v_pad.saturating_sub(1) {
@@ -281,17 +289,17 @@ fn render_wave_tree(
 
     // Build wave groups from the ordered plan list
     // Each group of plans gets a synthetic wave header if we have > 3 plans
-    let use_waves = data.plans.len() > 3;
+    let use_waves = tui_state.plan_summaries.len() > 3;
 
     if use_waves {
         // Group into waves of ~3-5 plans each
         let wave_size = 4usize;
-        let num_waves = (data.plans.len() + wave_size - 1) / wave_size;
+        let num_waves = (tui_state.plan_summaries.len() + wave_size - 1) / wave_size;
 
         for wave_idx in 0..num_waves {
             let start = wave_idx * wave_size;
-            let end = (start + wave_size).min(data.plans.len());
-            let wave_plans = &data.plans[start..end];
+            let end = (start + wave_size).min(tui_state.plan_summaries.len());
+            let wave_plans = &tui_state.plan_summaries[start..end];
 
             let wave_done = wave_plans.iter().filter(|p| p.completed).count();
             let wave_total = wave_plans.len();
@@ -402,7 +410,7 @@ fn render_wave_tree(
 
             // Plans within wave
             for i in start..end {
-                if let Some(plan) = data.plans.get(i) {
+                if let Some(plan) = tui_state.plan_summaries.get(i) {
                     render_plan_line(
                         &mut lines,
                         plan,
@@ -418,7 +426,7 @@ fn render_wave_tree(
         }
     } else {
         // Flat list
-        for (i, plan) in data.plans.iter().enumerate() {
+        for (i, plan) in tui_state.plan_summaries.iter().enumerate() {
             render_plan_line(
                 &mut lines,
                 plan,
@@ -701,7 +709,7 @@ fn render_plan_line(
 fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -729,12 +737,12 @@ fn render_right_panel(
     }
 
     if let Some(plan) = tui_state.plans.get(tui_state.selected_plan_idx) {
-        let plan_summary = data
-            .plans
+        let plan_summary = tui_state
+            .plan_summaries
             .iter()
             .find(|summary| summary.id == plan.id)
-            .or_else(|| data.plans.get(tui_state.selected_plan_idx));
-        let plan_execution = data
+            .or_else(|| tui_state.plan_summaries.get(tui_state.selected_plan_idx));
+        let plan_execution = tui_state
             .current_plan_execution
             .as_ref()
             .filter(|exec| exec.plan_id == plan.id);
@@ -744,7 +752,7 @@ fn render_right_panel(
             plan,
             plan_summary,
             plan_execution,
-            data,
+            tui_state,
             view_state,
             theme,
         );
@@ -777,7 +785,7 @@ fn render_plan_summary(
     plan: &PlanEntry,
     plan_summary: Option<&crate::plan::PlanSummary>,
     plan_execution: Option<&crate::tui::dashboard::PlanExecutionSnapshot>,
-    data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
@@ -818,8 +826,8 @@ fn render_plan_summary(
     } else {
         ("\u{25cb}", theme.muted, raw_status)
     };
-    let plan_gates: Vec<_> = data
-        .gate_results
+    let plan_gates: Vec<_> = tui_state
+        .gate_result_summaries
         .iter()
         .filter(|gate| gate.plan_id == plan.id)
         .collect();

@@ -26,18 +26,18 @@ use crate::tui::state::{LogEntry, LogEntryLevel, TuiState};
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let entries = build_unified_log(data);
-    render_with_entries(frame, area, &entries, data, tui_state, view_state, theme);
+    let entries = build_unified_log(tui_state);
+    render_with_entries(frame, area, &entries, _data, tui_state, view_state, theme);
 }
 
 /// Count visible log entries after applying the active level filter.
-pub(crate) fn filtered_entry_count(data: &DashboardData, tui_state: &TuiState) -> usize {
-    build_unified_log(data)
+pub(crate) fn filtered_entry_count(_data: &DashboardData, tui_state: &TuiState) -> usize {
+    build_unified_log(tui_state)
         .into_iter()
         .filter(|entry| tui_state.log_level_visible(entry.level.filter_level()))
         .count()
@@ -48,7 +48,7 @@ fn render_with_entries(
     frame: &mut Frame<'_>,
     area: Rect,
     entries: &[LogEntry],
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -60,11 +60,11 @@ fn render_with_entries(
         .collect();
 
     // Status bar with source counts
-    let signal_count = data.recent_signals.len();
-    let episode_count = data.episodes().len();
-    let eff_count = data.efficiency_events.len();
-    let gate_count = data.gate_results.len();
-    let event_count = data.event_log.len();
+    let signal_count = tui_state.recent_signals.len();
+    let episode_count = tui_state.episodes_cache.len();
+    let eff_count = tui_state.efficiency_events.len();
+    let gate_count = tui_state.gate_result_summaries.len();
+    let event_count = tui_state.event_log.len();
 
     let tail_label = if view_state.auto_tail {
         "TAIL"
@@ -196,13 +196,13 @@ fn render_with_entries(
 // ---------------------------------------------------------------------------
 
 /// Build a unified, time-sorted log from all available data sources.
-fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
+fn build_unified_log(tui_state: &TuiState) -> Vec<LogEntry> {
     // Use a BTreeMap keyed by (timestamp_ms, sequence) for stable ordering
     let mut entries: BTreeMap<(i64, usize), LogEntry> = BTreeMap::new();
     let mut seq = 0usize;
 
     // 1. Signals
-    for signal in &data.recent_signals {
+    for signal in &tui_state.recent_signals {
         let level = if signal.kind.contains("error") || signal.kind.contains("fail") {
             LogEntryLevel::Error
         } else if signal.kind.contains("warn") {
@@ -239,7 +239,7 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     }
 
     // 2. Episodes
-    for episode in data.episodes() {
+    for episode in &tui_state.episodes_cache {
         let ts_ms = episode.timestamp.timestamp_millis();
         let level = if !episode.success {
             LogEntryLevel::Error
@@ -290,7 +290,7 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     }
 
     // 3. Efficiency events
-    for event in &data.efficiency_events {
+    for event in &tui_state.efficiency_events {
         let ts_ms = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
             .map(|dt| dt.timestamp_millis())
             .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
@@ -335,7 +335,7 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     }
 
     // 4. Gate failures (highlighted)
-    for failure in &data.gate_results_page.failure_rows {
+    for failure in &tui_state.gate_results_page.failure_rows {
         let ts = format_timestamp_ms(failure.created_at_ms);
         entries.insert(
             (failure.created_at_ms, seq),
@@ -354,7 +354,7 @@ fn build_unified_log(data: &DashboardData) -> Vec<LogEntry> {
     }
 
     // 5. Orchestrator event log
-    for event in &data.event_log {
+    for event in &tui_state.event_log {
         let ts_ms = event.timestamp_ms as i64;
         let ts = format_timestamp_ms(ts_ms);
         let level = match event.event_type.as_str() {

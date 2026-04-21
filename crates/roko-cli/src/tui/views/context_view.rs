@@ -59,16 +59,16 @@ struct ModelCostAggregate {
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let ctx_data = build_context_data(data);
+    let ctx_data = build_context_data(tui_state);
     render_with_context_data(
         frame,
         area,
-        data,
+        tui_state,
         &ctx_data,
         view_state,
         theme,
@@ -80,7 +80,7 @@ pub(crate) fn render(
 fn render_with_context_data(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     ctx_data: &ContextViewData,
     view_state: &ViewState,
     theme: &Theme,
@@ -93,12 +93,12 @@ fn render_with_context_data(
     ])
     .split(area);
 
-    render_health_summary(frame, sections[0], data, focused, theme);
+    render_health_summary(frame, sections[0], tui_state, focused, theme);
 
     let mid_panels = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(sections[1]);
-    render_token_burn_by_role(frame, mid_panels[0], data, view_state, focused, theme);
-    render_cost_by_model(frame, mid_panels[1], data, focused, theme);
+    render_token_burn_by_role(frame, mid_panels[0], tui_state, view_state, focused, theme);
+    render_cost_by_model(frame, mid_panels[1], tui_state, focused, theme);
 
     let bottom_panels =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -106,20 +106,20 @@ fn render_with_context_data(
     render_cascade_router(
         frame,
         bottom_panels[0],
-        data,
+        tui_state,
         ctx_data,
         view_state,
         focused,
         theme,
     );
-    render_alerts_and_health(frame, bottom_panels[1], data, focused, theme);
+    render_alerts_and_health(frame, bottom_panels[1], tui_state, focused, theme);
 }
 
 /// Top section: system health summary with C-Factor and key metrics.
 fn render_health_summary(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
@@ -148,7 +148,7 @@ fn render_health_summary(
     .split(inner);
 
     // Left column: token/cost summary
-    let eff = &data.efficiency;
+    let eff = &tui_state.efficiency_summary;
     let token_lines = vec![
         Line::from(vec![
             Span::styled("input tokens:  ", theme.muted()),
@@ -197,11 +197,11 @@ fn render_health_summary(
         ]),
         Line::from(vec![
             Span::styled("agents:        ", theme.muted()),
-            Span::raw(data.agents.len().to_string()),
+            Span::raw(tui_state.agent_summaries.len().to_string()),
         ]),
         Line::from(vec![
             Span::styled("plans:         ", theme.muted()),
-            Span::raw(data.plans.len().to_string()),
+            Span::raw(tui_state.plan_summaries.len().to_string()),
         ]),
     ];
     frame.render_widget(
@@ -210,7 +210,7 @@ fn render_health_summary(
     );
 
     // Right column: C-Factor or cascade router summary
-    let right_lines = if let Some(ref cf) = data.cfactor {
+    let right_lines = if let Some(ref cf) = tui_state.cfactor {
         let cf_style = if cf.overall >= 0.7 {
             theme.success()
         } else if cf.overall >= 0.4 {
@@ -237,8 +237,8 @@ fn render_health_summary(
             ]),
         ]
     } else {
-        let router_models = data.cascade_router.model_slugs.len();
-        let total_trials: u64 = data
+        let router_models = tui_state.cascade_router.model_slugs.len();
+        let total_trials: u64 = tui_state
             .cascade_router
             .confidence_stats
             .values()
@@ -259,7 +259,7 @@ fn render_health_summary(
             ]),
             Line::from(vec![
                 Span::styled("gate types:    ", theme.muted()),
-                Span::raw(data.gate_results_page.gate_rows.len().to_string()),
+                Span::raw(tui_state.gate_results_page.gate_rows.len().to_string()),
             ]),
         ]
     };
@@ -273,7 +273,7 @@ fn render_health_summary(
 fn render_token_burn_by_role(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     _view_state: &ViewState,
     focused: bool,
     theme: &Theme,
@@ -295,7 +295,7 @@ fn render_token_burn_by_role(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if data.efficiency_events.is_empty() {
+    if tui_state.efficiency_events.is_empty() {
         let empty = Paragraph::new("no efficiency data -- run agents to see token burn")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
@@ -305,7 +305,7 @@ fn render_token_burn_by_role(
 
     // Aggregate by role
     let mut role_agg: BTreeMap<String, RoleAggregate> = BTreeMap::new();
-    for event in &data.efficiency_events {
+    for event in &tui_state.efficiency_events {
         let role = if event.role.is_empty() {
             "unknown"
         } else {
@@ -388,7 +388,7 @@ fn render_token_burn_by_role(
 fn render_cost_by_model(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
@@ -409,7 +409,7 @@ fn render_cost_by_model(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if data.efficiency_events.is_empty() {
+    if tui_state.efficiency_events.is_empty() {
         let empty = Paragraph::new("no cost data")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
@@ -419,7 +419,7 @@ fn render_cost_by_model(
 
     // Aggregate by model
     let mut model_agg: BTreeMap<String, ModelCostAggregate> = BTreeMap::new();
-    for event in &data.efficiency_events {
+    for event in &tui_state.efficiency_events {
         let model = if event.model.is_empty() {
             "unknown"
         } else {
@@ -486,7 +486,7 @@ fn render_cost_by_model(
 fn render_cascade_router(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     ctx_data: &ContextViewData,
     _view_state: &ViewState,
     focused: bool,
@@ -512,18 +512,18 @@ fn render_cascade_router(
     let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(inner);
 
     // Router model stats
-    if data.cascade_router.model_slugs.is_empty() && ctx_data.token_burns.is_empty() {
+    if tui_state.cascade_router.model_slugs.is_empty() && ctx_data.token_burns.is_empty() {
         let empty = Paragraph::new("no routing decisions -- run agents to populate")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, sections[0]);
     } else {
-        let rows: Vec<Row<'_>> = data
+        let rows: Vec<Row<'_>> = tui_state
             .cascade_router
             .model_slugs
             .iter()
             .map(|slug| {
-                let stats = data.cascade_router.confidence_stats.get(slug);
+                let stats = tui_state.cascade_router.confidence_stats.get(slug);
                 let trials = stats.map_or(0, |s| s.trials);
                 let successes = stats.map_or(0, |s| s.successes);
                 let rate = if trials > 0 {
@@ -590,13 +590,13 @@ fn render_cascade_router(
     }
 
     // Summary line at the bottom
-    let total_trials: u64 = data
+    let total_trials: u64 = tui_state
         .cascade_router
         .confidence_stats
         .values()
         .map(|s| s.trials)
         .sum();
-    let total_success: u64 = data
+    let total_success: u64 = tui_state
         .cascade_router
         .confidence_stats
         .values()
@@ -610,7 +610,7 @@ fn render_cascade_router(
 
     let summary = Paragraph::new(vec![Line::from(vec![
         Span::styled("models: ", theme.muted()),
-        Span::raw(data.cascade_router.model_slugs.len().to_string()),
+        Span::raw(tui_state.cascade_router.model_slugs.len().to_string()),
         Span::styled("  trials: ", theme.muted()),
         Span::raw(total_trials.to_string()),
         Span::styled("  success: ", theme.muted()),
@@ -624,7 +624,7 @@ fn render_cascade_router(
 fn render_alerts_and_health(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
 ) {
@@ -649,13 +649,13 @@ fn render_alerts_and_health(
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
     // Conductor alerts
-    if data.conductor_alerts.is_empty() {
+    if tui_state.conductor_alerts.is_empty() {
         let empty = Paragraph::new("no conductor alerts")
             .style(theme.success())
             .alignment(Alignment::Center);
         frame.render_widget(empty, sections[0]);
     } else {
-        let items: Vec<ListItem<'_>> = data
+        let items: Vec<ListItem<'_>> = tui_state
             .conductor_alerts
             .iter()
             .take(sections[0].height as usize)
@@ -676,15 +676,15 @@ fn render_alerts_and_health(
     }
 
     // Gate threshold summary
-    if data.gate_results_page.threshold_rows.is_empty()
-        && data.gate_results_page.gate_rows.is_empty()
+    if tui_state.gate_results_page.threshold_rows.is_empty()
+        && tui_state.gate_results_page.gate_rows.is_empty()
     {
         let empty = Paragraph::new("no gate data")
             .style(theme.muted())
             .alignment(Alignment::Center);
         frame.render_widget(empty, sections[1]);
     } else {
-        let rows: Vec<Row<'_>> = data
+        let rows: Vec<Row<'_>> = tui_state
             .gate_results_page
             .gate_rows
             .iter()
@@ -725,10 +725,10 @@ fn render_alerts_and_health(
 }
 
 /// Build context data from available dashboard data.
-fn build_context_data(data: &DashboardData) -> ContextViewData {
+fn build_context_data(tui_state: &TuiState) -> ContextViewData {
     // Build token burn sparklines from efficiency events
     let mut burn_map: HashMap<String, Vec<u64>> = HashMap::new();
-    for event in &data.efficiency_events {
+    for event in &tui_state.efficiency_events {
         let id = event.agent_id.clone();
         let cumulative = burn_map.entry(id).or_default();
         let prev = cumulative.last().copied().unwrap_or(0);
