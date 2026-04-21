@@ -28,8 +28,8 @@ pub use advanced::{
     ComputationalMicrostate, ConstitutionalPrinciple, ConstitutionalSelfCritique, DreamArchive,
     DreamArchiveEntry, DreamArchiveKind, DreamJournal, DreamJournalEntry, DreamTrendAnalysis,
     InsightEnvironmentSnapshot, LucidDreamMonitor, NeuroinformedLucidMonitor, NightmareClass,
-    NightmareContainment, NightmareDecision, NightmareDetector, NightmareReport,
-    PrincipleSeverity, ScreeningVerdict, StageResult, TemporalValidityTracker,
+    NightmareContainment, NightmareDecision, NightmareDetector, NightmareReport, PrincipleSeverity,
+    ScreeningVerdict, StageResult, TemporalValidityTracker,
 };
 pub use cycle::{
     DreamOutcomeEvent, DreamPhase, DreamQualityDashboard, DreamQualityTrend, ExtendedDreamPhase,

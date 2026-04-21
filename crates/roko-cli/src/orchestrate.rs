@@ -2610,7 +2610,10 @@ fn knowledge_routing_boost(
                 .source_model
                 .as_deref()
                 .is_some_and(|sm| sm.eq_ignore_ascii_case(model_slug))
-            || entry.tags.iter().any(|t| t.eq_ignore_ascii_case(model_slug));
+            || entry
+                .tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(model_slug));
         if !content_matches {
             continue;
         }
@@ -11874,9 +11877,7 @@ impl PlanRunner {
                 .and_then(|t| t.last_routing_reason.clone());
             if routing_reason.as_deref() == Some("role_force_backend") {
                 if let Some(model) = selected_model {
-                    self.learning
-                        .cascade_router()
-                        .record_outcome(model, false);
+                    self.learning.cascade_router().record_outcome(model, false);
                     tracing::debug!(
                         plan_id = %plan_id,
                         task_id = %task_id,
@@ -15374,8 +15375,7 @@ impl PlanRunner {
         // GATE-07: wire fact-check oracle from Perplexity when API key is present (rung 5).
         if rung == 5 || rung > 6 {
             if let Some(api_key) = std::env::var("PERPLEXITY_API_KEY").ok() {
-                config.fact_check_oracle =
-                    Some(Arc::new(PerplexitySearchOracle::new(&api_key)));
+                config.fact_check_oracle = Some(Arc::new(PerplexitySearchOracle::new(&api_key)));
             }
         }
         // GATE-07: wire LLM judge oracle from agent dispatch infrastructure (rung 6).
@@ -15467,7 +15467,7 @@ impl PlanRunner {
                     };
                     manifest.expectations.push(SymbolExpectation {
                         name,
-                        kind: SymbolKind::Struct,   // default; symbol gate tolerates kind mismatches
+                        kind: SymbolKind::Struct, // default; symbol gate tolerates kind mismatches
                         visibility: Visibility::Pub, // default to pub
                         module_path,
                         signature: None,
@@ -15480,15 +15480,13 @@ impl PlanRunner {
             });
 
         // GATE-06: Build fact-check signal from task acceptance criteria for rung 5.
-        let fact_check_signal = task_def
-            .filter(|td| !td.acceptance.is_empty())
-            .map(|td| {
-                let claims = td.acceptance.join("\n");
-                Engram::builder(Kind::Task)
-                    .body(Body::text(&claims))
-                    .provenance(Provenance::trusted("orchestrate"))
-                    .build()
-            });
+        let fact_check_signal = task_def.filter(|td| !td.acceptance.is_empty()).map(|td| {
+            let claims = td.acceptance.join("\n");
+            Engram::builder(Kind::Task)
+                .body(Body::text(&claims))
+                .provenance(Provenance::trusted("orchestrate"))
+                .build()
+        });
 
         // GATE-06: Build LLM judge signal from task description + git diff for rung 6.
         let llm_judge_signal = if task_def.is_some() {

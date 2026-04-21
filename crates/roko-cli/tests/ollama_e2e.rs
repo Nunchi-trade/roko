@@ -114,10 +114,7 @@ fn ollama_e2e_run_produces_signals() {
 
     // Verify signals were written.
     let engrams_path = workdir.join(".roko/engrams.jsonl");
-    assert!(
-        engrams_path.exists(),
-        "engrams.jsonl missing after run"
-    );
+    assert!(engrams_path.exists(), "engrams.jsonl missing after run");
     let log = fs::read_to_string(&engrams_path).unwrap();
     assert!(!log.is_empty(), "engrams.jsonl is empty after run");
 

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use roko_core::config::schema::RokoConfig;
 use roko_core::config::ServeAuthConfig;
+use roko_core::config::schema::RokoConfig;
 use roko_serve::deploy::create_backend;
 use roko_serve::routes::build_router;
 use roko_serve::runtime::{CliRuntime, DashboardInfo, RunResult, SessionStatusInfo};
@@ -89,19 +89,20 @@ fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
 }
 
 /// Send a GET request and return `(StatusCode, serde_json::Value)`.
-async fn get_json(
-    router: &axum::Router,
-    uri: &str,
-) -> (StatusCode, serde_json::Value) {
+async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .uri(uri)
         .body(Body::empty())
         .expect("build request");
     let resp = router.clone().oneshot(req).await.expect("oneshot");
     let status = resp.status();
-    let body = resp.into_body().collect().await.expect("collect body").to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -119,9 +120,13 @@ async fn post_json(
         .expect("build request");
     let resp = router.clone().oneshot(req).await.expect("oneshot");
     let status = resp.status();
-    let bytes = resp.into_body().collect().await.expect("collect body").to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -249,12 +254,7 @@ async fn post_run_returns_accepted() {
 #[tokio::test]
 async fn post_run_rejects_empty_prompt() {
     let (_dir, app) = test_app();
-    let (status, body) = post_json(
-        &app,
-        "/api/run",
-        serde_json::json!({ "prompt": "" }),
-    )
-    .await;
+    let (status, body) = post_json(&app, "/api/run", serde_json::json!({ "prompt": "" })).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "validation_error");
@@ -263,12 +263,7 @@ async fn post_run_rejects_empty_prompt() {
 #[tokio::test]
 async fn post_run_rejects_missing_prompt() {
     let (_dir, app) = test_app();
-    let (status, _body) = post_json(
-        &app,
-        "/api/run",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, _body) = post_json(&app, "/api/run", serde_json::json!({})).await;
 
     // Missing required field — either 400 (validation) or 422 (parse).
     assert!(status.is_client_error());

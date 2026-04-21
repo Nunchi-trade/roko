@@ -202,6 +202,19 @@ cargo test --workspace
 cargo clippy --workspace --no-deps -- -D warnings
 ```
 
+### Pre-commit checks (MANDATORY before any commit)
+
+**Always run these before committing. CI will reject code that fails any of these.**
+
+```bash
+cargo +nightly fmt --all                              # Format (nightly, matches CI)
+cargo clippy --workspace --no-deps -- -D warnings     # Lint (must pass clean)
+cargo test --workspace                                # Tests (must pass)
+```
+
+Do NOT push without running all three. The CI uses the latest stable rustc which may have
+stricter lints than your local toolchain.
+
 ## What to work on
 
 Priority order for reaching full self-hosting:

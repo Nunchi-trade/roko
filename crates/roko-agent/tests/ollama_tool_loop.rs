@@ -67,16 +67,13 @@ async fn ollama_tool_loop_read_file() {
     let resolver = Arc::new(|name: &str| handler_for(name));
     let dispatcher = Arc::new(ToolDispatcher::new(registry, resolver));
     let translator: Arc<dyn Translator> = Arc::new(OpenAiTranslator);
-    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend))
-        .with_max_iterations(5);
+    let tool_loop = ToolLoop::new(translator, dispatcher, Arc::new(backend)).with_max_iterations(5);
 
     let result = tool_loop
         .run(
             "You are a helpful assistant. When asked to read a file, use the read_file tool. \
              After reading the file, summarize its contents in a short sentence.",
-            &format!(
-                "Read the file at path \"test.txt\" and tell me what it says."
-            ),
+            &format!("Read the file at path \"test.txt\" and tell me what it says."),
             &read_tools(),
             &tool_context(tempdir.path()),
         )

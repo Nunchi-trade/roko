@@ -3536,7 +3536,10 @@ mod tests {
             500_000,
         )
         .expect("register via canonical");
-        assert!(register_result.success, "canonical registration should succeed");
+        assert!(
+            register_result.success,
+            "canonical registration should succeed"
+        );
 
         let canonical_count = EvmExecutor::call(
             &fork,

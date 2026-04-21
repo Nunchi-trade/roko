@@ -1272,7 +1272,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cmd_status(cli, workdir, cfactor).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Replay { hash, workdir, forensic } => cmd_replay(workdir, hash, forensic).await,
+        Command::Replay {
+            hash,
+            workdir,
+            forensic,
+        } => cmd_replay(workdir, hash, forensic).await,
         Command::Dream { cmd } => cmd_dream(cli, cmd).await,
         Command::Dreams { cmd } => cmd_dreams(cli, cmd),
         Command::Config { cmd } => {
@@ -7009,31 +7013,20 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String, forensic: bool) -> R
         let indent = "  ".repeat(depth);
         if let Some(sig) = substrate.get(&id).await.map_err(|e| anyhow!("get: {e}"))? {
             if forensic {
-                println!(
-                    "{indent}{} {}",
-                    sig.kind, sig.id,
-                );
-                println!(
-                    "{indent}  hash:      {}",
-                    sig.id,
-                );
-                println!(
-                    "{indent}  author:    {}",
-                    sig.provenance.author,
-                );
-                println!(
-                    "{indent}  created:   {}",
-                    sig.created_at_ms,
-                );
+                println!("{indent}{} {}", sig.kind, sig.id,);
+                println!("{indent}  hash:      {}", sig.id,);
+                println!("{indent}  author:    {}", sig.provenance.author,);
+                println!("{indent}  created:   {}", sig.created_at_ms,);
                 println!(
                     "{indent}  lineage:   [{}]",
-                    sig.lineage.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(", "),
+                    sig.lineage
+                        .iter()
+                        .map(|h| h.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 );
                 if !sig.tags.is_empty() {
-                    println!(
-                        "{indent}  tags:      {:?}",
-                        sig.tags,
-                    );
+                    println!("{indent}  tags:      {:?}", sig.tags,);
                 }
                 if let Ok(text) = sig.body.as_text() {
                     let body_preview: String = text.chars().take(120).collect();
@@ -7208,7 +7201,10 @@ fn cmd_dreams(cli: &Cli, cmd: DreamsCmd) -> Result<i32> {
                     println!("\n{} entries shown (of last {})", entries.len(), limit);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("no dream journal found at {}", journal.journal_path.display());
+                    println!(
+                        "no dream journal found at {}",
+                        journal.journal_path.display()
+                    );
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -9516,9 +9512,17 @@ mod tests {
         let backup_dir = tempdir().unwrap();
         let neuro_dir = workdir.path().join(".roko").join("neuro");
         std::fs::create_dir_all(&neuro_dir).unwrap();
-        std::fs::write(neuro_dir.join(NEURO_KNOWLEDGE_FILE), b"{\"id\":\"old\",\"content\":\"old data\",\"confidence\":0.5}\n").unwrap();
+        std::fs::write(
+            neuro_dir.join(NEURO_KNOWLEDGE_FILE),
+            b"{\"id\":\"old\",\"content\":\"old data\",\"confidence\":0.5}\n",
+        )
+        .unwrap();
         std::fs::write(neuro_dir.join(NEURO_CONFIRMATIONS_FILE), b"stale\n").unwrap();
-        std::fs::write(backup_dir.path().join(NEURO_KNOWLEDGE_FILE), b"{\"id\":\"new\",\"content\":\"new data\",\"confidence\":0.9}\n").unwrap();
+        std::fs::write(
+            backup_dir.path().join(NEURO_KNOWLEDGE_FILE),
+            b"{\"id\":\"new\",\"content\":\"new data\",\"confidence\":0.9}\n",
+        )
+        .unwrap();
 
         let err = restore_neuro_store(workdir.path(), backup_dir.path(), false, 1, None, None)
             .unwrap_err();
@@ -9527,7 +9531,10 @@ mod tests {
         let report =
             restore_neuro_store(workdir.path(), backup_dir.path(), true, 1, None, None).unwrap();
         let restored = std::fs::read_to_string(&report.live.knowledge).unwrap();
-        assert!(restored.contains("\"new\""), "restored store should contain the new entry");
+        assert!(
+            restored.contains("\"new\""),
+            "restored store should contain the new entry"
+        );
         // The backup has no confirmations file, so the report should note it as absent.
         assert!(!report.confirmations_present);
     }

@@ -4317,18 +4317,9 @@ impl DashboardSnapshot {
                 let _ = writeln!(out, "  recent:");
                 for line in lines.iter().rev().take(5) {
                     if let Ok(val) = serde_json::from_str::<Value>(line) {
-                        let cycle_id = val
-                            .get("cycle_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let phase = val
-                            .get("phase")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let summary = val
-                            .get("summary")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let cycle_id = val.get("cycle_id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("?");
+                        let summary = val.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                         let _ = writeln!(out, "    [{cycle_id}] {phase}: {summary}");
                     }
                 }
@@ -4349,18 +4340,12 @@ impl DashboardSnapshot {
                 let _ = writeln!(out, "  recent:");
                 for line in lines.iter().rev().take(5) {
                     if let Ok(val) = serde_json::from_str::<Value>(line) {
-                        let kind = val
-                            .get("kind")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
+                        let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
                         let quality = val
                             .get("quality_score")
                             .and_then(|v| v.as_f64())
                             .unwrap_or(0.0);
-                        let summary = val
-                            .get("summary")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let summary = val.get("summary").and_then(|v| v.as_str()).unwrap_or("");
                         let _ = writeln!(out, "    [{kind}] q={quality:.2}: {summary}");
                     }
                 }

@@ -1132,7 +1132,7 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
 
     let mut model_entries = config.models.iter().collect::<Vec<_>>();
-    model_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    model_entries.sort_unstable_by_key(|(left, _)| *left);
     for (model_key, profile) in model_entries {
         let provider = profile.provider.trim();
         if !provider_keys.contains(provider) {
@@ -1173,7 +1173,7 @@ pub fn validate_references(config: &RokoConfig) -> Vec<ValidationWarning> {
 
     if !explicit_model_keys.is_empty() {
         let mut tier_entries = config.agent.tier_models.iter().collect::<Vec<_>>();
-        tier_entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        tier_entries.sort_unstable_by_key(|(left, _)| *left);
         for (tier, model_key) in tier_entries {
             let model_key = model_key.trim();
             if model_key.is_empty() || explicit_model_keys.contains(model_key) {
