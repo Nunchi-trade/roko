@@ -59,9 +59,9 @@ use crate::{
     Bytecode, MirageError, Result, TransactionRequest,
     events::MirageTelemetryEvent,
     fork::{
-        ClassificationConfig, DiffClassifier, EvmExecutor, ForkState, HybridDB, LocalBlock,
-        LocalReceipt, LocalTransaction, MirageFork, MirageState, WatchSource, lock_state_writes,
-        with_state_write,
+        ClassificationConfig, DiffClassifier, EthFilter, EvmExecutor, ForkState, HybridDB,
+        LocalBlock, LocalReceipt, LocalTransaction, MirageFork, MirageState, WatchSource,
+        lock_state_writes, with_state_write,
     },
     integration::{
         EventFilter, EventSource, MIRAGE_BEGIN_SCENARIO_SET_METHOD, MIRAGE_DEFINE_SCENARIO_METHOD,
@@ -1031,16 +1031,38 @@ fn build_rpc_module(
 
     module.register_async_method("eth_getTransactionReceipt", |params, ctx, _| async move {
         let (tx_hash,): (B256,) = params.parse().map_err(invalid_params)?;
-        let state = ctx.state.read();
-        let receipt = state.fork.receipts.get(&tx_hash).map(receipt_json);
-        Ok::<_, ErrorObjectOwned>(receipt)
+        let local = {
+            let state = ctx.state.read();
+            state.fork.receipts.get(&tx_hash).map(receipt_json)
+        };
+        if let Some(receipt) = local {
+            return Ok::<_, ErrorObjectOwned>(Some(receipt));
+        }
+        // Fall back to upstream when forking.
+        let upstream_receipt = run_fork_snapshot(&ctx.state, false, move |fork| {
+            fork.db.upstream.get_transaction_receipt(tx_hash)
+        })
+        .await
+        .map_err(rpc_error)?;
+        Ok::<_, ErrorObjectOwned>(upstream_receipt)
     })?;
 
     module.register_async_method("eth_getTransactionByHash", |params, ctx, _| async move {
         let (tx_hash,): (B256,) = params.parse().map_err(invalid_params)?;
-        let state = ctx.state.read();
-        let tx = state.fork.transactions.get(&tx_hash).map(transaction_json);
-        Ok::<_, ErrorObjectOwned>(tx)
+        let local = {
+            let state = ctx.state.read();
+            state.fork.transactions.get(&tx_hash).map(transaction_json)
+        };
+        if let Some(tx) = local {
+            return Ok::<_, ErrorObjectOwned>(Some(tx));
+        }
+        // Fall back to upstream when forking.
+        let upstream_tx = run_fork_snapshot(&ctx.state, false, move |fork| {
+            fork.db.upstream.get_transaction_by_hash(tx_hash)
+        })
+        .await
+        .map_err(rpc_error)?;
+        Ok::<_, ErrorObjectOwned>(upstream_tx)
     })?;
 
     module.register_async_method("eth_getLogs", |params, ctx, _| async move {
@@ -1155,9 +1177,320 @@ fn build_rpc_module(
     })?;
 
     module.register_async_method("eth_getBlockByHash", |params, ctx, _| async move {
-        let (hash, _full): (B256, bool) = params.parse().map_err(invalid_params)?;
+        let (hash, full): (B256, bool) = params.parse().map_err(invalid_params)?;
+        let local = {
+            let state = ctx.state.read();
+            state.fork.blocks_by_hash.get(&hash).map(block_json)
+        };
+        if let Some(block) = local {
+            return Ok::<_, ErrorObjectOwned>(Some(block));
+        }
+        // Fall back to upstream when forking.
+        let upstream_block = run_fork_snapshot(&ctx.state, false, move |fork| {
+            fork.db.upstream.get_block_by_hash(hash, full)
+        })
+        .await
+        .map_err(rpc_error)?;
+        Ok::<_, ErrorObjectOwned>(upstream_block)
+    })?;
+
+    // ── Standard / Anvil compatibility methods ──────────────────────────
+
+    module.register_async_method("eth_accounts", |_params, ctx, _| async move {
         let state = ctx.state.read();
-        Ok::<_, ErrorObjectOwned>(state.fork.blocks_by_hash.get(&hash).map(block_json))
+        let accounts: Vec<Address> = state.fork.impersonated_accounts.iter().copied().collect();
+        Ok::<_, ErrorObjectOwned>(accounts)
+    })?;
+
+    module.register_async_method("web3_sha3", |params, ctx, _| async move {
+        let _ = ctx;
+        let (input,): (Bytes,) = params.parse().map_err(invalid_params)?;
+        Ok::<_, ErrorObjectOwned>(keccak256(input.as_ref()))
+    })?;
+
+    module.register_async_method("net_listening", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+
+    module.register_async_method("net_peerCount", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>("0x0")
+    })?;
+
+    module.register_async_method("txpool_status", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({
+            "pending": "0x0",
+            "queued": "0x0",
+        }))
+    })?;
+
+    module.register_async_method("txpool_content", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({
+            "pending": {},
+            "queued": {},
+        }))
+    })?;
+
+    module.register_async_method("txpool_inspect", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({
+            "pending": {},
+            "queued": {},
+        }))
+    })?;
+
+    module.register_async_method("anvil_getAutomine", |_params, _ctx, _| async move {
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+
+    module.register_async_method("anvil_nodeInfo", |_params, ctx, _| async move {
+        let state = ctx.state.read();
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({
+            "chainId": state.fork.chain_id,
+            "forkUrl": state.fork.fork_url,
+            "forkBlock": state.fork.fork_block,
+            "currentBlockNumber": hex_u64(state.fork.local_block_number),
+            "currentBlockTimestamp": hex_u64(state.fork.timestamp),
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": format!("0x{:x}", state.fork.next_base_fee_per_gas),
+            "automine": true,
+        }))
+    })?;
+
+    module.register_async_method("anvil_dropTransaction", |params, ctx, _| async move {
+        let (tx_hash,): (B256,) = params.parse().map_err(invalid_params)?;
+        let mut state = ctx.state.write();
+        let removed = state.fork.transactions.remove(&tx_hash).is_some();
+        if removed {
+            state.fork.receipts.remove(&tx_hash);
+        }
+        Ok::<_, ErrorObjectOwned>(removed)
+    })?;
+
+    module.register_async_method("anvil_setRpcUrl", |params, ctx, _| async move {
+        let (url,): (String,) = params.parse().map_err(invalid_params)?;
+        let mut state = ctx.state.write();
+        state.fork.fork_url = Some(url);
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+
+    module.register_async_method("anvil_dumpState", |_params, ctx, _| async move {
+        let state = ctx.state.read();
+        let dirty_json = serde_json::to_vec(&state.fork.db.dirty)
+            .map_err(|e| rpc_error(MirageError::Unsupported(e.to_string())))?;
+        Ok::<_, ErrorObjectOwned>(format!("0x{}", hex::encode(&dirty_json)))
+    })?;
+
+    module.register_async_method("anvil_loadState", |params, ctx, _| async move {
+        let (hex_data,): (String,) = params.parse().map_err(invalid_params)?;
+        let bytes = hex::decode(hex_data.trim_start_matches("0x"))
+            .map_err(|e| invalid_params_message(format!("invalid hex: {e}")))?;
+        let dirty: crate::fork::DirtyStore = serde_json::from_slice(&bytes)
+            .map_err(|e| invalid_params_message(format!("invalid state JSON: {e}")))?;
+        let mut state = ctx.state.write();
+        state.fork.db.dirty = dirty;
+        Ok::<_, ErrorObjectOwned>(true)
+    })?;
+
+    module.register_async_method("debug_traceTransaction", |params, ctx, _| async move {
+        let (tx_hash,): (B256,) = params.parse().map_err(invalid_params)?;
+        let state = ctx.state.read();
+        let gas = state
+            .fork
+            .receipts
+            .get(&tx_hash)
+            .map(|r| r.gas_used)
+            .unwrap_or(0);
+        // Return a minimal trace stub — full step-level tracing is not yet supported.
+        Ok::<_, ErrorObjectOwned>(serde_json::json!({
+            "gas": gas,
+            "failed": false,
+            "returnValue": "",
+            "structLogs": [],
+        }))
+    })?;
+
+    // ── Filter API ───────────────────────────────────────────────────────
+
+    module.register_async_method("eth_newFilter", |params, ctx, _| async move {
+        let (filter,): (serde_json::Value,) = params.parse().map_err(invalid_params)?;
+        let addresses: Vec<Address> = match filter.get("address") {
+            Some(serde_json::Value::String(s)) => {
+                vec![s.parse::<Address>().map_err(|e| invalid_params_message(e.to_string()))?]
+            }
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str().and_then(|s| s.parse::<Address>().ok()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let topics: Vec<Option<Vec<B256>>> = match filter.get("topics") {
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .map(|t| match t {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(s) => s.parse::<B256>().ok().map(|h| vec![h]),
+                    serde_json::Value::Array(sub) => Some(
+                        sub.iter()
+                            .filter_map(|v| v.as_str().and_then(|s| s.parse::<B256>().ok()))
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut state = ctx.state.write();
+        let tip = state.fork.local_block_number;
+        let id = state.fork.next_filter_id;
+        state.fork.next_filter_id += U256::from(1);
+        state.fork.filters.insert(
+            id,
+            EthFilter::Log {
+                topics,
+                addresses,
+                last_poll_block: tip,
+            },
+        );
+        Ok::<_, ErrorObjectOwned>(hex_u256(id))
+    })?;
+
+    module.register_async_method("eth_newBlockFilter", |_params, ctx, _| async move {
+        let mut state = ctx.state.write();
+        let tip = state.fork.local_block_number;
+        let id = state.fork.next_filter_id;
+        state.fork.next_filter_id += U256::from(1);
+        state.fork.filters.insert(
+            id,
+            EthFilter::Block {
+                last_poll_block: tip,
+            },
+        );
+        Ok::<_, ErrorObjectOwned>(hex_u256(id))
+    })?;
+
+    module.register_async_method(
+        "eth_newPendingTransactionFilter",
+        |_params, ctx, _| async move {
+            let mut state = ctx.state.write();
+            let id = state.fork.next_filter_id;
+            state.fork.next_filter_id += U256::from(1);
+            state.fork.filters.insert(
+                id,
+                EthFilter::PendingTransaction {
+                    seen: std::collections::HashSet::new(),
+                },
+            );
+            Ok::<_, ErrorObjectOwned>(hex_u256(id))
+        },
+    )?;
+
+    module.register_async_method("eth_getFilterChanges", |params, ctx, _| async move {
+        let (id_hex,): (String,) = params.parse().map_err(invalid_params)?;
+        let id = parse_hex_u256(&id_hex).map_err(rpc_error)?;
+        let mut state = ctx.state.write();
+        let tip = state.fork.local_block_number;
+        let Some(filter) = state.fork.filters.get_mut(&id) else {
+            return Err(invalid_params_message("filter not found"));
+        };
+        // Extract filter state and advance cursor under the mutable borrow,
+        // then drop the mutable ref so we can read blocks/receipts.
+        enum PollKind {
+            Block { from: u64 },
+            Pending,
+            Log {
+                from: u64,
+                topics: Vec<Option<Vec<B256>>>,
+                addresses: Vec<Address>,
+            },
+        }
+        let kind = match filter {
+            EthFilter::Block { last_poll_block } => {
+                let from = *last_poll_block + 1;
+                *last_poll_block = tip;
+                PollKind::Block { from }
+            }
+            EthFilter::PendingTransaction { .. } => {
+                PollKind::Pending
+            }
+            EthFilter::Log {
+                topics,
+                addresses,
+                last_poll_block,
+            } => {
+                let from = *last_poll_block + 1;
+                *last_poll_block = tip;
+                PollKind::Log {
+                    from,
+                    topics: topics.clone(),
+                    addresses: addresses.clone(),
+                }
+            }
+        };
+        // Now only immutable reads on state.fork.
+        match kind {
+            PollKind::Block { from } => {
+                let hashes: Vec<B256> = (from..=tip)
+                    .filter_map(|n| state.fork.blocks_by_number.get(&n).map(|b| b.hash))
+                    .collect();
+                Ok(serde_json::json!(hashes))
+            }
+            PollKind::Pending => {
+                let all_tx_hashes: Vec<B256> =
+                    state.fork.transactions.keys().copied().collect();
+                // Re-acquire mutable ref to update the seen set.
+                if let Some(EthFilter::PendingTransaction { seen }) =
+                    state.fork.filters.get_mut(&id)
+                {
+                    let new_hashes: Vec<B256> = all_tx_hashes
+                        .into_iter()
+                        .filter(|h| seen.insert(*h))
+                        .collect();
+                    Ok(serde_json::json!(new_hashes))
+                } else {
+                    Ok(serde_json::json!([]))
+                }
+            }
+            PollKind::Log {
+                from,
+                topics,
+                addresses,
+            } => {
+                let out = collect_filter_logs(
+                    &state.fork,
+                    from,
+                    tip,
+                    &topics,
+                    &addresses,
+                );
+                Ok(serde_json::json!(out))
+            }
+        }
+    })?;
+
+    module.register_async_method("eth_getFilterLogs", |params, ctx, _| async move {
+        let (id_hex,): (String,) = params.parse().map_err(invalid_params)?;
+        let id = parse_hex_u256(&id_hex).map_err(rpc_error)?;
+        let state = ctx.state.read();
+        let tip = state.fork.local_block_number;
+        let Some(filter) = state.fork.filters.get(&id) else {
+            return Err(invalid_params_message("filter not found"));
+        };
+        let EthFilter::Log {
+            topics, addresses, ..
+        } = filter
+        else {
+            return Err(invalid_params_message(
+                "eth_getFilterLogs only works with log filters",
+            ));
+        };
+        let out = collect_filter_logs(&state.fork, 0, tip, topics, addresses);
+        Ok::<_, ErrorObjectOwned>(out)
+    })?;
+
+    module.register_async_method("eth_uninstallFilter", |params, ctx, _| async move {
+        let (id_hex,): (String,) = params.parse().map_err(invalid_params)?;
+        let id = parse_hex_u256(&id_hex).map_err(rpc_error)?;
+        let mut state = ctx.state.write();
+        Ok::<_, ErrorObjectOwned>(state.fork.filters.remove(&id).is_some())
     })?;
 
     register_impersonation_methods(&mut module)?;
@@ -1196,28 +1529,44 @@ fn register_chain_methods(
 
     module.register_async_method("chain_postInsight", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
-        let payload: PostInsightParams = params.parse().map_err(invalid_params)?;
+        let payload: PostInsightParams = params.parse().map_err(|e| {
+            invalid_params_message(format!(
+                "{e}. Expected: {{author: string, kind: string, content: string, enabledBy?: string[], stakeWei?: number}}"
+            ))
+        })?;
         let result = handle_post_insight(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
     })?;
 
     module.register_async_method("chain_searchInsights", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
-        let payload: SearchInsightsParams = params.parse().map_err(invalid_params)?;
+        let payload: SearchInsightsParams = params.parse().map_err(|e| {
+            invalid_params_message(format!(
+                "{e}. Expected: {{query?: string, queryVector?: number[], k?: number, kind?: string}}"
+            ))
+        })?;
         let result = handle_search_insights(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
     })?;
 
     module.register_async_method("chain_confirmInsight", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
-        let payload: ConfirmInsightParams = params.parse().map_err(invalid_params)?;
+        let payload: ConfirmInsightParams = params.parse().map_err(|e| {
+            invalid_params_message(format!(
+                "{e}. Expected: {{id: string, confirmer: string}}"
+            ))
+        })?;
         let result = handle_confirm_insight(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
     })?;
 
     module.register_async_method("chain_challengeInsight", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
-        let payload: ChallengeInsightParams = params.parse().map_err(invalid_params)?;
+        let payload: ChallengeInsightParams = params.parse().map_err(|e| {
+            invalid_params_message(format!(
+                "{e}. Expected: {{id: string, challenger: string}}"
+            ))
+        })?;
         let result = handle_challenge_insight(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
     })?;
@@ -1238,7 +1587,11 @@ fn register_chain_methods(
 
     module.register_async_method("chain_depositPheromone", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
-        let payload: DepositPheromoneParams = params.parse().map_err(invalid_params)?;
+        let payload: DepositPheromoneParams = params.parse().map_err(|e| {
+            invalid_params_message(format!(
+                "{e}. Expected: {{kind: string, content: string, intensity?: number, halfLifeSeconds?: number}}"
+            ))
+        })?;
         let result = handle_deposit_pheromone(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
     })?;
@@ -2633,6 +2986,56 @@ fn extract_to(kind: Option<Address>) -> Option<Address> {
     kind
 }
 
+/// Collect log entries from the fork state matching filter criteria.
+fn collect_filter_logs(
+    fork: &ForkState,
+    from: u64,
+    to: u64,
+    topics: &[Option<Vec<B256>>],
+    addresses: &[Address],
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for (num, block) in fork.blocks_by_number.range(from..=to) {
+        for tx_hash in &block.transactions {
+            let Some(receipt) = fork.receipts.get(tx_hash) else {
+                continue;
+            };
+            for log in &receipt.logs {
+                if !addresses.is_empty() && !addresses.contains(&log.address) {
+                    continue;
+                }
+                if !topics.is_empty() {
+                    let mut matched = true;
+                    for (i, topic_filter) in topics.iter().enumerate() {
+                        if let Some(allowed) = topic_filter {
+                            let actual = log.topics.get(i);
+                            if !actual.is_some_and(|t| allowed.contains(t)) {
+                                matched = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !matched {
+                        continue;
+                    }
+                }
+                out.push(serde_json::json!({
+                    "address": log.address,
+                    "topics": log.topics,
+                    "data": format!("0x{}", hex::encode(log.data.as_ref())),
+                    "blockNumber": hex_u64(*num),
+                    "blockHash": block.hash,
+                    "transactionHash": tx_hash,
+                    "transactionIndex": "0x0",
+                    "logIndex": hex_u64(log.log_index as u64),
+                    "removed": false,
+                }));
+            }
+        }
+    }
+    out
+}
+
 fn resolve_block_tag(v: Option<&serde_json::Value>, tip: u64) -> Option<u64> {
     match v? {
         serde_json::Value::String(s) => match s.as_str() {
@@ -2828,6 +3231,11 @@ pub async fn mirage_instance_or_env() -> crate::Result<crate::MirageTestInstance
 fn parse_hex_quantity(value: &str) -> Result<u64> {
     u64::from_str_radix(value.trim_start_matches("0x"), 16)
         .map_err(|error| MirageError::InvalidParams(format!("invalid hex quantity: {error}")))
+}
+
+fn parse_hex_u256(value: &str) -> Result<U256> {
+    U256::from_str_radix(value.trim_start_matches("0x"), 16)
+        .map_err(|error| MirageError::InvalidParams(format!("invalid hex U256: {error}")))
 }
 
 #[derive(Debug, Clone)]

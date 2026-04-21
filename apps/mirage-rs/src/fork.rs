@@ -954,6 +954,30 @@ pub struct LocalBlock {
     pub transactions: Vec<B256>,
 }
 
+/// Filter type for the `eth_newFilter` / `eth_newBlockFilter` / `eth_newPendingTransactionFilter` APIs.
+#[derive(Debug, Clone)]
+pub enum EthFilter {
+    /// Log filter with optional topic and address constraints.
+    Log {
+        /// Topic filters (positional). Each position can match any of the given topics.
+        topics: Vec<Option<Vec<B256>>>,
+        /// Address filter. If non-empty, only logs from these addresses match.
+        addresses: Vec<Address>,
+        /// Block number at last poll.
+        last_poll_block: u64,
+    },
+    /// Block filter that tracks new blocks since last poll.
+    Block {
+        /// Block number at last poll.
+        last_poll_block: u64,
+    },
+    /// Pending transaction filter.
+    PendingTransaction {
+        /// Transaction hashes already seen.
+        seen: HashSet<B256>,
+    },
+}
+
 /// Fork-global mutable state backing the RPC server.
 #[derive(Debug)]
 pub struct ForkState {
@@ -991,6 +1015,10 @@ pub struct ForkState {
     pub fork_block: u64,
     /// Upstream RPC URL used for the fork (if any).
     pub fork_url: Option<String>,
+    /// Active filters created by `eth_newFilter` and friends.
+    pub filters: HashMap<U256, EthFilter>,
+    /// Monotonically increasing filter ID counter.
+    pub next_filter_id: U256,
 }
 
 impl Clone for ForkState {
@@ -1024,6 +1052,8 @@ impl Clone for ForkState {
             verify_signatures: self.verify_signatures,
             fork_block: self.fork_block,
             fork_url: self.fork_url.clone(),
+            filters: self.filters.clone(),
+            next_filter_id: self.next_filter_id,
         }
     }
 }
@@ -1050,6 +1080,8 @@ impl ForkState {
             strict_nonce: false,
             strict_balance: false,
             verify_signatures: false,
+            filters: HashMap::new(),
+            next_filter_id: U256::ZERO,
         }
     }
 
