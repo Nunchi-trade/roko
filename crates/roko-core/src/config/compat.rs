@@ -199,6 +199,7 @@ fn convert_gates(m: &MoriConfig) -> GatesConfig {
         clippy_enabled: m.clippy_enabled.unwrap_or(d.clippy_enabled),
         skip_tests: m.skip_tests.unwrap_or(d.skip_tests),
         max_iterations: m.max_iterations.unwrap_or(d.max_iterations),
+        domain_gates: HashMap::new(),
     }
 }
 

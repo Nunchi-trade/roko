@@ -1100,7 +1100,7 @@ impl EpisodeLogger {
 
             // Sort normals by timestamp descending so we can truncate the
             // tail (oldest).
-            normals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            normals.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
             let keep_normals = policy.max_episodes.saturating_sub(headlines.len());
             normals.truncate(keep_normals);
@@ -1108,7 +1108,7 @@ impl EpisodeLogger {
             // Recombine and sort by timestamp ascending (original write
             // order) for the rewritten file.
             survivors = headlines.into_iter().chain(normals).collect();
-            survivors.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            survivors.sort_by_key(|a| a.timestamp);
         }
 
         let after = survivors.len();

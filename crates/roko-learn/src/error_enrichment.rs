@@ -92,7 +92,7 @@ fn fallback_diagnosis(raw_error: &str, task_context: &str) -> String {
             .to_string()
     };
 
-    format!("{} {}", ensure_sentence(&first), ensure_sentence(&second),)
+    format!("{} {}", ensure_sentence(&first), ensure_sentence(&second))
 }
 
 fn extract_file_line(raw_error: &str) -> Option<String> {

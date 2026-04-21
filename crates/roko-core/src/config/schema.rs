@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::agent::{AgentBackend, ProviderKind};
+use crate::task::TaskDomain;
 use crate::temperament::Temperament;
 use crate::tool::{ToolFormat, profile_for_model};
 use regex::Regex;
@@ -1764,6 +1765,9 @@ pub struct ProjectConfig {
     /// Git branch used as the base for fresh batch/worktree creation.
     #[serde(default = "default_fresh_base_branch")]
     pub fresh_base_branch: String,
+    /// Default work domain for tasks that don't declare one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_domain: Option<TaskDomain>,
 }
 
 fn default_project_name() -> String {
@@ -1784,6 +1788,7 @@ impl Default for ProjectConfig {
             name: default_project_name(),
             root: default_dot(),
             fresh_base_branch: default_fresh_base_branch(),
+            default_domain: None,
         }
     }
 }
@@ -2127,6 +2132,10 @@ pub struct GatesConfig {
     /// Max gate retry iterations before giving up.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    /// Per-domain gate overrides. Keys are domain labels (e.g. "research", "docs"),
+    /// values are shell commands to run as gates (e.g. `["shell:true"]`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub domain_gates: HashMap<String, Vec<String>>,
 }
 
 const fn default_max_iterations() -> u32 {
@@ -2139,6 +2148,7 @@ impl Default for GatesConfig {
             clippy_enabled: default_true(),
             skip_tests: false,
             max_iterations: default_max_iterations(),
+            domain_gates: HashMap::new(),
         }
     }
 }

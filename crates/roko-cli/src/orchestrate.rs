@@ -61,8 +61,8 @@ use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
-    TaskCategory, TaskComplexityBand, TaskRequirements, TaskStatus, ToolRegistry, Verdict,
-    score_model_for_task,
+    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, TaskStatus, ToolRegistry,
+    Verdict, score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -78,7 +78,7 @@ use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, SearchHit,
-    SearchOracle, TestGate, VerdictPublisher,
+    SearchOracle, ShellGate, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -186,6 +186,30 @@ const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
+
+/// Whether this domain uses compiled (compile/test/clippy) gates.
+fn domain_uses_compiled_gates(domain: &TaskDomain) -> bool {
+    matches!(
+        domain,
+        TaskDomain::Code | TaskDomain::Chain | TaskDomain::Custom(_)
+    )
+}
+
+/// Whether this domain requires git operations (worktrees, changed-files, commits).
+fn domain_uses_git(domain: &TaskDomain) -> bool {
+    matches!(domain, TaskDomain::Code | TaskDomain::Chain)
+}
+
+/// Resolve an `AgentRole` from a task's `role` string (kebab-case label).
+fn resolve_task_role(role_str: Option<&str>) -> AgentRole {
+    let label = match role_str {
+        Some(s) if !s.is_empty() => s,
+        _ => return AgentRole::Implementer,
+    };
+    // Serde deserialize from the JSON string form (kebab-case).
+    let quoted = format!("\"{label}\"");
+    serde_json::from_str::<AgentRole>(&quoted).unwrap_or(AgentRole::Implementer)
+}
 
 fn model_experiments_path(workdir: &Path) -> PathBuf {
     workdir
@@ -8913,10 +8937,14 @@ impl PlanRunner {
             let model_override = prompt_override.as_ref().map(|_| retry_model.clone());
             total_dispatches += 1;
 
+            let dispatch_role = task_def
+                .as_ref()
+                .and_then(|td| td.role.as_deref())
+                .map_or(AgentRole::Implementer, |r| resolve_task_role(Some(r)));
             match self
                 .dispatch_agent_with(
                     plan_id,
-                    AgentRole::Implementer,
+                    dispatch_role,
                     task_id,
                     prompt_override,
                     model_override,
@@ -9230,7 +9258,7 @@ impl PlanRunner {
         }
 
         // ── Build agent configs sequentially (needs &mut self) ───────
-        let mut configs: Vec<(String, String, AgentRunConfig)> =
+        let mut configs: Vec<(String, String, String, AgentRunConfig)> =
             Vec::with_capacity(task_dirs.len());
 
         let plan_dir = plans_dir(&self.workdir).join(plan_id);
@@ -9241,15 +9269,18 @@ impl PlanRunner {
             None
         };
 
-        let role = AgentRole::Implementer;
-        let claude_tools_csv = claude_tool_allowlist(role);
-        let skip_perms = role == AgentRole::Implementer || role == AgentRole::AutoFixer;
         let mcp_config_path = self.resolve_mcp_config_path().await;
 
         for (tid, dir) in &task_dirs {
             let task_def = tasks_file
                 .as_ref()
                 .and_then(|tf| tf.tasks.iter().find(|t| t.id == *tid).cloned());
+            let role = task_def
+                .as_ref()
+                .and_then(|td| td.role.as_deref())
+                .map_or(AgentRole::Implementer, |r| resolve_task_role(Some(r)));
+            let claude_tools_csv = claude_tool_allowlist(role);
+            let skip_perms = role == AgentRole::Implementer || role == AgentRole::AutoFixer;
             let task_phase = task_def
                 .as_ref()
                 .map(|task| task.status.clone())
@@ -9310,6 +9341,7 @@ impl PlanRunner {
             configs.push((
                 tid.clone(),
                 task_phase,
+                role.label().to_string(),
                 AgentRunConfig {
                     command: self.config.agent.command.clone(),
                     exec_dir: dir.clone(),
@@ -9344,7 +9376,7 @@ impl PlanRunner {
             let mut join_set = JoinSet::new();
             let mut launched = 0usize;
             while launched < concurrency_limit {
-                let Some((tid, task_phase, cfg)) = pending.next() else {
+                let Some((tid, task_phase, role_label, cfg)) = pending.next() else {
                     break;
                 };
                 launched += 1;
@@ -9355,7 +9387,7 @@ impl PlanRunner {
                         plan_id = %plan_id,
                         task_id = %tid,
                         agent_model = %cfg.model,
-                        task_role = %role,
+                        task_role = %role_label,
                         phase = %task_phase
                     );
                     let task_id = tid;
@@ -11633,6 +11665,7 @@ impl PlanRunner {
                 timeout_secs: 30,
                 max_retries: 0,
                 acceptance: Vec::new(),
+                domain: None,
             });
         let mut regenerated_task = template_task.clone();
         regenerated_task.id = format!("{task_id}-replan-{replan_attempt_number}");
@@ -12940,8 +12973,6 @@ impl PlanRunner {
             Some(dir) => dir,
             None => self.ensure_plan_exec_dir(plan_id).await?,
         };
-        let preexisting_changed_files = self.git_changed_files(&exec_dir).await.ok();
-
         // ── Budget check before dispatch ─────────────────────────────
         self.ensure_task_budget_available(plan_id, task)?;
         let plan_spent = self.plan_costs.get(plan_id).copied().unwrap_or(0.0);
@@ -12967,6 +12998,20 @@ impl PlanRunner {
         let task_def = tasks_file
             .as_ref()
             .and_then(|tf| tf.tasks.iter().find(|t| t.id == task).cloned());
+
+        // ── Resolve domain: skip git operations for non-code domains ─
+        let config_default_domain = load_roko_config(&self.workdir)
+            .ok()
+            .and_then(|c| c.project.default_domain);
+        let task_domain = task_def
+            .as_ref()
+            .and_then(|td| td.effective_domain(config_default_domain.as_ref()));
+        let uses_git = task_domain.as_ref().map_or(true, domain_uses_git);
+        let preexisting_changed_files = if uses_git {
+            self.git_changed_files(&exec_dir).await.ok()
+        } else {
+            None
+        };
         let frequency = task_def
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
@@ -14275,7 +14320,11 @@ impl PlanRunner {
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
 
         // ── AGT-01: Post-dispatch safety check ─────────────────────
-        let post_changed_files = self.git_changed_files(&exec_dir).await.unwrap_or_default();
+        let post_changed_files = if uses_git {
+            self.git_changed_files(&exec_dir).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let agent_output_text = result.output.body.as_text().unwrap_or_default().to_string();
         let safety_violations = self.safety_layer.post_dispatch_check(
             plan_id,
@@ -14364,12 +14413,15 @@ impl PlanRunner {
         // Feed the raw agent turn into the conductor stream so the stuck-pattern
         // watcher can compare consecutive outputs across turns.
         self.emit_agent_turn_signal(&result.output);
-        let files_changed_count = self
-            .git_changed_files(&exec_dir)
-            .await
-            .ok()
-            .and_then(|files| u32::try_from(files.len()).ok())
-            .unwrap_or(0);
+        let files_changed_count = if uses_git {
+            self.git_changed_files(&exec_dir)
+                .await
+                .ok()
+                .and_then(|files| u32::try_from(files.len()).ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         // ── Context attribution feedback ──────────────────────────────
         // Scan agent output for references to injected context sections.
@@ -15216,8 +15268,30 @@ impl PlanRunner {
             && self.adaptive_thresholds.should_skip_rung(rung.as_index())
     }
 
+    /// Resolve the effective domain for the current task in this plan.
+    fn current_task_domain(&self, plan_id: &str) -> Option<TaskDomain> {
+        let tracker = self.task_trackers.get(plan_id)?;
+        let task = tracker.last_impl_task()?;
+        let config_default = load_roko_config(&self.workdir)
+            .ok()
+            .and_then(|c| c.project.default_domain);
+        task.effective_domain(config_default.as_ref())
+    }
+
     fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Gate>)> {
+        let domain = self.current_task_domain(plan_id);
+
+        // For non-code domains, use verify steps or domain-specific gate config
+        // instead of the compile/test/clippy pipeline.
+        if let Some(ref dom) = domain {
+            if !domain_uses_compiled_gates(dom) {
+                return self.domain_gate_steps(plan_id, dom);
+            }
+        }
+
+        // Code/Chain/None: existing compile-gate logic with build system detection.
         let gate_config = self.runtime_gate_config();
+        let build_system = BuildSystem::detect(exec_dir);
         let generated_tests = self.generated_test_store_for(exec_dir);
         let caps = self.gate_rung_caps(exec_dir, generated_tests.as_ref());
         let mut selected = select_rungs(
@@ -15239,12 +15313,14 @@ impl PlanRunner {
         let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
         for rung in selected {
             match rung {
-                Rung::Compile => steps.push((rung, Box::new(CompileGate::cargo()))),
+                Rung::Compile => {
+                    steps.push((rung, Box::new(CompileGate::new(build_system))));
+                }
                 Rung::Lint if caps.has_lint_tool => {
-                    steps.push((rung, Box::new(ClippyGate::cargo())));
+                    steps.push((rung, Box::new(ClippyGate::new(build_system))));
                 }
                 Rung::Test if !gate_config.skip_tests => {
-                    steps.push((rung, Box::new(TestGate::cargo())));
+                    steps.push((rung, Box::new(TestGate::new(build_system))));
                 }
                 Rung::GeneratedTest => {
                     if let Some(store) = generated_tests.clone() {
@@ -15256,7 +15332,70 @@ impl PlanRunner {
         }
 
         if steps.is_empty() {
-            steps.push((Rung::Compile, Box::new(CompileGate::cargo())));
+            steps.push((Rung::Compile, Box::new(CompileGate::new(build_system))));
+        }
+
+        steps
+    }
+
+    /// Build gate steps for a non-code domain. Uses task verify steps, config
+    /// domain_gates, or a pass-through ShellGate as fallback.
+    fn domain_gate_steps(&self, plan_id: &str, domain: &TaskDomain) -> Vec<(Rung, Box<dyn Gate>)> {
+        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+
+        // 1. Check for per-task verify steps.
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            if let Some(task) = tracker.last_impl_task() {
+                for step in &task.verify {
+                    let parts: Vec<&str> = step.command.splitn(2, ' ').collect();
+                    let program = parts[0].to_string();
+                    let args: Vec<String> = if parts.len() > 1 {
+                        parts[1].split_whitespace().map(String::from).collect()
+                    } else {
+                        vec![]
+                    };
+                    steps.push((
+                        Rung::Compile,
+                        Box::new(
+                            ShellGate::new(program, args)
+                                .with_name(format!("verify:{}", step.phase)),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // 2. If no verify steps, check config domain_gates.
+        if steps.is_empty() {
+            if let Ok(config) = load_roko_config(&self.workdir) {
+                if let Some(gate_cmds) = config.gates.domain_gates.get(domain.label()) {
+                    for cmd in gate_cmds {
+                        let stripped = cmd.strip_prefix("shell:").unwrap_or(cmd);
+                        let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
+                        let program = parts[0].to_string();
+                        let args: Vec<String> = if parts.len() > 1 {
+                            parts[1].split_whitespace().map(String::from).collect()
+                        } else {
+                            vec![]
+                        };
+                        steps.push((
+                            Rung::Compile,
+                            Box::new(
+                                ShellGate::new(program, args)
+                                    .with_name(format!("domain:{}", domain.label())),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback: pass-through gate (always passes).
+        if steps.is_empty() {
+            steps.push((
+                Rung::Compile,
+                Box::new(ShellGate::new("true", vec![]).with_name("domain:pass-through")),
+            ));
         }
 
         steps

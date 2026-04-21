@@ -1928,7 +1928,7 @@ pub fn evolve_skills(
             for gate in &failed_gates {
                 let tool_seq = episode_tool_sequence(episode);
                 let anti_pattern =
-                    format!("AVOID: {} failed after {}", gate, tool_seq.join(" -> "),);
+                    format!("AVOID: {} failed after {}", gate, tool_seq.join(" -> "));
                 let name = format!(
                     "anti_{}_{}_{}",
                     sanitize_component(gate),
