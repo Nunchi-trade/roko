@@ -8959,8 +8959,14 @@ impl PlanRunner {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
                     }
+                    let domain = self.current_task_domain(plan_id);
                     if let Err(e) = self
-                        .finalize_successful_task_worktree(plan_id, task_id, &exec_dir)
+                        .finalize_successful_task_worktree(
+                            plan_id,
+                            task_id,
+                            &exec_dir,
+                            domain.as_ref(),
+                        )
                         .await
                     {
                         tracing::error!(
@@ -9462,8 +9468,14 @@ impl PlanRunner {
                     any_fatal = true;
                     continue;
                 }
+                let domain = self.current_task_domain(plan_id);
                 if let Err(e) = self
-                    .finalize_successful_task_worktree(plan_id, tid, &task_result.exec_dir)
+                    .finalize_successful_task_worktree(
+                        plan_id,
+                        tid,
+                        &task_result.exec_dir,
+                        domain.as_ref(),
+                    )
                     .await
                 {
                     tracing::error!(
@@ -12100,15 +12112,19 @@ impl PlanRunner {
 
         let mut task_files = Vec::new();
         let mut seen_files = HashSet::new();
-        if let Some(exec_dir) = self
-            .worktrees
-            .get(&format!("{plan_id}-{task_id}"))
-            .map(|handle| handle.path)
-            && let Ok(changed_files) = self.git_changed_files(&exec_dir).await
-        {
-            for file in changed_files {
-                if seen_files.insert(file.clone()) {
-                    task_files.push(file);
+        let domain = self.current_task_domain(plan_id);
+        let uses_git = !domain.as_ref().is_some_and(|d| !domain_uses_git(d));
+        if uses_git {
+            if let Some(exec_dir) = self
+                .worktrees
+                .get(&format!("{plan_id}-{task_id}"))
+                .map(|handle| handle.path)
+                && let Ok(changed_files) = self.git_changed_files(&exec_dir).await
+            {
+                for file in changed_files {
+                    if seen_files.insert(file.clone()) {
+                        task_files.push(file);
+                    }
                 }
             }
         }
@@ -12163,7 +12179,14 @@ impl PlanRunner {
             last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
         });
 
-        let fix_tier = if gate_phase == "compile" {
+        let domain = self.current_task_domain(plan_id);
+        let fix_tier = if domain
+            .as_ref()
+            .is_some_and(|d| !domain_uses_compiled_gates(d))
+        {
+            // Non-code domains don't have compile/clippy phases; use standard fix model.
+            "focused"
+        } else if gate_phase == "compile" {
             "mechanical"
         } else {
             "focused"
@@ -15076,8 +15099,14 @@ impl PlanRunner {
         plan_id: &str,
         task_id: &str,
         exec_dir: &Path,
+        domain: Option<&TaskDomain>,
     ) -> Result<()> {
         if !self.worktrees_enabled() {
+            return Ok(());
+        }
+
+        // Non-git domains don't use worktrees or git commits.
+        if domain.is_some_and(|d| !domain_uses_git(d)) {
             return Ok(());
         }
 
@@ -15175,6 +15204,13 @@ impl PlanRunner {
         if !self.worktrees_enabled() {
             return Ok(self.workdir.clone());
         }
+        // Non-git domains don't need worktree isolation.
+        if self
+            .current_task_domain(plan_id)
+            .is_some_and(|d| !domain_uses_git(&d))
+        {
+            return Ok(self.workdir.clone());
+        }
         self.clear_stale_worktree_locks().await;
         let handle = self
             .worktrees
@@ -15207,6 +15243,13 @@ impl PlanRunner {
     /// within a plan, so parallel tasks get isolated working directories.
     async fn task_exec_dir(&self, plan_id: &str, task_id: &str) -> Result<PathBuf> {
         if !self.worktrees_enabled() {
+            return Ok(self.workdir.clone());
+        }
+        // Non-git domains don't need worktree isolation.
+        if self
+            .current_task_domain(plan_id)
+            .is_some_and(|d| !domain_uses_git(&d))
+        {
             return Ok(self.workdir.clone());
         }
         self.clear_stale_worktree_locks().await;
@@ -16308,8 +16351,14 @@ impl PlanRunner {
         task_id: &str,
         allowed_files: &[String],
         exec_dir: &Path,
+        domain: Option<&TaskDomain>,
     ) -> Result<()> {
         if allowed_files.is_empty() {
+            return Ok(());
+        }
+
+        // Non-git domains don't track file changes via git.
+        if domain.is_some_and(|d| !domain_uses_git(d)) {
             return Ok(());
         }
 
@@ -16398,19 +16447,25 @@ impl PlanRunner {
             ));
         }
 
-        self.verify_declared_write_files(plan_id, &td.id, &td.files, exec_dir)
+        let domain = self.current_task_domain(plan_id);
+        self.verify_declared_write_files(plan_id, &td.id, &td.files, exec_dir, domain.as_ref())
             .await?;
 
+        let uses_git = !domain.as_ref().is_some_and(|d| !domain_uses_git(d));
         let mut task_files = Vec::new();
         let mut seen_files = HashSet::new();
-        let changed_file_count = if let Ok(changed_files) = self.git_changed_files(exec_dir).await {
-            let changed_file_count = u32::try_from(changed_files.len()).unwrap_or(u32::MAX);
-            for file in changed_files {
-                if seen_files.insert(file.clone()) {
-                    task_files.push(file);
+        let changed_file_count = if uses_git {
+            if let Ok(changed_files) = self.git_changed_files(exec_dir).await {
+                let count = u32::try_from(changed_files.len()).unwrap_or(u32::MAX);
+                for file in changed_files {
+                    if seen_files.insert(file.clone()) {
+                        task_files.push(file);
+                    }
                 }
+                count
+            } else {
+                0
             }
-            changed_file_count
         } else {
             0
         };
@@ -19336,7 +19391,7 @@ depends_on = []
         std::fs::write(task_dir.join("feature.txt"), "task change\n").expect("write change");
 
         runner
-            .finalize_successful_task_worktree("plan-1", "T1", &task_dir)
+            .finalize_successful_task_worktree("plan-1", "T1", &task_dir, None)
             .await
             .expect("finalize task worktree");
 

@@ -842,7 +842,8 @@ impl SystemPromptBuilder {
             })
             .collect::<Vec<_>>();
 
-        let mut assigned = caps.iter().sum::<usize>();
+        let assigned: usize = caps.iter().sum();
+        let remaining = token_budget.saturating_sub(assigned);
         let mut remainders = data
             .iter()
             .enumerate()
@@ -853,12 +854,8 @@ impl SystemPromptBuilder {
             .collect::<Vec<_>>();
         remainders.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0).then_with(|| lhs.1.cmp(&rhs.1)));
 
-        for (_, index) in remainders {
-            if assigned >= token_budget {
-                break;
-            }
-            caps[index] = caps[index].saturating_add(1);
-            assigned += 1;
+        for (_, index) in remainders.iter().take(remaining) {
+            caps[*index] = caps[*index].saturating_add(1);
         }
 
         for (index, section) in sections.iter_mut().enumerate() {

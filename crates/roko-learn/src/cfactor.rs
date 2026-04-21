@@ -472,7 +472,7 @@ pub fn trend_arrow(history: &[CFactor], window: Duration) -> &'static str {
         .iter()
         .filter(|snapshot| snapshot.computed_at >= cutoff)
         .collect();
-    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+    snapshots.sort_by_key(|s| s.computed_at);
 
     let Some(first) = snapshots.first() else {
         return "→";
@@ -511,7 +511,7 @@ pub fn detect_cfactor_regression(
         .iter()
         .filter(|snapshot| snapshot.computed_at >= cutoff)
         .collect();
-    snapshots.sort_by(|left, right| left.computed_at.cmp(&right.computed_at));
+    snapshots.sort_by_key(|s| s.computed_at);
 
     let Some(current) = snapshots.last().copied() else {
         return None;

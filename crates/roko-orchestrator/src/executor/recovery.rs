@@ -407,10 +407,11 @@ fn apply_event_to_plan(
                 reason: roko_core::FailureKind::Other(reason),
             };
         }
-        EventKind::MergeAttempted => {
-            if info.phase.kind() != PhaseKind::Complete && info.phase.kind() != PhaseKind::Failed {
-                info.phase = PlanPhase::Merging;
-            }
+        EventKind::MergeAttempted
+            if info.phase.kind() != PhaseKind::Complete
+                && info.phase.kind() != PhaseKind::Failed =>
+        {
+            info.phase = PlanPhase::Merging;
         }
         // All other event kinds (current and future) are no-ops for recovery.
         _ => {}

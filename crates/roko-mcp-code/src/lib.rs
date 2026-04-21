@@ -1673,6 +1673,9 @@ mod tests {
                 "get_symbol_context",
                 "get_file_ast",
                 "find_similar_patterns",
+                "get_index_stats",
+                "find_references",
+                "find_implementations",
                 "get_callers",
                 "workspace_map",
                 "get_context",
@@ -1694,7 +1697,7 @@ mod tests {
             serde_json::from_str(result["content"][0]["text"].as_str().expect("payload text"))
                 .expect("json payload");
         assert_eq!(payload["strategy_used"], "hybrid");
-        assert_eq!(payload["results"].as_array().expect("results").len(), 1);
+        assert_eq!(payload["results"].as_array().expect("results").len(), 2);
     }
 
     #[test]

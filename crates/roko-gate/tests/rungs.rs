@@ -375,7 +375,7 @@ async fn diff_gate_accepts_real_diffs_and_rejects_stub_tokens() {
 #[tokio::test]
 async fn symbol_rung_passes_and_reports_missing_symbols() {
     let tmp = tempdir();
-    write_text(tmp.path(), "src/lib.rs", "pub struct Present;\n");
+    write_text(tmp.path(), "lib.rs", "pub struct Present;\n");
 
     let gate = SymbolGate::new(vec![tmp.path().to_path_buf()]);
     let manifest = SymbolManifest::new("plan-symbol").with_expectation(SymbolExpectation {

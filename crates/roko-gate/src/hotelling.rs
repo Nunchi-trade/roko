@@ -61,7 +61,7 @@ impl HotellingDetector {
         let threshold = chi_squared_critical(dim, alpha);
         Self {
             dimension: dim,
-            mean: vec![0.5; dim],
+            mean: vec![0.0; dim],
             covariance: identity_matrix(dim),
             observations: 0,
             threshold,
@@ -337,15 +337,22 @@ mod tests {
     #[test]
     fn normal_baseline_is_not_anomalous() {
         let mut det = HotellingDetector::new(2, 0.05);
-        // Train on a stable baseline.
-        for _ in 0..50 {
-            det.update(&[0.8, 0.9]);
+        // Train on a baseline with independent variation in each dimension
+        // to produce a non-singular covariance matrix.
+        for _ in 0..30 {
+            det.update(&[0.80, 0.90]);
         }
-        for _ in 0..50 {
-            det.update(&[0.85, 0.88]);
+        for _ in 0..30 {
+            det.update(&[0.85, 0.90]);
         }
-        // A point near the mean should not be anomalous.
-        assert!(!det.is_anomalous(&[0.82, 0.89]));
+        for _ in 0..30 {
+            det.update(&[0.80, 0.85]);
+        }
+        for _ in 0..30 {
+            det.update(&[0.85, 0.85]);
+        }
+        // The mean is [0.825, 0.875]; a point very close should not be anomalous.
+        assert!(!det.is_anomalous(&[0.825, 0.875]));
     }
 
     #[test]
@@ -371,10 +378,22 @@ mod tests {
     #[test]
     fn check_returns_detailed_result() {
         let mut det = HotellingDetector::new(2, 0.05);
-        for _ in 0..20 {
-            det.update(&[0.9, 0.85]);
+        // Use four observation clusters with independent variation in each
+        // dimension to ensure a non-singular covariance matrix.
+        for _ in 0..10 {
+            det.update(&[0.90, 0.85]);
         }
-        let result = det.check(&[0.9, 0.85]);
+        for _ in 0..10 {
+            det.update(&[0.88, 0.85]);
+        }
+        for _ in 0..10 {
+            det.update(&[0.90, 0.87]);
+        }
+        for _ in 0..10 {
+            det.update(&[0.88, 0.87]);
+        }
+        // Mean is [0.89, 0.86]; check exactly at the mean.
+        let result = det.check(&[0.89, 0.86]);
         assert!(!result.is_anomalous);
         assert!(result.t_squared >= 0.0);
     }

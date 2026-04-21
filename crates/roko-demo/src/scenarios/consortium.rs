@@ -236,8 +236,7 @@ fn find_wallet_by_address(
 fn current_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 async fn mine_block(rpc_url: &str) -> anyhow::Result<()> {

@@ -190,21 +190,22 @@ pub fn decide(
     // Rule 1 + Rule 2: react to high-intensity pheromones.
     for p in pheromones {
         match p.kind.as_str() {
-            "threat" if p.intensity > THREAT_THRESHOLD => {
-                if find_warning_for_threat(insights).is_none() {
-                    let content = format!(
-                        "[{watcher_id}] observed high-intensity threat pheromone #{} (intensity={:.2})",
-                        p.id, p.intensity
-                    );
-                    out.push(Reaction::post_insight(
-                        "warning",
-                        content,
-                        format!(
-                            "threat pheromone {} intensity {:.2} > {:.2}",
-                            p.id, p.intensity, THREAT_THRESHOLD
-                        ),
-                    ));
-                }
+            "threat"
+                if p.intensity > THREAT_THRESHOLD
+                    && find_warning_for_threat(insights).is_none() =>
+            {
+                let content = format!(
+                    "[{watcher_id}] observed high-intensity threat pheromone #{} (intensity={:.2})",
+                    p.id, p.intensity
+                );
+                out.push(Reaction::post_insight(
+                    "warning",
+                    content,
+                    format!(
+                        "threat pheromone {} intensity {:.2} > {:.2}",
+                        p.id, p.intensity, THREAT_THRESHOLD
+                    ),
+                ));
             }
             "opportunity" if p.intensity > OPPORTUNITY_THRESHOLD => {
                 let content = format!(

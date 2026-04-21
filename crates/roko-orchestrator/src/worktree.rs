@@ -607,8 +607,7 @@ fn is_stale_lock(path: &Path) -> bool {
     };
     std::time::SystemTime::now()
         .duration_since(modified)
-        .map(|age| age.as_secs() >= STALE_LOCK_SECS)
-        .unwrap_or(false)
+        .is_ok_and(|age| age.as_secs() >= STALE_LOCK_SECS)
 }
 
 #[cfg(test)]

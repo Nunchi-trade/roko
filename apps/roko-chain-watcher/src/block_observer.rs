@@ -694,7 +694,7 @@ impl BlockObserver {
         }
 
         // Sustained saturation trend
-        let tail = &snapshot[n.saturating_sub(5).max(0)..];
+        let tail = &snapshot[n.saturating_sub(5)..];
         if tail.len() >= 3 {
             let avg_sat: f32 =
                 tail.iter().map(|b| b.saturation_pct).sum::<f32>() / tail.len() as f32;

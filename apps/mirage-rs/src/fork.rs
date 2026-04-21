@@ -1182,6 +1182,8 @@ pub(crate) struct MirageState {
     pub next_event_subscription_id: u64,
     /// Broadcasts new block headers to all `eth_subscribe("newHeads")` subscribers.
     pub new_heads_tx: tokio::sync::broadcast::Sender<NewHeadBroadcast>,
+    /// Broadcasts committed transaction hashes for `eth_subscribe("newPendingTransactions")`.
+    pub pending_tx_tx: tokio::sync::broadcast::Sender<B256>,
     pub last_request_at: Instant,
     pub reject_new_forks: bool,
     pub writer_gate: Arc<AsyncMutex<()>>,
@@ -1255,6 +1257,7 @@ impl MirageFork {
                 event_subscriptions: HashMap::new(),
                 next_event_subscription_id: 0,
                 new_heads_tx: tokio::sync::broadcast::channel(1_024).0,
+                pending_tx_tx: tokio::sync::broadcast::channel(1_024).0,
                 last_request_at: Instant::now(),
                 reject_new_forks: false,
                 writer_gate: Arc::new(AsyncMutex::new(())),

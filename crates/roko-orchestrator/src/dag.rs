@@ -514,7 +514,7 @@ impl UnifiedTaskDag {
         let critical = self
             .cpm_analysis()
             .map_or(0, |(_, _, total, _)| duration_to_minutes(total));
-        let wave_count = self.waves().map(|w| w.len()).unwrap_or(0);
+        let wave_count = self.waves().map_or(0, |w| w.len());
         DagStats {
             nodes: self.nodes.len(),
             edges: edge_count,
@@ -611,10 +611,7 @@ impl UnifiedTaskDag {
     pub fn fuse_linear_chains(&mut self, config: &FusionConfig) -> usize {
         let mut fusions = 0usize;
 
-        loop {
-            let Ok(topo) = self.topological_sort() else {
-                break;
-            };
+        while let Ok(topo) = self.topological_sort() {
             let mut fused = false;
 
             for start in topo {
@@ -678,7 +675,7 @@ impl UnifiedTaskDag {
                 // below the configured threshold.
                 if config.ave_width > 0.0 {
                     let node_count = self.nodes.len();
-                    let wave_count = self.waves().map(|w| w.len()).unwrap_or(1).max(1);
+                    let wave_count = self.waves().map_or(1, |w| w.len()).max(1);
                     let merged_count = chain.len() - 1; // nodes that would be removed
                     let new_node_count = node_count.saturating_sub(merged_count);
                     // After fusion, waves may shrink; estimate new average width.
