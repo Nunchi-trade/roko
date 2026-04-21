@@ -39,6 +39,7 @@ pub mod config_cmd;
 pub mod custody;
 pub mod daemon;
 pub mod deployment;
+pub mod doctor;
 pub mod episode;
 pub mod event_sources;
 pub mod explain;

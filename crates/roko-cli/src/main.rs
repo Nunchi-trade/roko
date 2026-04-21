@@ -218,6 +218,15 @@ enum Command {
         #[arg(long)]
         cfactor: bool,
     },
+    /// Diagnose self-hosted workspace bootstrap state.
+    Doctor {
+        /// Directory containing `roko.toml` and `.roko/` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// roko-serve base URL or explicit health endpoint to probe.
+        #[arg(long)]
+        serve_url: Option<String>,
+    },
     /// Walk the lineage DAG rooted at a signal hash and print it.
     #[command(visible_alias = "inspect")]
     Replay {
@@ -1272,6 +1281,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cmd_status(cli, workdir, cfactor).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Doctor { workdir, serve_url } => cmd_doctor(cli, workdir, serve_url).await,
         Command::Replay {
             hash,
             workdir,
@@ -1438,6 +1448,23 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             dry_run,
         } => cmd_archive(cli, workdir, &older_than, batch_size, dry_run).await,
     }
+}
+
+async fn cmd_doctor(cli: &Cli, workdir: Option<PathBuf>, serve_url: Option<String>) -> Result<i32> {
+    let report = roko_cli::doctor::run_doctor(&roko_cli::doctor::DoctorOptions {
+        workdir: workdir.unwrap_or_else(|| resolve_workdir(cli)),
+        config_override: cli.config.clone(),
+        serve_url,
+    })
+    .await?;
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_human());
+    }
+
+    Ok(report.exit_code())
 }
 
 async fn cmd_archive(
@@ -8426,6 +8453,26 @@ mod tests {
     fn cli_parses_status_subcommand() {
         let cli = Cli::try_parse_from(["roko", "status"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn cli_parses_doctor_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "doctor",
+            "--workdir",
+            "/tmp/project",
+            "--serve-url",
+            "http://localhost:9090",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                workdir: Some(_),
+                serve_url: Some(_),
+            })
+        ));
     }
 
     #[test]
