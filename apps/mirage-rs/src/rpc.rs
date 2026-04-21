@@ -2565,9 +2565,7 @@ fn parse_log_subscription_filter(filter_val: Option<&serde_json::Value>) -> LogS
             .iter()
             .map(|entry| match entry {
                 serde_json::Value::Null => None,
-                serde_json::Value::String(s) => {
-                    s.parse::<B256>().ok().map(|h| vec![h])
-                }
+                serde_json::Value::String(s) => s.parse::<B256>().ok().map(|h| vec![h]),
                 serde_json::Value::Array(inner) => {
                     let hashes: Vec<B256> = inner
                         .iter()
@@ -2589,10 +2587,7 @@ fn parse_log_subscription_filter(filter_val: Option<&serde_json::Value>) -> LogS
 }
 
 /// Checks whether a `MirageEvent` matches a log subscription filter.
-fn log_matches_subscription_filter(
-    event: &MirageEvent,
-    filter: &LogSubscriptionFilter,
-) -> bool {
+fn log_matches_subscription_filter(event: &MirageEvent, filter: &LogSubscriptionFilter) -> bool {
     // Address check: if addresses are specified, the event contract must be in the list.
     if !filter.addresses.is_empty() && !filter.addresses.contains(&event.contract) {
         return false;
@@ -5041,10 +5036,7 @@ mod tests {
     #[tokio::test]
     async fn ws_eth_subscribe_new_heads() {
         use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::{
-            connect_async,
-            tungstenite::Message as WsMessage,
-        };
+        use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
         let upstream = Arc::new(UpstreamRpc::mock(1));
         let db = HybridDB::new(upstream, 32, Duration::from_secs(12), NonZeroUsize::MIN, 1);
@@ -5081,8 +5073,7 @@ mod tests {
             .expect("stream ended")
             .expect("ws error");
         let confirm: serde_json::Value =
-            serde_json::from_str(confirm.to_text().expect("text frame"))
-                .expect("parse json");
+            serde_json::from_str(confirm.to_text().expect("text frame")).expect("parse json");
         let sub_id = confirm["result"].clone();
         assert!(!sub_id.is_null(), "subscription id missing");
 
@@ -5107,8 +5098,7 @@ mod tests {
             .expect("stream ended")
             .expect("ws error");
         let event: serde_json::Value =
-            serde_json::from_str(event.to_text().expect("text frame"))
-                .expect("parse json");
+            serde_json::from_str(event.to_text().expect("text frame")).expect("parse json");
         assert_eq!(event["method"], "eth_subscription");
         assert_eq!(event["params"]["subscription"], sub_id);
         assert!(
@@ -5132,8 +5122,7 @@ mod tests {
             .expect("stream ended")
             .expect("ws error");
         let unsub: serde_json::Value =
-            serde_json::from_str(unsub.to_text().expect("text frame"))
-                .expect("parse json");
+            serde_json::from_str(unsub.to_text().expect("text frame")).expect("parse json");
         assert_eq!(unsub["result"], true);
     }
 }
