@@ -20,7 +20,7 @@ use crate::{
     cow::{CowState, MultiVersionStore},
     fork::{
         Classification, DiffClassifier, DirtyAccount, DirtyStore, EvmExecutor, ForkState, HybridDB,
-        MirageState, NewHeadBroadcast, ReadCache, WatchEntry, WatchSource,
+        LocalBlock, MirageState, NewHeadBroadcast, ReadCache, WatchEntry, WatchSource,
     },
     provider::UpstreamRpc,
     resources::MirageMode,
@@ -496,6 +496,47 @@ impl TargetedFollower {
 
             if !self.config.sync_state_only {
                 state.fork.local_block_number = number;
+
+                // Populate blocks_by_hash/blocks_by_number so replayed blocks
+                // are findable by hash (eth_getBlockByHash, etc.).
+                let block_hash = block
+                    .get("hash")
+                    .and_then(|v| parse_b256_value(v).ok())
+                    .unwrap_or_default();
+                let tx_hashes: Vec<B256> = block
+                    .get("transactions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|tx| {
+                                // Transactions can be full objects or bare hash strings.
+                                if tx.is_string() {
+                                    parse_b256_value(tx).ok()
+                                } else {
+                                    tx.get("hash").and_then(|h| parse_b256_value(h).ok())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let local_block = LocalBlock {
+                    hash: block_hash,
+                    number,
+                    timestamp: state.fork.timestamp,
+                    gas_used: parse_hex_field(&block, "gasUsed").unwrap_or(0),
+                    gas_limit: parse_hex_field(&block, "gasLimit").unwrap_or(30_000_000),
+                    base_fee_per_gas: state.fork.next_base_fee_per_gas,
+                    coinbase: state.fork.coinbase,
+                    prev_randao: state.fork.prev_randao,
+                    transactions: tx_hashes,
+                };
+                state
+                    .fork
+                    .blocks_by_hash
+                    .insert(block_hash, local_block.clone());
+                state.fork.blocks_by_number.insert(number, local_block);
+                state.fork.prune_old_blocks();
+
                 let _ = state.new_heads_tx.send(NewHeadBroadcast {
                     number,
                     timestamp: state.fork.timestamp,

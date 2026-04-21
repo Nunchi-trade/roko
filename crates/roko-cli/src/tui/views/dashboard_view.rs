@@ -270,7 +270,7 @@ fn render_sub_agents(
 fn render_output_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     focused: bool,
@@ -298,10 +298,10 @@ fn render_output_panel(
     // Priority:
     //   1. current_plan_execution.agent_output_tail
     //   2. selected agent's live row data from tui_state.agents
-    //   3. most recent task output from data.task_outputs
+    //   3. most recent task output from tui_state.task_output_tails
     let collected: Vec<String> = {
         // 1. Plan execution output tail.
-        let exec_lines: Vec<String> = data
+        let exec_lines: Vec<String> = tui_state
             .current_plan_execution
             .as_ref()
             .map(|exec| exec.agent_output_tail.clone())
@@ -319,7 +319,8 @@ fn render_output_panel(
             } else if !agent.last_output_line.is_empty() {
                 vec![agent.last_output_line.clone()]
             } else if !agent.current_task.is_empty() {
-                data.task_outputs
+                tui_state
+                    .task_output_tails
                     .get(&agent.current_task)
                     .cloned()
                     .unwrap_or_default()
@@ -331,9 +332,10 @@ fn render_output_panel(
         }
     };
 
-    // 3. Fallback: most recent task output from data.task_outputs.
+    // 3. Fallback: most recent task output from tui_state.task_output_tails.
     let collected = if collected.is_empty() {
-        data.task_outputs
+        tui_state
+            .task_output_tails
             .values()
             .max_by_key(|v| v.len())
             .cloned()
@@ -459,7 +461,7 @@ fn render_agent_routes_table(
 fn render_sub_diff(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     theme: &Theme,
 ) {
@@ -468,7 +470,7 @@ fn render_sub_diff(
     } else {
         None
     };
-    widgets::diff_panel::render_diff_panel(frame, area, &data.git_diff, scroll, theme);
+    widgets::diff_panel::render_diff_panel(frame, area, &tui_state.git_diff, scroll, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +480,7 @@ fn render_sub_diff(
 fn render_sub_gate(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
@@ -508,9 +510,9 @@ fn render_sub_gate(
         return;
     }
 
-    let rows = gate_verdict_rows(data);
+    let rows = gate_verdict_rows(tui_state);
     let trend_rows = gate_trend_rows(tui_state);
-    let failures = &data.gate_results_page.failure_rows;
+    let failures = &tui_state.gate_results_page.failure_rows;
 
     if rows.is_empty()
         && trend_rows.is_empty()
@@ -680,7 +682,7 @@ pub(crate) fn collect_git_summary(
 fn render_sub_mcp(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     theme: &Theme,
 ) {
@@ -702,16 +704,16 @@ fn render_sub_mcp(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let eff = &data.efficiency;
-    let model_usage = aggregate_model_usage(&data.efficiency_events);
-    let mcp_config = load_mcp_config_view(data.root());
-    let total_trials: u64 = data
+    let eff = &tui_state.efficiency_summary;
+    let model_usage = aggregate_model_usage(&tui_state.efficiency_events);
+    let mcp_config = load_mcp_config_view(&tui_state.workdir);
+    let total_trials: u64 = tui_state
         .cascade_router
         .confidence_stats
         .values()
         .map(|stats| stats.trials)
         .sum();
-    let total_successes: u64 = data
+    let total_successes: u64 = tui_state
         .cascade_router
         .confidence_stats
         .values()
@@ -834,7 +836,7 @@ fn render_sub_mcp(
         Line::from(Span::raw("")),
         section_header("Cascade Router", theme),
     ]);
-    if data.cascade_router.model_slugs.is_empty() && total_trials == 0 {
+    if tui_state.cascade_router.model_slugs.is_empty() && total_trials == 0 {
         lines.push(Line::from(vec![
             Span::styled("status: ", theme.muted()),
             Span::styled("no router stats yet", theme.muted()),
@@ -851,7 +853,7 @@ fn render_sub_mcp(
         lines.push(Line::from(vec![
             Span::styled("models: ", theme.muted()),
             Span::styled(
-                data.cascade_router.model_slugs.len().to_string(),
+                tui_state.cascade_router.model_slugs.len().to_string(),
                 theme.info(),
             ),
             Span::styled("  trials: ", theme.muted()),
@@ -859,8 +861,8 @@ fn render_sub_mcp(
             Span::styled("  success: ", theme.muted()),
             Span::styled(success_rate, theme.text()),
         ]));
-        for slug in &data.cascade_router.model_slugs {
-            let stats = data.cascade_router.confidence_stats.get(slug);
+        for slug in &tui_state.cascade_router.model_slugs {
+            let stats = tui_state.cascade_router.confidence_stats.get(slug);
             let trials = stats.map_or(0, |entry| entry.trials);
             let successes = stats.map_or(0, |entry| entry.successes);
             let rate = if trials > 0 {
@@ -1078,7 +1080,7 @@ fn render_diagnosis_panel(
 fn render_sub_learning(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
@@ -1108,7 +1110,7 @@ fn render_sub_learning(
         return;
     }
 
-    let trends = build_learning_trends(data);
+    let trends = build_learning_trends(tui_state);
     let sections =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).split(inner);
 
@@ -1120,7 +1122,7 @@ fn render_sub_learning(
     ])
     .split(sections[0]);
 
-    let c_factor_title = cfactor_trend_title(&trends, data);
+    let c_factor_title = cfactor_trend_title(&trends, tui_state);
     let c_factor_style = trends
         .cfactor_latest
         .map(|score| rate_style(score, theme))
@@ -1162,7 +1164,7 @@ fn render_sub_learning(
         focused,
     );
 
-    render_concluded_experiments_panel(frame, sections[1], data, tui_state, focused, theme);
+    render_concluded_experiments_panel(frame, sections[1], _data, tui_state, focused, theme);
 }
 
 fn render_learning_sparkline(
@@ -1208,7 +1210,7 @@ fn render_learning_sparkline(
 fn render_concluded_experiments_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     focused: bool,
     theme: &Theme,
@@ -1234,7 +1236,7 @@ fn render_concluded_experiments_panel(
         return;
     }
 
-    let rows = concluded_experiment_rows(data, tui_state);
+    let rows = concluded_experiment_rows(tui_state);
     if rows.is_empty() {
         frame.render_widget(
             Paragraph::new(" no concluded experiments yet").style(theme.muted()),
@@ -1312,17 +1314,12 @@ struct ConcludedExperimentRow {
     ci_upper: f64,
 }
 
-fn concluded_experiment_rows(
-    data: &DashboardData,
-    tui_state: &TuiState,
-) -> Vec<ConcludedExperimentRow> {
-    let winners = if tui_state.experiment_winners.is_empty() {
-        &data.experiment_winners
-    } else {
-        &tui_state.experiment_winners
-    };
-
-    winners.into_iter().map(concluded_experiment_row).collect()
+fn concluded_experiment_rows(tui_state: &TuiState) -> Vec<ConcludedExperimentRow> {
+    tui_state
+        .experiment_winners
+        .iter()
+        .map(concluded_experiment_row)
+        .collect()
 }
 
 fn concluded_experiment_row(summary: &ExperimentWinnerSummary) -> ConcludedExperimentRow {
@@ -1392,8 +1389,8 @@ fn rate_style(rate: f64, theme: &Theme) -> Style {
     }
 }
 
-fn gate_verdict_rows(data: &DashboardData) -> Vec<GateSummaryRow> {
-    data.gate_results_page.gate_rows.clone()
+fn gate_verdict_rows(tui_state: &TuiState) -> Vec<GateSummaryRow> {
+    tui_state.gate_results_page.gate_rows.clone()
 }
 
 fn render_gate_verdict_summary(
@@ -1795,32 +1792,32 @@ struct LearningTrends {
     cfactor_latest: Option<f64>,
 }
 
-fn build_learning_trends(data: &DashboardData) -> LearningTrends {
-    let cfactor_latest = data
-        .cfactor_trend
+fn build_learning_trends(tui_state: &TuiState) -> LearningTrends {
+    let cfactor_latest = tui_state
+        .cfactor_trend_buckets
         .iter()
         .rev()
         .find(|bucket| bucket.samples > 0)
         .map(|bucket| bucket.avg)
-        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+        .or_else(|| tui_state.cfactor.as_ref().map(|cfactor| cfactor.overall));
 
-    let cfactor_overall = data
-        .cfactor_trend
+    let cfactor_overall = tui_state
+        .cfactor_trend_buckets
         .iter()
         .map(|bucket| (bucket.avg.clamp(0.0, 1.0) * 100.0).round() as u64)
         .collect();
 
-    let tokens_per_hour = data
+    let tokens_per_hour = tui_state
         .efficiency_trend
         .iter()
         .map(|bucket| bucket.tokens_in.saturating_add(bucket.tokens_out))
         .collect();
-    let latency_per_hour_ms = data
+    let latency_per_hour_ms = tui_state
         .efficiency_trend
         .iter()
         .map(|bucket| bucket.latency_ms_avg.round() as u64)
         .collect();
-    let cost_per_hour_cents = data
+    let cost_per_hour_cents = tui_state
         .efficiency_trend
         .iter()
         .map(|bucket| bucket.cost_usd_cents)
@@ -1835,10 +1832,10 @@ fn build_learning_trends(data: &DashboardData) -> LearningTrends {
     }
 }
 
-fn cfactor_trend_title(trends: &LearningTrends, data: &DashboardData) -> String {
+fn cfactor_trend_title(trends: &LearningTrends, tui_state: &TuiState) -> String {
     let latest = trends
         .cfactor_latest
-        .or_else(|| data.cfactor.as_ref().map(|cfactor| cfactor.overall));
+        .or_else(|| tui_state.cfactor.as_ref().map(|cfactor| cfactor.overall));
 
     match latest {
         Some(score) => format!(" C-Factor / hr (%) {:>3.0} ", score * 100.0),
@@ -2162,7 +2159,8 @@ mod tests {
     fn render_learning_dashboard(data: &DashboardData) -> String {
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let tui_state = TuiState::default();
+        let mut tui_state = TuiState::default();
+        tui_state.experiment_winners = data.experiment_winners.clone();
         let view_state = ViewState {
             sub_tab: 6,
             ..ViewState::default()
@@ -2182,7 +2180,8 @@ mod tests {
     fn render_gate_dashboard(data: &DashboardData) -> String {
         let backend = TestBackend::new(120, 28);
         let mut terminal = Terminal::new(backend).unwrap();
-        let tui_state = TuiState::default();
+        let mut tui_state = TuiState::default();
+        tui_state.gate_results_page = data.gate_results_page.clone();
         let view_state = ViewState {
             sub_tab: 3,
             ..ViewState::default()

@@ -1949,7 +1949,7 @@ impl App {
     }
 
     fn current_agent_topology_max_scroll(&self) -> usize {
-        views::agents_view::agent_topology_lines(&self.data, &self.tui_state)
+        views::agents_view::agent_topology_lines(&self.tui_state)
             .len()
             .saturating_sub(self.current_agent_topology_viewport_height())
             .min(u16::MAX as usize)
@@ -2081,7 +2081,6 @@ impl App {
     fn current_agent_output_line_count(&self) -> usize {
         match self.tui_state.active_tab {
             Tab::Agents => views::agents_view::collect_agent_output_lines(
-                &self.data,
                 &self.tui_state,
                 self.current_view_state().selected,
             )
@@ -2287,6 +2286,7 @@ impl App {
         }
     }
 
+    #[allow(deprecated)] // tick() is deprecated but still needed for standalone mode
     fn tick_snapshot(&mut self) {
         if let Err(error) = self.data.tick() {
             tracing::warn!(
@@ -2492,7 +2492,12 @@ impl App {
                 }
             }
             if got_refresh {
-                self.tick_snapshot();
+                // With a live orchestrator, the push path (drain_snapshot_channel)
+                // handles updates. Only fall back to file-based refresh when
+                // running standalone (`roko dashboard` with no orchestrator).
+                if self.snapshot_rx.is_none() {
+                    self.tick_snapshot();
+                }
             }
         }
 
@@ -2738,7 +2743,7 @@ impl App {
     }
 
     fn clamp_signal_selection(&mut self) {
-        let len = self.data.recent_signals.len();
+        let len = self.tui_state.recent_signals.len();
         if len == 0 {
             self.signal_selection = 0;
         } else if self.signal_selection >= len {
@@ -2747,7 +2752,7 @@ impl App {
     }
 
     fn clamp_gate_failure_selection(&mut self) {
-        let len = self.data.gate_results_page.failure_rows.len();
+        let len = self.tui_state.gate_results_page.failure_rows.len();
         if len == 0 {
             self.gate_failure_selection = 0;
         } else if self.gate_failure_selection >= len {
@@ -3186,6 +3191,12 @@ mod tests {
                         role: "reviewer".to_string(),
                         active: true,
                         output_bytes: 0,
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                        current_task: String::new(),
+                        current_plan: String::new(),
                     },
                 ),
                 (
@@ -3195,6 +3206,12 @@ mod tests {
                         role: "planner".to_string(),
                         active: false,
                         output_bytes: 0,
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                        current_task: String::new(),
+                        current_plan: String::new(),
                     },
                 ),
             ]

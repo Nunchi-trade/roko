@@ -542,6 +542,7 @@ impl DashboardData {
     }
 
     /// Refresh the snapshot from the stored workspace root.
+    #[allow(deprecated)] // tick() is deprecated but still needed for standalone refresh
     pub async fn refresh(&mut self) -> Result<()> {
         let mut snapshot = std::mem::take(self);
         let refreshed = tokio::task::spawn_blocking(move || -> Result<Self> {
@@ -554,6 +555,11 @@ impl DashboardData {
     }
 
     /// Advance cursor-backed dashboard artifacts and refresh stamp-backed files once.
+    ///
+    /// **Deprecated**: In connected mode the TUI is fully push-based via
+    /// `DashboardSnapshot`. This method is only used for standalone mode
+    /// (`roko dashboard`) where no orchestrator is attached.
+    #[deprecated(note = "use push-based DashboardSnapshot instead; kept for standalone mode only")]
     pub fn tick(&mut self) -> Result<()> {
         let roko_dir = self.root.join(".roko");
         let state_path = roko_dir.join("state").join("executor.json");
@@ -4799,6 +4805,7 @@ fn load_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

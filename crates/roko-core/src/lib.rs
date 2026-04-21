@@ -180,8 +180,9 @@ pub use task::{
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
 pub use dashboard_snapshot::{
-    AgentTopology, AgentTopologyEdge, AgentTopologyNode, DashboardEvent, DashboardSnapshot,
-    DiagnosisSeverity, DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
+    AgentState as DashboardAgentState, AgentTopology, AgentTopologyEdge, AgentTopologyNode,
+    CFactorBucket, DashboardEvent, DashboardEventLogEntry, DashboardSnapshot, DiagnosisSeverity,
+    DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry, SnapshotStats,
     TrendBucket, TrendBuckets,
 };
 pub use namespace::{

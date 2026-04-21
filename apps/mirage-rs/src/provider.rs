@@ -451,6 +451,44 @@ impl UpstreamRpc {
         })
     }
 
+    /// Returns a block payload by hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream block-fetch, transport, or parsing errors.
+    pub fn get_block_by_hash(&self, hash: B256, full: bool) -> Result<Option<Value>> {
+        if self.http_url.is_none() {
+            self.maybe_delay_mock();
+            return Ok(None);
+        }
+
+        let response = self.call("eth_getBlockByHash", json!([hash, full]))?;
+        Ok(if response.is_null() {
+            None
+        } else {
+            Some(response)
+        })
+    }
+
+    /// Returns a transaction receipt by hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns upstream receipt-fetch, transport, or parsing errors.
+    pub fn get_transaction_receipt(&self, tx_hash: B256) -> Result<Option<Value>> {
+        if self.http_url.is_none() {
+            self.maybe_delay_mock();
+            return Ok(None);
+        }
+
+        let response = self.call("eth_getTransactionReceipt", json!([tx_hash]))?;
+        Ok(if response.is_null() {
+            None
+        } else {
+            Some(response)
+        })
+    }
+
     /// Returns upstream bytecode by code hash.
     ///
     /// # Errors

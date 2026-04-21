@@ -51,7 +51,7 @@ pub(crate) fn render(
         Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)]).split(area);
 
     render_left_panel(frame, panels[0], data, tui_state, view_state, theme);
-    render_right_panel(frame, panels[1], data, tui_state, view_state, theme);
+    render_right_panel(frame, panels[1], tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -68,10 +68,10 @@ fn render_left_panel(
 ) {
     // Compute how much space to allocate.
     // Summary = 2 lines, sparkline = 6 lines (if token data exists), rest = roster.
-    let has_token_data = data.efficiency.event_count > 0
+    let has_token_data = tui_state.efficiency_summary.event_count > 0
         || tui_state.cumulative_input_tokens > 0
         || tui_state.cumulative_output_tokens > 0
-        || !data.efficiency_events.is_empty();
+        || !tui_state.efficiency_events.is_empty();
 
     let sparkline_height = if has_token_data { 6u16 } else { 0u16 };
 
@@ -82,8 +82,8 @@ fn render_left_panel(
     ])
     .split(area);
 
-    render_agent_roster(frame, sections[0], data, tui_state, view_state, theme);
-    render_summary_line(frame, sections[1], data, tui_state, theme);
+    render_agent_roster(frame, sections[0], tui_state, view_state, theme);
+    render_summary_line(frame, sections[1], tui_state, theme);
     if has_token_data {
         crate::tui::widgets::token_sparkline::render_token_sparkline(
             frame,
@@ -101,14 +101,13 @@ fn render_left_panel(
 fn render_agent_roster(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     let focused = matches!(tui_state.focus, FocusZone::PlanTree);
     let mut agents: Vec<(usize, &crate::tui::dashboard::AgentSummary)> =
-        data.agents.iter().enumerate().collect();
+        tui_state.agent_summaries.iter().enumerate().collect();
     agents.sort_by(|(idx_a, a), (idx_b, b)| {
         agent_status_rank(&a.status)
             .cmp(&agent_status_rank(&b.status))
@@ -180,8 +179,10 @@ fn render_agent_roster(
     }
 
     let content_width = inner.width as usize;
-    let activity =
-        crate::tui::dashboard::build_agent_activity_snapshot(&data.agents, &data.efficiency_events);
+    let activity = crate::tui::dashboard::build_agent_activity_snapshot(
+        &tui_state.agent_summaries,
+        &tui_state.efficiency_events,
+    );
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     if inner.height > 3 {
@@ -209,7 +210,7 @@ fn render_agent_roster(
         ]));
     }
 
-    for (idx, agent) in data.agents.iter().enumerate() {
+    for (idx, agent) in tui_state.agent_summaries.iter().enumerate() {
         let is_selected = idx == view_state.selected;
         let status = AgentStatus::from(agent.status.as_str());
         let is_active = status.is_active();
@@ -411,19 +412,13 @@ fn render_agent_roster(
 // Summary line (2 lines)
 // ---------------------------------------------------------------------------
 
-fn render_summary_line(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    data: &DashboardData,
-    tui_state: &TuiState,
-    theme: &Theme,
-) {
-    let active_count = data
-        .agents
+fn render_summary_line(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let active_count = tui_state
+        .agent_summaries
         .iter()
         .filter(|a| AgentStatus::from(a.status.as_str()).is_active())
         .count();
-    let total_agents = data.agents.len();
+    let total_agents = tui_state.agent_summaries.len();
     let total_tokens = tui_state.cumulative_input_tokens + tui_state.cumulative_output_tokens;
     let cost = tui_state.cost_dollars;
 
@@ -476,7 +471,6 @@ fn render_summary_line(
 fn render_right_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -484,10 +478,10 @@ fn render_right_panel(
     let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
 
     // -- Tab bar --
-    render_role_tabs(frame, layout[0], data, view_state, theme);
+    render_role_tabs(frame, layout[0], tui_state, view_state, theme);
 
     // -- Output body --
-    render_output_body(frame, layout[1], data, tui_state, view_state, theme);
+    render_output_body(frame, layout[1], tui_state, view_state, theme);
 }
 
 // ---------------------------------------------------------------------------
@@ -497,12 +491,16 @@ fn render_right_panel(
 fn render_role_tabs(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     // Determine which roles have active agents
-    let agent_roles: Vec<&str> = data.agents.iter().map(|a| a.label.as_str()).collect();
+    let agent_roles: Vec<&str> = tui_state
+        .agent_summaries
+        .iter()
+        .map(|a| a.label.as_str())
+        .collect();
 
     // Selected role from sub_tab
     let selected_role = ROLE_TABS
@@ -544,17 +542,16 @@ fn render_role_tabs(
 fn render_output_body(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
 ) {
     if tui_state.agent_topology_visible {
-        render_agent_topology_panel(frame, area, data, tui_state, theme);
+        render_agent_topology_panel(frame, area, tui_state, theme);
         return;
     }
 
-    let selected_agent = data.agents.get(view_state.selected);
+    let selected_agent = tui_state.agent_summaries.get(view_state.selected);
     let selected_row = tui_state.agents.get(view_state.selected);
     let selected_id = selected_agent
         .map(|agent| agent.id.as_str())
@@ -596,7 +593,7 @@ fn render_output_body(
         theme.muted()
     };
 
-    let collected = collect_agent_output_lines(data, tui_state, view_state.selected);
+    let collected = collect_agent_output_lines(tui_state, view_state.selected);
     let output_lines = if collected.is_empty() {
         Vec::new()
     } else {
@@ -626,7 +623,7 @@ fn render_output_body(
     let output_area = layout[1];
     let stream_area = show_stream_panel.then_some(layout[2]);
 
-    render_route_metrics_bar(frame, layout[0], data, tui_state, view_state, theme);
+    render_route_metrics_bar(frame, layout[0], tui_state, view_state, theme);
 
     if output_area.width == 0 || output_area.height == 0 {
         return;
@@ -693,7 +690,6 @@ fn render_output_body(
 fn render_agent_topology_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
     tui_state: &TuiState,
     theme: &Theme,
 ) {
@@ -735,7 +731,7 @@ fn render_agent_topology_panel(
         sections[0],
     );
 
-    let body_lines = agent_topology_lines(data, tui_state)
+    let body_lines = agent_topology_lines(tui_state)
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -772,7 +768,7 @@ fn topology_status_text(tui_state: &TuiState) -> String {
     }
 }
 
-pub(crate) fn agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -> Vec<String> {
+pub(crate) fn agent_topology_lines(tui_state: &TuiState) -> Vec<String> {
     match &tui_state.agent_topology_status {
         AgentTopologyStatus::Idle => vec!["topology not loaded yet".to_string()],
         AgentTopologyStatus::Loading => vec!["loading topology...".to_string()],
@@ -783,17 +779,17 @@ pub(crate) fn agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -
             "topology fetch failed".to_string(),
             truncate_middle(message, 72),
         ],
-        AgentTopologyStatus::Ready => build_agent_topology_lines(data, tui_state),
+        AgentTopologyStatus::Ready => build_agent_topology_lines(tui_state),
     }
 }
 
-fn build_agent_topology_lines(data: &DashboardData, tui_state: &TuiState) -> Vec<String> {
+fn build_agent_topology_lines(tui_state: &TuiState) -> Vec<String> {
     if tui_state.agent_topology.nodes.is_empty() {
         return vec!["no topology nodes reported".to_string()];
     }
 
     let mut tasks_by_agent: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for task in &data.active_tasks {
+    for task in &tui_state.active_task_summaries {
         for agent_id in &task.assigned_agents {
             tasks_by_agent
                 .entry(agent_id.clone())
@@ -926,19 +922,15 @@ fn render_live_stream_panel(
     frame.render_widget(paragraph, inner);
 }
 
-pub(crate) fn collect_agent_output_lines(
-    data: &DashboardData,
-    tui_state: &TuiState,
-    selected: usize,
-) -> Vec<String> {
-    let selected_agent = data.agents.get(selected);
+pub(crate) fn collect_agent_output_lines(tui_state: &TuiState, selected: usize) -> Vec<String> {
+    let selected_agent = tui_state.agent_summaries.get(selected);
 
     // Priority:
     //   1. current_plan_execution.agent_output_tail
     //   2. selected agent's live row data from tui_state.agents
-    //   3. task_outputs for the agent's current task
+    //   3. task_output_tails for the agent's current task
     //   4. episode output text
-    let collected: Vec<String> = data
+    let collected: Vec<String> = tui_state
         .current_plan_execution
         .as_ref()
         .map(|exec| exec.agent_output_tail.clone())
@@ -961,8 +953,8 @@ pub(crate) fn collect_agent_output_lines(
                 return vec![agent_row.last_output_line.clone()];
             }
             if !agent_row.current_task.is_empty() {
-                let task_output = data
-                    .task_outputs
+                let task_output = tui_state
+                    .task_output_tails
                     .get(&agent_row.current_task)
                     .cloned()
                     .unwrap_or_default();
@@ -972,7 +964,7 @@ pub(crate) fn collect_agent_output_lines(
             }
         }
 
-        for episode in data.episodes() {
+        for episode in &tui_state.episodes_cache {
             if episode.agent_id != agent_summary.id {
                 continue;
             }
@@ -1125,7 +1117,6 @@ fn format_uptime(ms: u64) -> String {
 fn render_route_metrics_bar(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
     tui_state: &TuiState,
     view_state: &ViewState,
     theme: &Theme,
@@ -1134,7 +1125,7 @@ fn render_route_metrics_bar(
         return;
     }
 
-    let selected_agent = data.agents.get(view_state.selected);
+    let selected_agent = tui_state.agent_summaries.get(view_state.selected);
     let selected_id = selected_agent
         .map(|a| a.id.as_str())
         .or_else(|| {

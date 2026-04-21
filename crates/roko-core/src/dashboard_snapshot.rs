@@ -96,6 +96,22 @@ pub enum DashboardEvent {
         /// Whether the episode was successful.
         passed: bool,
     },
+    /// Live task output lines appended (item 72).
+    TaskOutputAppended { task_id: String, lines: Vec<String> },
+    /// Orchestrator event log entry (item 74).
+    EventLogEntry {
+        timestamp_ms: u64,
+        event_type: String,
+        plan_id: String,
+        task_id: String,
+        message: String,
+    },
+    /// Cascade router state updated (item 76d).
+    CascadeRouterUpdated { snapshot_json: String },
+    /// Adaptive gate thresholds updated (item 76e).
+    GateThresholdsUpdated { snapshot_json: String },
+    /// Agent completed execution (item 70).
+    AgentCompleted { agent_id: String },
     /// An error occurred.
     Error { message: String },
 }
@@ -145,6 +161,24 @@ pub struct AgentState {
     pub active: bool,
     /// Byte count of output received so far.
     pub output_bytes: usize,
+    /// Model slug (e.g. "claude-sonnet-4-20250514").
+    #[serde(default)]
+    pub model: String,
+    /// Cumulative input tokens.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Cumulative output tokens.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Cumulative cost in USD.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Current task being worked on.
+    #[serde(default)]
+    pub current_task: String,
+    /// Current plan being worked on.
+    #[serde(default)]
+    pub current_plan: String,
 }
 
 /// A single gate verdict.
@@ -559,6 +593,26 @@ pub struct FailureEntry {
     pub artifacts: Option<PathBuf>,
 }
 
+/// One entry in the dashboard event log (for the Events tab).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardEventLogEntry {
+    /// Unix timestamp in milliseconds.
+    #[serde(default)]
+    pub timestamp_ms: u64,
+    /// Event type label.
+    #[serde(default)]
+    pub event_type: String,
+    /// Plan identifier when applicable.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier when applicable.
+    #[serde(default)]
+    pub task_id: String,
+    /// Human-readable message.
+    #[serde(default)]
+    pub message: String,
+}
+
 /// The full materialized dashboard state.
 ///
 /// Updated atomically by [`StateHub`](super::state_hub::StateHub) via
@@ -600,6 +654,18 @@ pub struct DashboardSnapshot {
     pub episodes: VecDeque<EpisodeSummary>,
     /// Recent errors (ring of last 64).
     pub errors: Vec<ErrorEntry>,
+    /// Orchestrator event log (ring of last 200).
+    #[serde(default)]
+    pub event_log: VecDeque<DashboardEventLogEntry>,
+    /// Live task output lines keyed by task_id (ring of 50 per task).
+    #[serde(default)]
+    pub task_outputs: HashMap<String, VecDeque<String>>,
+    /// Cascade router state as opaque JSON (avoids roko-learn dep).
+    #[serde(default)]
+    pub cascade_router_json: String,
+    /// Adaptive gate threshold state as opaque JSON.
+    #[serde(default)]
+    pub gate_thresholds_json: String,
     /// Overall counts.
     pub stats: SnapshotStats,
 }
@@ -630,6 +696,9 @@ pub struct SnapshotStats {
     /// Total episodes recorded.
     #[serde(default)]
     pub episodes_total: usize,
+    /// Cumulative cost in USD across all agents.
+    #[serde(default)]
+    pub cost_usd_total: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +710,8 @@ const MAX_DIAGNOSES: usize = 50;
 const MAX_ERRORS: usize = 64;
 const MAX_GATE_FAILURES: usize = 50;
 const MAX_EPISODES: usize = 128;
+const MAX_EVENT_LOG: usize = 200;
+const MAX_TASK_OUTPUT_LINES: usize = 50;
 const GATE_TREND_BUCKET_SIZE_SECS: u64 = 60 * 60;
 const GATE_TREND_BUCKET_COUNT: usize = 24;
 
@@ -707,6 +778,13 @@ impl DashboardSnapshot {
                 if let Some(plan) = self.plans.get_mut(plan_id) {
                     plan.tasks_total += 1;
                 }
+                // Set current_task / current_plan on the matching agent by role.
+                for agent in self.agents.values_mut() {
+                    if agent.active && agent.role == *phase {
+                        agent.current_task = task_id.clone();
+                        agent.current_plan = plan_id.clone();
+                    }
+                }
             }
             DashboardEvent::TaskCompleted {
                 plan_id,
@@ -752,6 +830,12 @@ impl DashboardSnapshot {
                         role: role.clone(),
                         active: true,
                         output_bytes: 0,
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cost_usd: 0.0,
+                        current_task: String::new(),
+                        current_plan: String::new(),
                     },
                 );
             }
@@ -801,8 +885,43 @@ impl DashboardSnapshot {
                     plan.phase = to.clone();
                 }
             }
-            DashboardEvent::EfficiencyEvent { .. } => {
-                // Efficiency metrics are tracked separately by the learn subsystem.
+            DashboardEvent::EfficiencyEvent {
+                plan_id,
+                task_id,
+                metric,
+                value,
+            } => {
+                // Update per-agent token/cost stats when the metric carries them.
+                // The metric field encodes the metric name; we match known names.
+                let agent_key = self.find_agent_key_for_task(plan_id, task_id);
+                match metric.as_str() {
+                    "input_tokens" => {
+                        if let Some(agent) =
+                            agent_key.as_deref().and_then(|k| self.agents.get_mut(k))
+                        {
+                            agent.input_tokens += *value as u64;
+                        }
+                    }
+                    "output_tokens" => {
+                        if let Some(agent) =
+                            agent_key.as_deref().and_then(|k| self.agents.get_mut(k))
+                        {
+                            agent.output_tokens += *value as u64;
+                        }
+                    }
+                    "cost_usd" => {
+                        if let Some(agent) =
+                            agent_key.as_deref().and_then(|k| self.agents.get_mut(k))
+                        {
+                            agent.cost_usd += value;
+                        }
+                        self.stats.cost_usd_total += value;
+                    }
+                    "model" => {
+                        // model name encoded as hash — skip (set via AgentSpawned or direct).
+                    }
+                    _ => {}
+                }
             }
             DashboardEvent::Diagnosis { summary } => {
                 push_diagnosis(self, summary.clone());
@@ -831,6 +950,45 @@ impl DashboardSnapshot {
                     ts_millis: ts,
                 });
             }
+            DashboardEvent::TaskOutputAppended { task_id, lines } => {
+                let ring = self.task_outputs.entry(task_id.clone()).or_default();
+                for line in lines {
+                    if ring.len() >= MAX_TASK_OUTPUT_LINES {
+                        ring.pop_front();
+                    }
+                    ring.push_back(line.clone());
+                }
+            }
+            DashboardEvent::EventLogEntry {
+                timestamp_ms,
+                event_type,
+                plan_id,
+                task_id,
+                message,
+            } => {
+                while self.event_log.len() >= MAX_EVENT_LOG {
+                    self.event_log.pop_front();
+                }
+                self.event_log.push_back(DashboardEventLogEntry {
+                    timestamp_ms: *timestamp_ms,
+                    event_type: event_type.clone(),
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    message: message.clone(),
+                });
+            }
+            DashboardEvent::CascadeRouterUpdated { snapshot_json } => {
+                self.cascade_router_json = snapshot_json.clone();
+            }
+            DashboardEvent::GateThresholdsUpdated { snapshot_json } => {
+                self.gate_thresholds_json = snapshot_json.clone();
+            }
+            DashboardEvent::AgentCompleted { agent_id } => {
+                if let Some(agent) = self.agents.get_mut(agent_id) {
+                    agent.active = false;
+                }
+                self.stats.agents_active = self.stats.agents_active.saturating_sub(1);
+            }
             DashboardEvent::Error { message } => {
                 self.stats.errors_total += 1;
                 if self.errors.len() >= MAX_ERRORS {
@@ -848,6 +1006,25 @@ impl DashboardSnapshot {
     ///
     /// This seeds the live hub from persisted `.roko/` state when it is
     /// available. Missing files are treated as an empty snapshot.
+    /// Find the agent currently assigned to a task (by matching `current_plan`/`current_task`
+    /// or by iterating active agents). Returns the agent_id key, or `None`.
+    fn find_agent_key_for_task(&self, plan_id: &str, task_id: &str) -> Option<String> {
+        // First try exact match on current assignment.
+        if let Some((key, _)) = self
+            .agents
+            .iter()
+            .find(|(_, a)| a.active && a.current_plan == plan_id && a.current_task == task_id)
+        {
+            return Some(key.clone());
+        }
+        // Fall back: if there's only one active agent, use it.
+        let active: Vec<_> = self.agents.iter().filter(|(_, a)| a.active).collect();
+        if active.len() == 1 {
+            return Some(active[0].0.clone());
+        }
+        None
+    }
+
     pub fn load_from_workdir(workdir: &Path) -> Result<Self, io::Error> {
         let root = resolve_snapshot_root(workdir);
         let roko_dir = root.join(".roko");
@@ -862,14 +1039,28 @@ impl DashboardSnapshot {
         let experiment_winners = read_experiment_winners(&learn_dir.join("experiments.json"))?;
         let cfactor_trend = read_cfactor_trend(&learn_dir.join("c-factor.jsonl"))?;
 
-        Ok(snapshot_from_workdir_parts(
+        let mut snapshot = snapshot_from_workdir_parts(
             &state,
             &task_trackers,
             &signal_gates,
             &event_entries,
             &experiment_winners,
             &cfactor_trend,
-        ))
+        );
+
+        // Bootstrap new fields from persisted files.
+        snapshot.cascade_router_json =
+            std::fs::read_to_string(learn_dir.join("cascade-router.json")).unwrap_or_default();
+        snapshot.gate_thresholds_json =
+            std::fs::read_to_string(learn_dir.join("gate-thresholds.json")).unwrap_or_default();
+
+        // Bootstrap episodes from JSONL.
+        bootstrap_episodes(&mut snapshot, &roko_dir);
+
+        // Bootstrap efficiency stats (aggregate token/cost) from JSONL.
+        bootstrap_efficiency_stats(&mut snapshot, &learn_dir);
+
+        Ok(snapshot)
     }
 }
 
@@ -1410,6 +1601,12 @@ fn bootstrap_plan_state(
                     role: role.clone(),
                     active: false,
                     output_bytes: 0,
+                    model: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                    current_task: String::new(),
+                    current_plan: String::new(),
                 });
             if entry.role == "unknown" && role != "unknown" {
                 entry.role = role;
@@ -2065,6 +2262,94 @@ fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<u64> {
                 .and_then(serde_json::Value::as_i64)
                 .and_then(|value| u64::try_from(value).ok())
         })
+}
+
+/// Bootstrap episodes from `.roko/episodes.jsonl` into the snapshot.
+fn bootstrap_episodes(snapshot: &mut DashboardSnapshot, roko_dir: &Path) {
+    let episodes_path = roko_dir.join("episodes.jsonl");
+    let content = match std::fs::read_to_string(&episodes_path) {
+        Ok(text) => text,
+        Err(_) => {
+            // Also try the memory directory.
+            match std::fs::read_to_string(roko_dir.join("memory").join("episodes.jsonl")) {
+                Ok(text) => text,
+                Err(_) => return,
+            }
+        }
+    };
+
+    for line in content.lines().rev().take(MAX_EPISODES) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        #[derive(Deserialize)]
+        struct EpisodeRow {
+            #[serde(default)]
+            agent_id: String,
+            #[serde(default)]
+            role: String,
+            #[serde(default)]
+            episode_id: String,
+            #[serde(default)]
+            passed: Option<bool>,
+            #[serde(default)]
+            outcome: Option<String>,
+            #[serde(default)]
+            timestamp_ms: Option<u64>,
+            #[serde(default)]
+            created_at: Option<String>,
+        }
+        let Ok(row) = serde_json::from_str::<EpisodeRow>(trimmed) else {
+            continue;
+        };
+        let passed = row.passed.unwrap_or_else(|| {
+            row.outcome
+                .as_deref()
+                .is_some_and(|o| o.contains("pass") || o.contains("success"))
+        });
+        let ts_millis = row.timestamp_ms.unwrap_or_else(|| {
+            row.created_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp_millis() as u64)
+                .unwrap_or(0)
+        });
+        snapshot.episodes.push_front(EpisodeSummary {
+            episode_id: row.episode_id,
+            agent_id: row.agent_id,
+            role: row.role,
+            passed,
+            ts_millis,
+        });
+        snapshot.stats.episodes_total += 1;
+    }
+}
+
+/// Bootstrap aggregate token/cost stats from `.roko/learn/efficiency.jsonl`.
+fn bootstrap_efficiency_stats(snapshot: &mut DashboardSnapshot, learn_dir: &Path) {
+    let path = learn_dir.join("efficiency.jsonl");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return,
+    };
+
+    let mut total_cost = 0.0_f64;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        #[derive(Deserialize)]
+        struct EffRow {
+            #[serde(default)]
+            cost_usd: Option<f64>,
+        }
+        if let Ok(row) = serde_json::from_str::<EffRow>(trimmed) {
+            total_cost += row.cost_usd.unwrap_or(0.0);
+        }
+    }
+    snapshot.stats.cost_usd_total = total_cost;
 }
 
 #[cfg(test)]

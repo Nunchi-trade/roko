@@ -24,7 +24,7 @@ use crate::tui::state::TuiState;
 pub fn render(
     frame: &mut Frame<'_>,
     area: Rect,
-    data: &DashboardData,
+    _data: &DashboardData,
     tui_state: &TuiState,
     _view_state: &ViewState,
     theme: &Theme,
@@ -52,10 +52,10 @@ pub fn render(
     }
 
     // Build the flat item list (editable fields + runtime sections)
-    let mut items = build_flat_items(data.root(), &tui_state.config_pending);
+    let mut items = build_flat_items(tui_state.workdir.as_path(), &tui_state.config_pending);
 
     // Append runtime data sections
-    append_runtime_sections(&mut items, data);
+    append_runtime_sections(&mut items, tui_state);
 
     // Clamp cursor
     let cursor = tui_state.config_cursor.min(items.len().saturating_sub(1));
@@ -320,10 +320,10 @@ fn render_save_button<'a>(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
+fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
     // Efficiency summary
     {
-        let eff = &data.efficiency;
+        let eff = &tui_state.efficiency_summary;
         let pass_rate = if eff.event_count > 0 {
             format!(
                 "{:.1}%",
@@ -360,16 +360,16 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
     }
 
     // Cascade router
-    if !data.cascade_router.model_slugs.is_empty() {
+    if !tui_state.cascade_router.model_slugs.is_empty() {
         items.push(ConfigItem::Header("Runtime: Cascade Router".to_string()));
 
-        let total_trials: u64 = data
+        let total_trials: u64 = tui_state
             .cascade_router
             .confidence_stats
             .values()
             .map(|s| s.trials)
             .sum();
-        let total_success: u64 = data
+        let total_success: u64 = tui_state
             .cascade_router
             .confidence_stats
             .values()
@@ -386,13 +386,13 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
             },
             value: format!(
                 "{} models, {total_success}/{total_trials} total",
-                data.cascade_router.model_slugs.len()
+                tui_state.cascade_router.model_slugs.len()
             ),
             source: ConfigSource::Default,
         });
 
-        for slug in &data.cascade_router.model_slugs {
-            let stats = data.cascade_router.confidence_stats.get(slug);
+        for slug in &tui_state.cascade_router.model_slugs {
+            let stats = tui_state.cascade_router.confidence_stats.get(slug);
             let trials = stats.map_or(0, |s| s.trials);
             let successes = stats.map_or(0, |s| s.successes);
             let rate = if trials > 0 {
@@ -415,9 +415,9 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
     }
 
     // Gate thresholds
-    if !data.gate_results_page.threshold_rows.is_empty() {
+    if !tui_state.gate_results_page.threshold_rows.is_empty() {
         items.push(ConfigItem::Header("Runtime: Gate Thresholds".to_string()));
-        for row in &data.gate_results_page.threshold_rows {
+        for row in &tui_state.gate_results_page.threshold_rows {
             let trend_icon = match row.trend {
                 crate::tui::dashboard::GateTrend::Up => "^",
                 crate::tui::dashboard::GateTrend::Down => "v",
@@ -444,9 +444,9 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
     }
 
     // Gate results summary
-    if !data.gate_results_page.gate_rows.is_empty() {
+    if !tui_state.gate_results_page.gate_rows.is_empty() {
         items.push(ConfigItem::Header("Runtime: Gate Results".to_string()));
-        for row in &data.gate_results_page.gate_rows {
+        for row in &tui_state.gate_results_page.gate_rows {
             items.push(ConfigItem::Field {
                 meta: config_meta::ConfigFieldMeta {
                     key: "runtime.gate_results",
@@ -468,9 +468,9 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, data: &DashboardData) {
     }
 
     // Experiments
-    if !data.experiments.is_empty() {
+    if !tui_state.experiments.is_empty() {
         items.push(ConfigItem::Header("Runtime: Experiments".to_string()));
-        for exp in &data.experiments {
+        for exp in &tui_state.experiments {
             items.push(ConfigItem::Field {
                 meta: config_meta::ConfigFieldMeta {
                     key: "runtime.experiments",
