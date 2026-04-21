@@ -957,6 +957,11 @@ pub struct LocalBlock {
 /// Fork-global mutable state backing the RPC server.
 #[derive(Debug)]
 pub struct ForkState {
+    /// HDC index state shared with the `0xA0C` precompile. `Arc` so Clone preserves
+    /// the same underlying index across snapshot forks — Phase 4 can deep-clone for
+    /// true COW branching.
+    #[cfg(feature = "chain")]
+    pub hdc_state: std::sync::Arc<crate::precompiles::hdc::HDCState>,
     /// Core database.
     pub db: HybridDB,
     /// Current local block number.
@@ -996,6 +1001,8 @@ pub struct ForkState {
 impl Clone for ForkState {
     fn clone(&self) -> Self {
         Self {
+            #[cfg(feature = "chain")]
+            hdc_state: std::sync::Arc::clone(&self.hdc_state),
             db: HybridDB {
                 dirty: self.db.dirty.clone(),
                 read_cache: ReadCache::new(
@@ -1033,6 +1040,8 @@ impl ForkState {
     #[must_use]
     pub fn new(db: HybridDB, local_block_number: u64, chain_id: u64) -> Self {
         Self {
+            #[cfg(feature = "chain")]
+            hdc_state: crate::precompiles::hdc::HDCState::new(),
             fork_block: local_block_number,
             fork_url: db.upstream.http_url(),
             db,
@@ -1575,7 +1584,7 @@ impl EvmExecutor {
             state.chain_id,
         )?;
         let state_chain_id = state.chain_id;
-        let mut evm = Context::mainnet()
+        let built = Context::mainnet()
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(MIRAGE_EVM_SPEC);
                 cfg.chain_id = state_chain_id;
@@ -1583,6 +1592,13 @@ impl EvmExecutor {
             .with_db(db)
             .with_block(fork_block_env(state))
             .build_mainnet();
+        #[cfg(feature = "chain")]
+        let mut evm = built.with_precompiles(crate::precompiles::hdc::HDCPrecompiles::new(
+            MIRAGE_EVM_SPEC,
+            std::sync::Arc::clone(&state.hdc_state),
+        ));
+        #[cfg(not(feature = "chain"))]
+        let mut evm = built;
         let exec = evm.transact(tx).map_err(map_revm_error)?;
         Ok(revm_exec_to_mirage(&exec.result, gas_limit))
     }
@@ -1926,7 +1942,7 @@ impl EvmExecutor {
         let placeholder = hollow_hybrid(&state.db);
         let db = std::mem::replace(&mut state.db, placeholder);
         let state_chain_id = state.chain_id;
-        let mut evm = Context::mainnet()
+        let built = Context::mainnet()
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(MIRAGE_EVM_SPEC);
                 cfg.chain_id = state_chain_id;
@@ -1934,6 +1950,13 @@ impl EvmExecutor {
             .with_db(db)
             .with_block(fork_block_env(state))
             .build_mainnet();
+        #[cfg(feature = "chain")]
+        let mut evm = built.with_precompiles(crate::precompiles::hdc::HDCPrecompiles::new(
+            MIRAGE_EVM_SPEC,
+            std::sync::Arc::clone(&state.hdc_state),
+        ));
+        #[cfg(not(feature = "chain"))]
+        let mut evm = built;
 
         let exec_result = evm.transact_commit(tx).map_err(map_revm_error)?;
         state.db = evm.ctx.journaled_state.database;
@@ -1982,7 +2005,7 @@ impl EvmExecutor {
         let placeholder = hollow_hybrid(&state.db);
         let db = std::mem::replace(&mut state.db, placeholder);
         let state_chain_id = state.chain_id;
-        let mut evm = Context::mainnet()
+        let built = Context::mainnet()
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(MIRAGE_EVM_SPEC);
                 cfg.chain_id = state_chain_id;
@@ -1990,6 +2013,13 @@ impl EvmExecutor {
             .with_db(db)
             .with_block(fork_block_env(state))
             .build_mainnet();
+        #[cfg(feature = "chain")]
+        let mut evm = built.with_precompiles(crate::precompiles::hdc::HDCPrecompiles::new(
+            MIRAGE_EVM_SPEC,
+            std::sync::Arc::clone(&state.hdc_state),
+        ));
+        #[cfg(not(feature = "chain"))]
+        let mut evm = built;
 
         let exec_result = evm.transact_commit(tx).map_err(map_revm_error)?;
         state.db = evm.ctx.journaled_state.database;
