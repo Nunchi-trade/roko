@@ -603,8 +603,6 @@ fn keybinding_ctrl_c_always_quits_in_all_modes() {
         InputMode::Filter,
         InputMode::Confirm,
         InputMode::ConfigEdit,
-        InputMode::JobFormEdit,
-        InputMode::JobAssign,
     ];
 
     for mode in modes {
@@ -801,12 +799,11 @@ fn keybinding_tab_key_cycles_focus_globally() {
             FocusZone::PlanTree,
             &modals,
         );
-        // Marketplace uses Tab for form field cycling, but it matches before global
-        // so we accept either FocusNext or MarketplaceFormNextField
-        assert!(
-            action == TuiAction::FocusNext
-                || action == TuiAction::MarketplaceFormNextField,
-            "Tab key did not produce FocusNext or MarketplaceFormNextField on tab {tab:?}, got {action:?}"
+        // Tab key produces FocusNext on every tab in Normal mode
+        assert_eq!(
+            action,
+            TuiAction::FocusNext,
+            "Tab key did not produce FocusNext on tab {tab:?}, got {action:?}"
         );
     }
 }

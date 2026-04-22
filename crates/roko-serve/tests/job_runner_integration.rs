@@ -629,3 +629,295 @@ async fn cancel_terminal_job_fails() {
         "error should mention terminal state: {err_body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Execute job through HTTP endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_open_job_returns_accepted() {
+    let (_dir, _state, app) = test_app_state();
+
+    // Create a job (status=open).
+    let (status, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "id": "job-exec-http",
+            "title": "Execute via HTTP",
+            "description": "Test execute endpoint."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["status"], "open");
+
+    // Execute through HTTP.
+    let (status, body) = post_json(
+        &app,
+        "/api/jobs/job-exec-http/execute",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["id"], "job-exec-http");
+    assert_eq!(body["status"], "executing");
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Blank title rejected
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn blank_title_rejected() {
+    let (_dir, _state, app) = test_app_state();
+
+    let (status, err_body) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "title": "   ",
+            "description": "blank title test"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        err_body["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("blank"),
+        "error should mention blank: {err_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Job stats endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn job_stats_reflect_created_jobs() {
+    let (_dir, _state, app) = test_app_state();
+
+    // Stats should start empty.
+    let (status, stats) = get_json(&app, "/api/jobs/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["total"], 0);
+
+    // Create two coding jobs and one research job.
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "title": "Job A", "job_type": "coding_task" }),
+    )
+    .await;
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "title": "Job B", "job_type": "coding_task" }),
+    )
+    .await;
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "title": "Job C", "job_type": "research" }),
+    )
+    .await;
+
+    let (status, stats) = get_json(&app, "/api/jobs/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["total"], 3);
+    assert_eq!(stats["by_state"]["open"], 3);
+    assert_eq!(stats["by_type"]["coding_task"], 2);
+    assert_eq!(stats["by_type"]["research"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Heartbeat lifecycle
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn heartbeat_post_and_list() {
+    let (_dir, _state, app) = test_app_state();
+
+    // Post a heartbeat.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/heartbeats")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "sender_id": "agent-1",
+                "timestamp": "2026-04-22T12:00:00Z",
+                "active_tasks": 3,
+                "active_agents": 1
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Post a second heartbeat from a different sender.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/heartbeats")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "sender_id": "agent-2",
+                "timestamp": "2026-04-22T12:01:00Z",
+                "active_tasks": 1,
+                "active_agents": 1
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // List heartbeats — should return both.
+    let (status, list) = get_json(&app, "/api/heartbeats").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = list.as_array().expect("heartbeats should be array");
+    assert_eq!(arr.len(), 2);
+}
+
+#[tokio::test]
+async fn network_stats_aggregates_heartbeats() {
+    let (_dir, _state, app) = test_app_state();
+
+    // Post two heartbeats from the same sender.
+    for ts in ["2026-04-22T12:00:00Z", "2026-04-22T12:01:00Z"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/heartbeats")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "sender_id": "agent-stats",
+                    "timestamp": ts,
+                    "active_tasks": 4,
+                    "active_agents": 2
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    // Get network stats.
+    let (status, stats) = get_json(&app, "/api/network/stats").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = stats.as_array().expect("network stats should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["sender_id"], "agent-stats");
+    assert_eq!(arr[0]["heartbeat_count"], 2);
+    assert_eq!(arr[0]["avg_active_tasks"], 4.0);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Filtering by state, type, assigned_to
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filter_jobs_by_state() {
+    let (_dir, _state, app) = test_app_state();
+
+    // Create two jobs.
+    let (_, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "filter-a", "title": "Filter A" }),
+    )
+    .await;
+    assert_eq!(created["status"], "open");
+
+    let (_, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "filter-b", "title": "Filter B" }),
+    )
+    .await;
+    assert_eq!(created["status"], "open");
+
+    // Assign one.
+    let _ = post_json(
+        &app,
+        "/api/jobs/filter-b/assign",
+        serde_json::json!({ "agent_id": "agent-x" }),
+    )
+    .await;
+
+    // Filter by state=open — should get only filter-a.
+    let (status, list) = get_json(&app, "/api/jobs?state=open").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = list.as_array().expect("jobs should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "filter-a");
+
+    // Filter by state=assigned — should get only filter-b.
+    let (status, list) = get_json(&app, "/api/jobs?state=assigned").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = list.as_array().expect("jobs should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "filter-b");
+}
+
+#[tokio::test]
+async fn filter_jobs_by_type() {
+    let (_dir, _state, app) = test_app_state();
+
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "type-a", "title": "Coding", "job_type": "coding_task" }),
+    )
+    .await;
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "type-b", "title": "Research", "job_type": "research" }),
+    )
+    .await;
+
+    let (status, list) = get_json(&app, "/api/jobs?job_type=research").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = list.as_array().expect("jobs should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "type-b");
+}
+
+#[tokio::test]
+async fn filter_jobs_by_assigned_to() {
+    let (_dir, _state, app) = test_app_state();
+
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "assign-a", "title": "Job A" }),
+    )
+    .await;
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({ "id": "assign-b", "title": "Job B" }),
+    )
+    .await;
+
+    // Assign one.
+    post_json(
+        &app,
+        "/api/jobs/assign-a/assign",
+        serde_json::json!({ "agent_id": "agent-filter" }),
+    )
+    .await;
+
+    let (status, list) = get_json(&app, "/api/jobs?assigned_to=agent-filter").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = list.as_array().expect("jobs should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "assign-a");
+}

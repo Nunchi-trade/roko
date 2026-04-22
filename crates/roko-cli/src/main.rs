@@ -20,6 +20,7 @@
 )]
 
 mod agent_serve;
+mod auth;
 mod commands;
 mod plan_validate;
 
@@ -5837,9 +5838,19 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
         } => {
             if let Some(url) = serve_url {
                 // Delegate to roko-serve
+                let default_wd = resolve_workdir(cli);
+                let wd = workdir.as_deref().unwrap_or(&default_wd);
+                let auth_cfg = load_layered(wd)
+                    .map(|r| r.config.serve.auth)
+                    .unwrap_or_default();
+                let headers = match auth::resolve_api_key(&auth_cfg, None) {
+                    Some(resolved) => auth::auth_headers(&resolved.key),
+                    None => reqwest::header::HeaderMap::new(),
+                };
                 let client = reqwest::Client::new();
                 let resp = client
                     .post(format!("{url}/api/jobs/{id}/execute"))
+                    .headers(headers)
                     .send()
                     .await?;
                 let status = resp.status();

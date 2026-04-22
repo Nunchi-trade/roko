@@ -73,6 +73,8 @@ pub mod error;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
 pub mod hash;
+/// Heartbeat protocol types for health monitoring.
+pub mod heartbeat;
 /// Cognitive immune system -- quarantine, anomaly detection, incident linking.
 pub mod immune;
 /// Marketplace job types shared between serve, TUI, and CLI.
@@ -138,6 +140,10 @@ pub use forensic::{
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
 };
 pub use hash::ContentHash;
+pub use heartbeat::{
+    HeartbeatPayload, NetworkStats, SenderInfo, DEFAULT_HEARTBEAT_INTERVAL_SECS,
+    HEARTBEAT_RING_CAPACITY,
+};
 pub use immune::{
     AnomalyScore, ImmuneResponse, IncidentLink, IncidentRelation, QuarantineDecision,
     QuarantineEntry, QuarantineStatus, QuarantineVault, ResponseAction,
@@ -187,7 +193,11 @@ pub use dashboard_snapshot::{
     DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry, SnapshotStats,
     TrendBucket, TrendBuckets,
 };
-pub use job::{JobProgressEntry, JobStatus, MarketplaceJob, PrdSummary, TaskSummary as JobTaskSummary};
+pub use job::{
+    CreateJobRequest, FileJobStore, JobError, JobEvaluation, JobFilter, JobGateResult,
+    JobProgressEntry, JobStats, JobStatus, JobSubmission, JobType, MarketplaceJob, PrdSummary,
+    TaskSummary as JobTaskSummary,
+};
 pub use namespace::{
     Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };

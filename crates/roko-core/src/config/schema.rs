@@ -173,6 +173,10 @@ pub struct RokoConfig {
     /// ```
     #[serde(default)]
     pub oneirography: OneirographyConfig,
+
+    /// EVM chain connection settings for chain-domain tools.
+    #[serde(default)]
+    pub chain: ChainConfig,
 }
 
 const fn default_schema_version() -> u32 {
@@ -217,6 +221,7 @@ impl Default for RokoConfig {
             gemini: GeminiConfig::default(),
             tools: ToolsConfig::default(),
             oneirography: OneirographyConfig::default(),
+            chain: ChainConfig::default(),
         }
     }
 }
@@ -591,9 +596,13 @@ impl RokoConfig {
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         let config: Self = toml::from_str(s)?;
         if config.config_version == 1 {
-            tracing::warn!(
-                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
-            );
+            use std::sync::Once;
+            static WARN_ONCE: Once = Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+                );
+            });
         }
         Ok(config)
     }
@@ -1336,6 +1345,32 @@ impl Default for OneirographyConfig {
             base_duration_seconds: 3600,
         }
     }
+}
+
+/// Chain connection settings used by the `chain.*` tool domain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ChainConfig {
+    /// HTTP JSON-RPC endpoint (e.g. `https://mirage-devnet.up.railway.app`).
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+    /// Chain ID. Must match the endpoint. Mirage uses 1.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    /// Hex-encoded private key (0x-prefixed or bare). Used to sign txs.
+    #[serde(default)]
+    pub wallet_key: Option<String>,
+    /// ERC-8004 IdentityRegistry contract address.
+    #[serde(default)]
+    pub identity_registry: Option<String>,
+    /// ERC-8004 ReputationRegistry contract address.
+    #[serde(default)]
+    pub reputation_registry: Option<String>,
+    /// ERC-8004 ValidationRegistry contract address.
+    #[serde(default)]
+    pub validation_registry: Option<String>,
+    /// Deployer / funder address.
+    #[serde(default)]
+    pub deployer: Option<String>,
 }
 
 /// A single named tool profile with extra/excluded tool lists.

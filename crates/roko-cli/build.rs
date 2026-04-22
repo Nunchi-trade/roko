@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 /// Build script for roko-cli: captures git hash and rustc version at compile time.
 use std::process::Command;
 

@@ -9,6 +9,7 @@ mod aggregator;
 pub(crate) mod config;
 mod deployments;
 mod diagnosis;
+mod heartbeats;
 mod integrations;
 mod jobs;
 mod learning;
@@ -49,6 +50,7 @@ pub fn build_router(
         .merge(crate::openapi::routes())
         .merge(status::routes())
         .merge(jobs::routes())
+        .merge(heartbeats::routes())
         .merge(plans::routes())
         .merge(prds::routes())
         .merge(run::routes())

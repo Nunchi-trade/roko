@@ -66,12 +66,39 @@ pub struct PlanSummary {
 
 impl std::fmt::Display for PlanSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let status = if self.completed { "done" } else { "pending" };
+        let status_label = if self.completed {
+            format!("done {}/{}", self.tasks_done, self.task_count)
+        } else if self.tasks_done > 0 || self.tasks_failed > 0 {
+            let mut parts = Vec::new();
+            if self.tasks_done > 0 {
+                parts.push(format!("{} done", self.tasks_done));
+            }
+            if self.tasks_failed > 0 {
+                parts.push(format!("{} failed", self.tasks_failed));
+            }
+            let in_progress =
+                self.task_count
+                    .saturating_sub(self.tasks_done)
+                    .saturating_sub(self.tasks_failed);
+            if in_progress > 0 {
+                parts.push(format!("{in_progress} remaining"));
+            }
+            format!("{}/{} ({})", self.tasks_done, self.task_count, parts.join(", "))
+        } else if self.task_count > 0 {
+            format!("pending 0/{}", self.task_count)
+        } else {
+            "pending".to_string()
+        };
         let icon = if self.old_format { "⚠ " } else { "" };
+        let error_hint = self
+            .last_error
+            .as_deref()
+            .map(|e| format!("  err: {e}"))
+            .unwrap_or_default();
         write!(
             f,
-            "{icon}{:<16} {:<40} tasks={:<4} [{}]",
-            self.id, self.title, self.task_count, status
+            "{icon}{:<16} {:<40} tasks={:<4} [{status_label}]{error_hint}",
+            self.id, self.title, self.task_count,
         )
     }
 }
@@ -207,27 +234,51 @@ pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
         .and_then(|content| extract_markdown_title(&content))
         .unwrap_or_else(|| stable_plan_id(plan_info).to_string());
     let tasks_path = tasks_path(plan_info);
-    let (task_count, old_format) = match tasks_path.as_deref() {
+    let (task_count, tasks_done, tasks_failed, old_format) = match tasks_path.as_deref() {
         Some(path) if path.is_file() => {
-            let task_count = crate::task_parser::TasksFile::parse(path)
-                .map(|tasks| tasks.tasks.len())
-                .unwrap_or(0);
             let old_format = matches!(
                 crate::task_parser::TasksFile::validate_modern_fields(path),
                 Ok(issues) if !issues.is_empty()
             );
-            (task_count, old_format)
+            match crate::task_parser::TasksFile::parse(path) {
+                Ok(tasks_file) => {
+                    let total = tasks_file.tasks.len();
+                    let done = tasks_file
+                        .tasks
+                        .iter()
+                        .filter(|t| {
+                            matches!(
+                                t.status.as_str(),
+                                "done" | "completed" | "passed" | "skipped"
+                            )
+                        })
+                        .count();
+                    let failed = tasks_file
+                        .tasks
+                        .iter()
+                        .filter(|t| {
+                            matches!(
+                                t.status.as_str(),
+                                "failed" | "error" | "gate_rejected"
+                            )
+                        })
+                        .count();
+                    (total, done, failed, old_format)
+                }
+                Err(_) => (0, 0, 0, old_format),
+            }
         }
-        _ => (0, false),
+        _ => (0, 0, 0, false),
     };
 
+    let completed = task_count > 0 && tasks_done == task_count;
     PlanSummary {
         id: stable_plan_id(plan_info).to_string(),
         title,
         task_count,
-        tasks_done: 0,
-        tasks_failed: 0,
-        completed: false,
+        tasks_done,
+        tasks_failed,
+        completed,
         old_format,
         last_error: None,
     }
@@ -317,10 +368,12 @@ pub fn format_plan_list_json(plans: &[PlanSummary]) -> String {
         .iter()
         .map(|p| {
             format!(
-                r#"{{"id":"{}","title":"{}","task_count":{},"completed":{},"old_format":{}}}"#,
+                r#"{{"id":"{}","title":"{}","task_count":{},"tasks_done":{},"tasks_failed":{},"completed":{},"old_format":{}}}"#,
                 p.id,
                 p.title.replace('"', "\\\""),
                 p.task_count,
+                p.tasks_done,
+                p.tasks_failed,
                 p.completed,
                 p.old_format,
             )
@@ -425,7 +478,7 @@ mod tests {
         let text = format_plan_list(&summaries);
         assert!(text.contains("p1"));
         assert!(text.contains("Test"));
-        assert!(text.contains("pending"));
+        assert!(text.contains("pending 0/3"));
     }
 
     #[test]
@@ -519,12 +572,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_summary_display() {
+    fn plan_summary_display_done() {
         let summary = PlanSummary {
             id: "p1".into(),
             title: "My Plan".into(),
             task_count: 5,
-            tasks_done: 0,
+            tasks_done: 5,
             tasks_failed: 0,
             completed: true,
             old_format: true,
@@ -533,8 +586,43 @@ mod tests {
         let text = summary.to_string();
         assert!(text.contains("p1"));
         assert!(text.contains("My Plan"));
-        assert!(text.contains("done"));
+        assert!(text.contains("done 5/5"));
         assert!(text.contains("⚠"));
+    }
+
+    #[test]
+    fn plan_summary_display_partial_progress() {
+        let summary = PlanSummary {
+            id: "p2".into(),
+            title: "Partial Plan".into(),
+            task_count: 5,
+            tasks_done: 2,
+            tasks_failed: 1,
+            completed: false,
+            old_format: false,
+            last_error: None,
+        };
+        let text = summary.to_string();
+        assert!(text.contains("2/5"));
+        assert!(text.contains("2 done"));
+        assert!(text.contains("1 failed"));
+        assert!(text.contains("2 remaining"));
+    }
+
+    #[test]
+    fn plan_summary_display_pending() {
+        let summary = PlanSummary {
+            id: "p3".into(),
+            title: "Fresh Plan".into(),
+            task_count: 3,
+            tasks_done: 0,
+            tasks_failed: 0,
+            completed: false,
+            old_format: false,
+            last_error: None,
+        };
+        let text = summary.to_string();
+        assert!(text.contains("pending 0/3"));
     }
 
     #[test]

@@ -115,7 +115,7 @@ async fn poll_and_execute(state: &AppState) -> anyhow::Result<()> {
 }
 
 /// Execute a single job end-to-end: claim -> in_progress -> dispatch -> submit -> complete.
-async fn execute_job(state: &AppState, job_id: &str) -> anyhow::Result<String> {
+pub async fn execute_job(state: &AppState, job_id: &str) -> anyhow::Result<String> {
     let path = job_path(&state.workdir, job_id);
     let data = tokio::fs::read_to_string(&path).await?;
     let mut job: MarketplaceJob = serde_json::from_str(&data)?;
@@ -127,6 +127,25 @@ async fn execute_job(state: &AppState, job_id: &str) -> anyhow::Result<String> {
     job.updated_at = Utc::now().to_rfc3339();
     write_job(&path, &job).await?;
     publish_transition(state, &job, &prev_status);
+
+    // Emit execution started event.
+    state.event_bus.publish(ServerEvent::JobExecutionStarted {
+        job_id: job_id.to_string(),
+        job_type: job.job_type.clone(),
+        agent_id: "job-runner".to_string(),
+    });
+
+    // Emit initial progress.
+    let initial_progress = match job.job_type.as_str() {
+        "research" => (0, "starting research"),
+        "coding_task" | "coding" => (25, "planning"),
+        _ => (0, "starting"),
+    };
+    state.event_bus.publish(ServerEvent::JobProgress {
+        job_id: job_id.to_string(),
+        percent: initial_progress.0,
+        message: initial_progress.1.to_string(),
+    });
 
     // Dispatch by job type.
     let result = match job.job_type.as_str() {
@@ -149,8 +168,31 @@ async fn execute_job(state: &AppState, job_id: &str) -> anyhow::Result<String> {
         }
     };
 
+    // Emit midpoint progress for research jobs.
+    if job.job_type == "research" && result.is_ok() {
+        state.event_bus.publish(ServerEvent::JobProgress {
+            job_id: job_id.to_string(),
+            percent: 50,
+            message: "researching".to_string(),
+        });
+    }
+    if matches!(job.job_type.as_str(), "coding_task" | "coding") && result.is_ok() {
+        state.event_bus.publish(ServerEvent::JobProgress {
+            job_id: job_id.to_string(),
+            percent: 75,
+            message: "implementing".to_string(),
+        });
+    }
+
     match result {
         Ok(summary) => {
+            // Emit completion progress.
+            state.event_bus.publish(ServerEvent::JobProgress {
+                job_id: job_id.to_string(),
+                percent: 100,
+                message: "complete".to_string(),
+            });
+
             // Transition: in_progress -> submitted -> completed
             let prev = job.status.clone();
             job.status = "submitted".to_string();

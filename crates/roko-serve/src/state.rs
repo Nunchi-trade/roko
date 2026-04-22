@@ -5,7 +5,7 @@
 //! layout, configuration, runtime services, and tracking maps for active
 //! runs, plans, and operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -306,6 +306,8 @@ pub struct AppState {
     pub discovered_agents: RwLock<HashMap<String, DiscoveredAgent>>,
     /// Short-lived aggregator cache keyed by route + query signature.
     pub aggregator_cache: RwLock<HashMap<String, CachedJsonValue>>,
+    /// Ring buffer of recent heartbeat payloads.
+    pub heartbeats: RwLock<VecDeque<roko_core::HeartbeatPayload>>,
 }
 
 impl AppState {
@@ -372,6 +374,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
+            heartbeats: RwLock::new(VecDeque::new()),
         }
     }
 

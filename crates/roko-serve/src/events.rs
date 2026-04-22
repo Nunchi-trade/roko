@@ -236,6 +236,13 @@ pub enum ServerEvent {
         summary: String,
     },
 
+    /// A heartbeat was received from a client or agent.
+    HeartbeatReceived {
+        sender_id: String,
+        active_tasks: usize,
+        active_agents: usize,
+    },
+
     /// The server is shutting down.
     ServerShutdown,
 

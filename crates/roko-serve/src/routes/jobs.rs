@@ -7,21 +7,25 @@ use crate::error::{ApiError, validate_path_segment};
 use crate::events::ServerEvent;
 use crate::extract::{RequestPayload, ValidJson, validate_string_items_non_blank};
 use crate::state::AppState;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use roko_core::JobStatus;
 use serde::{Deserialize, Serialize};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/stats", get(job_stats))
         .route("/jobs/{id}", get(get_job).patch(update_job).delete(cancel_job))
         .route("/jobs/{id}/assign", post(assign_job))
+        .route("/jobs/{id}/start", post(start_job))
         .route("/jobs/{id}/submit", post(submit_job))
         .route("/jobs/{id}/evaluate", post(evaluate_job))
         .route("/jobs/{id}/execute", post(execute_job_endpoint))
+        .route("/jobs/{id}/cancel", post(cancel_job_endpoint))
 }
 
 const VALID_STATUSES: &[&str] = &["open","assigned","in_progress","submitted","completed","failed","cancelled"];
@@ -127,16 +131,40 @@ impl RequestPayload for SubmitJobRequest { fn validate_payload(&self) -> Result<
 struct EvaluateJobRequest { accepted: bool, #[serde(default)] feedback: String }
 impl RequestPayload for EvaluateJobRequest { fn validate_payload(&self) -> Result<(), ApiError> { Ok(()) } }
 
-async fn list_jobs(State(state): State<Arc<AppState>>) -> Result<Json<Vec<JobRecord>>, ApiError> {
+#[derive(Debug, Default, Deserialize)]
+struct JobListQuery {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    job_type: Option<String>,
+    #[serde(default)]
+    assigned_to: Option<String>,
+}
+
+async fn list_jobs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<JobListQuery>,
+) -> Result<Json<Vec<JobRecord>>, ApiError> {
     let dir = jobs_dir(&state.workdir);
     if !dir.is_dir() { return Ok(Json(Vec::new())); }
+    let filter_status = query.state.as_deref().and_then(JobStatus::parse);
     let mut jobs = Vec::new();
     let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| ApiError::internal(format!("read jobs dir: {e}")))?;
     while let Some(entry) = entries.next_entry().await.map_err(|e| ApiError::internal(format!("read jobs entry: {e}")))? {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
         let data = tokio::fs::read_to_string(&path).await.map_err(|e| ApiError::internal(format!("read job '{}': {e}", path.display())))?;
-        jobs.push(JobRecord::from_path(&path, &data)?);
+        let job = JobRecord::from_path(&path, &data)?;
+        if let Some(fs) = filter_status {
+            if JobStatus::parse(&job.status) != Some(fs) { continue; }
+        }
+        if let Some(ref jt) = query.job_type {
+            if !jt.is_empty() && job.job_type != *jt { continue; }
+        }
+        if let Some(ref assignee) = query.assigned_to {
+            if !assignee.is_empty() && job.assigned_to != *assignee { continue; }
+        }
+        jobs.push(job);
     }
     jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     Ok(Json(jobs))
@@ -284,6 +312,75 @@ fn publish_transition(state: &AppState, job: &JobRecord, prev_status: &str) {
     });
 }
 
+async fn job_stats(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, ApiError> {
+    let dir = jobs_dir(&state.workdir);
+    if !dir.is_dir() {
+        return Ok(Json(serde_json::json!({"total": 0, "by_state": {}, "by_type": {}})));
+    }
+    let mut total = 0usize;
+    let mut by_state: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| ApiError::internal(format!("read jobs dir: {e}")))?;
+    while let Some(entry) = entries.next_entry().await.map_err(|e| ApiError::internal(format!("read jobs entry: {e}")))? {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+        let data = match tokio::fs::read_to_string(&path).await { Ok(d) => d, Err(_) => continue };
+        let job = match JobRecord::from_path(&path, &data) { Ok(j) => j, Err(_) => continue };
+        total += 1;
+        let sk = if job.status.is_empty() { "open".to_string() } else { job.status.clone() };
+        *by_state.entry(sk).or_default() += 1;
+        let tk = if job.job_type.is_empty() { "other".to_string() } else { job.job_type.clone() };
+        *by_type.entry(tk).or_default() += 1;
+    }
+    Ok(Json(serde_json::json!({"total": total, "by_state": by_state, "by_type": by_type})))
+}
+
+async fn start_job(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<JobRecord>, ApiError> {
+    validate_path_segment(&id, "job id")?;
+    let path = job_path(&state.workdir, &id);
+    let mut job = load_job(&state.workdir, &id).await?;
+    let current = normalise_status(&job.status);
+    if current != "assigned" {
+        return Err(ApiError::unprocessable_with_hint(
+            format!("cannot start job '{id}': current status is '{current}', expected 'assigned'"),
+            "only jobs in 'assigned' state can be started".to_string(),
+        ));
+    }
+    let prev_status = job.status.clone();
+    job.status = "in_progress".to_string();
+    job.updated_at = Utc::now().to_rfc3339();
+    write_job(&path, &job).await?;
+    publish_job_event(&state, ServerEventKind::Updated, &job)?;
+    publish_transition(&state, &job, &prev_status);
+    Ok(Json(job))
+}
+
+async fn cancel_job_endpoint(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<JobRecord>, ApiError> {
+    validate_path_segment(&id, "job id")?;
+    let path = job_path(&state.workdir, &id);
+    let mut job = load_job(&state.workdir, &id).await?;
+    let current = normalise_status(&job.status);
+    if is_terminal(&current) {
+        return Err(ApiError::unprocessable_with_hint(
+            format!("cannot cancel job '{id}': current status '{current}' is terminal"),
+            format!("'{current}' is a terminal state with no valid transitions"),
+        ));
+    }
+    let prev_status = job.status.clone();
+    job.status = "cancelled".to_string();
+    job.updated_at = Utc::now().to_rfc3339();
+    write_job(&path, &job).await?;
+    publish_job_event(&state, ServerEventKind::Updated, &job)?;
+    publish_transition(&state, &job, &prev_status);
+    Ok(Json(job))
+}
+
 async fn execute_job_endpoint(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -300,10 +397,10 @@ async fn execute_job_endpoint(
 
     let state_clone = Arc::clone(&state);
     let job_id = id.clone();
-    // TODO: wire to crate::job_runner::execute_job once job_runner module lands
     tokio::spawn(async move {
-        tracing::info!(job_id = %job_id, "job execution spawned (job_runner not yet wired)");
-        let _ = state_clone;
+        if let Err(err) = crate::job_runner::execute_job(&state_clone, &job_id).await {
+            tracing::error!(job_id = %job_id, error = %err, "job execution failed");
+        }
     });
 
     Ok((

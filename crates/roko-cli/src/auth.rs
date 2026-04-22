@@ -22,6 +22,7 @@ pub enum ApiKeySource {
 
 impl ApiKeySource {
     /// Human-readable label for diagnostics output.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -38,6 +39,7 @@ pub struct ResolvedApiKey {
     /// The API key value.
     pub key: String,
     /// Where the key was resolved from.
+    #[allow(dead_code)]
     pub source: ApiKeySource,
 }
 
