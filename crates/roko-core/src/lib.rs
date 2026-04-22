@@ -141,8 +141,8 @@ pub use forensic::{
 };
 pub use hash::ContentHash;
 pub use heartbeat::{
-    DEFAULT_HEARTBEAT_INTERVAL_SECS, HEARTBEAT_RING_CAPACITY, HeartbeatPayload, NetworkStats,
-    SenderInfo,
+    AgentEndpoints, DEFAULT_HEARTBEAT_INTERVAL_SECS, HEARTBEAT_RING_CAPACITY, HeartbeatPayload,
+    NetworkStats, SenderInfo,
 };
 pub use immune::{
     AnomalyScore, ImmuneResponse, IncidentLink, IncidentRelation, QuarantineDecision,

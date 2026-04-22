@@ -1,6 +1,6 @@
 # Roko HTTP API Reference
 
-The roko HTTP control plane is started with `roko serve` (default: `127.0.0.1:9090`). All REST endpoints are prefixed with `/api/` except webhooks (`/webhooks/`) and WebSocket (`/ws`).
+The roko HTTP control plane is started with `roko serve` (default: `127.0.0.1:6677`). All REST endpoints are prefixed with `/api/` except webhooks (`/webhooks/`) and WebSocket (`/ws`).
 
 ## Authentication
 
@@ -117,7 +117,7 @@ PRD-to-plan-to-task coverage ratios.
 Prometheus-compatible text exposition format.
 
 ```bash
-curl http://localhost:9090/api/metrics/prometheus
+curl http://localhost:6677/api/metrics/prometheus
 ```
 
 ---
@@ -259,7 +259,7 @@ Start background execution of a plan. Returns 409 if the plan is already executi
 ```
 
 ```bash
-curl -X POST http://localhost:9090/api/plans/my-plan/execute
+curl -X POST http://localhost:6677/api/plans/my-plan/execute
 ```
 
 ### `GET /api/plans/{id}/status`
@@ -349,7 +349,7 @@ Execute a single prompt through the universal loop (compose -> agent -> gate -> 
 ```
 
 ```bash
-curl -X POST http://localhost:9090/api/run \
+curl -X POST http://localhost:6677/api/run \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Add error handling to the parse function"}'
 ```
@@ -638,7 +638,7 @@ C-Factor trend over time.
 Return the current resolved `RokoConfig` as JSON (secrets masked).
 
 ```bash
-curl http://localhost:9090/api/config
+curl http://localhost:6677/api/config
 ```
 
 ### `PUT /api/config`
@@ -717,7 +717,7 @@ Delete a template.
 Deploy (spawn) an agent from a template.
 
 ```bash
-curl -X POST http://localhost:9090/api/templates/code-reviewer/deploy
+curl -X POST http://localhost:6677/api/templates/code-reviewer/deploy
 ```
 
 ---
@@ -816,7 +816,7 @@ Receive a callback from a deployed worker.
 List configured LLM providers with health status and model counts.
 
 ```bash
-curl http://localhost:9090/api/providers
+curl http://localhost:6677/api/providers
 ```
 
 ### `GET /api/providers/{id}/health`
@@ -828,7 +828,7 @@ Health check for a specific provider (circuit breaker state, latency).
 Send a test prompt to a provider to verify connectivity.
 
 ```bash
-curl -X POST http://localhost:9090/api/providers/anthropic/test
+curl -X POST http://localhost:6677/api/providers/anthropic/test
 ```
 
 ---
@@ -898,7 +898,7 @@ SSE stream of projection updates. Reconnectable with `Last-Event-ID`.
 Server-Sent Events stream for dashboard updates. Supports reconnection via `Last-Event-ID` header.
 
 ```bash
-curl -N http://localhost:9090/api/events
+curl -N http://localhost:6677/api/events
 ```
 
 Events are JSON payloads with monotonic `id:` fields:
@@ -917,7 +917,7 @@ Upgrade to WebSocket connection for bidirectional real-time events.
 
 **Connection:**
 ```javascript
-const ws = new WebSocket("ws://localhost:9090/ws");
+const ws = new WebSocket("ws://localhost:6677/ws");
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log(data.type, data);

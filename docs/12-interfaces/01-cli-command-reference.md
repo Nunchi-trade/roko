@@ -486,7 +486,7 @@ roko daemon <SUBCOMMAND>
 
 | Subcommand | Flags | Description |
 |---|---|---|
-| `start` | `--foreground`, `--port 9090` | Start the daemon (launchd on macOS) |
+| `start` | `--foreground`, `--port 6677` | Start the daemon (launchd on macOS) |
 | `stop` | | Stop the running daemon |
 | `status` | | Check daemon state |
 | `logs` | | Stream daemon logs |
@@ -502,7 +502,7 @@ roko serve [--bind ADDR] [--port PORT] [--workdir PATH]
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--bind` | String | `127.0.0.1` | Address to bind to |
-| `--port` | u16 | `9090` | Port number |
+| `--port` | u16 | `6677` | Port number |
 | `--workdir` | PathBuf | Current directory | Working directory |
 
 See [05-http-api-roko-serve.md](./05-http-api-roko-serve.md) for the full API specification.

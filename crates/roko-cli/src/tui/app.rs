@@ -1663,6 +1663,9 @@ impl App {
                     }
                 }
             }
+            TuiAction::SubmitJob => {
+                self.submit_marketplace_job();
+            }
             TuiAction::None => {}
         }
 
@@ -2402,6 +2405,108 @@ impl App {
         }
     }
 
+    /// Submit the CreateJob form: write a JSON file to `.roko/jobs/` so the
+    /// file-watcher and job_runner pick it up automatically.
+    fn submit_marketplace_job(&mut self) {
+        let title = self.tui_state.job_form_title.trim().to_string();
+        if title.is_empty() {
+            self.notifications
+                .push(super::modals::Notification::warn("Job title is required"));
+            return;
+        }
+
+        let job_type = {
+            let t = self.tui_state.job_form_type.trim().to_string();
+            if t.is_empty() {
+                "coding_task".to_string()
+            } else {
+                t
+            }
+        };
+        let priority = {
+            let p = self.tui_state.job_form_priority.trim().to_string();
+            if p.is_empty() {
+                "medium".to_string()
+            } else {
+                p
+            }
+        };
+        let description = self.tui_state.job_form_description.trim().to_string();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let id = format!(
+            "job-{}-{:04x}",
+            now.replace([':', '-', 'T', '+'], "")
+                .get(..14)
+                .unwrap_or("0"),
+            nanos & 0xFFFF
+        );
+
+        let job = roko_core::MarketplaceJob {
+            id: id.clone(),
+            title: title.clone(),
+            description,
+            job_type,
+            status: "pending".to_string(),
+            priority,
+            posted_by: "tui".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            ..Default::default()
+        };
+
+        let jobs_dir = self.workdir.join(".roko").join("jobs");
+        if let Err(e) = std::fs::create_dir_all(&jobs_dir) {
+            self.notifications
+                .push(super::modals::Notification::error(&format!(
+                    "Failed to create jobs directory: {e}"
+                )));
+            return;
+        }
+
+        let path = jobs_dir.join(format!("{id}.json"));
+        match serde_json::to_string_pretty(&job) {
+            Ok(json) => match std::fs::write(&path, json) {
+                Ok(()) => {
+                    self.tui_state.command_results.push(
+                        super::state::CommandResult {
+                            ok: true,
+                            label: "create-job".to_string(),
+                            message: format!("Created job '{title}' ({id})"),
+                        },
+                    );
+                    // Reset form fields.
+                    self.tui_state.job_form_title.clear();
+                    self.tui_state.job_form_type.clear();
+                    self.tui_state.job_form_priority.clear();
+                    self.tui_state.job_form_description.clear();
+                    self.tui_state.job_form_editing = false;
+
+                    self.refresh_snapshot();
+                    self.notifications.push(super::modals::Notification::info(
+                        format!("Job '{title}' created"),
+                    ));
+                }
+                Err(e) => {
+                    self.notifications
+                        .push(super::modals::Notification::error(&format!(
+                            "Failed to write job file: {e}"
+                        )));
+                }
+            },
+            Err(e) => {
+                self.notifications
+                    .push(super::modals::Notification::error(&format!(
+                        "Failed to serialize job: {e}"
+                    )));
+            }
+        }
+    }
+
     fn current_view_state(&self) -> ViewState {
         match self.tui_state.active_tab {
             Tab::Dashboard => ViewState {
@@ -2410,6 +2515,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.agent_scroll.is_none(),
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Plans => ViewState {
                 scroll: self.tui_state.plan_scroll_offset as u16,
@@ -2417,6 +2523,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Agents => ViewState {
                 scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
@@ -2424,6 +2531,7 @@ impl App {
                 sub_tab: self.tui_state.selected_agent_tab,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.agent_scroll.is_none(),
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Git => ViewState {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
@@ -2431,6 +2539,7 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Logs => ViewState {
                 scroll: self.tui_state.log_scroll.min(u16::MAX as usize) as u16,
@@ -2438,6 +2547,7 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.log_auto_tail,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Config => ViewState {
                 scroll: self.tui_state.config_scroll_offset.min(u16::MAX as usize) as u16,
@@ -2445,6 +2555,7 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Inspect => ViewState {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
@@ -2452,6 +2563,7 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Marketplace => ViewState {
                 scroll: 0,
@@ -2459,6 +2571,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Atelier => ViewState {
                 scroll: 0,
@@ -2466,6 +2579,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
         }
     }

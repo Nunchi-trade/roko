@@ -69,9 +69,23 @@ pub fn create_openai_compat_backend(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
         }
-        ProviderKind::PerplexityApi => Err(AgentCreationError::MissingConfig(
-            "Perplexity tool-loop backend is not implemented yet".into(),
-        )),
+        ProviderKind::PerplexityApi => {
+            // Perplexity's chat completions API is OpenAI-compatible.
+            let api_key = resolve_api_key(provider)?;
+            let base_url = provider
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.perplexity.ai".to_string());
+            Ok(Arc::new(
+                OpenAiCompatBackend::new(api_key, model.slug.clone())
+                    .with_provider_id(model.provider.clone())
+                    .with_base_url(base_url)
+                    .with_timeout_ms(provider.timeout_ms.unwrap_or(120_000))
+                    .with_max_tokens(max_tokens_for_model(model))
+                    .with_extra_headers(provider.extra_headers.clone().unwrap_or_default())
+                    .with_poster(Box::new(SharedHttpPoster { inner: poster })),
+            ))
+        }
         ProviderKind::GeminiApi => Err(AgentCreationError::MissingConfig(
             "Gemini tool-loop backend is not implemented yet".into(),
         )),
@@ -117,9 +131,7 @@ pub fn create_tool_loop_backend(
                 "CLI/ACP backends don't use LlmBackend — they own the tool loop".into(),
             ))
         }
-        ProviderKind::PerplexityApi => Err(AgentCreationError::MissingConfig(
-            "Perplexity tool-loop backend is not implemented yet".into(),
-        )),
+        ProviderKind::PerplexityApi => create_openai_compat_backend(provider, model, poster),
     }
 }
 

@@ -1837,12 +1837,13 @@ async fn truth_map_handler() -> Json<Value> {
 // ── Retention ────────────────────────────────────────────────────────
 
 /// `GET /api/retention` — return retention policies and any current violations.
-async fn retention_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+async fn retention_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
     let policies = crate::retention::default_retention_policies();
     let violations = crate::retention::check_retention(&state.workdir);
-    let status = crate::retention::RetentionStatus { policies, violations };
+    let status = crate::retention::RetentionStatus {
+        policies,
+        violations,
+    };
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 

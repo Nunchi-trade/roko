@@ -51,22 +51,8 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-/// Known endpoint set for an agent.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentEndpoints {
-    /// Base REST endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rest: Option<String>,
-    /// Streaming WebSocket endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub websocket: Option<String>,
-    /// Optional A2A endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub a2a: Option<String>,
-    /// Optional MCP endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<String>,
-}
+/// Re-export the shared endpoint type from roko-core.
+pub use roko_core::AgentEndpoints;
 
 /// Agent discovery entry used by the serve-side aggregator.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

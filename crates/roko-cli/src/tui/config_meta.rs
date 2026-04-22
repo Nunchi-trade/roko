@@ -610,7 +610,7 @@ pub fn all_fields() -> Vec<ConfigFieldMeta> {
             kind: ConfigFieldKind::Int {
                 min: Some(1),
                 max: Some(65535),
-                presets: vec![8080, 9090, 3000],
+                presets: vec![6677, 8080, 9090, 3000],
             },
             group: "Server",
         },

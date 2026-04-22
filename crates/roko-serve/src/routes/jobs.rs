@@ -90,6 +90,8 @@ struct JobRecord {
     reward: String,
     #[serde(default)]
     plan_id: String,
+    #[serde(default)]
+    auto_execute: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     submission: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,8 @@ struct CreateJobRequest {
     reward: String,
     #[serde(default)]
     plan_id: String,
+    #[serde(default)]
+    auto_execute: bool,
 }
 
 impl RequestPayload for CreateJobRequest {
@@ -312,6 +316,7 @@ async fn create_job(
         tags: trim_items(body.tags),
         reward: body.reward.trim().to_string(),
         plan_id: body.plan_id.trim().to_string(),
+        auto_execute: body.auto_execute,
         submission: None,
         evaluation: None,
     };

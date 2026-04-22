@@ -46,3 +46,22 @@ pub struct SenderInfo {
     pub last_seen: String,
     pub total_heartbeats: usize,
 }
+
+/// Endpoint set advertised by an agent. Shared between the agent-server
+/// sidecar (which produces the card) and roko-serve (which stores
+/// discovery records).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentEndpoints {
+    /// REST endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<String>,
+    /// Streaming WebSocket endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<String>,
+    /// Optional A2A endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<String>,
+    /// Optional MCP endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<String>,
+}

@@ -233,10 +233,7 @@ fn plan_verify_cell(plan_id: &str, state: &TuiState) -> (String, Color) {
     } else {
         format!("{passed}/{total}")
     };
-    (
-        format!("{:>width$}", text, width = COL_VERIFY),
-        color,
-    )
+    (format!("{:>width$}", text, width = COL_VERIFY), color)
 }
 
 fn render_wave_tree(
@@ -395,7 +392,16 @@ fn render_flat_plans(
 ) {
     for plan in &state.plans {
         if matches_filter(plan, filter_lower) {
-            render_plan_line(lines, plan, state, focused, area, false, selected_plan_id, false);
+            render_plan_line(
+                lines,
+                plan,
+                state,
+                focused,
+                area,
+                false,
+                selected_plan_id,
+                false,
+            );
         }
     }
 }

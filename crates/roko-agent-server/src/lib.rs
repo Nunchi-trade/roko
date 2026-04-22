@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use axum::{Router, middleware};
 use tokio::net::TcpListener;
+use tokio::time::MissedTickBehavior;
 use tower_http::trace::TraceLayer;
 
 use roko_agent::dispatcher::ToolDispatcher;
@@ -31,9 +32,7 @@ pub use registration::{
 };
 pub use state::{
     AgentMetrics, AgentPrediction, AgentPredictionResidual, AgentRuntimeStats, AgentState,
-    DispatchError, DispatchLike, MessageContext, PredictionCreateRequest, ResearchRequest,
-    ResearchResponse, TaskArtifact, TaskCompletionRequest, TaskEntry, TaskPriority, TaskState,
-    TaskSummary,
+    DispatchError, DispatchLike, MessageContext, PredictionCreateRequest,
 };
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -56,6 +55,10 @@ pub struct AgentServer {
     features: FeatureFlags,
     on_start: Option<StartHook>,
     registration: Option<AgentRegistration>,
+    /// Base URL of the roko-serve control plane for heartbeat reporting.
+    serve_url: Option<String>,
+    /// Heartbeat interval in seconds.
+    heartbeat_interval_secs: u64,
 }
 
 impl AgentServer {
@@ -144,6 +147,18 @@ impl AgentServer {
                 .context("run on_start hook")?;
         }
 
+        // Spawn heartbeat loop if a serve URL is configured.
+        if let Some(serve_url) = &self.serve_url {
+            let heartbeat_state = Arc::clone(&self.state);
+            let heartbeat_url = format!("{}/api/heartbeats", serve_url.trim_end_matches('/'));
+            let interval_secs = self.heartbeat_interval_secs;
+            tokio::spawn(heartbeat_loop(
+                heartbeat_state,
+                heartbeat_url,
+                interval_secs,
+            ));
+        }
+
         axum::serve(listener, self.router())
             .await
             .context("serve agent http router")
@@ -168,6 +183,8 @@ pub struct AgentServerBuilder {
     features: FeatureFlags,
     on_start: Option<StartHook>,
     registration: Option<AgentRegistration>,
+    serve_url: Option<String>,
+    heartbeat_interval_secs: Option<u64>,
 }
 
 impl AgentServerBuilder {
@@ -280,11 +297,25 @@ impl AgentServerBuilder {
         self
     }
 
-    /// Enable the task feature surface.
+    /// Enable the task queue feature surface.
     #[must_use]
     pub fn tasks(mut self) -> Self {
         self.features.tasks = true;
         self.capabilities.push("tasks".to_string());
+        self
+    }
+
+    /// Set the roko-serve control plane URL for heartbeat reporting.
+    #[must_use]
+    pub fn serve_url(mut self, url: impl Into<String>) -> Self {
+        self.serve_url = Some(url.into());
+        self
+    }
+
+    /// Override the heartbeat interval (default: 30 seconds).
+    #[must_use]
+    pub const fn heartbeat_interval(mut self, secs: u64) -> Self {
+        self.heartbeat_interval_secs = Some(secs);
         self
     }
 
@@ -344,6 +375,10 @@ impl AgentServerBuilder {
             features: self.features,
             on_start: self.on_start,
             registration: self.registration,
+            serve_url: self.serve_url,
+            heartbeat_interval_secs: self
+                .heartbeat_interval_secs
+                .unwrap_or(roko_core::DEFAULT_HEARTBEAT_INTERVAL_SECS),
         })
     }
 }
@@ -372,6 +407,54 @@ fn capability_is_live(value: &str, features: FeatureFlags) -> bool {
         "research" => features.research,
         "tasks" => features.tasks,
         _ => true,
+    }
+}
+
+/// Background task that periodically POSTs a [`roko_core::HeartbeatPayload`] to
+/// the roko-serve control plane so that the discovery registry stays fresh.
+#[allow(clippy::cast_precision_loss)]
+async fn heartbeat_loop(state: Arc<state::AgentState>, url: String, interval_secs: u64) {
+    let client = ::reqwest::Client::new();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        let payload = roko_core::HeartbeatPayload {
+            sender_id: state.agent_id().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            active_tasks: 0,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            active_agents: 1,
+            frequency: 1.0 / interval_secs as f64,
+            metrics: std::collections::HashMap::new(),
+        };
+
+        match client.post(&url).json(&payload).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::trace!(
+                    agent_id = state.agent_id(),
+                    url = %url,
+                    "heartbeat sent"
+                );
+            }
+            Ok(resp) => {
+                tracing::debug!(
+                    agent_id = state.agent_id(),
+                    status = %resp.status(),
+                    "heartbeat rejected by control plane"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    agent_id = state.agent_id(),
+                    error = %err,
+                    "heartbeat send failed (control plane unreachable?)"
+                );
+            }
+        }
     }
 }
 

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
 use super::ViewState;
 use crate::tui::config_meta::{
@@ -51,8 +51,7 @@ pub fn render(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Config ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -514,9 +513,7 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
 
 #[allow(clippy::cast_precision_loss)]
 fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Provider Health ", theme.accent()));
+    let block = Block::bordered().title(Span::styled(" Provider Health ", theme.accent()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -524,12 +521,7 @@ fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiStat
     let mut providers: std::collections::BTreeMap<String, (u64, u64, u64)> =
         std::collections::BTreeMap::new();
     for event in &tui_state.efficiency_events {
-        let provider = if event.model.is_empty() {
-            "unknown"
-        } else {
-            event.model.split('/').next().unwrap_or(&event.model)
-        };
-        let entry = providers.entry(provider.to_string()).or_default();
+        let entry = providers.entry(infer_provider(&event.model)).or_default();
         entry.0 += 1; // total calls
         if event.output_tokens > 0 {
             entry.1 += 1; // successes
@@ -538,7 +530,7 @@ fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiStat
     }
 
     if providers.is_empty() {
-        let empty = Paragraph::new("no provider data -- run agents to populate")
+        let empty = Paragraph::new("no provider data — run agents to populate")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
@@ -558,12 +550,7 @@ fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiStat
             } else {
                 0.0
             };
-            let status = if rate >= 90.0 { "healthy" } else { "degraded" };
-            let status_style = if rate >= 90.0 {
-                theme.success()
-            } else {
-                theme.warning()
-            };
+            let (status, status_style) = provider_health_status(rate, *total, theme);
             Row::new(vec![
                 Cell::from(truncate(name, 20)),
                 Cell::from(Span::styled(status.to_string(), status_style)),
@@ -594,21 +581,19 @@ fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiStat
 
 #[allow(clippy::cast_precision_loss)]
 fn render_model_comparison(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Model Comparison ", theme.accent()));
+    let block = Block::bordered().title(Span::styled(" Model Comparison ", theme.accent()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if tui_state.cascade_router.model_slugs.is_empty() {
-        let empty = Paragraph::new("no model data -- run agents to populate cascade router")
+        let empty = Paragraph::new("no model data — run agents to populate cascade router")
             .style(theme.muted())
             .wrap(Wrap { trim: false });
         frame.render_widget(empty, inner);
         return;
     }
 
-    let rows: Vec<Row<'_>> = tui_state
+    let model_rows = tui_state
         .cascade_router
         .model_slugs
         .iter()
@@ -629,20 +614,48 @@ fn render_model_comparison(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiSta
                 .filter(|e| e.model == *slug)
                 .map(|e| e.cost_usd)
                 .sum();
+            (slug, infer_tier(slug), cost, gate_rate, trials)
+        })
+        .collect::<Vec<_>>();
 
-            let rate_style = if gate_rate >= 80.0 {
+    let best_cost = model_rows
+        .iter()
+        .map(|(_, _, cost, _, _)| *cost)
+        .filter(|cost| *cost > 0.0)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let best_gate = model_rows
+        .iter()
+        .map(|(_, _, _, gate_rate, _)| *gate_rate)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let rows: Vec<Row<'_>> = model_rows
+        .iter()
+        .map(|(slug, tier, cost, gate_rate, trials)| {
+            let rate_style = if *gate_rate >= 80.0 {
                 theme.success()
-            } else if gate_rate >= 50.0 {
+            } else if *gate_rate >= 50.0 {
                 theme.warning()
-            } else if trials > 0 {
+            } else if *trials > 0 {
                 theme.danger()
             } else {
                 theme.muted()
             };
+            let rate_style = if best_gate.is_some_and(|best| (*gate_rate - best).abs() < f64::EPSILON)
+            {
+                rate_style.add_modifier(Modifier::BOLD)
+            } else {
+                rate_style
+            };
+            let cost_style = if best_cost.is_some_and(|best| (*cost - best).abs() < f64::EPSILON) {
+                theme.success().add_modifier(Modifier::BOLD)
+            } else {
+                theme.text()
+            };
 
             Row::new(vec![
                 Cell::from(truncate(slug, 24)),
-                Cell::from(format!("${cost:.4}")),
+                Cell::from(tier.clone()),
+                Cell::from(Span::styled(format!("${cost:.4}"), cost_style)),
                 Cell::from(Span::styled(format!("{gate_rate:.0}%"), rate_style)),
                 Cell::from(trials.to_string()),
             ])
@@ -651,15 +664,58 @@ fn render_model_comparison(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiSta
 
     let widths = [
         Constraint::Min(16),
+        Constraint::Length(8),
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(6),
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["model", "cost", "gate %", "tries"])
+            Row::new(["model", "tier", "cost", "gate %", "tries"])
                 .style(theme.accent().add_modifier(Modifier::BOLD)),
         )
         .column_spacing(1);
     frame.render_widget(table, inner);
+}
+
+fn infer_provider(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        "anthropic".to_string()
+    } else if lower.contains("gpt") || lower.contains("openai") {
+        "openai".to_string()
+    } else if lower.contains("gemini") || lower.contains("google") {
+        "google".to_string()
+    } else if lower.contains("ollama") || lower.contains("llama") {
+        "ollama".to_string()
+    } else {
+        trimmed.split('/').next().unwrap_or(trimmed).to_string()
+    }
+}
+
+fn infer_tier(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("haiku") || lower.contains("mini") || lower.contains("small") {
+        "fast".to_string()
+    } else if lower.contains("opus") || lower.contains("pro") || lower.contains("large") {
+        "deep".to_string()
+    } else {
+        "std".to_string()
+    }
+}
+
+fn provider_health_status(rate: f64, total: u64, theme: &Theme) -> (&'static str, Style) {
+    if total == 0 {
+        ("no data", theme.muted())
+    } else if rate >= 90.0 {
+        ("healthy", theme.success())
+    } else if rate >= 70.0 {
+        ("degraded", theme.warning())
+    } else {
+        ("unhealthy", theme.danger())
+    }
 }

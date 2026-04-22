@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::registration::{AgentCard, AgentCardEndpoints};
+use crate::registration::{AgentCard, AgentEndpoints};
 
 /// Opaque message context payload that round-trips caller JSON as-is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -666,7 +666,7 @@ impl AgentState {
         AgentCard {
             name: self.agent_id.clone(),
             capabilities: self.capabilities.clone(),
-            endpoints: AgentCardEndpoints {
+            endpoints: AgentEndpoints {
                 rest: Some(rest),
                 websocket: Some(websocket),
                 a2a: None,
@@ -760,35 +760,53 @@ impl AgentState {
         })
     }
 
-    /// Execute a simple research request against the local state.
+    /// Run a sidecar-local research lookup against the attached knowledge store.
     #[allow(clippy::unused_async)]
     pub async fn research(&self, request: ResearchRequest) -> ResearchResponse {
         self.metrics.record_request();
-        let depth = request.depth;
-        ResearchResponse {
-            findings: vec![
-                format!("{} reviewed topic '{}'", self.agent_id, request.topic),
-                format!("requested depth: {depth}"),
-            ],
-            sources: vec![
-                format!("agent://{}/capabilities", self.agent_id),
-                self.chain_client.as_ref().map_or_else(
-                    || "chain://unconfigured".to_string(),
-                    |client| format!("chain://{}", client.name()),
-                ),
-            ],
+        let topic = request.topic.trim();
+        let mut findings = Vec::new();
+        let mut sources = Vec::new();
+
+        if let Some(store) = &self.knowledge_store {
+            match store.query(topic, 5) {
+                Ok(entries) => {
+                    for entry in entries {
+                        if !entry.content.trim().is_empty() {
+                            findings.push(entry.content);
+                        }
+                        if let Some(source) = entry.source {
+                            sources.push(source);
+                        } else if !entry.id.is_empty() {
+                            sources.push(entry.id);
+                        }
+                    }
+                }
+                Err(error) => {
+                    findings.push(format!("local knowledge query failed: {error}"));
+                }
+            }
         }
+
+        if findings.is_empty() {
+            findings.push(format!(
+                "no local knowledge findings for topic '{topic}' at {} depth",
+                request.depth
+            ));
+        }
+
+        ResearchResponse { findings, sources }
     }
 
-    /// Return the current task queue.
+    /// List the in-memory sidecar task queue.
     #[allow(clippy::unused_async)]
     pub async fn list_tasks(&self) -> Vec<TaskEntry> {
         self.metrics.record_request();
         self.tasks.lock().iter().cloned().collect()
     }
 
-    /// Accept a task by identifier.
-    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
+    /// Mark a queued task as accepted by this agent.
+    #[allow(clippy::unused_async, clippy::significant_drop_tightening)]
     pub async fn accept_task(&self, id: u64) -> Option<TaskEntry> {
         self.metrics.record_request();
         let mut tasks = self.tasks.lock();
@@ -798,8 +816,8 @@ impl AgentState {
         Some(task.clone())
     }
 
-    /// Complete a task by identifier.
-    #[allow(clippy::significant_drop_tightening, clippy::unused_async)]
+    /// Mark a queued task as completed and attach its artifacts.
+    #[allow(clippy::unused_async, clippy::significant_drop_tightening)]
     pub async fn complete_task(
         &self,
         id: u64,
@@ -812,29 +830,7 @@ impl AgentState {
         task.completed_at = Some(now_secs());
         task.artifacts = request.artifacts;
         task.summary = request.summary;
-        self.stats.lock().tasks_completed += 1;
         Some(task.clone())
-    }
-
-    /// Seed a task for test or bootstrap use.
-    pub fn push_task(&self, title: impl Into<String>, kind: impl Into<String>) -> TaskEntry {
-        let mut tasks = self.tasks.lock();
-        let id = tasks.len() as u64 + 1;
-        let entry = TaskEntry {
-            id,
-            title: title.into(),
-            kind: kind.into(),
-            priority: TaskPriority::Medium,
-            state: TaskState::Open,
-            bounty: 0,
-            assignee: None,
-            created_at: now_secs(),
-            completed_at: None,
-            artifacts: Vec::new(),
-            summary: None,
-        };
-        tasks.push_back(entry.clone());
-        entry
     }
 }
 

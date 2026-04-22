@@ -147,6 +147,9 @@ pub struct AgentServeArgs {
     /// Wallet private key reserved for future signing hooks.
     #[arg(long)]
     pub wallet_key: Option<String>,
+    /// roko-serve control plane URL for heartbeat reporting.
+    #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
+    pub serve_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +158,7 @@ struct AgentServeRuntimeConfig {
     bind: String,
     relay: Option<RelayConfig>,
     chain: Option<ChainConfig>,
+    serve_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +183,7 @@ impl AgentServeRuntimeConfig {
             bind: args.bind,
             relay,
             chain,
+            serve_url: args.serve_url,
         }
     }
 
@@ -197,10 +202,9 @@ impl AgentServeRuntimeConfig {
         let mut builder = AgentServer::builder()
             .agent_id(self.agent_id.clone())
             .bind(self.bind.clone())
+            .serve_url(self.serve_url.clone())
             .messaging()
-            .predictions()
-            .research()
-            .tasks();
+            .predictions();
 
         if let Some(dispatcher) = self.try_build_dispatcher()? {
             builder = builder.with_message_dispatcher(dispatcher);
@@ -323,6 +327,7 @@ impl AgentServeRuntimeConfig {
             bind: self.bind.clone(),
             relay: self.relay.clone(),
             chain: self.chain.clone(),
+            serve_url: self.serve_url.clone(),
         }
     }
 }
@@ -333,6 +338,8 @@ struct StartupSnapshot {
     bind: String,
     relay: Option<RelayConfig>,
     chain: Option<ChainConfig>,
+    #[allow(dead_code)]
+    serve_url: String,
 }
 
 impl ChainConfig {

@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::state::{AgentState, TaskCompletionRequest};
+use crate::state::{AgentState, TaskCompletionRequest, TaskEntry};
 
 /// Task routes.
 pub fn router() -> Router<Arc<AgentState>> {
@@ -20,7 +20,7 @@ pub fn router() -> Router<Arc<AgentState>> {
         .route("/tasks/{id}/complete", post(complete_task))
 }
 
-async fn list_tasks(State(state): State<Arc<AgentState>>) -> Json<Vec<crate::state::TaskEntry>> {
+async fn list_tasks(State(state): State<Arc<AgentState>>) -> Json<Vec<TaskEntry>> {
     Json(state.list_tasks().await)
 }
 

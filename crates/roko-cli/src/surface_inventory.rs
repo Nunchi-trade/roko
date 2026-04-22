@@ -1069,8 +1069,7 @@ pub fn tui_parity_inventory() -> Vec<TuiParityDetail> {
         cli_equivalent: Some("roko plan show <id>".into()),
         data_source: DataSourceKind::PushBased,
         parity_status: TuiParityStatus::TuiOnly,
-        notes: "Wave-grouped DAG with gradient progress bars. TUI-only visualization."
-            .into(),
+        notes: "Wave-grouped DAG with gradient progress bars. TUI-only visualization.".into(),
     });
     v.push(TuiParityDetail {
         tab: "F2 Plans".into(),
@@ -1182,8 +1181,7 @@ pub fn tui_parity_inventory() -> Vec<TuiParityDetail> {
         cli_equivalent: None,
         data_source: DataSourceKind::FileBased,
         parity_status: TuiParityStatus::TuiOnly,
-        notes: "git worktree list porcelain output parsed. Background refresh."
-            .into(),
+        notes: "git worktree list porcelain output parsed. Background refresh.".into(),
     });
 
     // ── F5 Logs ─────────────────────────────────────────────────────────
@@ -1207,8 +1205,7 @@ pub fn tui_parity_inventory() -> Vec<TuiParityDetail> {
         cli_equivalent: Some("roko status".into()),
         data_source: DataSourceKind::PushBased,
         parity_status: TuiParityStatus::TuiEnhanced,
-        notes: "Level-based colored log with filter toggles. Reads TuiState only."
-            .into(),
+        notes: "Level-based colored log with filter toggles. Reads TuiState only.".into(),
     });
     v.push(TuiParityDetail {
         tab: "F5 Logs".into(),
@@ -1388,8 +1385,7 @@ pub fn tui_parity_inventory() -> Vec<TuiParityDetail> {
         cli_equivalent: Some("roko plan show".into()),
         data_source: DataSourceKind::PushBased,
         parity_status: TuiParityStatus::Equivalent,
-        notes: "Plan detail with task table from TuiState.atelier_tasks_by_slug (push)."
-            .into(),
+        notes: "Plan detail with task table from TuiState.atelier_tasks_by_slug (push).".into(),
     });
 
     v
@@ -1411,14 +1407,8 @@ pub fn print_parity_table(entries: &[TuiParityDetail], json_mode: bool) {
     println!("{}", "-".repeat(130));
 
     for entry in entries {
-        let subview = entry
-            .subview
-            .as_deref()
-            .unwrap_or("-");
-        let dashboard = entry
-            .dashboard_equivalent
-            .as_deref()
-            .unwrap_or("(none)");
+        let subview = entry.subview.as_deref().unwrap_or("-");
+        let dashboard = entry.dashboard_equivalent.as_deref().unwrap_or("(none)");
         let notes = if entry.notes.len() > 50 {
             format!("{}...", &entry.notes[..47])
         } else {

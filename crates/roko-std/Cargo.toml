@@ -17,6 +17,7 @@ async-trait = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = "0.12"
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "process", "time"] }
 
 [dev-dependencies]

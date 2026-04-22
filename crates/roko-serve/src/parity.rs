@@ -50,7 +50,10 @@ impl WidgetState {
     /// `Error`, and `Unavailable`.
     #[must_use]
     pub fn is_actionable(&self) -> bool {
-        matches!(self, Self::Live | Self::Stale { .. } | Self::Degraded { .. })
+        matches!(
+            self,
+            Self::Live | Self::Stale { .. } | Self::Degraded { .. }
+        )
     }
 
     /// Short human-readable label for the state (suitable for a badge or tag).
@@ -392,7 +395,9 @@ pub fn build_parity_matrix() -> ParityMatrix {
         // -- Cost tier / model routing --
         ParityEntry {
             feature: "Cost tiers / model routing".into(),
-            dashboard_route: Some("GET /api/learn/cost-tiers, GET /api/learn/cascade-router".into()),
+            dashboard_route: Some(
+                "GET /api/learn/cost-tiers, GET /api/learn/cascade-router".into(),
+            ),
             tui_tab: None,
             tui_subview: None,
             cli_fallback: None,
@@ -517,7 +522,10 @@ pub fn build_parity_matrix() -> ParityMatrix {
 
     let summary = ParitySummary {
         total: entries.len(),
-        full: entries.iter().filter(|e| e.status == ParityStatus::Full).count(),
+        full: entries
+            .iter()
+            .filter(|e| e.status == ParityStatus::Full)
+            .count(),
         partial: entries
             .iter()
             .filter(|e| e.status == ParityStatus::Partial)
@@ -546,10 +554,7 @@ mod tests {
     #[test]
     fn widget_state_labels() {
         assert_eq!(WidgetState::Live.label(), "live");
-        assert_eq!(
-            WidgetState::Stale { age_secs: 30 }.label(),
-            "stale"
-        );
+        assert_eq!(WidgetState::Stale { age_secs: 30 }.label(), "stale");
         assert_eq!(WidgetState::Loading.label(), "loading");
         assert_eq!(
             WidgetState::Degraded {
@@ -572,15 +577,19 @@ mod tests {
     fn widget_state_actionable() {
         assert!(WidgetState::Live.is_actionable());
         assert!(WidgetState::Stale { age_secs: 10 }.is_actionable());
-        assert!(WidgetState::Degraded {
-            reason: "slow".into()
-        }
-        .is_actionable());
+        assert!(
+            WidgetState::Degraded {
+                reason: "slow".into()
+            }
+            .is_actionable()
+        );
         assert!(!WidgetState::Loading.is_actionable());
-        assert!(!WidgetState::Error {
-            message: "fail".into()
-        }
-        .is_actionable());
+        assert!(
+            !WidgetState::Error {
+                message: "fail".into()
+            }
+            .is_actionable()
+        );
         assert!(!WidgetState::Unavailable.is_actionable());
     }
 
@@ -647,8 +656,10 @@ mod tests {
             "summary.total must match entries.len()"
         );
         assert_eq!(
-            matrix.summary.full + matrix.summary.partial
-                + matrix.summary.incomplete + matrix.summary.missing,
+            matrix.summary.full
+                + matrix.summary.partial
+                + matrix.summary.incomplete
+                + matrix.summary.missing,
             matrix.summary.total,
             "status counts must sum to total"
         );
@@ -679,7 +690,11 @@ mod tests {
     #[test]
     fn full_parity_entries_have_all_surfaces() {
         let matrix = build_parity_matrix();
-        for entry in matrix.entries.iter().filter(|e| e.status == ParityStatus::Full) {
+        for entry in matrix
+            .entries
+            .iter()
+            .filter(|e| e.status == ParityStatus::Full)
+        {
             assert!(
                 entry.dashboard_route.is_some(),
                 "'{}' is Full but missing dashboard_route",

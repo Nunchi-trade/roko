@@ -234,6 +234,8 @@ pub struct ViewState {
     pub secondary_selected: usize,
     /// Whether auto-scroll / tail mode is active.
     pub auto_tail: bool,
+    /// Free-text query used by searchable sub-views.
+    pub search_query: String,
 }
 
 impl ViewState {

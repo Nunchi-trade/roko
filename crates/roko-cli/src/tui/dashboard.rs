@@ -2806,8 +2806,8 @@ fn efficiency_summary_from_events(events: &[AgentEfficiencyEvent]) -> Efficiency
     let total_input_tokens = events.iter().map(|e| e.input_tokens).sum();
     let total_output_tokens = events.iter().map(|e| e.output_tokens).sum();
     let passed_count = events.iter().filter(|e| e.gate_passed).count();
-    let average_wall_time_ms = events.iter().map(|e| e.wall_time_ms as f64).sum::<f64>()
-        / count_to_f64(event_count);
+    let average_wall_time_ms =
+        events.iter().map(|e| e.wall_time_ms as f64).sum::<f64>() / count_to_f64(event_count);
     EfficiencySummary {
         event_count,
         total_cost_usd,

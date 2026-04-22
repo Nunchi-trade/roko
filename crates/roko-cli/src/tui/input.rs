@@ -353,6 +353,9 @@ pub enum TuiAction {
     // -- refresh --
     Refresh,
 
+    // -- marketplace job form --
+    SubmitJob,
+
     // -- no-op --
     None,
 }
@@ -834,10 +837,15 @@ fn handle_inspect_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
 }
 
 fn handle_marketplace_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
+    // Ctrl-S submits the job creation form.
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return TuiAction::SubmitJob;
+    }
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => TuiAction::ScrollFocusedDown,
         KeyCode::Char('k') | KeyCode::Up => TuiAction::ScrollFocusedUp,
         KeyCode::Enter => TuiAction::ExpandCollapse,
+        KeyCode::Char('n') => TuiAction::SwitchSubView(2), // CreateJob sub-view
         KeyCode::Char('r') => TuiAction::Refresh,
         KeyCode::Home => TuiAction::ScrollFocusedHome,
         KeyCode::End => TuiAction::ScrollFocusedEnd,

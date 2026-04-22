@@ -12,7 +12,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -65,9 +67,9 @@ pub(crate) fn render(
     theme: &Theme,
 ) {
     match view_state.sub_tab {
-        1 => render_engram_dag(frame, area, tui_state, theme),
-        2 => render_episode_replay(frame, area, tui_state, theme),
-        3 => render_knowledge_browse(frame, area, tui_state, theme),
+        1 => render_engram_dag(frame, area, tui_state, view_state, theme),
+        2 => render_episode_replay(frame, area, tui_state, view_state, theme),
+        3 => render_knowledge_browse(frame, area, tui_state, view_state, theme),
         _ => {
             let ctx_data = build_context_data(tui_state);
             render_with_context_data(
@@ -735,7 +737,13 @@ fn render_alerts_and_health(
 // Sub-view: Engram DAG (sub_tab == 1)
 // ---------------------------------------------------------------------------
 
-fn render_engram_dag(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+fn render_engram_dag(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" Engram DAG ", theme.accent()));
@@ -753,6 +761,7 @@ fn render_engram_dag(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
     let rows: Vec<Row<'_>> = tui_state
         .recent_signals
         .iter()
+        .skip(view_state.scroll as usize)
         .take(inner.height as usize)
         .map(|sig| {
             Row::new(vec![
@@ -784,7 +793,13 @@ fn render_engram_dag(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
 // Sub-view: Episode Replay (sub_tab == 2)
 // ---------------------------------------------------------------------------
 
-fn render_episode_replay(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+fn render_episode_replay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" Episode Replay ", theme.accent()));
@@ -803,6 +818,7 @@ fn render_episode_replay(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState
         .episodes_cache
         .iter()
         .rev()
+        .skip(view_state.scroll as usize)
         .take(inner.height as usize)
         .map(|ep| {
             let outcome_style = if ep.success {
@@ -839,7 +855,13 @@ fn render_episode_replay(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState
 // Sub-view: Knowledge Browse (sub_tab == 3)
 // ---------------------------------------------------------------------------
 
-fn render_knowledge_browse(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+fn render_knowledge_browse(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" Knowledge Browse ", theme.accent()));
@@ -854,9 +876,33 @@ fn render_knowledge_browse(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiSta
         return;
     }
 
-    let items: Vec<ListItem<'_>> = tui_state
+    let query = view_state.search_query.trim().to_ascii_lowercase();
+    let filtered = tui_state
         .knowledge_entries
         .iter()
+        .filter(|entry| {
+            query.is_empty()
+                || entry.kind.to_ascii_lowercase().contains(&query)
+                || entry.content_preview.to_ascii_lowercase().contains(&query)
+                || entry.tags.iter().any(|t| t.to_ascii_lowercase().contains(&query))
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        let empty = Paragraph::new(format!(
+            "no knowledge entries match '{}'",
+            view_state.search_query.trim()
+        ))
+        .alignment(Alignment::Center)
+        .style(theme.muted())
+        .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let items: Vec<ListItem<'_>> = filtered
+        .iter()
+        .skip(view_state.scroll as usize)
         .take(inner.height as usize)
         .map(|entry| {
             ListItem::new(Line::from(vec![
@@ -867,7 +913,12 @@ fn render_knowledge_browse(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiSta
         })
         .collect();
 
-    frame.render_widget(List::new(items), inner);
+    let mut list_state = ListState::default();
+    let visible_len = items.len();
+    if visible_len > 0 {
+        list_state.select(Some(view_state.selected.min(visible_len - 1)));
+    }
+    frame.render_stateful_widget(List::new(items).highlight_symbol("> "), inner, &mut list_state);
 }
 
 /// Build context data from available dashboard data.

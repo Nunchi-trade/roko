@@ -2758,7 +2758,7 @@ impl Default for AgentRoleToggles {
 
 /// Learning subsystem configuration.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LearningConfig {
     /// Auto-refresh playbook rules after successful tasks.
     #[serde(default = "default_true")]
@@ -2793,6 +2793,22 @@ pub struct LearningConfig {
     /// Consecutive gate failures required before emitting a plan revision.
     #[serde(default = "default_replan_gate_attempts")]
     pub replan_gate_attempts: u32,
+    /// Enable the lookahead router for cost-saving tier downgrades.
+    /// When true, the cascade router selection is post-filtered through
+    /// `LookaheadRouter::route_with_lookahead()` which may downgrade to a
+    /// cheaper model when calibration data indicates sufficient success
+    /// probability.
+    #[serde(default)]
+    pub use_lookahead_router: bool,
+    /// Success probability threshold for the lookahead router to accept a
+    /// cheaper tier (0.0--1.0). Only used when `use_lookahead_router` is true.
+    /// Defaults to 0.7.
+    #[serde(default = "default_lookahead_threshold")]
+    pub lookahead_threshold: f64,
+}
+
+fn default_lookahead_threshold() -> f64 {
+    0.7
 }
 
 const fn default_learning_min_occ() -> usize {
@@ -2829,6 +2845,8 @@ impl Default for LearningConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: default_replan_max_per_plan(),
             replan_gate_attempts: default_replan_gate_attempts(),
+            use_lookahead_router: false,
+            lookahead_threshold: default_lookahead_threshold(),
         }
     }
 }

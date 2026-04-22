@@ -17,11 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use roko_agent::chat_types::FinishReason;
-use roko_agent::safety::provenance::{Custody, CustodyLogger};
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::is_known_protocol_command;
+use roko_agent::safety::provenance::{Custody, CustodyLogger};
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -3151,6 +3151,8 @@ pub struct PlanRunner {
     verdict_publisher: Option<VerdictPublisher>,
     /// Rolling latency registry for routed model/provider pairs.
     latency_registry: LatencyRegistry,
+    /// Calibration state for the lookahead router tier-downgrade decisions.
+    router_calibration: roko_learn::routing_extras::RouterCalibration,
     /// Event bus used to publish post-turn learning signals.
     learning_event_bus: LearningEventBus,
     /// Runtime-wide event bus for cross-crate orchestration fan-out.
@@ -4772,6 +4774,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -4964,6 +4967,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -5158,6 +5162,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -6791,7 +6796,9 @@ impl PlanRunner {
     /// Flush accumulated conductor signals to `.roko/engrams.jsonl` so the
     /// background `WatcherRunner` can detect anomalies in real time (not just
     /// from stale data on disk).
-    #[allow(dead_code)]
+    ///
+    /// Drains the in-memory buffer after a successful write so signals are
+    /// not re-flushed on subsequent calls.
     async fn flush_conductor_signals_to_disk(&mut self) {
         if self.conductor_signals.is_empty() {
             return;
@@ -6824,6 +6831,10 @@ impl PlanRunner {
                         "[orchestrate] failed to flush conductor signals to {}: {e}",
                         engrams_path.display()
                     );
+                } else {
+                    // Drain only after a successful write so we don't lose
+                    // signals on transient I/O failures.
+                    self.conductor_signals.clear();
                 }
             }
             Err(e) => {
@@ -7483,7 +7494,15 @@ impl PlanRunner {
                 }
                 self.actions_since_save = 0;
             }
+
+            // Flush conductor signals to disk so the background WatcherRunner
+            // can detect anomalies from fresh data rather than stale snapshots.
+            self.flush_conductor_signals_to_disk().await;
         }
+
+        // Final flush of any conductor signals accumulated in the last
+        // iteration or after the loop exited.
+        self.flush_conductor_signals_to_disk().await;
 
         if self.cancel.is_cancelled() || watcher_cancel.is_cancelled() {
             self.cleanup_tracked_plan_worktrees().await;
@@ -8129,12 +8148,7 @@ impl PlanRunner {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        self.record_custody_gate(
-                            &plan_id,
-                            effective_rung,
-                            passed,
-                            &custody_gates,
-                        );
+                        self.record_custody_gate(&plan_id, effective_rung, passed, &custody_gates);
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -8578,6 +8592,7 @@ impl PlanRunner {
                     &ExecutorEvent::Fatal(reason),
                     "failed",
                 );
+                self.cleanup_plan_pool_agents(&plan_id);
                 self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::CompletePlan { plan_id } => {
@@ -8600,6 +8615,7 @@ impl PlanRunner {
                         }),
                     },
                 );
+                self.cleanup_plan_pool_agents(&plan_id);
                 self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::Reorder {
@@ -10654,6 +10670,24 @@ impl PlanRunner {
                     "skipping cascade observation: model not found in router arms"
                 );
             }
+        }
+
+        // ── Feed outcome into lookahead router calibration ────────
+        {
+            let model = self.effective_model();
+            // Use 1.0 as the predicted probability for the selected model
+            // (it was chosen because the router believed it would succeed).
+            let predicted = if result.success { 0.85 } else { 0.5 };
+            self.router_calibration
+                .record_prediction(&model, predicted, result.success);
+            tracing::debug!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model = %model,
+                success = result.success,
+                brier_score = self.router_calibration.brier_score,
+                "recorded lookahead router calibration observation"
+            );
         }
 
         // UX34: when a force_backend override was used, feed the outcome into
@@ -13794,6 +13828,47 @@ impl PlanRunner {
                                 frequency_label(frequency)
                             );
                             routing_reason = "reactive_bypass".to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Lookahead router post-filter (optional tier downgrade) ───
+        //
+        // When enabled and calibration data exists, check if a cheaper model
+        // has a high enough estimated success probability to justify a
+        // tier downgrade. This is the inline equivalent of
+        // `LookaheadRouter::route_with_lookahead()`.
+        if self.learning_config.use_lookahead_router
+            && !self.router_calibration.is_empty()
+            && task_def.is_some()
+        {
+            use roko_learn::routing_extras;
+
+            let baseline_tier = routing_extras::tier_rank(&selected_model);
+            // Only attempt downgrade from Standard (1) or Premium (2) tiers.
+            if baseline_tier > 0 {
+                let threshold = self.learning_config.lookahead_threshold;
+                let model_slugs = self.learning.cascade_router().model_slugs().to_vec();
+                for candidate_slug in &model_slugs {
+                    let candidate_tier = routing_extras::tier_rank(candidate_slug);
+                    if candidate_tier >= baseline_tier {
+                        continue;
+                    }
+                    if let Some(cal) = self.router_calibration.calibration(candidate_slug) {
+                        let success_prob = routing_extras::estimate_model_success(cal);
+                        if success_prob > threshold {
+                            tracing::info!(
+                                original_model = %selected_model,
+                                downgraded_model = %candidate_slug,
+                                success_prob = success_prob,
+                                threshold = threshold,
+                                "[orchestrate] lookahead router downgraded model tier"
+                            );
+                            selected_model = candidate_slug.clone();
+                            routing_reason = "lookahead_downgrade".to_string();
+                            break;
                         }
                     }
                 }
@@ -18202,7 +18277,6 @@ impl PlanRunner {
     }
 
     /// Clean up pool agents associated with a completed/failed plan.
-    #[allow(dead_code)]
     fn cleanup_plan_pool_agents(&mut self, plan_id: &str) {
         let killed = self.agent_pool.kill_plan_agents(plan_id);
         if killed > 0 {

@@ -345,7 +345,10 @@ fn build_app_state(
     // Seed StateHub with persisted marketplace jobs so the TUI sees them on connect.
     let jobs = scan_marketplace_jobs(&state.workdir);
     if !jobs.is_empty() {
-        info!(count = jobs.len(), "loaded existing marketplace jobs from disk");
+        info!(
+            count = jobs.len(),
+            "loaded existing marketplace jobs from disk"
+        );
         state
             .state_hub
             .publish(DashboardEvent::MarketplaceJobsUpdated { jobs });

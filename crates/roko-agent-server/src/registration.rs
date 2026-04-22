@@ -17,6 +17,12 @@ use crate::state::AgentState;
 
 type BoxFutureResult = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
+/// Re-export the shared endpoint type for backward compatibility.
+pub use roko_core::AgentEndpoints;
+
+/// Backward-compatible alias used by callers that imported `AgentCardEndpoints`.
+pub type AgentCardEndpoints = AgentEndpoints;
+
 /// ERC-8004 Agent Card payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentCard {
@@ -25,24 +31,11 @@ pub struct AgentCard {
     /// Advertised capabilities.
     pub capabilities: Vec<String>,
     /// Endpoint map used for discovery.
-    pub endpoints: AgentCardEndpoints,
+    pub endpoints: AgentEndpoints,
     /// Domain tags used for off-chain filtering.
     pub domain_tags: Vec<String>,
     /// Card schema/version.
     pub version: String,
-}
-
-/// Agent-card endpoint fields.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct AgentCardEndpoints {
-    /// REST endpoint.
-    pub rest: Option<String>,
-    /// WebSocket endpoint.
-    pub websocket: Option<String>,
-    /// A2A endpoint.
-    pub a2a: Option<String>,
-    /// MCP endpoint.
-    pub mcp: Option<String>,
 }
 
 /// Result of an agent-card publication/update.

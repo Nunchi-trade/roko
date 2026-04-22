@@ -34,7 +34,10 @@ impl CliRuntime for TestRuntime {
     ) -> anyhow::Result<RunResult> {
         Ok(RunResult {
             success: true,
-            output_text: Some("test runtime output".to_string()),
+            output_text: Some(
+                "test runtime output\n[PASS] compile: cargo check passed\n[PASS] tests: focused tests passed"
+                    .to_string(),
+            ),
         })
     }
 
@@ -281,6 +284,67 @@ async fn coding_job_full_lifecycle_transitions() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn coding_job_execution_persists_artifacts_and_gate_results() {
+    let (dir, state, _app) = test_app_state();
+    let job_json = serde_json::json!({
+        "id": "coding-payload",
+        "title": "Implement payload collection",
+        "description": "Collect artifacts and gate results for coding jobs.",
+        "job_type": "coding_task",
+        "status": "open",
+        "plan_id": "plan-42",
+        "created_at": "2026-04-22T00:00:00Z",
+        "updated_at": "2026-04-22T00:00:00Z"
+    });
+    write_job_file(dir.path(), &job_json);
+    std::fs::create_dir_all(dir.path().join("plans")).unwrap();
+    std::fs::write(dir.path().join("plans").join("plan-42.md"), "# Plan 42\n").unwrap();
+
+    let summary = roko_serve::job_runner::execute_job(&state, "coding-payload")
+        .await
+        .expect("execute coding job");
+    assert!(summary.contains("test runtime output"));
+
+    let final_job = read_job_file(dir.path(), "coding-payload");
+    assert_eq!(final_job["status"], "completed");
+    let submission = final_job["submission"].as_object().expect("submission object");
+    assert!(
+        submission["result_summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("test runtime output")
+    );
+    let artifacts = submission["artifacts"].as_array().expect("artifacts array");
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["path"] == ".roko/jobs/artifacts/coding-payload/job-brief.md"),
+        "job brief artifact missing: {artifacts:?}"
+    );
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["path"] == "plans/plan-42.md"),
+        "plan artifact missing: {artifacts:?}"
+    );
+    let gates = submission["gate_results"]
+        .as_array()
+        .expect("gate results array");
+    assert!(
+        gates
+            .iter()
+            .any(|gate| gate["gate"] == "compile" && gate["passed"] == true),
+        "compile gate missing: {gates:?}"
+    );
+    assert!(
+        gates
+            .iter()
+            .any(|gate| gate["gate"] == "tests" && gate["passed"] == true),
+        "tests gate missing: {gates:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
