@@ -78,7 +78,7 @@ pub mod truth_map;
 
 pub use crate::routes::reload_config_from_disk;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -90,6 +90,7 @@ use tracing::{info, warn};
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
+use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::{ExecutionEvent, ServerEvent};
@@ -341,7 +342,87 @@ fn build_app_state(
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
     let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
+    // Seed StateHub with persisted marketplace jobs so the TUI sees them on connect.
+    let jobs = scan_marketplace_jobs(&state.workdir);
+    if !jobs.is_empty() {
+        info!(count = jobs.len(), "loaded existing marketplace jobs from disk");
+        state
+            .state_hub
+            .publish(DashboardEvent::MarketplaceJobsUpdated { jobs });
+    }
+    // Seed StateHub with persisted PRDs so the Atelier tab is populated on connect.
+    let prds = scan_prd_summaries(&state.workdir);
+    if !prds.is_empty() {
+        info!(count = prds.len(), "loaded existing PRDs from disk");
+        state.state_hub.publish(DashboardEvent::AtelierPrdsUpdated {
+            prds,
+            tasks: std::collections::HashMap::new(),
+        });
+    }
     state
+}
+
+/// Scan `.roko/jobs/*.json` and return a vec of `MarketplaceJob`.
+fn scan_marketplace_jobs(workdir: &Path) -> Vec<roko_core::MarketplaceJob> {
+    let dir = workdir.join(".roko").join("jobs");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut jobs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
+            Ok(job) => jobs.push(job),
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping malformed job file during startup scan"
+                );
+            }
+        }
+    }
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    jobs
+}
+
+/// Scan `.roko/prd/{drafts,published}/*.md` and return a vec of `PrdSummary`.
+fn scan_prd_summaries(workdir: &Path) -> Vec<roko_core::PrdSummary> {
+    let prd_dir = workdir.join(".roko").join("prd");
+    let mut prds = Vec::new();
+    for (status, subdir) in [("draft", "drafts"), ("published", "published")] {
+        let dir = prd_dir.join(subdir);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let slug = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            prds.push(roko_core::PrdSummary {
+                slug: slug.clone(),
+                title: slug,
+                status: status.to_string(),
+                ..Default::default()
+            });
+        }
+    }
+    prds
 }
 
 fn start_state_hub_bridge(state: Arc<AppState>) -> JoinHandle<()> {
@@ -678,10 +759,12 @@ fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
     let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
 
-    if !roko_config.scheduler.is_empty() {
+    if !roko_config.scheduler.is_empty() && scheduler::claim_scheduler_guard() {
         sources.push(Box::new(CronEventSource::from_config(
             roko_config.scheduler.clone(),
         )));
+    } else if !roko_config.scheduler.is_empty() {
+        warn!("scheduler already started elsewhere; skipping cron in event sources");
     }
 
     if !roko_config.watcher.is_empty() {

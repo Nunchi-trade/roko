@@ -112,6 +112,15 @@ pub enum AgentCmd {
     },
     /// Start a per-agent HTTP runtime.
     Serve(AgentServeArgs),
+    /// Interactive chat REPL with an agent.
+    Chat {
+        /// Agent ID to chat with.
+        #[arg(long, default_value = "nunchi-intelligence")]
+        agent: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
+        serve_url: String,
+    },
 }
 
 /// Arguments for `roko agent serve`.
@@ -450,6 +459,10 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
         } => run_agent_stop(&name, force, workdir.as_deref()),
         AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
+        AgentCmd::Chat { agent, serve_url } => {
+            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+            Ok(())
+        }
     }
 }
 

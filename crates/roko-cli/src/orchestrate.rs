@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
 use roko_agent::chat_types::FinishReason;
+use roko_agent::safety::provenance::{Custody, CustodyLogger};
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
@@ -251,6 +252,10 @@ fn routing_log_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("routing.jsonl")
+}
+
+fn custody_logger_for(workdir: &Path) -> CustodyLogger {
+    CustodyLogger::new(RokoLayout::for_project(workdir).custody_log())
 }
 
 fn cfactor_history_path(workdir: &Path) -> PathBuf {
@@ -3191,6 +3196,8 @@ pub struct PlanRunner {
     /// The `Instant` records when the index was built so we can invalidate
     /// after a configurable staleness window (default: 60 s).
     code_index_cache: Option<(std::time::Instant, roko_index::WorkspaceIndex)>,
+    /// Append-only custody logger for audit chain records.
+    custody_logger: CustodyLogger,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4788,6 +4795,7 @@ impl PlanRunner {
             chain_client,
             chain_wallet,
             code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -4979,6 +4987,7 @@ impl PlanRunner {
             chain_client,
             chain_wallet,
             code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -5172,6 +5181,7 @@ impl PlanRunner {
             chain_client,
             chain_wallet,
             code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -8106,6 +8116,25 @@ impl PlanRunner {
                             EventKind::GateResult,
                             serde_json::json!({"plan_id": plan_id, "rung": effective_rung, "passed": passed}),
                         );
+                        // ── Custody audit record: gate result ─────────
+                        let custody_gates: Vec<String> = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .map(|tracker| {
+                                tracker
+                                    .last_gate_verdicts
+                                    .iter()
+                                    .filter(|v| v.passed)
+                                    .map(|v| v.gate.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        self.record_custody_gate(
+                            &plan_id,
+                            effective_rung,
+                            passed,
+                            &custody_gates,
+                        );
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -10015,6 +10044,35 @@ impl PlanRunner {
             .model
             .clone()
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
+    }
+
+    /// Record a custody chain entry for an agent dispatch.
+    fn record_custody_dispatch(&self, plan_id: &str, task: &str, model: &str, role: &str) {
+        let record = Custody::new(
+            format!("agent_dispatch:{role}"),
+            format!("{plan_id}/{task}"),
+            now_unix_ms_i64(),
+            Vec::new(),
+        )
+        .with_heuristics(vec![format!("model={model}")]);
+        if let Err(e) = self.custody_logger.log(&record) {
+            tracing::warn!(error = %e, "failed to write custody record for agent dispatch");
+        }
+    }
+
+    /// Record a custody chain entry for a gate result.
+    fn record_custody_gate(&self, plan_id: &str, rung: u32, passed: bool, gates: &[String]) {
+        let record = Custody::new(
+            format!("gate_result:rung-{rung}"),
+            plan_id.to_string(),
+            now_unix_ms_i64(),
+            Vec::new(),
+        )
+        .with_result(if passed { "pass" } else { "fail" })
+        .with_gates_passed(gates.to_vec());
+        if let Err(e) = self.custody_logger.log(&record) {
+            tracing::warn!(error = %e, "failed to write custody record for gate result");
+        }
     }
 
     fn task_retry_model(&self, plan_id: &str, task_id: &str) -> String {
@@ -15124,6 +15182,9 @@ impl PlanRunner {
                     "success": result.success,
                 }),
             );
+
+            // ── Custody audit record: agent dispatch ────────────────────
+            self.record_custody_dispatch(plan_id, task, &selected_model, &format!("{role:?}"));
 
             self.finish_task_post_processing(
                 plan_id,
