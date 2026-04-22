@@ -636,7 +636,30 @@ impl RokoConfig {
     #[must_use]
     pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
         if !self.providers.is_empty() {
-            return self.providers.clone();
+            let mut providers = self.providers.clone();
+            // If `ANTHROPIC_API_KEY` is set in the environment but no
+            // explicit `[providers.anthropic]` section exists, synthesize one
+            // so the anthropic_api backend is usable out of the box.
+            if !providers.contains_key("anthropic")
+                && std::env::var_os("ANTHROPIC_API_KEY").is_some()
+            {
+                providers.insert(
+                    "anthropic".into(),
+                    ProviderConfig {
+                        kind: ProviderKind::AnthropicApi,
+                        base_url: Some("https://api.anthropic.com".to_string()),
+                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        command: None,
+                        args: None,
+                        timeout_ms: default_provider_timeout_ms(),
+                        ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                        connect_timeout_ms: default_provider_connect_timeout_ms(),
+                        extra_headers: None,
+                        max_concurrent: None,
+                    },
+                );
+            }
+            return providers;
         }
 
         let mut providers = HashMap::new();
@@ -663,15 +686,30 @@ impl RokoConfig {
             },
         );
 
-        if let Some(base_url) = self.agent_env_value("ANTHROPIC_BASE_URL") {
+        // Synthesize an anthropic provider from env vars or agent config.
+        let has_env_key = std::env::var_os("ANTHROPIC_API_KEY").is_some();
+        let has_config_key = self.agent_env_value("ANTHROPIC_API_KEY").is_some();
+        let base_url = self
+            .agent_env_value("ANTHROPIC_BASE_URL")
+            .map(|s| s.to_owned())
+            .or_else(|| {
+                if has_env_key {
+                    Some("https://api.anthropic.com".to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(base_url) = base_url {
             providers.insert(
                 "anthropic".into(),
                 ProviderConfig {
                     kind: ProviderKind::AnthropicApi,
-                    base_url: Some(base_url.to_owned()),
-                    api_key_env: self
-                        .agent_env_value("ANTHROPIC_API_KEY")
-                        .map(|_| "ANTHROPIC_API_KEY".to_string()),
+                    base_url: Some(base_url),
+                    api_key_env: if has_env_key || has_config_key {
+                        Some("ANTHROPIC_API_KEY".to_string())
+                    } else {
+                        None
+                    },
                     command: None,
                     args: None,
                     timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
@@ -1895,7 +1933,11 @@ fn default_model() -> String {
 }
 
 fn default_backend() -> String {
-    "claude".into()
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
+        "anthropic_api".into()
+    } else {
+        "claude".into()
+    }
 }
 
 fn default_effort() -> String {

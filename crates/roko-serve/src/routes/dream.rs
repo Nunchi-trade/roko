@@ -37,21 +37,23 @@ impl RequestPayload for DreamRunRequest {
 /// `POST /api/dream/run` — trigger a dream consolidation cycle in the background.
 async fn dream_run(
     State(state): State<Arc<AppState>>,
-    ValidJson(_body): ValidJson<DreamRunRequest>,
+    ValidJson(body): ValidJson<DreamRunRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let op_id = uuid::Uuid::new_v4().to_string();
     let bus = state.event_bus.clone();
     let workdir = state.workdir.clone();
+    let mode = body.mode.clone();
 
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             bus.publish(ServerEvent::OperationStarted {
                 op_id: op_id.clone(),
-                kind: "dream_run".into(),
+                kind: format!("dream_run:{mode}"),
             });
 
             let result = tokio::task::spawn_blocking(move || {
+                let effort = if mode == "quick" { "low" } else { "medium" };
                 let config = roko_dreams::DreamLoopConfig {
                     auto_dream: true,
                     idle_threshold_mins: 0,
@@ -61,7 +63,7 @@ async fn dream_run(
                         args: Vec::new(),
                         model: None,
                         bare_mode: true,
-                        effort: "medium".to_string(),
+                        effort: effort.to_string(),
                         fallback_model: None,
                         timeout_ms: 120_000,
                         env: Vec::new(),

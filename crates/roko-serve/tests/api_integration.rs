@@ -274,7 +274,7 @@ async fn jobs_create_list_get_and_update_round_trip() {
     assert_eq!(status, StatusCode::CREATED);
     let job_id = created["id"].as_str().expect("job id");
     assert_eq!(created["title"], "Implement marketplace filters");
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
     assert_eq!(created["job_type"], "coding_task");
 
     let persisted = dir
@@ -289,6 +289,7 @@ async fn jobs_create_list_get_and_update_round_trip() {
     let jobs = listed.as_array().expect("jobs array");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["id"], job_id);
+    assert_eq!(jobs[0]["state"], "open");
     assert_eq!(jobs[0]["posted_by"], "operator");
 
     let (status, fetched) = get_json(&app, &format!("/api/jobs/{job_id}")).await;
@@ -307,12 +308,12 @@ async fn jobs_create_list_get_and_update_round_trip() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "in_progress");
+    assert_eq!(updated["state"], "in_progress");
     assert_eq!(updated["assigned_to"], "implementer-1");
 
     let (status, fetched_again) = get_json(&app, &format!("/api/jobs/{job_id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched_again["status"], "in_progress");
+    assert_eq!(fetched_again["state"], "in_progress");
     assert_eq!(fetched_again["assigned_to"], "implementer-1");
 }
 
@@ -351,7 +352,7 @@ async fn jobs_events_are_visible_over_websocket() {
         serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse create event");
     assert_eq!(create_event["type"], "job_created");
     assert_eq!(create_event["job"]["id"], "job-ws-1");
-    assert_eq!(create_event["job"]["status"], "open");
+    assert_eq!(create_event["job"]["state"], "open");
 
     let (_status, _updated) = patch_json(
         &app,
@@ -367,7 +368,7 @@ async fn jobs_events_are_visible_over_websocket() {
         serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse update event");
     assert_eq!(update_event["type"], "job_updated");
     assert_eq!(update_event["job"]["id"], "job-ws-1");
-    assert_eq!(update_event["job"]["status"], "assigned");
+    assert_eq!(update_event["job"]["state"], "assigned");
     assert_eq!(update_event["job"]["assigned_to"], "agent-7");
 
     let _ = socket.close(None).await;

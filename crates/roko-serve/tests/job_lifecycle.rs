@@ -219,7 +219,7 @@ async fn test_full_job_lifecycle_happy_path() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "create should return 201");
     assert_eq!(created["id"], "lifecycle-happy");
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
     assert_eq!(created["title"], "Happy path lifecycle job");
     assert_eq!(created["job_type"], "coding_task");
     assert_eq!(created["posted_by"], "operator");
@@ -243,7 +243,7 @@ async fn test_full_job_lifecycle_happy_path() {
     let jobs = listed.as_array().expect("jobs array");
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["id"], "lifecycle-happy");
-    assert_eq!(jobs[0]["status"], "open");
+    assert_eq!(jobs[0]["state"], "open");
 
     // -- Step 3: GET /api/jobs/{id} -> verify job details
     let (status, fetched) = get_json(&app, "/api/jobs/lifecycle-happy").await;
@@ -261,7 +261,7 @@ async fn test_full_job_lifecycle_happy_path() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "assign should return 200");
-    assert_eq!(assigned["status"], "assigned");
+    assert_eq!(assigned["state"], "assigned");
     assert_eq!(assigned["assigned_to"], "agent-alpha");
 
     // -- Step 5: POST /api/jobs/{id}/start -> status becomes in_progress
@@ -272,7 +272,7 @@ async fn test_full_job_lifecycle_happy_path() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "start should return 200");
-    assert_eq!(started["status"], "in_progress");
+    assert_eq!(started["state"], "in_progress");
     assert_eq!(
         started["assigned_to"], "agent-alpha",
         "assigned_to preserved"
@@ -290,7 +290,7 @@ async fn test_full_job_lifecycle_happy_path() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "submit should return 200");
-    assert_eq!(submitted["status"], "submitted");
+    assert_eq!(submitted["state"], "submitted");
     let submission = &submitted["submission"];
     assert!(submission.is_object(), "submission data must be present");
     assert_eq!(
@@ -312,7 +312,7 @@ async fn test_full_job_lifecycle_happy_path() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "evaluate should return 200");
-    assert_eq!(evaluated["status"], "completed");
+    assert_eq!(evaluated["state"], "completed");
     let evaluation = &evaluated["evaluation"];
     assert!(evaluation.is_object(), "evaluation data must be present");
     assert_eq!(evaluation["accepted"], true);
@@ -322,7 +322,7 @@ async fn test_full_job_lifecycle_happy_path() {
     // -- Step 8: GET /api/jobs/{id} -> verify final state
     let (status, final_state) = get_json(&app, "/api/jobs/lifecycle-happy").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(final_state["status"], "completed");
+    assert_eq!(final_state["state"], "completed");
     assert_eq!(final_state["assigned_to"], "agent-alpha");
     assert!(final_state["submission"].is_object());
     assert!(final_state["evaluation"].is_object());
@@ -332,7 +332,7 @@ async fn test_full_job_lifecycle_happy_path() {
     let disk_data = std::fs::read_to_string(&persisted).expect("read persisted job");
     let disk_job: serde_json::Value =
         serde_json::from_str(&disk_data).expect("parse persisted job");
-    assert_eq!(disk_job["status"], "completed");
+    assert_eq!(disk_job["state"], "completed");
     assert_eq!(disk_job["evaluation"]["accepted"], true);
 }
 
@@ -382,7 +382,7 @@ async fn test_job_rejection_and_resubmit() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(submitted["status"], "submitted");
+    assert_eq!(submitted["state"], "submitted");
 
     // Evaluate: REJECT (accepted=false) -> status goes back to in_progress.
     let (status, rejected) = post_json(
@@ -396,8 +396,8 @@ async fn test_job_rejection_and_resubmit() {
     .await;
     assert_eq!(status, StatusCode::OK, "rejection should return 200");
     assert_eq!(
-        rejected["status"], "in_progress",
-        "rejected job should go back to in_progress"
+        rejected["state"], "in_progress",
+        "rejected job returns to in_progress for rework"
     );
     assert_eq!(rejected["evaluation"]["accepted"], false);
     assert_eq!(
@@ -405,7 +405,7 @@ async fn test_job_rejection_and_resubmit() {
         "Missing error handling, please add."
     );
 
-    // Second submission.
+    // Resubmit after rejection
     let (status, resubmitted) = post_json(
         &app,
         "/api/jobs/reject-resubmit/submit",
@@ -415,9 +415,9 @@ async fn test_job_rejection_and_resubmit() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(resubmitted["status"], "submitted");
+    assert_eq!(resubmitted["state"], "submitted");
 
-    // Second evaluation: ACCEPT.
+    // Accept the second attempt
     let (status, accepted) = post_json(
         &app,
         "/api/jobs/reject-resubmit/evaluate",
@@ -428,7 +428,49 @@ async fn test_job_rejection_and_resubmit() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(accepted["status"], "completed");
+    assert_eq!(accepted["state"], "completed");
+    assert_eq!(accepted["evaluation"]["accepted"], true);
+}
+
+#[tokio::test]
+async fn test_evaluate_accepted_sets_completed_state() {
+    let (_dir, app) = test_app();
+
+    // Create, assign, start, submit a fresh job for the accept path.
+    post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "id": "eval-accept",
+            "title": "Evaluate accept test",
+        }),
+    )
+    .await;
+    post_json(
+        &app,
+        "/api/jobs/eval-accept/assign",
+        serde_json::json!({ "agent_id": "agent-1" }),
+    )
+    .await;
+    post_json(&app, "/api/jobs/eval-accept/start", serde_json::json!({})).await;
+    post_json(
+        &app,
+        "/api/jobs/eval-accept/submit",
+        serde_json::json!({ "result_summary": "Done." }),
+    )
+    .await;
+
+    let (status, accepted) = post_json(
+        &app,
+        "/api/jobs/eval-accept/evaluate",
+        serde_json::json!({
+            "accepted": true,
+            "feedback": "Looks great now!"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(accepted["state"], "completed");
     assert_eq!(accepted["evaluation"]["accepted"], true);
 }
 
@@ -450,12 +492,12 @@ async fn test_job_cancellation_from_open() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // DELETE /api/jobs/{id} cancels from open.
     let (status, cancelled) = delete_json(&app, "/api/jobs/cancel-open").await;
     assert_eq!(status, StatusCode::OK, "DELETE cancel should return 200");
-    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["state"], "cancelled");
     assert_eq!(cancelled["id"], "cancel-open");
 
     // Verify persisted on disk.
@@ -467,14 +509,14 @@ async fn test_job_cancellation_from_open() {
     let disk_data = std::fs::read_to_string(&path).expect("read persisted job");
     let disk_job: serde_json::Value =
         serde_json::from_str(&disk_data).expect("parse persisted job");
-    assert_eq!(disk_job["status"], "cancelled");
+    assert_eq!(disk_job["state"], "cancelled");
 
     // Verify the cancelled job still appears in the list.
     let (status, listed) = get_json(&app, "/api/jobs").await;
     assert_eq!(status, StatusCode::OK);
     let jobs = listed.as_array().expect("jobs array");
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0]["status"], "cancelled");
+    assert_eq!(jobs[0]["state"], "cancelled");
 }
 
 // -------------------------------------------------------------------------
@@ -508,18 +550,18 @@ async fn test_job_cancellation_from_in_progress() {
     let (status, started) =
         post_json(&app, "/api/jobs/cancel-ip/start", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(started["status"], "in_progress");
+    assert_eq!(started["state"], "in_progress");
 
     // POST /api/jobs/{id}/cancel from in_progress.
     let (status, cancelled) =
         post_json(&app, "/api/jobs/cancel-ip/cancel", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "POST cancel should return 200");
-    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["state"], "cancelled");
 
     // Verify via GET.
     let (status, fetched) = get_json(&app, "/api/jobs/cancel-ip").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched["status"], "cancelled");
+    assert_eq!(fetched["state"], "cancelled");
 }
 
 // -------------------------------------------------------------------------
@@ -769,7 +811,7 @@ async fn test_cancel_terminal_job_fails_422() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["state"], "completed");
 
     // Attempt to cancel via DELETE -> 422 (terminal state).
     let (status, err_body) = delete_json(&app, "/api/jobs/cancel-term").await;
@@ -1153,7 +1195,7 @@ async fn test_job_events_fire_on_websocket() {
         "first event should be job_created"
     );
     assert_eq!(create_event["job"]["id"], "ws-events-job");
-    assert_eq!(create_event["job"]["status"], "open");
+    assert_eq!(create_event["job"]["state"], "open");
 
     // -- Assign the job: should fire JobUpdated then JobTransitioned.
     let (status, _) = post_json(
@@ -1171,7 +1213,7 @@ async fn test_job_events_fire_on_websocket() {
         "assignment should emit job_updated"
     );
     assert_eq!(update_event["job"]["id"], "ws-events-job");
-    assert_eq!(update_event["job"]["status"], "assigned");
+    assert_eq!(update_event["job"]["state"], "assigned");
     assert_eq!(update_event["job"]["assigned_to"], "ws-agent");
 
     let transition_event: serde_json::Value =
@@ -1192,7 +1234,7 @@ async fn test_job_events_fire_on_websocket() {
     let start_update: serde_json::Value =
         serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse start update");
     assert_eq!(start_update["type"], "job_updated");
-    assert_eq!(start_update["job"]["status"], "in_progress");
+    assert_eq!(start_update["job"]["state"], "in_progress");
 
     let start_transition: serde_json::Value =
         serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse start transition");
@@ -1267,7 +1309,7 @@ async fn test_patch_only_assigned_to_succeeds() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(patched["assigned_to"], "new-owner");
-    assert_eq!(patched["status"], "open", "status should remain open");
+    assert_eq!(patched["state"], "open", "status should remain open");
 }
 
 // -------------------------------------------------------------------------
@@ -1334,7 +1376,7 @@ async fn test_cancel_from_assigned_state() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["state"], "cancelled");
 }
 
 // -------------------------------------------------------------------------
@@ -1376,5 +1418,5 @@ async fn test_cancel_from_submitted_state() {
     // Cancel from submitted via DELETE.
     let (status, cancelled) = delete_json(&app, "/api/jobs/cancel-sub").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["state"], "cancelled");
 }

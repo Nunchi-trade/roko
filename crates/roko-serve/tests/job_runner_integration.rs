@@ -201,13 +201,13 @@ async fn research_job_creates_artifact_via_api() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = created["id"].as_str().expect("job id");
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
     assert_eq!(created["job_type"], "research");
 
     // Verify the job file was written to disk.
     let disk_job = read_job_file(dir.path(), job_id);
     assert_eq!(disk_job["title"], "Research DeFi lending protocols");
-    assert_eq!(disk_job["status"], "open");
+    assert_eq!(disk_job["state"], "open");
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ async fn coding_job_full_lifecycle_transitions() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = created["id"].as_str().expect("job id");
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // Transition: open -> assigned
     let (status, updated) = patch_json(
@@ -243,7 +243,7 @@ async fn coding_job_full_lifecycle_transitions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "assigned");
+    assert_eq!(updated["state"], "assigned");
     assert_eq!(updated["assigned_to"], "agent-1");
 
     // Transition: assigned -> in_progress
@@ -254,7 +254,7 @@ async fn coding_job_full_lifecycle_transitions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "in_progress");
+    assert_eq!(updated["state"], "in_progress");
 
     // Transition: in_progress -> submitted
     let (status, updated) = patch_json(
@@ -264,7 +264,7 @@ async fn coding_job_full_lifecycle_transitions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "submitted");
+    assert_eq!(updated["state"], "submitted");
 
     // Transition: submitted -> completed
     let (status, updated) = patch_json(
@@ -274,7 +274,7 @@ async fn coding_job_full_lifecycle_transitions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "completed");
+    assert_eq!(updated["state"], "completed");
 
     // Terminal state: no further transitions allowed.
     let (status, _) = patch_json(
@@ -349,6 +349,54 @@ async fn coding_job_execution_persists_artifacts_and_gate_results() {
     );
 }
 
+#[tokio::test]
+async fn coding_job_without_plan_materializes_prd_and_synthetic_plan() {
+    let (dir, state, _app) = test_app_state();
+    let job_json = serde_json::json!({
+        "id": "coding-no-plan",
+        "title": "Implement generated plan path",
+        "description": "Exercise PRD to synthetic plan fallback for coding jobs.",
+        "job_type": "coding_task",
+        "status": "open",
+        "created_at": "2026-04-22T00:00:00Z",
+        "updated_at": "2026-04-22T00:00:00Z"
+    });
+    write_job_file(dir.path(), &job_json);
+
+    roko_serve::job_runner::execute_job(&state, "coding-no-plan")
+        .await
+        .expect("execute coding job");
+
+    let final_job = read_job_file(dir.path(), "coding-no-plan");
+    assert_eq!(final_job["status"], "completed");
+    assert!(
+        dir.path()
+            .join(".roko/prd/published/job-coding-no-plan.md")
+            .exists(),
+        "coding job PRD should be materialized"
+    );
+    assert!(
+        dir.path()
+            .join(".roko/plans/job-coding-no-plan/tasks.toml")
+            .exists(),
+        "fallback plan tasks should be materialized"
+    );
+
+    let artifacts = final_job["submission"]["artifacts"]
+        .as_array()
+        .expect("artifacts array");
+    assert!(
+        artifacts.iter().any(|artifact| artifact["kind"] == "prd"),
+        "PRD artifact missing: {artifacts:?}"
+    );
+    assert!(
+        artifacts
+            .iter()
+            .any(|artifact| artifact["path"] == ".roko/plans/job-coding-no-plan/tasks.toml"),
+        "synthetic plan artifact missing: {artifacts:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests: auto_execute false stays open
 // ---------------------------------------------------------------------------
@@ -373,7 +421,7 @@ async fn auto_execute_false_stays_open() {
     // Fetch via API — should still be open.
     let (status, fetched) = get_json(&app, "/api/jobs/job-no-auto").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched["status"], "open");
+    assert_eq!(fetched["state"], "open");
     assert_eq!(fetched["id"], "job-no-auto");
 }
 
@@ -397,12 +445,12 @@ async fn cancel_prevents_execution() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // Cancel the job via DELETE.
     let (status, cancelled) = delete_json(&app, "/api/jobs/job-cancel-test").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cancelled["status"], "cancelled");
+    assert_eq!(cancelled["state"], "cancelled");
 
     // Trying to execute a cancelled job should fail.
     let (status, err_body) = post_json(
@@ -477,7 +525,7 @@ async fn job_file_lock_prevents_state_conflict() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // Write a lock file to simulate an in-progress execution.
     let lock_path = dir
@@ -550,7 +598,7 @@ async fn assign_submit_evaluate_lifecycle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(assigned["status"], "assigned");
+    assert_eq!(assigned["state"], "assigned");
     assert_eq!(assigned["assigned_to"], "agent-42");
 
     // Move to in_progress.
@@ -561,7 +609,7 @@ async fn assign_submit_evaluate_lifecycle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["status"], "in_progress");
+    assert_eq!(updated["state"], "in_progress");
 
     // Submit.
     let (status, submitted) = post_json(
@@ -574,7 +622,7 @@ async fn assign_submit_evaluate_lifecycle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(submitted["status"], "submitted");
+    assert_eq!(submitted["state"], "submitted");
     assert!(submitted["submission"].is_object());
 
     // Evaluate (accept).
@@ -588,7 +636,7 @@ async fn assign_submit_evaluate_lifecycle() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(evaluated["status"], "completed");
+    assert_eq!(evaluated["state"], "completed");
     assert!(evaluated["evaluation"].is_object());
 }
 
@@ -725,7 +773,7 @@ async fn execute_open_job_returns_accepted() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // Execute through HTTP.
     let (status, body) = post_json(
@@ -908,7 +956,7 @@ async fn filter_jobs_by_state() {
         serde_json::json!({ "id": "filter-a", "title": "Filter A" }),
     )
     .await;
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     let (_, created) = post_json(
         &app,
@@ -916,7 +964,7 @@ async fn filter_jobs_by_state() {
         serde_json::json!({ "id": "filter-b", "title": "Filter B" }),
     )
     .await;
-    assert_eq!(created["status"], "open");
+    assert_eq!(created["state"], "open");
 
     // Assign one.
     let _ = post_json(

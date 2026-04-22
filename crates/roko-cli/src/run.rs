@@ -612,8 +612,8 @@ async fn run_anthropic_api_tool_loop(
     use std::time::Instant;
 
     let started = Instant::now();
-    let api_key = resolve_anthropic_api_key(config)
-        .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not found"))?;
+    let api_key =
+        resolve_anthropic_api_key(config).ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not found"))?;
 
     let model = config
         .agent
@@ -630,7 +630,7 @@ async fn run_anthropic_api_tool_loop(
     let tools: Vec<roko_core::tool::ToolDef> = registry.all().into_iter().cloned().collect();
 
     let resolver: Arc<dyn roko_agent::dispatcher::HandlerResolver> =
-        match build_chain_resolver(config) {
+        match build_chain_resolver(workdir) {
             Some(chain_resolver) => chain_resolver,
             None => Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
                 roko_std::tool::handlers::handler_for(name)
@@ -721,18 +721,15 @@ async fn run_anthropic_api_tool_loop(
     }
 }
 
-/// Build a chain-aware handler resolver if chain config is present.
+/// Build a chain-aware handler resolver if chain config is present in the workspace.
 fn build_chain_resolver(
-    config: &Config,
-) -> Option<Arc<dyn roko_agent::dispatcher::HandlerResolver>> {
+    workdir: &Path,
+) -> Option<std::sync::Arc<dyn roko_agent::dispatcher::HandlerResolver>> {
     use roko_chain::alloy_impl::AlloyChainClient;
-    use roko_core::tool::ToolHandler;
     use std::sync::Arc;
 
-    let rpc_url = config
-        .chain
-        .as_ref()
-        .and_then(|c| c.rpc_url.as_deref())?;
+    let roko_config = roko_core::config::load_config(workdir).ok()?;
+    let rpc_url = roko_config.chain.rpc_url.as_deref()?;
 
     let client: Arc<dyn roko_chain::ChainClient> = match AlloyChainClient::http(rpc_url) {
         Ok(c) => Arc::new(c),
@@ -744,22 +741,19 @@ fn build_chain_resolver(
         }
     };
 
-    let wallet: Option<Arc<dyn roko_chain::ChainWallet>> = config
-        .chain
-        .as_ref()
-        .and_then(|c| {
-            let key = c.private_key.as_deref()?;
-            let chain_id = c.chain_id.unwrap_or(1);
-            match roko_chain::alloy_impl::AlloyChainWallet::from_hex_key(rpc_url, key, chain_id) {
-                Ok(w) => Some(Arc::new(w) as Arc<dyn roko_chain::ChainWallet>),
-                Err(e) => {
-                    eprintln!(
-                        "\x1b[33m\u{26a0} chain wallet init failed: {e}, write ops unavailable\x1b[0m"
-                    );
-                    None
-                }
+    let wallet: Option<Arc<dyn roko_chain::ChainWallet>> = (|| {
+        let key = roko_config.chain.wallet_key.as_deref()?;
+        let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+        match roko_chain::alloy_impl::AlloyChainWallet::from_hex_key(rpc_url, key, chain_id) {
+            Ok(w) => Some(Arc::new(w) as Arc<dyn roko_chain::ChainWallet>),
+            Err(e) => {
+                eprintln!(
+                    "\x1b[33m\u{26a0} chain wallet init failed: {e}, write ops unavailable\x1b[0m"
+                );
+                None
             }
-        });
+        }
+    })();
 
     let chain_map = crate::chain_registry::chain_handler_map(client, wallet);
     Some(Arc::new(crate::chain_registry::chain_aware_resolver(

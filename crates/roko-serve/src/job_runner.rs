@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 use roko_core::MarketplaceJob;
 
 use crate::events::ServerEvent;
+use crate::runtime::PlanGenerationResult;
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
@@ -316,27 +317,39 @@ async fn execute_coding_job(
 
     let brief_path = artifact_dir.join("job-brief.md");
     let brief = render_coding_job_brief(job);
-    tokio::fs::write(&brief_path, brief).await?;
+    tokio::fs::write(&brief_path, &brief).await?;
 
+    let prd_path = materialize_coding_job_prd(&state.workdir, job, &brief).await?;
+    let plan = prepare_coding_plan(state, job, &prd_path).await?;
     let before = snapshot_workspace_files(&state.workdir);
-    let prompt = if job.plan_id.is_empty() {
-        format!(
-            "Complete this coding job in the current workspace.\n\nTitle: {}\n\nDescription:\n{}\n\nWhen finished, include changed files and gate results in the response.",
-            job.title, job.description
-        )
-    } else {
-        format!(
-            "Execute plan '{}' in the current workspace for coding job '{}'. Include changed files and gate results in the response.",
-            job.plan_id, job.title
-        )
-    };
-    let result = state.runtime.run_once(&state.workdir, &prompt).await?;
-    let summary = result
-        .output_text
-        .unwrap_or_else(|| "coding task completed".to_string());
-    if !result.success {
-        return Err(anyhow::anyhow!(summary));
+
+    let mut summaries = Vec::new();
+    let mut gate_results = Vec::new();
+    for target in &plan.plan_targets {
+        let result = state.runtime.run_plan(&state.workdir, target).await?;
+        let output = result
+            .output_text
+            .unwrap_or_else(|| format!("plan {} completed", target.display()));
+        if !result.success {
+            return Err(anyhow::anyhow!(output));
+        }
+        if result.gate_results.is_empty() {
+            gate_results.extend(parse_gate_results(&output));
+        } else {
+            gate_results.extend(
+                result
+                    .gate_results
+                    .into_iter()
+                    .map(|gate| gate_result(&gate.gate, gate.passed, gate.detail.as_str())),
+            );
+        }
+        summaries.push(output);
     }
+    let summary = if summaries.is_empty() {
+        "coding task completed without plan output".to_string()
+    } else {
+        summaries.join("\n\n")
+    };
 
     let result_path = artifact_dir.join("result-summary.md");
     tokio::fs::write(&result_path, &summary).await?;
@@ -352,19 +365,29 @@ async fn execute_coding_job(
             &state.workdir,
             &result_path,
             "result_summary",
-            Some("Raw coding job runner summary"),
+            Some("Coding job plan execution summary"),
+        ),
+        artifact_value(
+            &state.workdir,
+            &prd_path,
+            "prd",
+            Some("Materialized PRD brief for coding job planning"),
         ),
     ];
+    artifacts.extend(
+        plan.artifacts
+            .iter()
+            .map(|path| artifact_value(&state.workdir, path, "plan", Some("Plan artifact"))),
+    );
     artifacts.extend(plan_artifacts(&state.workdir, &job.plan_id));
     artifacts.extend(changed_artifacts(&state.workdir, &before, 25));
     dedupe_artifacts(&mut artifacts);
 
-    let mut gate_results = parse_gate_results(&summary);
     if gate_results.is_empty() {
         gate_results.push(gate_result(
             "runtime",
             true,
-            "runtime completed without structured gate output",
+            "plan execution completed without structured gate output",
         ));
     }
 
@@ -565,6 +588,219 @@ fn render_coding_job_brief(job: &MarketplaceJob) -> String {
         },
         job.description
     )
+}
+
+async fn materialize_coding_job_prd(
+    workdir: &Path,
+    job: &MarketplaceJob,
+    brief: &str,
+) -> anyhow::Result<PathBuf> {
+    let slug = coding_job_slug(job);
+    let prd_dir = workdir.join(".roko").join("prd").join("published");
+    tokio::fs::create_dir_all(&prd_dir).await?;
+    let prd_path = prd_dir.join(format!("{slug}.md"));
+    tokio::fs::write(&prd_path, render_coding_job_prd(job, brief)).await?;
+    Ok(prd_path)
+}
+
+async fn prepare_coding_plan(
+    state: &AppState,
+    job: &MarketplaceJob,
+    prd_path: &Path,
+) -> anyhow::Result<PlanGenerationResult> {
+    if !job.plan_id.trim().is_empty() {
+        let targets = resolve_plan_targets(&state.workdir, &job.plan_id);
+        if !targets.is_empty() {
+            return Ok(PlanGenerationResult {
+                plans_root: targets
+                    .first()
+                    .and_then(|target| target.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| state.workdir.join(".roko").join("plans")),
+                artifacts: collect_plan_artifact_paths(&targets),
+                plan_targets: targets,
+            });
+        }
+        warn!(
+            job_id = %job.id,
+            plan_id = %job.plan_id,
+            "referenced coding job plan was not found; synthesizing fallback plan"
+        );
+        return synthesize_coding_plan(&state.workdir, job, prd_path).await;
+    }
+
+    let slug = coding_job_slug(job);
+    match state
+        .runtime
+        .generate_plan_from_prd(&state.workdir, &slug, prd_path)
+        .await
+    {
+        Ok(mut plan) => {
+            if plan.plan_targets.is_empty() {
+                plan.plan_targets.push(plan.plans_root.clone());
+            }
+            Ok(plan)
+        }
+        Err(err) => {
+            warn!(
+                job_id = %job.id,
+                error = %err,
+                "runtime PRD planning unavailable; synthesizing fallback coding plan"
+            );
+            synthesize_coding_plan(&state.workdir, job, prd_path).await
+        }
+    }
+}
+
+async fn synthesize_coding_plan(
+    workdir: &Path,
+    job: &MarketplaceJob,
+    prd_path: &Path,
+) -> anyhow::Result<PlanGenerationResult> {
+    let slug = coding_job_slug(job);
+    let plans_root = workdir.join(".roko").join("plans");
+    let plan_dir = plans_root.join(&slug);
+    tokio::fs::create_dir_all(&plan_dir).await?;
+    let plan_md = plan_dir.join("plan.md");
+    let tasks_toml = plan_dir.join("tasks.toml");
+    tokio::fs::write(&plan_md, render_coding_plan_markdown(job, prd_path)).await?;
+    tokio::fs::write(&tasks_toml, render_coding_tasks_toml(job, &slug, prd_path)).await?;
+    Ok(PlanGenerationResult {
+        plans_root,
+        plan_targets: vec![plan_dir],
+        artifacts: vec![plan_md, tasks_toml],
+    })
+}
+
+fn resolve_plan_targets(root: &Path, plan_id: &str) -> Vec<PathBuf> {
+    let plan_id = plan_id.trim();
+    if plan_id.is_empty() {
+        return Vec::new();
+    }
+    let raw = PathBuf::from(plan_id);
+    let mut candidates = if raw.is_absolute() {
+        vec![raw]
+    } else {
+        vec![
+            root.join(&raw),
+            root.join("plans").join(plan_id),
+            root.join("plans").join(format!("{plan_id}.md")),
+            root.join(".roko").join("plans").join(plan_id),
+            root.join(".roko")
+                .join("plans")
+                .join(format!("{plan_id}.md")),
+        ]
+    };
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect()
+}
+
+fn collect_plan_artifact_paths(targets: &[PathBuf]) -> Vec<PathBuf> {
+    let mut artifacts = Vec::new();
+    for target in targets {
+        if target.is_file() {
+            artifacts.push(target.clone());
+            continue;
+        }
+        for name in ["plan.md", "tasks.toml"] {
+            let path = target.join(name);
+            if path.exists() {
+                artifacts.push(path);
+            }
+        }
+    }
+    artifacts
+}
+
+fn render_coding_job_prd(job: &MarketplaceJob, brief: &str) -> String {
+    format!(
+        "# PRD: {}\n\n## Problem\n\n{}\n\n## Requirements\n\n- REQ-001: Implement the coding job described below.\n- REQ-002: Preserve existing behavior outside the requested scope.\n- REQ-003: Collect changed files and gate results as submission evidence.\n\n## Acceptance Criteria\n\n- The requested code change is implemented in the workspace.\n- Relevant project gates are run and reported.\n- The job submission includes plan, result, gate, and changed-file artifacts.\n\n## Source Job Brief\n\n{}\n",
+        job.title,
+        if job.description.trim().is_empty() {
+            "Complete the requested coding work."
+        } else {
+            job.description.trim()
+        },
+        brief
+    )
+}
+
+fn render_coding_plan_markdown(job: &MarketplaceJob, prd_path: &Path) -> String {
+    format!(
+        "---\nplan: {}\ntitle: {}\npriority: 0\n---\n\n# {}\n\nSource PRD: `{}`\n\nImplement the marketplace coding job, then run the configured gates and preserve submission evidence.\n",
+        coding_job_slug(job),
+        toml_escape(&job.title),
+        job.title,
+        prd_path.display()
+    )
+}
+
+fn render_coding_tasks_toml(job: &MarketplaceJob, slug: &str, prd_path: &Path) -> String {
+    let title = if job.title.trim().is_empty() {
+        "Implement coding job"
+    } else {
+        job.title.trim()
+    };
+    let description = if job.description.trim().is_empty() {
+        "Complete the coding job."
+    } else {
+        job.description.trim()
+    };
+    let prd_rel = prd_path
+        .strip_prefix(Path::new("."))
+        .unwrap_or(prd_path)
+        .to_string_lossy();
+    format!(
+        "[meta]\nplan = \"{}\"\niteration = 1\ntotal = 1\ndone = 0\nstatus = \"ready\"\nmax_parallel = 1\nestimated_total_minutes = 30\n\n[[task]]\nid = \"T1\"\ntitle = \"{}\"\nrole = \"implementer\"\nstatus = \"ready\"\ntier = \"focused\"\nmodel_hint = \"claude-sonnet-4-6\"\nmax_loc = 500\nfiles = []\nallowed_tools = []\ndepends_on = []\nverify = [{{ phase = \"runtime\", command = \"cargo check\", fail_msg = \"cargo check failed\", timeout_ms = 120000 }}]\n\n[task.context]\nread_files = [{{ path = \"{}\" }}]\nrequirements = [\"{}\"]\nanti_patterns = [\"Do not make unrelated refactors.\"]\n",
+        toml_escape(slug),
+        toml_escape(title),
+        toml_escape(&prd_rel),
+        toml_escape(description)
+    )
+}
+
+fn coding_job_slug(job: &MarketplaceJob) -> String {
+    let base = if job.id.trim().is_empty() {
+        job.title.as_str()
+    } else {
+        job.id.as_str()
+    };
+    let slug = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "coding-job".to_string()
+    } else if slug
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        format!("job-{slug}")
+    } else {
+        format!("job-coding-{slug}")
+    }
+}
+
+fn toml_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "")
 }
 
 fn snapshot_workspace_files(root: &Path) -> BTreeMap<PathBuf, FileSnapshot> {

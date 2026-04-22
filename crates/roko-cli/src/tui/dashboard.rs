@@ -451,7 +451,8 @@ impl DashboardData {
 
         let plans = load_plan_summaries(&root, &state);
         let active_tasks = load_active_tasks(&state);
-        let agents = load_agents(&state);
+        let mut agents = load_agents(&state);
+        merge_runtime_agents(&mut agents, &root);
         let gate_results = load_gate_results(&state, &signal_gate_results);
         let efficiency_events = read_efficiency_events_sync(&efficiency_path);
         let efficiency = load_efficiency_summary(&efficiency_path);
@@ -700,6 +701,7 @@ impl DashboardData {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
             self.active_tasks = load_active_tasks(&self.executor_state);
             self.agents = load_agents(&self.executor_state);
+            merge_runtime_agents(&mut self.agents, &self.root);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
             self.current_plan_execution = backfill_agent_output_tail(
                 load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
@@ -1237,11 +1239,13 @@ pub struct ExperimentSummary {
 }
 
 /// Recent signal summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalSummary {
     pub id: String,
     pub kind: String,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub confidence: Option<f64>,
     #[serde(default)]
     pub plan_id: Option<String>,
     #[serde(default)]
@@ -1526,6 +1530,7 @@ impl SignalSummary {
             id: value.get("id")?.as_str()?.to_string(),
             kind: value.get("kind")?.as_str()?.to_string(),
             created_at_ms: entry_timestamp_ms(value)?,
+            confidence: signal_confidence(value),
             plan_id: value
                 .pointer("/tags/plan_id")
                 .and_then(Value::as_str)
@@ -2205,6 +2210,56 @@ fn load_agents(state: &Value) -> Vec<AgentSummary> {
 
     agents.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.plan_id.cmp(&b.plan_id)));
     agents
+}
+
+/// Runtime entry from `.roko/runtime/agents.json`.
+#[derive(Debug, Deserialize)]
+struct RuntimeAgentEntry {
+    name: String,
+    pid: u32,
+    #[allow(dead_code)]
+    bind: String,
+}
+
+/// Check whether a process with the given PID is alive.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn is_process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 is an existence check — no signal is delivered.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Merge agents from `.roko/runtime/agents.json` (alive PIDs) into the
+/// agent list, deduplicating by ID.
+fn merge_runtime_agents(agents: &mut Vec<AgentSummary>, workdir: &Path) {
+    let path = workdir.join(".roko").join("runtime").join("agents.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<RuntimeAgentEntry>>(&contents) else {
+        return;
+    };
+    let existing: HashSet<String> = agents.iter().map(|a| a.id.clone()).collect();
+    for entry in entries {
+        if !is_process_alive(entry.pid) {
+            continue;
+        }
+        if existing.contains(&entry.name) {
+            continue;
+        }
+        agents.push(AgentSummary {
+            id: entry.name.clone(),
+            label: entry.name,
+            plan_id: None,
+            status: "running".to_string(),
+        });
+    }
+    agents.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.plan_id.cmp(&b.plan_id)));
 }
 
 fn load_gate_results(
@@ -3183,6 +3238,29 @@ fn signal_payload_preview(value: &Value) -> String {
     };
     let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_str(compact.trim(), 60)
+}
+
+fn signal_confidence(value: &Value) -> Option<f64> {
+    [
+        "/tags/confidence",
+        "/tags/score",
+        "/tags/trust",
+        "/body/data/confidence",
+        "/body/data/score",
+        "/body/data/trust",
+        "/payload/confidence",
+        "/payload/score",
+        "/payload/trust",
+    ]
+    .iter()
+    .find_map(|path| value.pointer(path).and_then(value_as_f64))
+    .map(|confidence| confidence.clamp(0.0, 1.0))
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
 }
 
 fn current_phase_label(plan_state: &Value) -> Option<String> {
@@ -5185,6 +5263,45 @@ mod tests {
             frequency: roko_core::OperatingFrequency::Theta,
             reasoning_tokens: 0,
         }
+    }
+
+    #[test]
+    fn signal_summary_extracts_structured_confidence() {
+        let signal = SignalSummary::from_value(&serde_json::json!({
+            "id": "sig-1",
+            "kind": "gate:compile",
+            "created_at_ms": 42,
+            "body": {
+                "data": {
+                    "confidence": "0.82",
+                    "plan_id": "plan-a"
+                }
+            }
+        }))
+        .expect("valid signal");
+
+        assert_eq!(signal.confidence, Some(0.82));
+        assert_eq!(signal.plan_id.as_deref(), Some("plan-a"));
+    }
+
+    #[test]
+    fn signal_confidence_clamps_out_of_range_values() {
+        assert_eq!(
+            signal_confidence(&serde_json::json!({
+                "tags": {
+                    "score": 1.4
+                }
+            })),
+            Some(1.0)
+        );
+        assert_eq!(
+            signal_confidence(&serde_json::json!({
+                "payload": {
+                    "trust": -0.25
+                }
+            })),
+            Some(0.0)
+        );
     }
 
     #[test]

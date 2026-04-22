@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/prds/ideas", post(post_idea))
         .route("/prds/status", get(prds_coverage))
         .route("/prd/consolidate", post(consolidate_prds))
+        .route("/prds/consolidate", post(consolidate_prds))
         .route("/prds/{slug}", get(get_prd))
         .route("/prds/{slug}/draft", post(draft_prd))
         .route("/prds/{slug}/promote", post(promote_prd))

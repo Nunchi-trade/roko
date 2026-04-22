@@ -8,8 +8,6 @@
 //!
 //! Each source is color-coded by type and severity.
 
-use std::collections::BTreeMap;
-
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Modifier;
@@ -31,14 +29,22 @@ pub(crate) fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let entries = build_unified_log(tui_state);
-    render_with_entries(frame, area, &entries, _data, tui_state, view_state, theme);
+    render_with_entries(
+        frame,
+        area,
+        tui_state.unified_log_entries(),
+        _data,
+        tui_state,
+        view_state,
+        theme,
+    );
 }
 
 /// Count visible log entries after applying the active level filter.
 pub(crate) fn filtered_entry_count(_data: &DashboardData, tui_state: &TuiState) -> usize {
-    build_unified_log(tui_state)
-        .into_iter()
+    tui_state
+        .unified_log_entries()
+        .iter()
         .filter(|entry| tui_state.log_level_visible(entry.level.filter_level()))
         .count()
 }
@@ -191,207 +197,6 @@ fn render_with_entries(
     frame.render_widget(paragraph, inner);
 }
 
-// ---------------------------------------------------------------------------
-// Log construction
-// ---------------------------------------------------------------------------
-
-/// Build a unified, time-sorted log from all available data sources.
-fn build_unified_log(tui_state: &TuiState) -> Vec<LogEntry> {
-    // Use a BTreeMap keyed by (timestamp_ms, sequence) for stable ordering
-    let mut entries: BTreeMap<(i64, usize), LogEntry> = BTreeMap::new();
-    let mut seq = 0usize;
-
-    // 1. Signals
-    for signal in &tui_state.recent_signals {
-        let level = if signal.kind.contains("error") || signal.kind.contains("fail") {
-            LogEntryLevel::Error
-        } else if signal.kind.contains("warn") {
-            LogEntryLevel::Warn
-        } else if signal.kind.contains("gate:") {
-            if signal.payload_preview.contains("passed") {
-                LogEntryLevel::Info
-            } else {
-                LogEntryLevel::Warn
-            }
-        } else if signal.kind.contains("debug") {
-            LogEntryLevel::Debug
-        } else {
-            LogEntryLevel::Info
-        };
-
-        let ts = format_timestamp_ms(signal.created_at_ms);
-        let message = if signal.payload_preview.is_empty() {
-            signal.kind.clone()
-        } else {
-            truncate(&signal.payload_preview, 120)
-        };
-
-        entries.insert(
-            (signal.created_at_ms, seq),
-            LogEntry::new(
-                ts,
-                level,
-                format!("signal:{}", truncate_kind(&signal.kind)),
-                message,
-            ),
-        );
-        seq += 1;
-    }
-
-    // 2. Episodes
-    for episode in &tui_state.episodes_cache {
-        let ts_ms = episode.timestamp.timestamp_millis();
-        let level = if !episode.success {
-            LogEntryLevel::Error
-        } else if episode.kind == "gate" {
-            LogEntryLevel::Warn
-        } else {
-            LogEntryLevel::Info
-        };
-
-        let duration_str = if episode.duration_secs > 0.0 {
-            format!(" ({:.1}s)", episode.duration_secs)
-        } else {
-            String::new()
-        };
-
-        let gate_summary = if !episode.gate_verdicts.is_empty() {
-            let passed = episode.gate_verdicts.iter().filter(|g| g.passed).count();
-            let total = episode.gate_verdicts.len();
-            format!(" gates:{passed}/{total}")
-        } else {
-            String::new()
-        };
-
-        let message = format!(
-            "{} [{}] task={}{}{} {}",
-            episode.kind,
-            if episode.success { "ok" } else { "FAIL" },
-            truncate(&episode.task_id, 30),
-            duration_str,
-            gate_summary,
-            if !episode.model.is_empty() {
-                format!("model={}", episode.model)
-            } else {
-                String::new()
-            },
-        );
-
-        entries.insert(
-            (ts_ms, seq),
-            LogEntry::new(
-                episode.timestamp.format("%H:%M:%S").to_string(),
-                level,
-                format!("episode:{}", truncate_kind(&episode.kind)),
-                message,
-            ),
-        );
-        seq += 1;
-    }
-
-    // 3. Efficiency events
-    for event in &tui_state.efficiency_events {
-        let ts_ms = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
-        let ts = format_timestamp_ms(ts_ms);
-        let duration_ms = event.duration_ms;
-        let level = if event.cost_usd > 1.0 {
-            LogEntryLevel::Warn
-        } else {
-            LogEntryLevel::Debug
-        };
-
-        let cache_pct = if event.input_tokens > 0 {
-            format!(
-                " cache:{:.0}%",
-                event.cache_read_tokens as f64 / event.input_tokens as f64 * 100.0
-            )
-        } else {
-            String::new()
-        };
-
-        let message = format!(
-            "{} model={} in={} out={} ${:.4} {}ms{}",
-            event.role,
-            truncate(&event.model, 20),
-            format_count(event.input_tokens),
-            format_count(event.output_tokens),
-            event.cost_usd,
-            duration_ms,
-            cache_pct,
-        );
-
-        entries.insert(
-            (ts_ms, seq),
-            LogEntry::new(
-                ts,
-                level,
-                format!("efficiency:{}", truncate(&event.agent_id, 12)),
-                message,
-            ),
-        );
-        seq += 1;
-    }
-
-    // 4. Gate failures (highlighted)
-    for failure in &tui_state.gate_results_page.failure_rows {
-        let ts = format_timestamp_ms(failure.created_at_ms);
-        entries.insert(
-            (failure.created_at_ms, seq),
-            LogEntry::new(
-                ts,
-                LogEntryLevel::Error,
-                format!("gate:{}", failure.gate_name),
-                format!(
-                    "FAILED task={} {}",
-                    failure.task_id,
-                    truncate(&failure.error_excerpt, 80),
-                ),
-            ),
-        );
-        seq += 1;
-    }
-
-    // 5. Orchestrator event log
-    for event in &tui_state.event_log {
-        let ts_ms = event.timestamp_ms as i64;
-        let ts = format_timestamp_ms(ts_ms);
-        let level = match event.event_type.as_str() {
-            "error" | "task_failed" | "gate_failed" => LogEntryLevel::Error,
-            "warning" | "retry" => LogEntryLevel::Warn,
-            "debug" => LogEntryLevel::Debug,
-            _ => LogEntryLevel::Info,
-        };
-        let detail = if event.task_id.is_empty() {
-            event.message.clone()
-        } else {
-            format!("[{}] {}", event.task_id, event.message)
-        };
-        entries.insert(
-            (ts_ms, seq),
-            LogEntry::new(
-                ts,
-                level,
-                format!("event:{}", truncate(&event.event_type, 16)),
-                detail,
-            ),
-        );
-        seq += 1;
-    }
-
-    // Collect sorted by time, capped to the most recent entries.
-    const MAX_UNIFIED_LOG_ENTRIES: usize = 10_000;
-    let all: Vec<LogEntry> = entries.into_values().collect();
-    if all.len() > MAX_UNIFIED_LOG_ENTRIES {
-        // Keep the tail (most recent) entries.
-        let skip = all.len() - MAX_UNIFIED_LOG_ENTRIES;
-        all.into_iter().skip(skip).collect()
-    } else {
-        all
-    }
-}
-
 /// Color style for log levels.
 fn level_style(level: LogEntryLevel, theme: &Theme) -> ratatui::style::Style {
     match level {
@@ -428,12 +233,6 @@ fn source_style(source: &str, theme: &Theme) -> ratatui::style::Style {
     }
 }
 
-fn format_timestamp_ms(ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .map(|dt| dt.format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| String::from("??:??:??"))
-}
-
 fn style_with_bg(
     style: ratatui::style::Style,
     bg: Option<ratatui::style::Color>,
@@ -442,33 +241,5 @@ fn style_with_bg(
         style.bg(bg)
     } else {
         style
-    }
-}
-
-/// Truncate a signal kind to the last two segments for readability.
-fn truncate_kind(kind: &str) -> String {
-    let parts: Vec<&str> = kind.split(':').collect();
-    if parts.len() <= 2 {
-        kind.to_string()
-    } else {
-        parts[parts.len() - 2..].join(":")
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    }
-}
-
-fn format_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }

@@ -53,6 +53,22 @@ pub enum AgentCmd {
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Comma-separated skill tags (e.g. "rust,p2p,networking").
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
+        /// Agent tier: Unverified, Verified, Trusted, Expert, Pioneer.
+        #[arg(long)]
+        tier: Option<String>,
+        /// Reputation score (0–100).
+        #[arg(long, default_value_t = 0)]
+        reputation: u32,
+        /// Maximum concurrent jobs.
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_jobs: u32,
+        /// Auto-register with roko-serve at this URL after creation.
+        /// Uses the default http://localhost:6677 when set to empty string.
+        #[arg(long)]
+        serve_url: Option<String>,
     },
     /// Delete an agent and clean up its state.
     ///
@@ -129,8 +145,8 @@ pub struct AgentServeArgs {
     /// Unique agent identifier advertised by the runtime.
     #[arg(long)]
     pub agent_id: String,
-    /// Socket address to bind, for example `127.0.0.1:8081`.
-    #[arg(long, default_value = "0.0.0.0:8081")]
+    /// Socket address to bind (default: auto-pick a free port on localhost).
+    #[arg(long, default_value = "127.0.0.1:0")]
     pub bind: String,
     /// Relay base URL reserved for a future relay bridge hook.
     #[arg(long)]
@@ -195,7 +211,13 @@ impl AgentServeRuntimeConfig {
             bind = %startup.bind,
             "starting roko agent server"
         );
-        server.serve().await
+        let result = server.serve().await;
+
+        // Cleanup: remove our entry from agents.json on shutdown.
+        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        remove_agent_entry(&workdir, &startup.agent_id);
+
+        result
     }
 
     fn build_server(&self) -> Result<AgentServer> {
@@ -215,9 +237,11 @@ impl AgentServeRuntimeConfig {
         }
 
         let startup = self.startup_snapshot();
+        let workdir_for_start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         builder
             .on_start(move |addr, card| {
                 let startup = startup.clone();
+                let workdir = workdir_for_start.clone();
                 async move {
                     info!(
                         agent_id = %startup.agent_id,
@@ -226,6 +250,79 @@ impl AgentServeRuntimeConfig {
                         rest_endpoint = ?card.endpoints.rest,
                         "agent server is ready"
                     );
+                    // Register with roko-serve so the control plane and
+                    // dashboard can discover this agent.  Retry up to 3
+                    // times with 2 s gaps — when `roko up` starts serve and
+                    // agents near-simultaneously the first attempt may fail
+                    // because serve isn't listening yet.
+                    let rest_endpoint = card
+                        .endpoints
+                        .rest
+                        .clone()
+                        .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
+                    let register_url = format!(
+                        "{}/api/agents/register",
+                        startup.serve_url.trim_end_matches('/')
+                    );
+                    let body = serde_json::json!({
+                        "agent_id": startup.agent_id,
+                        "label": startup.agent_id,
+                        "rest_endpoint": rest_endpoint,
+                        "process_id": std::process::id(),
+                    });
+                    let client = reqwest::Client::new();
+                    let mut registered = false;
+                    for attempt in 1..=3u32 {
+                        match client
+                            .post(&register_url)
+                            .json(&body)
+                            .timeout(std::time::Duration::from_secs(3))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                info!(
+                                    agent_id = %startup.agent_id,
+                                    serve_url = %startup.serve_url,
+                                    attempt,
+                                    "registered with roko-serve"
+                                );
+                                registered = true;
+                                break;
+                            }
+                            Ok(resp) => {
+                                warn!(
+                                    agent_id = %startup.agent_id,
+                                    status = %resp.status(),
+                                    attempt,
+                                    "roko-serve registration returned non-success"
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    agent_id = %startup.agent_id,
+                                    error = %err,
+                                    attempt,
+                                    "could not register with roko-serve (is it running?)"
+                                );
+                            }
+                        }
+                        if attempt < 3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                    if !registered {
+                        warn!(
+                            agent_id = %startup.agent_id,
+                            "failed to register with roko-serve after 3 attempts"
+                        );
+                    }
+
+                    // Write to agents.json so `roko agent list`, `roko agent chat`,
+                    // and the dashboard can discover this sidecar.
+                    let actual_bind = format!("http://127.0.0.1:{}", addr.port());
+                    upsert_agent_entry(&workdir, &startup.agent_id, &actual_bind);
+
                     if let Some(relay) = &startup.relay {
                         info!(
                             agent_id = %startup.agent_id,
@@ -259,30 +356,62 @@ impl AgentServeRuntimeConfig {
 
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
         let workdir = std::env::current_dir().context("read current working directory")?;
-        let config = load_roko_config(&workdir)?;
+        let mut config = load_roko_config(&workdir)?;
 
-        let model = config.agent.default_model.trim();
+        let model = config.agent.default_model.trim().to_string();
         if model.is_empty() {
             return Ok(None);
         }
 
-        // A dispatcher can be built if either:
-        //   (a) the default model resolves in the provider registry
-        //       (e.g. `[providers.lmstudio] kind = "openai_compat"` +
-        //       `[models.qwen] provider = "lmstudio"`), or
-        //   (b) a legacy subprocess command is configured (e.g. `command = "claude"`).
-        // Without either, there is no backend to call.
-        let has_provider_backing = config.effective_models().contains_key(model);
+        // When ANTHROPIC_API_KEY is set, prefer the direct HTTP API over the
+        // CLI subprocess for serving.  The API returns clean text; the CLI
+        // subprocess emits raw streaming-protocol JSON that leaks through to
+        // callers (dashboard, chat REPL).
+        //
+        // Override the model profile so `create_agent_for_model` resolves
+        // through the AnthropicApi adapter (ClaudeAgent with Messages API)
+        // instead of ClaudeCli (subprocess).
+        let has_anthropic_env = std::env::var_os("ANTHROPIC_API_KEY").is_some();
+        let use_anthropic_api = has_anthropic_env && !config.models.contains_key(&model);
+        if use_anthropic_api {
+            let mut profile = config
+                .effective_models()
+                .get(&model)
+                .cloned()
+                .unwrap_or_default();
+            if profile.provider == "claude_cli" {
+                profile.provider = "anthropic".to_string();
+                config.models.insert(model.clone(), profile);
+                info!(
+                    model = %model,
+                    "ANTHROPIC_API_KEY set — overriding provider to anthropic (direct HTTP)"
+                );
+            }
+        }
+
+        // A dispatcher can be built if any of:
+        //   (a) the default model resolves in the provider registry, or
+        //   (b) a legacy subprocess command is configured, or
+        //   (c) ANTHROPIC_API_KEY is set (model override above ensures resolution).
+        let has_provider_backing = config.effective_models().contains_key(&model);
         let has_legacy_command = config.agent.command.is_some();
-        if !has_provider_backing && !has_legacy_command {
+        if !has_provider_backing && !has_legacy_command && !has_anthropic_env {
             return Ok(None);
         }
+
+        // When using the API, don't pass the legacy CLI command — it would
+        // cause the provider layer to spawn a subprocess instead.
+        let command = if use_anthropic_api {
+            None
+        } else {
+            config.agent.command.clone()
+        };
 
         let agent = spawn_agent_scoped(
             &config,
             SpawnAgentSpec {
                 model: model.to_string(),
-                command: config.agent.command.clone(),
+                command,
                 timeout_ms: config.agent.timeout_ms,
                 system_prompt: None,
                 cached_content: None,
@@ -373,8 +502,15 @@ impl DispatchLike for ServingAgentDispatcher {
             .run(&input, &Context::now().with_goal(prompt))
             .await;
 
+        // Clean up raw JSON from the agent output (e.g. Claude CLI streaming
+        // protocol).  The `extract_clean_text` parser handles plain text
+        // (no-op), JSONL with result/assistant events, content block arrays,
+        // and nested `result`/`content` fields.
+        let raw = result.output.body.as_text().unwrap_or_default();
+        let content = roko_cli::chat::extract_clean_text(raw);
+
         Ok(ChatResponse {
-            content: result.output.body.as_text().unwrap_or_default().to_string(),
+            content,
             usage: result.usage,
             finish_reason: if result.success {
                 roko_agent::chat_types::FinishReason::Stop
@@ -438,6 +574,11 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
             template,
             prompt,
             workdir,
+            skills,
+            tier,
+            reputation,
+            max_concurrent_jobs,
+            serve_url,
         } => {
             run_agent_create(
                 &name,
@@ -446,7 +587,53 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
                 prompt.as_deref(),
                 workdir.as_deref(),
             )
-            .await
+            .await?;
+
+            // Auto-register with roko-serve if --serve-url is given.
+            let url = serve_url.as_deref().map(|u| {
+                if u.is_empty() {
+                    "http://localhost:6677"
+                } else {
+                    u
+                }
+            });
+            if let Some(base) = url {
+                let capabilities = match domain.as_str() {
+                    "research" => vec!["messaging".to_string(), "research".to_string()],
+                    _ => vec!["messaging".to_string(), "tasks".to_string()],
+                };
+                let body = serde_json::json!({
+                    "agent_id": name,
+                    "label": name,
+                    "capabilities": capabilities,
+                    "domain_tags": [domain],
+                    "skills": skills,
+                    "tier": tier,
+                    "reputation": reputation,
+                    "max_concurrent_jobs": max_concurrent_jobs,
+                });
+                let register_url = format!("{}/api/agents/register", base.trim_end_matches('/'));
+                match reqwest::Client::new()
+                    .post(&register_url)
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("Registered with serve at {base}");
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        eprintln!("warning: serve registration failed ({status}): {text}");
+                    }
+                    Err(err) => {
+                        eprintln!("warning: could not reach serve at {register_url}: {err}");
+                        eprintln!("  (the agent was created locally; register manually later)");
+                    }
+                }
+            }
+            Ok(())
         }
         AgentCmd::Delete {
             name,
@@ -510,6 +697,36 @@ fn save_agent_entries(workdir: &Path, entries: &[AgentEntry]) -> Result<()> {
     std::fs::write(&path, json)
         .with_context(|| format!("write agent entries to {}", path.display()))?;
     Ok(())
+}
+
+/// Insert or update an agent entry in agents.json.
+fn upsert_agent_entry(workdir: &Path, agent_id: &str, bind: &str) {
+    let mut entries = load_agent_entries(workdir);
+    entries.retain(|e| e.name != agent_id);
+    entries.push(AgentEntry {
+        name: agent_id.to_string(),
+        pid: std::process::id(),
+        bind: bind.to_string(),
+        domain: "general".to_string(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    });
+    if let Err(e) = save_agent_entries(workdir, &entries) {
+        warn!(error = %e, "failed to write agent entry to agents.json");
+    }
+}
+
+/// Remove an agent entry from agents.json.
+fn remove_agent_entry(workdir: &Path, agent_id: &str) {
+    let mut entries = load_agent_entries(workdir);
+    let before = entries.len();
+    entries.retain(|e| e.name != agent_id);
+    if entries.len() < before {
+        if let Err(e) = save_agent_entries(workdir, &entries) {
+            warn!(error = %e, "failed to clean agent entry from agents.json");
+        } else {
+            info!(agent_id, "removed agent entry from agents.json");
+        }
+    }
 }
 
 /// Check whether a process with the given PID is alive.
@@ -651,7 +868,7 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
 
 // ─── Agent start ────────────────────────────────────────────────────────
 
-fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()> {
+pub(crate) fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()> {
     let wd = workdir
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -721,7 +938,7 @@ fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()>
 
 // ─── Agent stop ─────────────────────────────────────────────────────────
 
-fn run_agent_stop(name: &str, force: bool, workdir: Option<&Path>) -> Result<()> {
+pub(crate) fn run_agent_stop(name: &str, force: bool, workdir: Option<&Path>) -> Result<()> {
     let wd = workdir
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -854,7 +1071,7 @@ const DEFAULT_AGENT_PROMPT: &str =
     "You are a helpful agent. Describe your task in the strategy document.";
 
 /// Three-step agent creation: build manifest, validate, write to disk.
-async fn run_agent_create(
+pub(crate) async fn run_agent_create(
     name: &str,
     domain: &str,
     template: Option<&str>,

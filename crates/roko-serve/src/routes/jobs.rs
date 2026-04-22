@@ -73,7 +73,7 @@ struct JobRecord {
     description: String,
     #[serde(default)]
     job_type: String,
-    #[serde(default, alias = "state")]
+    #[serde(default, rename = "state", alias = "status")]
     status: String,
     #[serde(default)]
     posted_by: String,
@@ -87,7 +87,11 @@ struct JobRecord {
     updated_at: String,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "serialize_reward",
+        deserialize_with = "deserialize_reward"
+    )]
     reward: String,
     #[serde(default)]
     plan_id: String,
@@ -142,7 +146,7 @@ struct CreateJobRequest {
     priority: String,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_reward")]
     reward: String,
     #[serde(default)]
     plan_id: String,
@@ -232,6 +236,8 @@ impl RequestPayload for SubmitJobRequest {
 struct EvaluateJobRequest {
     accepted: bool,
     #[serde(default)]
+    score: Option<f64>,
+    #[serde(default)]
     feedback: String,
 }
 impl RequestPayload for EvaluateJobRequest {
@@ -249,7 +255,7 @@ struct MatchJobRequest {
     language: Option<String>,
     #[serde(default, alias = "minTier")]
     min_tier: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_reward")]
     reward: String,
     #[serde(default)]
     skills: Vec<String>,
@@ -280,7 +286,7 @@ impl RequestPayload for MatchJobRequest {
 struct MatchJobResponse {
     candidates: Vec<MatchCandidate>,
     total_fee: String,
-    eta_hours: f64,
+    eta_hours: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -485,7 +491,9 @@ async fn match_jobs(
         candidates.iter().map(|c| c.reputation as f64).sum::<f64>() / candidates.len() as f64
     };
     let description_factor = (body.description.len() as f64 / 1200.0).min(1.0);
-    let eta_hours = (48.0 - avg_rep / 100.0 * 24.0 + description_factor * 12.0).max(4.0);
+    let eta_hours = (48.0 - avg_rep / 100.0 * 24.0 + description_factor * 12.0)
+        .max(4.0)
+        .round() as u32;
 
     Ok(Json(MatchJobResponse {
         candidates,
@@ -702,9 +710,12 @@ async fn evaluate_job(
     } else {
         "in_progress".to_string()
     };
-    job.evaluation = Some(
-        serde_json::json!({"accepted": body.accepted, "feedback": body.feedback.trim(), "evaluated_at": Utc::now().to_rfc3339()}),
-    );
+    job.evaluation = Some(serde_json::json!({
+        "accepted": body.accepted,
+        "score": body.score,
+        "feedback": body.feedback.trim(),
+        "evaluated_at": Utc::now().to_rfc3339(),
+    }));
     job.updated_at = Utc::now().to_rfc3339();
     write_job(&path, &job).await?;
     publish_job_event(&state, ServerEventKind::Updated, &job)?;
@@ -964,6 +975,52 @@ pub async fn count_agent_inflight_jobs(workdir: &Path, agent_id: &str) -> u32 {
     count
 }
 
+/// Serialize reward as a string, preserving any currency suffix (e.g. "2500 KORAI").
+/// Empty values serialize as null for cleaner JSON.
+fn serialize_reward<S: serde::Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.is_empty() {
+        serializer.serialize_none()
+    } else {
+        serializer.serialize_str(value)
+    }
+}
+
+/// Deserialize reward from either a number or a string.
+fn deserialize_reward<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    use serde::de;
+    struct RewardVisitor;
+    impl de::Visitor<'_> for RewardVisitor {
+        type Value = String;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a number or string")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v.to_string())
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(String::new())
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(String::new())
+        }
+    }
+    deserializer.deserialize_any(RewardVisitor)
+}
+
 fn non_empty_or_default(value: &str, default: &str) -> String {
     let t = value.trim();
     if t.is_empty() {
@@ -1096,7 +1153,7 @@ mod tests {
         assert_eq!(result.0.candidates[0].agent_id, "rust-expert");
         assert_eq!(result.0.candidates[0].tier, "Expert");
         assert_eq!(result.0.total_fee, "2500 KORAI");
-        assert!(result.0.eta_hours > 0.0);
+        assert!(result.0.eta_hours > 0);
     }
 
     #[tokio::test]
@@ -1300,7 +1357,7 @@ mod tests {
         // Gamma excluded (no rust skill)
         assert!(candidates.iter().all(|c| c["agentId"] != "agent-gamma"));
         assert_eq!(match_result["totalFee"], "2500 KORAI");
-        assert!(match_result["etaHours"].as_f64().unwrap() > 0.0);
+        assert!(match_result["etaHours"].as_u64().unwrap() > 0);
 
         // Step 3: Create job with committed_candidates from match
         let candidate_ids: Vec<String> = candidates
@@ -1318,9 +1375,13 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::CREATED,
+            "create_job response: {job}"
+        );
         let job_id = job["id"].as_str().unwrap().to_string();
-        assert_eq!(job["status"], "open");
+        assert_eq!(job["state"], "open", "full job body: {job}");
         let persisted_candidates = job["committed_candidates"].as_array().unwrap();
         assert_eq!(persisted_candidates.len(), 2);
 
@@ -1332,7 +1393,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(job["status"], "assigned");
+        assert_eq!(job["state"], "assigned");
         assert_eq!(job["assigned_to"], "agent-alpha");
 
         // Step 5: Start → Submit → Evaluate
@@ -1346,7 +1407,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(job["status"], "submitted");
+        assert_eq!(job["state"], "submitted");
 
         let (status, job) = post_json(
             &router,
@@ -1355,12 +1416,12 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(job["status"], "completed");
+        assert_eq!(job["state"], "completed");
 
         // Step 6: Verify final state via GET
         let (status, final_job) = get_json(&router, &format!("/api/jobs/{job_id}")).await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert_eq!(final_job["status"], "completed");
+        assert_eq!(final_job["state"], "completed");
         assert_eq!(final_job["assigned_to"], "agent-alpha");
         assert!(final_job["submission"].is_object());
         assert!(final_job["evaluation"].is_object());

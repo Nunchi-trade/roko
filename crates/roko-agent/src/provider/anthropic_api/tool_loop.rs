@@ -83,8 +83,7 @@ pub fn create_anthropic_backend_simple(
     model: &str,
     timeout_ms: u64,
 ) -> (Arc<dyn LlmBackend>, Arc<dyn Translator>) {
-    let backend = AnthropicMessagesBackend::new(api_key, model)
-        .with_timeout_ms(timeout_ms);
+    let backend = AnthropicMessagesBackend::new(api_key, model).with_timeout_ms(timeout_ms);
     let translator: Arc<dyn Translator> = Arc::new(AnthropicTranslator);
     (Arc::new(backend), translator)
 }

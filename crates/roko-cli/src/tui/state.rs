@@ -5,7 +5,7 @@
 //! cost tracking, git state, and more.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -591,7 +591,7 @@ impl LogEntryLevel {
 }
 
 /// A parsed, display-ready log row for the Logs tab.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
     /// Human-readable timestamp for the rendered row.
     pub timestamp: String,
@@ -613,6 +613,225 @@ impl LogEntry {
             source,
             message,
         }
+    }
+}
+
+/// Build a unified, time-sorted log from all available data sources.
+fn build_unified_log_cache(tui_state: &TuiState) -> Vec<LogEntry> {
+    let mut entries: BTreeMap<(i64, usize), LogEntry> = BTreeMap::new();
+    let mut seq = 0usize;
+
+    for signal in &tui_state.recent_signals {
+        let level = if signal.kind.contains("error") || signal.kind.contains("fail") {
+            LogEntryLevel::Error
+        } else if signal.kind.contains("warn") {
+            LogEntryLevel::Warn
+        } else if signal.kind.contains("gate:") {
+            if signal.payload_preview.contains("passed") {
+                LogEntryLevel::Info
+            } else {
+                LogEntryLevel::Warn
+            }
+        } else if signal.kind.contains("debug") {
+            LogEntryLevel::Debug
+        } else {
+            LogEntryLevel::Info
+        };
+
+        let message = if signal.payload_preview.is_empty() {
+            signal.kind.clone()
+        } else {
+            truncate_log(&signal.payload_preview, 120)
+        };
+
+        entries.insert(
+            (signal.created_at_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(signal.created_at_ms),
+                level,
+                format!("signal:{}", truncate_log_kind(&signal.kind)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for episode in &tui_state.episodes_cache {
+        let ts_ms = episode.timestamp.timestamp_millis();
+        let level = if !episode.success {
+            LogEntryLevel::Error
+        } else if episode.kind == "gate" {
+            LogEntryLevel::Warn
+        } else {
+            LogEntryLevel::Info
+        };
+        let duration_str = if episode.duration_secs > 0.0 {
+            format!(" ({:.1}s)", episode.duration_secs)
+        } else {
+            String::new()
+        };
+        let gate_summary = if !episode.gate_verdicts.is_empty() {
+            let passed = episode
+                .gate_verdicts
+                .iter()
+                .filter(|gate| gate.passed)
+                .count();
+            let total = episode.gate_verdicts.len();
+            format!(" gates:{passed}/{total}")
+        } else {
+            String::new()
+        };
+        let model = if episode.model.is_empty() {
+            String::new()
+        } else {
+            format!("model={}", episode.model)
+        };
+        let message = format!(
+            "{} [{}] task={}{}{} {}",
+            episode.kind,
+            if episode.success { "ok" } else { "FAIL" },
+            truncate_log(&episode.task_id, 30),
+            duration_str,
+            gate_summary,
+            model,
+        );
+
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                episode.timestamp.format("%H:%M:%S").to_string(),
+                level,
+                format!("episode:{}", truncate_log_kind(&episode.kind)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for event in &tui_state.efficiency_events {
+        let ts_ms = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+        let level = if event.cost_usd > 1.0 {
+            LogEntryLevel::Warn
+        } else {
+            LogEntryLevel::Debug
+        };
+        let cache_pct = if event.input_tokens > 0 {
+            format!(
+                " cache:{:.0}%",
+                event.cache_read_tokens as f64 / event.input_tokens as f64 * 100.0
+            )
+        } else {
+            String::new()
+        };
+        let message = format!(
+            "{} model={} in={} out={} ${:.4} {}ms{}",
+            event.role,
+            truncate_log(&event.model, 20),
+            format_log_count(event.input_tokens),
+            format_log_count(event.output_tokens),
+            event.cost_usd,
+            event.duration_ms,
+            cache_pct,
+        );
+
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(ts_ms),
+                level,
+                format!("efficiency:{}", truncate_log(&event.agent_id, 12)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for failure in &tui_state.gate_results_page.failure_rows {
+        entries.insert(
+            (failure.created_at_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(failure.created_at_ms),
+                LogEntryLevel::Error,
+                format!("gate:{}", failure.gate_name),
+                format!(
+                    "FAILED task={} {}",
+                    failure.task_id,
+                    truncate_log(&failure.error_excerpt, 80),
+                ),
+            ),
+        );
+        seq += 1;
+    }
+
+    for event in &tui_state.event_log {
+        let ts_ms = event.timestamp_ms as i64;
+        let level = match event.event_type.as_str() {
+            "error" | "task_failed" | "gate_failed" => LogEntryLevel::Error,
+            "warning" | "retry" => LogEntryLevel::Warn,
+            "debug" => LogEntryLevel::Debug,
+            _ => LogEntryLevel::Info,
+        };
+        let detail = if event.task_id.is_empty() {
+            event.message.clone()
+        } else {
+            format!("[{}] {}", event.task_id, event.message)
+        };
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(ts_ms),
+                level,
+                format!("event:{}", truncate_log(&event.event_type, 16)),
+                detail,
+            ),
+        );
+        seq += 1;
+    }
+
+    const MAX_UNIFIED_LOG_ENTRIES: usize = 10_000;
+    let all: Vec<LogEntry> = entries.into_values().collect();
+    let len = all.len();
+    if len > MAX_UNIFIED_LOG_ENTRIES {
+        all.into_iter()
+            .skip(len - MAX_UNIFIED_LOG_ENTRIES)
+            .collect()
+    } else {
+        all
+    }
+}
+
+fn format_log_timestamp_ms(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| String::from("??:??:??"))
+}
+
+fn truncate_log_kind(kind: &str) -> String {
+    let parts: Vec<&str> = kind.split(':').collect();
+    if parts.len() <= 2 {
+        kind.to_string()
+    } else {
+        parts[parts.len() - 2..].join(":")
+    }
+}
+
+fn truncate_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+fn format_log_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -1022,6 +1241,8 @@ pub struct TuiState {
     pub gate_result_summaries: Vec<GateResultSummary>,
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
+    /// Cached unified log for the logs tab.
+    pub cached_unified_log: Vec<LogEntry>,
 
     // -- network stats (header bar) --
     /// Number of agents currently online/discovered.
@@ -1196,6 +1417,7 @@ impl Default for TuiState {
             active_task_summaries: Vec::new(),
             gate_result_summaries: Vec::new(),
             episodes_cache: Vec::new(),
+            cached_unified_log: Vec::new(),
 
             agents_online: 0,
             isfr: None,
@@ -1715,6 +1937,7 @@ impl TuiState {
         self.active_task_summaries = data.active_tasks.clone();
         self.gate_result_summaries = data.gate_results.clone();
         self.episodes_cache = data.episodes().to_vec();
+        self.refresh_cached_unified_log();
 
         // -- knowledge browse --
         self.knowledge_entries = data.knowledge_entries.clone();
@@ -2118,6 +2341,18 @@ impl TuiState {
             self.task_output_tails
                 .insert(task_id.clone(), lines.iter().cloned().collect());
         }
+        self.refresh_cached_unified_log();
+    }
+
+    /// Return the display-ready cached log rows for the Logs tab.
+    #[must_use]
+    pub fn unified_log_entries(&self) -> &[LogEntry] {
+        &self.cached_unified_log
+    }
+
+    /// Rebuild the unified log cache from the current dashboard-derived sources.
+    pub fn refresh_cached_unified_log(&mut self) {
+        self.cached_unified_log = build_unified_log_cache(self);
     }
 
     /// Return cached, styled agent output lines for the selected agent pane.
@@ -3418,6 +3653,29 @@ mod tests {
 
         state.show_all_log_filter_levels();
         assert!(state.log_level_visible(LogFilterLevel::Warn));
+    }
+
+    #[test]
+    fn unified_log_cache_refreshes_from_sources() {
+        let mut state = TuiState::default();
+        state.recent_signals.push(SignalSummary {
+            id: "sig-1".into(),
+            kind: "gate:compile".into(),
+            created_at_ms: 1_700_000_000_000,
+            confidence: None,
+            plan_id: None,
+            task_id: None,
+            parent_hash: None,
+            lineage: Vec::new(),
+            payload_preview: "passed".into(),
+        });
+
+        assert!(state.unified_log_entries().is_empty());
+        state.refresh_cached_unified_log();
+
+        assert_eq!(state.unified_log_entries().len(), 1);
+        assert_eq!(state.unified_log_entries()[0].source, "signal:gate:compile");
+        assert_eq!(state.unified_log_entries()[0].level, LogEntryLevel::Info);
     }
 
     #[test]

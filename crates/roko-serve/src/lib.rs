@@ -86,7 +86,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
@@ -134,7 +134,17 @@ impl ServerBuildConfig {
             .bind
             .as_deref()
             .unwrap_or(&self.roko_config.server.bind);
-        let port = self.port.unwrap_or(self.roko_config.server.port);
+        let port = self.port.unwrap_or_else(|| {
+            // Prefer [serve].port when [server].port is still the default.
+            if self.roko_config.server.port == 6677 {
+                self.roko_config
+                    .serve
+                    .port
+                    .unwrap_or(self.roko_config.server.port)
+            } else {
+                self.roko_config.server.port
+            }
+        });
         format!("{bind}:{port}")
     }
 }
@@ -211,7 +221,9 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
-        let _orchestrator_bridge = start_orchestrator_event_bridge(Arc::clone(&state));
+        // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
+        // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
+        // The orchestrator publishes directly to the StateHub when running in-process.
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let router = routes::build_router(
@@ -309,7 +321,8 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
-    let _orchestrator_bridge = start_orchestrator_event_bridge(Arc::clone(&state));
+    // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
+    // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
     let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
     let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
     let router = routes::build_router(
@@ -473,6 +486,7 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             plan_id,
             task_id,
             gate,
+            rung: _,
             passed,
         } => Some(DashboardEvent::GateResult {
             plan_id: plan_id.clone(),
@@ -651,6 +665,7 @@ fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<Server
             plan_id: plan_id.clone(),
             task_id: task_id.clone(),
             gate: gate.clone(),
+            rung: 0,
             passed: *passed,
         }),
         DashboardEvent::PhaseTransition { plan_id, from, to } => {
@@ -767,7 +782,7 @@ fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
             roko_config.scheduler.clone(),
         )));
     } else if !roko_config.scheduler.is_empty() {
-        warn!("scheduler already started elsewhere; skipping cron in event sources");
+        debug!("scheduler already started elsewhere; skipping cron in event sources");
     }
 
     if !roko_config.watcher.is_empty() {

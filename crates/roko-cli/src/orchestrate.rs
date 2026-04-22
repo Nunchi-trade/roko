@@ -8203,6 +8203,7 @@ impl PlanRunner {
                             plan_id: plan_id.clone(),
                             task_id: format!("rung-{effective_rung}"),
                             gate: format!("rung-{effective_rung}"),
+                            rung: effective_rung,
                             passed,
                         });
                         self.emit_execution_event(
@@ -16959,6 +16960,9 @@ impl PlanRunner {
 
         let mut unexpected = Vec::new();
         for path in &changed {
+            if is_plan_enrichment_artifact(plan_id, path) || is_build_artifact_path(path) {
+                continue;
+            }
             let permitted = allowed.iter().any(|declared| {
                 path == declared
                     || path.starts_with(&format!("{declared}/"))
@@ -17381,6 +17385,27 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed
 }
 
+fn is_plan_enrichment_artifact(plan_id: &str, path: &str) -> bool {
+    let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !ALL_ORDERED
+        .iter()
+        .any(|step| step.output_filename() == file_name)
+    {
+        return false;
+    }
+    let expected_roots = [
+        format!("plans/{plan_id}/"),
+        format!(".roko/plans/{plan_id}/"),
+    ];
+    expected_roots.iter().any(|root| path.starts_with(root))
+}
+
+fn is_build_artifact_path(path: &str) -> bool {
+    matches!(path, "target" | "target/") || path.starts_with("target/")
+}
+
 async fn git_commit_all_if_needed(
     workspace: &Path,
     message: &str,
@@ -17555,6 +17580,7 @@ fn server_event_to_dashboard(
             plan_id,
             task_id,
             gate,
+            rung: _,
             passed,
         } => Some(DashboardEvent::GateResult {
             plan_id: plan_id.clone(),
@@ -19446,6 +19472,35 @@ acceptance = []
         assert!(selected.contains(&EnrichStep::Verify));
         assert!(!selected.contains(&EnrichStep::Research));
         assert!(!selected.contains(&EnrichStep::Invariants));
+    }
+
+    #[test]
+    fn enrichment_artifact_filter_matches_plan_scoped_outputs_only() {
+        assert!(is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/plan-1/brief.md"
+        ));
+        assert!(is_plan_enrichment_artifact(
+            "plan-1",
+            ".roko/plans/plan-1/decomposition.md"
+        ));
+        assert!(!is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/other/brief.md"
+        ));
+        assert!(!is_plan_enrichment_artifact("plan-1", "src/brief.md"));
+        assert!(!is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/plan-1/custom.md"
+        ));
+    }
+
+    #[test]
+    fn build_artifact_filter_matches_target_directory_only() {
+        assert!(is_build_artifact_path("target/"));
+        assert!(is_build_artifact_path("target/debug/roko"));
+        assert!(!is_build_artifact_path("src/target.rs"));
+        assert!(!is_build_artifact_path("plans/target/brief.md"));
     }
 
     #[test]

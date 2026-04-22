@@ -5,6 +5,7 @@
 //! buffer, then streams live events via the broadcast channel.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Router;
 use axum::extract::State;
@@ -86,6 +87,10 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
 
     // Subscribe to live events.
     let mut rx = state.event_bus.subscribe();
+    let mut last_lag_warn = Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or(Instant::now());
+    let mut lag_total: u64 = 0;
 
     loop {
         tokio::select! {
@@ -147,7 +152,12 @@ async fn handle_ws(state: Arc<AppState>, socket: WebSocket) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(n, "ws client lagged, skipped events");
+                        lag_total += n;
+                        if last_lag_warn.elapsed() >= std::time::Duration::from_secs(5) {
+                            warn!(skipped = lag_total, "ws client lagged");
+                            lag_total = 0;
+                            last_lag_warn = Instant::now();
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         debug!("event bus closed, shutting down ws");

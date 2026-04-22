@@ -1150,6 +1150,7 @@ impl ConfigLayer {
             Some(s) => {
                 let defaults = ServeConfig::default();
                 ServeConfig {
+                    port: s.port,
                     auto_orchestrate: match s.auto_orchestrate {
                         Some(auto_orchestrate) => auto_orchestrate,
                         None => defaults.auto_orchestrate,
@@ -2093,7 +2094,15 @@ fn interpolate_env_string(input: &str) -> Result<String> {
             output.push_str(&rest[start..]);
             return Ok(output);
         };
-        let var_name = &after[..end];
+        let expr = &after[..end];
+
+        // Split on `:-` to support ${VAR:-fallback} syntax.
+        let (var_name, default_value) = if let Some(sep) = expr.find(":-") {
+            (&expr[..sep], Some(&expr[sep + 2..]))
+        } else {
+            (expr, None)
+        };
+
         if var_name.is_empty()
             || !var_name
                 .chars()
@@ -2103,11 +2112,19 @@ fn interpolate_env_string(input: &str) -> Result<String> {
             rest = &rest[start + 2..];
             continue;
         }
-        let value = std::env::var(var_name).map_err(|_| {
-            anyhow!(
-                "Config error: ${{{var_name}}} referenced but {var_name} not set. Set it in .env or environment."
-            )
-        })?;
+        let value = match std::env::var(var_name) {
+            Ok(v) => v,
+            Err(_) => {
+                if let Some(fallback) = default_value {
+                    fallback.to_string()
+                } else {
+                    eprintln!(
+                        "warning: ${{{var_name}}} referenced but {var_name} not set; using empty string"
+                    );
+                    String::new()
+                }
+            }
+        };
         output.push_str(&value);
         rest = &after[end + 1..];
     }
@@ -2245,6 +2262,9 @@ pub struct ExecutorLayer {
 /// Partial `ServeConfig` — every field optional.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServeLayer {
+    /// Port override for `roko serve`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// Whether serve-side publish events trigger orchestration automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_orchestrate: Option<bool>,
@@ -2261,6 +2281,7 @@ impl ServeLayer {
     #[must_use]
     pub fn merge(self, overlay: Self) -> Self {
         Self {
+            port: overlay.port.or(self.port),
             auto_orchestrate: overlay.auto_orchestrate.or(self.auto_orchestrate),
             auth: match (self.auth, overlay.auth) {
                 (Some(base), Some(overlay)) => Some(base.merge(overlay)),
@@ -2981,16 +3002,33 @@ role = "prefix-${PATH}-suffix"
     }
 
     #[test]
-    fn missing_env_var_reports_clear_error() {
+    fn missing_env_var_resolves_to_empty_string() {
         let toml = r#"
 [agent]
-command = "${ROKO_TEST_MISSING_SECRET_9B1C}"
+command = "prefix-${ROKO_TEST_MISSING_SECRET_9B1C}-suffix"
 "#;
-        let err = Config::parse_toml(toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains(
-            "Config error: ${ROKO_TEST_MISSING_SECRET_9B1C} referenced but ROKO_TEST_MISSING_SECRET_9B1C not set. Set it in .env or environment."
-        ));
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.agent.command, "prefix--suffix");
+    }
+
+    #[test]
+    fn env_var_with_default_uses_fallback() {
+        let toml = r#"
+[agent]
+command = "${ROKO_TEST_MISSING_ABC123:-fallback_cmd}"
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.agent.command, "fallback_cmd");
+    }
+
+    #[test]
+    fn env_var_with_empty_default() {
+        let toml = r#"
+[agent]
+command = "x${ROKO_TEST_MISSING_DEF456:-}y"
+"#;
+        let cfg = Config::parse_toml(toml).unwrap();
+        assert_eq!(cfg.agent.command, "xy");
     }
 
     #[test]

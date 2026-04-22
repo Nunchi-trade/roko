@@ -137,6 +137,24 @@ pub struct MarketplaceJob {
     pub auto_execute: bool,
 }
 
+impl MarketplaceJob {
+    /// Return the effective lifecycle status, preferring `status` but falling
+    /// back to the deprecated `state` field for files written by roko-serve
+    /// (which serializes via `#[serde(rename = "state")]`).
+    #[must_use]
+    pub fn effective_status(&self) -> &str {
+        let s = self.status.trim();
+        if !s.is_empty() {
+            return s;
+        }
+        let fallback = self.state.trim();
+        if !fallback.is_empty() {
+            return fallback;
+        }
+        "open"
+    }
+}
+
 /// Summary of a PRD for the Atelier TUI view.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrdSummary {

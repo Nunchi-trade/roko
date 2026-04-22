@@ -1202,6 +1202,7 @@ enum DeployCmd {
 enum ConfigCmd {
     // ── Core config management ──────────────────────────────────────
     /// Interactive wizard: detects installed LLM CLIs, writes global config.
+    #[command(alias = "wizard")]
     Init {
         /// Skip all confirmation prompts.
         #[arg(long)]
@@ -2217,9 +2218,14 @@ async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
             } else {
                 Some(agent_def.prompt.as_str())
             };
-            if let Err(e) =
-                run_agent_create(&agent_def.name, &agent_def.domain, None, prompt, Some(&workdir))
-                    .await
+            if let Err(e) = run_agent_create(
+                &agent_def.name,
+                &agent_def.domain,
+                None,
+                prompt,
+                Some(&workdir),
+            )
+            .await
             {
                 eprintln!(
                     "  {:<14}  {}     {:10}  \u{2717} ({})",
@@ -2261,9 +2267,7 @@ async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
     println!();
 
     // Wait for Ctrl+C.
-    tokio::signal::ctrl_c()
-        .await
-        .context("listen for ctrl+c")?;
+    tokio::signal::ctrl_c().await.context("listen for ctrl+c")?;
 
     println!("\nShutting down...");
 
@@ -6215,6 +6219,52 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     }
 }
 
+/// Resolve a (possibly prefix-truncated) job ID to the full UUID by scanning
+/// `.roko/jobs/*.json`.  Exact matches are preferred; if no exact match is
+/// found the prefix is tried.  Ambiguous prefixes produce an error listing
+/// the candidates.
+fn resolve_job_path(jobs_dir: &Path, id: &str) -> Result<std::path::PathBuf> {
+    // 1. Try exact match first.
+    let exact = jobs_dir.join(format!("{id}.json"));
+    if exact.exists() {
+        return Ok(exact);
+    }
+    // 2. Prefix scan.
+    let lower = id.to_ascii_lowercase();
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(jobs_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = std::path::Path::new(&name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            else {
+                continue;
+            };
+            if stem.to_ascii_lowercase().starts_with(&lower) {
+                matches.push(entry.path());
+            }
+        }
+    }
+    match matches.len() {
+        0 => anyhow::bail!(
+            "job '{id}' not found — no files in {} match that prefix",
+            jobs_dir.display()
+        ),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        n => {
+            let ids: Vec<String> = matches
+                .iter()
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .collect();
+            anyhow::bail!(
+                "ambiguous job prefix '{id}' — {n} matches: {}",
+                ids.join(", ")
+            )
+        }
+    }
+}
+
 async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
     let jobs_dir = |wd: &Path| wd.join(".roko").join("jobs");
 
@@ -6240,18 +6290,24 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                 .collect();
             entries.sort_by_key(|e| e.file_name());
 
+            if cli.json {
+                let mut jobs: Vec<roko_core::MarketplaceJob> = Vec::new();
+                for entry in &entries {
+                    let data = std::fs::read_to_string(entry.path())?;
+                    if let Ok(job) = serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
+                        jobs.push(job);
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&jobs)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
             let mut count = 0usize;
             for entry in &entries {
                 let data = std::fs::read_to_string(entry.path())?;
                 let job: roko_core::MarketplaceJob =
                     serde_json::from_str(&data).unwrap_or_default();
-                let effective_status = if !job.status.is_empty() {
-                    &job.status
-                } else if !job.state.is_empty() {
-                    &job.state
-                } else {
-                    "unknown"
-                };
+                let effective_status = job.effective_status();
                 if let Some(ref filter) = status {
                     if !effective_status.eq_ignore_ascii_case(filter) {
                         continue;
@@ -6312,12 +6368,16 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             let path = dir.join(format!("{id}.json"));
             let rendered = serde_json::to_string_pretty(&job)?;
             std::fs::write(&path, &rendered)?;
-            println!("Created job: {id}");
-            println!("  title:    {}", job.title);
-            println!("  type:     {}", job.job_type);
-            println!("  priority: {}", job.priority);
-            println!("  auto_execute: {}", job.auto_execute);
-            println!("  path:     {}", path.display());
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&job)?);
+            } else {
+                println!("Created job: {id}");
+                println!("  title:    {}", job.title);
+                println!("  type:     {}", job.job_type);
+                println!("  priority: {}", job.priority);
+                println!("  auto_execute: {}", job.auto_execute);
+                println!("  path:     {}", path.display());
+            }
             Ok(EXIT_SUCCESS)
         }
         JobCmd::Match {
@@ -6366,6 +6426,14 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                     serde_json::to_string_pretty(&payload).unwrap_or_default()
                 );
                 return Ok(EXIT_FAILURE);
+            }
+
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+                return Ok(EXIT_SUCCESS);
             }
 
             let candidates = payload
@@ -6433,19 +6501,16 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
         }
         JobCmd::Show { id, workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let path = jobs_dir(&wd).join(format!("{id}.json"));
-            if !path.exists() {
-                bail!("job '{id}' not found at {}", path.display());
-            }
+            let path = resolve_job_path(&jobs_dir(&wd), &id)?;
             let data = std::fs::read_to_string(&path)?;
             let job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
-            let effective_status = if !job.status.is_empty() {
-                &job.status
-            } else if !job.state.is_empty() {
-                &job.state
-            } else {
-                "unknown"
-            };
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&job)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let effective_status = job.effective_status();
             println!("id:           {}", job.id);
             println!("title:        {}", job.title);
             println!("type:         {}", job.job_type);
@@ -6518,10 +6583,7 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             } else {
                 // Local inline execution — load config and use run_once
                 let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                let path = jobs_dir(&wd).join(format!("{id}.json"));
-                if !path.exists() {
-                    bail!("job '{id}' not found at {}", path.display());
-                }
+                let path = resolve_job_path(&jobs_dir(&wd), &id)?;
                 let data = std::fs::read_to_string(&path)?;
                 let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
                 println!("Executing job '{id}' locally...");
@@ -6573,17 +6635,10 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
         }
         JobCmd::Cancel { id, workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let path = jobs_dir(&wd).join(format!("{id}.json"));
-            if !path.exists() {
-                bail!("job '{id}' not found at {}", path.display());
-            }
+            let path = resolve_job_path(&jobs_dir(&wd), &id)?;
             let data = std::fs::read_to_string(&path)?;
             let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
-            let effective_status = if !job.status.is_empty() {
-                &job.status
-            } else {
-                "unknown"
-            };
+            let effective_status = job.effective_status();
             if matches!(effective_status, "completed" | "failed" | "cancelled") {
                 bail!("cannot cancel job '{id}': status '{effective_status}' is terminal");
             }
@@ -9494,6 +9549,12 @@ async fn cmd_deploy_railway(
 
     // 2. Deploy mirage if requested
     if with_mirage {
+        let mut mirage_env = env_vars.clone();
+        mirage_env.insert(
+            "MIRAGE_STATE_DIR".to_string(),
+            "/workspace/.roko/state".to_string(),
+        );
+
         let (_mirage_dep, _) = backend
             .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
                 project_name: config.project.name.clone(),
@@ -9507,7 +9568,7 @@ async fn cmd_deploy_railway(
                 healthcheck_path: "/relay/health".to_string(),
                 volume_mount_path: "/workspace/.roko".to_string(),
                 region: deploy_config.default_region.clone(),
-                env_vars: env_vars.clone(),
+                env_vars: mirage_env,
             })
             .await?;
 
@@ -9525,7 +9586,10 @@ async fn cmd_deploy_railway(
 
         let mut worker_env = env_vars.clone();
         worker_env.insert("ROKO_TEMPLATE_JSON".to_string(), template_b64);
-        worker_env.insert("ROKO_CONTROL_PLANE_URL".to_string(), control_url.to_string());
+        worker_env.insert(
+            "ROKO_CONTROL_PLANE_URL".to_string(),
+            control_url.to_string(),
+        );
 
         let service_name = format!("roko-worker-{template_name}");
         let (_worker_dep, _) = backend
@@ -9894,10 +9958,7 @@ fn resolve_workdir(cli: &Cli) -> PathBuf {
     if let Ok(abs) = dir.canonicalize() {
         for ancestor in abs.ancestors() {
             if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
-                let project_root = ancestor
-                    .parent()
-                    .unwrap_or(ancestor)
-                    .to_path_buf();
+                let project_root = ancestor.parent().unwrap_or(ancestor).to_path_buf();
                 eprintln!(
                     "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
                     project_root.display()

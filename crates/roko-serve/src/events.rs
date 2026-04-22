@@ -107,7 +107,11 @@ pub enum ServerEvent {
     GateResult {
         plan_id: String,
         task_id: String,
+        /// Gate name (also exposed as `rung` for dashboard compat).
         gate: String,
+        /// Numeric rung index for dashboard display.
+        #[serde(default)]
+        rung: u32,
         passed: bool,
     },
 
@@ -152,7 +156,11 @@ pub enum ServerEvent {
     },
 
     /// A one-shot run was started.
-    RunStarted { run_id: String, prompt: String },
+    RunStarted {
+        run_id: String,
+        #[serde(rename = "prompt_preview")]
+        prompt: String,
+    },
 
     /// A one-shot run completed.
     RunCompleted { run_id: String, success: bool },
@@ -297,8 +305,7 @@ pub enum ServerEvent {
     /// A periodic heartbeat.
     Heartbeat {
         agent_id: String,
-        #[serde(default)]
-        block_number: u64,
+        block_number: Option<u64>,
     },
 
     /// The server is shutting down.
@@ -377,6 +384,7 @@ mod tests {
                 plan_id: "p1".into(),
                 task_id: "t1".into(),
                 gate: "compile".into(),
+                rung: 1,
                 passed: true,
             },
             ServerEvent::RunStarted {
@@ -394,7 +402,7 @@ mod tests {
             },
             ServerEvent::Heartbeat {
                 agent_id: "a".into(),
-                block_number: 42,
+                block_number: Some(42),
             },
             ServerEvent::JobCreated {
                 job: serde_json::json!({}),

@@ -372,7 +372,7 @@ impl AppState {
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
             affect_engine: Mutex::new(affect_engine),
-            event_bus: EventBus::new(1024),
+            event_bus: EventBus::new(16_384),
             state_hub: roko_core::shared_state_hub(),
             subscriptions,
             runtime,

@@ -3019,7 +3019,12 @@ fn collect_process_metrics(
         return Vec::new();
     };
 
-    let active_pids = futures::executor::block_on(process_supervisor.active_pids());
+    // `active_pids()` is async (parking_lot::Mutex only), safe to call via
+    // a current-thread runtime on this dedicated background thread.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("mini-rt for process metrics");
+    let active_pids = rt.block_on(process_supervisor.active_pids());
     if active_pids.is_empty() {
         return Vec::new();
     }

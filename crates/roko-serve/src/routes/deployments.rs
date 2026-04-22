@@ -147,10 +147,7 @@ async fn create_deployment(
     let backend: Arc<dyn crate::deploy::DeployBackend> =
         if req.backend.is_some() || user_railway_token.is_some() {
             let rc = state.load_roko_config();
-            let backend_name = req
-                .backend
-                .as_deref()
-                .unwrap_or(&rc.deploy.backend);
+            let backend_name = req.backend.as_deref().unwrap_or(&rc.deploy.backend);
             let token = user_railway_token
                 .as_deref()
                 .or(rc.deploy.railway_api_token.as_deref());
@@ -160,9 +157,7 @@ async fn create_deployment(
                 rc.deploy.project_id.as_deref(),
                 rc.deploy.environment_id.as_deref(),
             )
-            .map_err(|e| {
-                ApiError::bad_request(format!("invalid backend '{backend_name}': {e}"))
-            })?;
+            .map_err(|e| ApiError::bad_request(format!("invalid backend '{backend_name}': {e}")))?;
             Arc::from(b)
         } else {
             Arc::clone(&state.deploy_backend)

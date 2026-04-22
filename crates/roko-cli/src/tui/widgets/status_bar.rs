@@ -125,10 +125,23 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     ));
 
     // ── 4. Context-sensitive keybind hints ────────────────────────────
-    let keys: &str = match state.active_tab {
+    let keys = key_hints_for_tab(state.active_tab, has_failures);
+
+    spans.push(Span::styled(
+        format!(" {keys}"),
+        Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
+    ));
+
+    let line = Line::from(spans);
+    let p = Paragraph::new(line).style(bg);
+    frame.render_widget(p, area);
+}
+
+fn key_hints_for_tab(tab: Tab, has_failures: bool) -> &'static str {
+    match tab {
         Tab::Dashboard => {
             if has_failures {
-                "\u{2191}\u{2193}:nav  a/o/d/e/g:sub-tab  Tab:panel  ?:help"
+                "\u{2191}\u{2193}:nav  a/o/d/e/g:sub-tab  R:retry  D:diag  Tab:panel  ?:help"
             } else {
                 "\u{2191}\u{2193}:nav  a/o/d/e/g:sub-tab  Tab:panel  ?:help"
             }
@@ -141,16 +154,7 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         Tab::Inspect => "\u{2191}\u{2193}:nav  ?:help",
         Tab::Marketplace => "j/k:nav  Enter:detail  n:new  r:refresh  ?:help",
         Tab::Atelier => "j/k:nav  Enter:detail  p:publish  g:gen plan  ?:help",
-    };
-
-    spans.push(Span::styled(
-        format!(" {keys}"),
-        Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
-    ));
-
-    let line = Line::from(spans);
-    let p = Paragraph::new(line).style(bg);
-    frame.render_widget(p, area);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,5 +182,16 @@ mod tests {
                 render_status_bar(frame, area, &state);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn dashboard_key_hints_surface_failure_actions_only_when_needed() {
+        let failed = key_hints_for_tab(Tab::Dashboard, true);
+        assert!(failed.contains("R:retry"));
+        assert!(failed.contains("D:diag"));
+
+        let healthy = key_hints_for_tab(Tab::Dashboard, false);
+        assert!(!healthy.contains("R:retry"));
+        assert!(!healthy.contains("D:diag"));
     }
 }
