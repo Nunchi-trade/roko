@@ -295,6 +295,8 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         (" F5", Theme::DREAM, "logs", Tab::Logs),
         (" F6", Theme::BONE_DIM, "cfg", Tab::Config),
         (" F7", Theme::BONE_DIM, "inspect", Tab::Inspect),
+        (" F8", Theme::SAGE, "market", Tab::Marketplace),
+        (" F9", Theme::DREAM, "atelier", Tab::Atelier),
     ];
 
     let fkey_width: u16 = fkey_items

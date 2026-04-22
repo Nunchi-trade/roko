@@ -139,6 +139,8 @@ pub fn render_status_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         Tab::Logs => "\u{2191}\u{2193}/PgUp/PgDn:scroll  1-4:levels  a:all  ?:help",
         Tab::Config => "j/k:nav  Enter:toggle  ?:help",
         Tab::Inspect => "\u{2191}\u{2193}:nav  ?:help",
+        Tab::Marketplace => "j/k:nav  Enter:detail  n:new  r:refresh  ?:help",
+        Tab::Atelier => "j/k:nav  Enter:detail  p:publish  g:gen plan  ?:help",
     };
 
     spans.push(Span::styled(

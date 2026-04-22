@@ -764,6 +764,17 @@ pub enum JobFormField {
     Description,
 }
 
+/// Result of a TUI-initiated command (e.g. job creation, PRD publish).
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// Short label describing the command (e.g. "create-job").
+    pub label: String,
+    /// Human-readable result message.
+    pub message: String,
+}
+
 /// Complete TUI state, matching Mori's `RunState` field set.
 #[derive(Debug, Clone)]
 pub struct TuiState {
@@ -1029,6 +1040,8 @@ pub struct TuiState {
     pub job_assign_buffer: String,
     /// Per-job progress entries (job_id → progress).
     pub job_progress: HashMap<String, roko_core::JobProgressEntry>,
+    /// Results of TUI-initiated commands (e.g. job creation feedback).
+    pub command_results: Vec<CommandResult>,
 
     cpu_pct_smoothed: SmoothedValue,
     token_rate_smoothed: SmoothedValue,
@@ -1170,6 +1183,7 @@ impl Default for TuiState {
             job_assign_editing: false,
             job_assign_buffer: String::new(),
             job_progress: HashMap::new(),
+            command_results: Vec::new(),
 
             cpu_pct_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
             token_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),

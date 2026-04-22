@@ -798,7 +798,12 @@ impl App {
                 self.tui_state.focus = match tab {
                     Tab::Dashboard | Tab::Plans => FocusZone::PlanTree,
                     Tab::Agents => FocusZone::AgentOutput,
-                    Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => FocusZone::RightPanel,
+                    Tab::Git
+                    | Tab::Logs
+                    | Tab::Config
+                    | Tab::Inspect
+                    | Tab::Marketplace
+                    | Tab::Atelier => FocusZone::RightPanel,
                 };
                 // Sync legacy page
                 if let Some(page_id) = tab_to_page(tab) {
@@ -1382,7 +1387,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         (self.tui_state.git_branch_cursor + 1).min(max);
                 }
-                Tab::Inspect => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::DrillOut => match self.tui_state.active_tab {
@@ -1399,7 +1404,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         self.tui_state.git_branch_cursor.saturating_sub(1);
                 }
-                Tab::Inspect => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::WaveNext => {
@@ -2074,7 +2079,7 @@ impl App {
                 self.tui_state
                     .clamp_log_scroll(self.current_log_max_scroll());
             }
-            Tab::Plans | Tab::Config | Tab::Inspect => {}
+            Tab::Plans | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
         }
     }
 
@@ -2409,6 +2414,20 @@ impl App {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: 0,
                 sub_tab: 0,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Marketplace => ViewState {
+                scroll: 0,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
+                secondary_selected: 0,
+                auto_tail: false,
+            },
+            Tab::Atelier => ViewState {
+                scroll: 0,
+                selected: self.tui_state.selected_plan_idx,
+                sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
             },
@@ -2936,7 +2955,7 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
         Tab::Agents => Some(PageId::AgentStatus),
         Tab::Logs => Some(PageId::LogView),
         Tab::Config => Some(PageId::ConfigView),
-        Tab::Git | Tab::Inspect => None,
+        Tab::Git | Tab::Inspect | Tab::Marketplace | Tab::Atelier => None,
     }
 }
 
@@ -3345,6 +3364,12 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
         assert_eq!(app.tui_state.active_tab, Tab::Inspect);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Marketplace);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Atelier);
 
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
