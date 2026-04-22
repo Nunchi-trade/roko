@@ -175,7 +175,7 @@ async fn list_agents(
             query
                 .owner
                 .as_deref()
-                .is_none_or(|owner| agent.owner.is_empty() || agent.owner == owner)
+                .is_none_or(|owner| agent.owner == owner)
         })
         .map(|(agent, health, capabilities)| {
             let stats = capabilities
@@ -1166,6 +1166,58 @@ mod tests {
         assert_eq!(trace["total"], 0);
         assert_eq!(trace["limit"], 10);
         assert_eq!(trace["items"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn agent_list_cache_is_invalidated_when_agents_register() {
+        let state = test_state();
+        let router = Router::new()
+            .nest("/api", routes())
+            .with_state(Arc::clone(&state));
+
+        let empty = call_json(&router, "/api/agents").await;
+        assert_eq!(empty["total"], 0);
+
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "agent-fresh".into(),
+                owner: "owner-1".into(),
+                capabilities: vec!["messaging".into(), "tasks".into()],
+                ..AgentRegistrationRecord::default()
+            })
+            .await;
+
+        let listed = call_json(&router, "/api/agents").await;
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["items"][0]["id"], "agent-fresh");
+    }
+
+    #[tokio::test]
+    async fn agent_list_owner_filter_excludes_unowned_agents() {
+        let state = test_state();
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "agent-owned".into(),
+                owner: "owner-1".into(),
+                capabilities: vec!["messaging".into()],
+                ..AgentRegistrationRecord::default()
+            })
+            .await;
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "agent-unowned".into(),
+                capabilities: vec!["messaging".into()],
+                ..AgentRegistrationRecord::default()
+            })
+            .await;
+
+        let router = Router::new()
+            .nest("/api", routes())
+            .with_state(Arc::clone(&state));
+        let filtered = call_json(&router, "/api/agents?owner=owner-1").await;
+
+        assert_eq!(filtered["total"], 1);
+        assert_eq!(filtered["items"][0]["id"], "agent-owned");
     }
 
     #[tokio::test]

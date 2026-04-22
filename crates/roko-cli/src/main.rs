@@ -2691,7 +2691,10 @@ async fn cmd_dashboard(
         } else {
             App::new_with_page(&workdir, initial_page)
         };
-        if app.run().is_ok() {
+        let tui_result = tokio::task::spawn_blocking(move || app.run())
+            .await
+            .context("dashboard TUI worker failed")?;
+        if tui_result.is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
