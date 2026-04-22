@@ -99,7 +99,7 @@ pub struct MarketplaceJob {
     #[serde(default)]
     pub status: String,
     /// Fallback status field for backward-compat with older job files using `state`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub state: String,
     /// Who posted the job.
     #[serde(default)]
