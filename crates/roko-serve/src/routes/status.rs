@@ -46,6 +46,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/operations/{id}", get(operation_status))
         .route("/relay/health", get(relay_health))
         .route("/truth_map", get(truth_map_handler))
+        .route("/retention", get(retention_handler))
+        .route("/parity", get(parity_handler))
 }
 
 /// `GET /api/health` — liveness check.
@@ -1814,6 +1816,26 @@ async fn relay_health() -> Json<Value> {
 /// `GET /api/truth_map` — return the entity truth-source registry.
 async fn truth_map_handler() -> Json<Value> {
     Json(serde_json::to_value(crate::truth_map::truth_map()).unwrap_or_default())
+}
+
+// ── Retention ────────────────────────────────────────────────────────
+
+/// `GET /api/retention` — return retention policies and any current violations.
+async fn retention_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let policies = crate::retention::default_retention_policies();
+    let violations = crate::retention::check_retention(&state.workdir);
+    let status = crate::retention::RetentionStatus { policies, violations };
+    Json(serde_json::to_value(&status).unwrap_or_default())
+}
+
+// ── Parity ───────────────────────────────────────────────────────────
+
+/// `GET /api/parity` — return cross-surface parity matrix.
+async fn parity_handler() -> Json<Value> {
+    let matrix = crate::parity::build_parity_matrix();
+    Json(serde_json::to_value(&matrix).unwrap_or_default())
 }
 
 #[cfg(test)]

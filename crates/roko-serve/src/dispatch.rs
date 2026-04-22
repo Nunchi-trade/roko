@@ -1375,7 +1375,86 @@ fn json_login_candidates<'a>(value: &'a Value) -> Vec<&'a str> {
         .unwrap_or_default()
 }
 
-/// Central event routing loop for webhook-driven signals.
+/// Convert an in-process `ServerEvent` into a synthetic `Engram` so that
+/// subscriptions can trigger on plan completions, gate results, episodes,
+/// and job transitions -- not just external webhooks.
+fn server_event_to_synthetic_signal(event: &ServerEvent) -> Option<Engram> {
+    let (kind_str, body_json) = match event {
+        ServerEvent::PlanCompleted {
+            plan_id, success, ..
+        } => (
+            "plan_completed",
+            serde_json::json!({ "plan_id": plan_id, "success": success }),
+        ),
+        ServerEvent::GateResult {
+            plan_id,
+            task_id,
+            gate,
+            passed,
+        } => (
+            "gate_result",
+            serde_json::json!({
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "gate": gate,
+                "passed": passed,
+            }),
+        ),
+        ServerEvent::Episode {
+            plan_id,
+            task_id,
+            passed,
+        } => (
+            "episode_recorded",
+            serde_json::json!({
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "passed": passed,
+            }),
+        ),
+        ServerEvent::JobTransitioned {
+            job_id,
+            from,
+            to,
+            assigned_to,
+        } => (
+            "job_transitioned",
+            serde_json::json!({
+                "job_id": job_id,
+                "from": from,
+                "to": to,
+                "assigned_to": assigned_to,
+            }),
+        ),
+        ServerEvent::RunCompleted { run_id, success } => (
+            "run_completed",
+            serde_json::json!({ "run_id": run_id, "success": success }),
+        ),
+        ServerEvent::DeploymentReady { id, url } => (
+            "deployment_ready",
+            serde_json::json!({ "deployment_id": id, "url": url }),
+        ),
+        ServerEvent::DeploymentFailed { id, reason } => (
+            "deployment_failed",
+            serde_json::json!({ "deployment_id": id, "reason": reason }),
+        ),
+        _ => return None,
+    };
+
+    let body = Body::from_json(&body_json).unwrap_or_else(|_| Body::text("{}"));
+    let signal = Engram::builder(Kind::Custom(kind_str.into()))
+        .body(body)
+        .provenance(Provenance::trusted("roko-serve/dispatch"))
+        .build();
+    Some(signal)
+}
+
+/// Central event routing loop for webhook and in-process signals.
+///
+/// Handles both external webhook events (which arrive as `WebhookReceived`
+/// signals) and in-process events (plan completions, gate results, episodes,
+/// job transitions) that are converted into synthetic `Engram`s and matched
+/// against subscriptions.
 pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispatcher>) {
     let subscriptions: SubscriptionRegistry = state.subscriptions.clone();
     let mut rx = state.event_bus.subscribe();
@@ -1421,8 +1500,14 @@ pub async fn dispatch_loop(state: Arc<AppState>, dispatcher: Arc<dyn AgentDispat
             continue;
         };
 
-        let ServerEvent::WebhookReceived { signal } = envelope.payload else {
-            continue;
+        // Extract a signal from either a webhook event or a synthetic
+        // in-process event. Non-triggerable events are silently skipped.
+        let signal = match envelope.payload {
+            ServerEvent::WebhookReceived { signal } => signal,
+            ref event => match server_event_to_synthetic_signal(event) {
+                Some(signal) => signal,
+                None => continue,
+            },
         };
 
         if state.cancel.is_cancelled() {
