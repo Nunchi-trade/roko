@@ -1018,8 +1018,12 @@ pub struct TuiState {
     // -- marketplace / atelier --
     /// Jobs loaded from .roko/jobs/ for the Marketplace tab.
     pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
+    /// Selected job index in the Marketplace tab.
+    pub marketplace_selected_job: usize,
     /// PRD summaries for the Atelier tab.
     pub atelier_prds: Vec<roko_core::PrdSummary>,
+    /// Selected PRD index in the Atelier tab.
+    pub atelier_selected_prd: usize,
     /// Per-slug task lists for the Atelier tab.
     pub atelier_tasks_by_slug: HashMap<String, Vec<roko_core::job::TaskSummary>>,
     /// Whether the job creation form is in editing mode.
@@ -1172,7 +1176,9 @@ impl Default for TuiState {
             episodes_cache: Vec::new(),
 
             marketplace_jobs: Vec::new(),
+            marketplace_selected_job: 0,
             atelier_prds: Vec::new(),
+            atelier_selected_prd: 0,
             atelier_tasks_by_slug: HashMap::new(),
             job_form_editing: false,
             job_form_title: String::new(),
@@ -1615,6 +1621,18 @@ impl TuiState {
         self.marketplace_jobs = data.marketplace_jobs.clone();
         self.atelier_prds = data.atelier_prds.clone();
         self.atelier_tasks_by_slug = data.atelier_tasks_by_slug.clone();
+
+        // Clamp marketplace/atelier selections to valid range after data refresh.
+        if self.marketplace_jobs.is_empty() {
+            self.marketplace_selected_job = 0;
+        } else if self.marketplace_selected_job >= self.marketplace_jobs.len() {
+            self.marketplace_selected_job = self.marketplace_jobs.len() - 1;
+        }
+        if self.atelier_prds.is_empty() {
+            self.atelier_selected_prd = 0;
+        } else if self.atelier_selected_prd >= self.atelier_prds.len() {
+            self.atelier_selected_prd = self.atelier_prds.len() - 1;
+        }
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.

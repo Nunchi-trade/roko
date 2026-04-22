@@ -7344,6 +7344,31 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -
         .await
         .with_context(|| format!("create {}", roko_dir.display()))?;
 
+    // Create all top-level layout directories and VERSION file via RokoLayout.
+    // This ensures doctor checks pass and all subsystems have their dirs.
+    let layout = RokoLayout::for_project(&target);
+    layout
+        .ensure_dirs()
+        .await
+        .with_context(|| "create .roko layout directories")?;
+
+    // Create additional directories used by CLI subsystems but not in
+    // RokoLayout::top_level_dirs() (jobs, prd, task-outputs, etc.).
+    for extra in &[
+        roko_dir.join("jobs"),
+        roko_dir.join("prd"),
+        roko_dir.join("prd").join("published"),
+        roko_dir.join("prd").join("drafts"),
+        roko_dir.join("task-outputs"),
+        roko_dir.join("research"),
+        roko_dir.join("subscriptions"),
+        roko_dir.join("templates"),
+    ] {
+        tokio::fs::create_dir_all(extra)
+            .await
+            .with_context(|| format!("create {}", extra.display()))?;
+    }
+
     let engrams_path = roko_dir.join("engrams.jsonl");
     if !engrams_path.exists() {
         // Migrate from legacy name if present.
@@ -7540,6 +7565,44 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             println!("  {kind:<24} {n}");
         }
     }
+
+    // Running agents from runtime directory.
+    let runtime_dir = workdir.join(".roko").join("runtime");
+    let mut running_agents: usize = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir(&runtime_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".pid") {
+                running_agents += 1;
+            }
+        }
+    }
+
+    // Active plans from executor snapshot.
+    let executor_path = workdir.join(".roko").join("state").join("executor.json");
+    let active_plans: usize = if executor_path.is_file() {
+        // Parse minimally: count plans with active=true.
+        match tokio::fs::read_to_string(&executor_path).await {
+            Ok(contents) => {
+                // Quick JSON parse: count occurrences of "active":true or
+                // plan entries. For a lightweight check, use serde_json::Value.
+                serde_json::from_str::<serde_json::Value>(&contents)
+                    .ok()
+                    .and_then(|val| val.get("plans")?.as_array().map(|arr| arr.len()))
+                    .unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+
+    println!();
+    println!(
+        "workspace: {} agent pid(s), {} plan(s) in executor snapshot",
+        running_agents, active_plans
+    );
 
     let mut episodes = substrate
         .query(&Query::of_kind(Kind::Episode), &ctx)

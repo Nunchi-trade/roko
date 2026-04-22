@@ -1813,6 +1813,22 @@ impl App {
                 self.tui_state.selected_agent = next as usize;
             }
             (Tab::Agents, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
+            (Tab::Marketplace, _) => {
+                if !self.tui_state.marketplace_jobs.is_empty() {
+                    let max = self.tui_state.marketplace_jobs.len().saturating_sub(1);
+                    let next = (self.tui_state.marketplace_selected_job as i32 + delta)
+                        .clamp(0, max as i32);
+                    self.tui_state.marketplace_selected_job = next as usize;
+                }
+            }
+            (Tab::Atelier, _) => {
+                if !self.tui_state.atelier_prds.is_empty() {
+                    let max = self.tui_state.atelier_prds.len().saturating_sub(1);
+                    let next = (self.tui_state.atelier_selected_prd as i32 + delta)
+                        .clamp(0, max as i32);
+                    self.tui_state.atelier_selected_prd = next as usize;
+                }
+            }
             (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
@@ -1842,6 +1858,26 @@ impl App {
                 } else {
                     offset.min(max)
                 };
+            }
+            (Tab::Marketplace, _) => {
+                if !self.tui_state.marketplace_jobs.is_empty() {
+                    let max = self.tui_state.marketplace_jobs.len().saturating_sub(1);
+                    self.tui_state.marketplace_selected_job = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                }
+            }
+            (Tab::Atelier, _) => {
+                if !self.tui_state.atelier_prds.is_empty() {
+                    let max = self.tui_state.atelier_prds.len().saturating_sub(1);
+                    self.tui_state.atelier_selected_prd = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                }
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
                 if self.tui_state.agent_topology_visible {
@@ -2419,14 +2455,14 @@ impl App {
             },
             Tab::Marketplace => ViewState {
                 scroll: 0,
-                selected: self.tui_state.selected_plan_idx,
+                selected: self.tui_state.marketplace_selected_job,
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
             },
             Tab::Atelier => ViewState {
                 scroll: 0,
-                selected: self.tui_state.selected_plan_idx,
+                selected: self.tui_state.atelier_selected_prd,
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
