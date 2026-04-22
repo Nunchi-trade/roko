@@ -47,11 +47,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
+        gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /agent-relay /usr/local/bin/agent-relay
 COPY docker/start-mirage-with-relay.sh /usr/local/bin/start-mirage-with-relay
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV PORT=8545
 ENV ROKO_AGENT_RELAY_BIND=127.0.0.1:9011
@@ -63,12 +65,13 @@ ENV RUST_LOG=info
 RUN useradd --create-home --shell /bin/bash mirage \
     && mkdir -p /workspace/.roko/state \
     && chown -R mirage:mirage /workspace \
-    && chmod +x /usr/local/bin/start-mirage-with-relay
+    && chmod +x /usr/local/bin/start-mirage-with-relay \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
-USER mirage
 WORKDIR /workspace
 # Default single-origin ingress port. Relay stays on loopback only.
 EXPOSE 8545
 
-ENTRYPOINT ["/usr/local/bin/start-mirage-with-relay"]
-CMD ["--chain-id", "88888"]
+# entrypoint.sh runs as root, fixes volume permissions, then drops to mirage via gosu.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/local/bin/start-mirage-with-relay", "--chain-id", "88888"]
