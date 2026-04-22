@@ -91,6 +91,7 @@ Tags: `latest` (main only), `sha-<short>`, `v<version>` (on version tags).
 - **Port:** `8545`
 - **Volume:** `/workspace/.roko` (chain snapshots)
 - **Entrypoint:** `entrypoint.sh` — starts as root, fixes volume permissions via `gosu`, drops to `mirage` user
+- **Demo block production:** set `MIRAGE_BLOCK_INTERVAL_MS=1000` for one local block per second when no live upstream websocket is attached; set it empty to disable auto-mining.
 
 ### roko-worker-* (agent workers)
 
@@ -134,7 +135,10 @@ Workers receive their configuration as a base64-encoded `ROKO_TEMPLATE_JSON` env
 |---|---|
 | `MIRAGE_STATE_DIR` | Snapshot directory (default: `/workspace/.roko/state`) |
 | `MIRAGE_SNAPSHOT_INTERVAL_SECS` | Snapshot frequency (default: `15`) |
+| `MIRAGE_BLOCK_INTERVAL_MS` | Local auto-mining interval for demo deployments (default: `1000` in `docker/mirage-demo.Dockerfile`; unset/empty disables it) |
 | `ETH_RPC_URL` | Upstream Ethereum RPC for mainnet fork |
+| `ISFR_SERVICE_URL` | Optional upstream ISFR service URL. If unset, `/api/isfr/*` returns local `no_data` fallback responses instead of 502s. |
+| `ISFR_STRICT_PROXY` | Set to `true` to return 502 when the configured ISFR service is unavailable. |
 
 ## Per-User Railway Tokens (Dashboard API)
 

@@ -28,7 +28,7 @@ RUN cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" 
     && cp target/release/mirage-rs /mirage-rs \
     && cp target/release/agent-relay /agent-relay
 
-FROM debian:bookworm-slim
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/nunchi/roko"
 LABEL org.opencontainers.image.description="mirage-rs demo with dashboard, roko APIs, and same-origin agent-relay"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
@@ -39,11 +39,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
+        gosu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /mirage-rs /usr/local/bin/mirage-rs
 COPY --from=builder /agent-relay /usr/local/bin/agent-relay
 COPY docker/start-mirage-with-relay.sh /usr/local/bin/start-mirage-with-relay
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY apps/mirage-rs/static/ /usr/local/share/mirage-dashboard/
 
 ENV PORT=8545
@@ -52,17 +54,18 @@ ENV ROKO_AGENT_RELAY_BIND=127.0.0.1:9011
 ENV ROKO_AGENT_RELAY_URL=http://127.0.0.1:9011
 ENV MIRAGE_STATE_DIR=/workspace/.roko/state
 ENV MIRAGE_SNAPSHOT_INTERVAL_SECS=15
+ENV MIRAGE_BLOCK_INTERVAL_MS=1000
 ENV RUST_LOG=info
 
 RUN useradd --create-home --shell /bin/bash mirage \
     && mkdir -p /workspace/.roko/state \
     && chown -R mirage:mirage /workspace \
-    && chmod +x /usr/local/bin/start-mirage-with-relay
+    && chmod +x /usr/local/bin/start-mirage-with-relay \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
-USER mirage
 WORKDIR /workspace
 # Default single-origin ingress port. Relay stays on loopback only.
 EXPOSE 8545
 
-ENTRYPOINT ["/usr/local/bin/start-mirage-with-relay"]
-CMD ["--chain-id", "1"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/local/bin/start-mirage-with-relay", "--chain-id", "1"]
