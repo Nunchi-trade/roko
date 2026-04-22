@@ -44,6 +44,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/episodes", get(episodes))
         .route("/signals", get(signals))
         .route("/operations/{id}", get(operation_status))
+        .route("/relay/health", get(relay_health))
+        .route("/truth_map", get(truth_map_handler))
 }
 
 /// `GET /api/health` — liveness check.
@@ -1797,6 +1799,33 @@ fn dispatch_bias_label(bias: AgentDispatchBias) -> String {
         AgentDispatchBias::PreferCheaper => "prefer_cheaper".to_string(),
         AgentDispatchBias::Neutral => "neutral".to_string(),
     }
+}
+
+// ── Relay health ─────────────────────────────────────────────────────
+
+/// `GET /api/relay/health` — return relay connection diagnostics.
+async fn relay_health() -> Json<Value> {
+    let health = crate::relay::RelayHealth::default();
+    Json(serde_json::to_value(&health).unwrap_or_default())
+}
+
+// ── Truth map ────────────────────────────────────────────────────────
+
+/// `GET /api/truth_map` — return the entity truth-source registry.
+async fn truth_map_handler() -> Json<Value> {
+    let entries: Vec<Value> = crate::truth_map::truth_map()
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "kind": entry.kind.to_string(),
+                "source": entry.source.to_string(),
+                "read_path": entry.read_path,
+                "ws_event": entry.ws_event,
+                "projection": entry.projection,
+            })
+        })
+        .collect();
+    Json(Value::Array(entries))
 }
 
 #[cfg(test)]

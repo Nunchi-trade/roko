@@ -173,6 +173,7 @@ async fn execute_plan(
         )));
     }
 
+    let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn({
         let plan_id = plan_id.clone();
         async move {
@@ -180,8 +181,12 @@ async fn execute_plan(
                 plan_id: plan_id.clone(),
             });
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success, .. }) => success,
+                Ok(RunResult { success, .. }) => {
+                    state_for_task.provider_health.record_success("default");
+                    success
+                }
                 Err(err) => {
+                    state_for_task.provider_health.record_failure("default");
                     bus.publish(ServerEvent::Error {
                         message: format!("plan execution failed for {plan_id}: {err}"),
                     });
@@ -258,12 +263,17 @@ async fn generate_plan(
     let kind = format!("plan_generate:{slug}");
     let slug_for_task = slug.clone();
 
+    let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success, .. }) => success,
+                Ok(RunResult { success, .. }) => {
+                    state_for_task.provider_health.record_success("default");
+                    success
+                }
                 Err(err) => {
+                    state_for_task.provider_health.record_failure("default");
                     bus.publish(ServerEvent::Error {
                         message: format!("plan generation failed for {slug_for_task}: {err}"),
                     });

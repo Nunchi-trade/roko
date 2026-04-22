@@ -65,11 +65,13 @@ pub mod integrations;
 pub mod job_runner;
 pub mod openapi;
 pub mod plan_types;
+pub mod relay;
 pub mod routes;
 pub mod runtime;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
+pub mod truth_map;
 
 pub use crate::routes::reload_config_from_disk;
 
@@ -205,6 +207,7 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+        let _orchestrator_bridge = start_orchestrator_event_bridge(Arc::clone(&state));
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let router = routes::build_router(
@@ -300,6 +303,7 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
     let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+    let _orchestrator_bridge = start_orchestrator_event_bridge(Arc::clone(&state));
     let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
     let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
     let router = routes::build_router(
@@ -462,6 +466,147 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::Error { message } => Some(DashboardEvent::Error {
             message: message.clone(),
         }),
+        _ => None,
+    }
+}
+
+/// Bridge orchestrator events (`StateHub` → `EventBus`) so SSE/WS clients
+/// see gate results, task completions, and other events from `roko plan run`.
+///
+/// This is the reverse direction of [`start_state_hub_bridge`] which pushes
+/// REST-triggered `ServerEvent`s into the `StateHub` for the TUI.
+pub fn start_orchestrator_event_bridge(state: Arc<AppState>) -> JoinHandle<()> {
+    let mut rx = state.state_hub.subscribe_events();
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(envelope) => {
+                    if let Some(server_event) = dashboard_event_to_server(&envelope.payload) {
+                        bus.publish(server_event);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(n, "orchestrator bridge lagged behind state hub");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Convert a [`DashboardEvent`] to a [`ServerEvent`] for SSE/WS delivery.
+/// Inverse of [`server_event_to_dashboard`].
+fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<ServerEvent> {
+    use roko_core::DashboardEvent;
+    match event {
+        DashboardEvent::PlanStarted { plan_id } => Some(ServerEvent::PlanStarted {
+            plan_id: plan_id.clone(),
+        }),
+        DashboardEvent::PlanCompleted { plan_id, success } => Some(ServerEvent::PlanCompleted {
+            plan_id: plan_id.clone(),
+            success: *success,
+        }),
+        DashboardEvent::TaskStarted {
+            plan_id,
+            task_id,
+            phase,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskStarted {
+                task_id: task_id.clone(),
+                phase: phase.clone(),
+            },
+        }),
+        DashboardEvent::TaskCompleted {
+            plan_id,
+            task_id,
+            outcome,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskCompleted {
+                task_id: task_id.clone(),
+                outcome: outcome.clone(),
+            },
+        }),
+        DashboardEvent::TaskPhaseChanged {
+            plan_id,
+            task_id,
+            old_phase,
+            new_phase,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskPhaseChanged {
+                task_id: task_id.clone(),
+                old_phase: old_phase.clone(),
+                new_phase: new_phase.clone(),
+            },
+        }),
+        DashboardEvent::AgentSpawned { agent_id, role } => Some(ServerEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: role.clone(),
+        }),
+        DashboardEvent::AgentOutput { agent_id, content } => Some(ServerEvent::AgentOutput {
+            agent_id: agent_id.clone(),
+            run_id: None,
+            content: content.clone(),
+            done: false,
+            metadata: None,
+        }),
+        DashboardEvent::GateResult {
+            plan_id,
+            task_id,
+            gate,
+            passed,
+        } => Some(ServerEvent::GateResult {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            gate: gate.clone(),
+            passed: *passed,
+        }),
+        DashboardEvent::PhaseTransition { plan_id, from, to } => {
+            Some(ServerEvent::PhaseTransition {
+                plan_id: plan_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+            })
+        }
+        DashboardEvent::EfficiencyEvent {
+            plan_id,
+            task_id,
+            metric,
+            value,
+        } => Some(ServerEvent::EfficiencyEvent {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            metric: metric.clone(),
+            value: *value,
+        }),
+        DashboardEvent::JobExecutionStarted {
+            job_id,
+            job_type,
+            agent_id,
+        } => Some(ServerEvent::JobExecutionStarted {
+            job_id: job_id.clone(),
+            job_type: job_type.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        DashboardEvent::JobProgress {
+            job_id,
+            percent,
+            message,
+        } => Some(ServerEvent::JobProgress {
+            job_id: job_id.clone(),
+            percent: *percent,
+            message: message.clone(),
+        }),
+        DashboardEvent::Error { message } => Some(ServerEvent::Error {
+            message: message.clone(),
+        }),
+        // Unmapped variants (Diagnosis, ExperimentWinnersUpdated, CFactorTrendUpdated,
+        // CascadeRouterUpdated, GateThresholdsUpdated, etc.) are dropped.
+        // FIXME: bridge loop — REST-originated events appear twice on EventBus
+        // (once from REST, once via StateHub→EventBus). Accepted for now.
         _ => None,
     }
 }

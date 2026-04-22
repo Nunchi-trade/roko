@@ -107,6 +107,7 @@ pub(crate) async fn spawn_background_run(
                 .await
             {
                 Ok(result) => {
+                    state_for_task.provider_health.record_success("default");
                     record_run_result(&state_for_task, &run_id, result.clone()).await;
                     publish_run_completed(
                         &bus,
@@ -119,6 +120,7 @@ pub(crate) async fn spawn_background_run(
                     );
                 }
                 Err(e) => {
+                    state_for_task.provider_health.record_failure("default");
                     let error_message = format!("run failed: {e}");
                     record_run_failure(&state_for_task, &run_id, &error_message).await;
                     bus.publish(ServerEvent::Error {

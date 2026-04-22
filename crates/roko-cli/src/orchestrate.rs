@@ -859,6 +859,28 @@ fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &P
     });
 }
 
+/// Log a one-time warning if `ANTHROPIC_API_KEY` is not set, which means
+/// episode distillation into the neuro knowledge store will be silently
+/// skipped.  Called at the start of each `PlanRunner::run_task_plans_inner`
+/// invocation but only emits the warning once per process.
+fn warn_if_distillation_disabled() {
+    use std::sync::Once;
+    static WARN: Once = Once::new();
+    WARN.call_once(|| {
+        let key_set = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_owned())
+            .is_some_and(|k| !k.is_empty());
+        if !key_set {
+            tracing::warn!(
+                "ANTHROPIC_API_KEY is not set; episode distillation into the neuro \
+                 knowledge store is disabled. Set it to enable automatic learning \
+                 from completed episodes."
+            );
+        }
+    });
+}
+
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let path = workdir.join("roko.toml");
     if !path.exists() {
@@ -7907,6 +7929,7 @@ impl PlanRunner {
 
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        warn_if_distillation_disabled();
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),

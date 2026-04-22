@@ -1284,7 +1284,8 @@ fn main() {
         }
     };
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    apply_env_overrides(&mut cli);
 
     // ── Color mode ──────────────────────────────────────────────────
     let use_color = cli.color.should_color();
@@ -1773,6 +1774,16 @@ async fn cmd_archive(
             let age_days = (chrono::Utc::now().timestamp_millis() - e.created_at_ms) / 86_400_000;
             println!("  {:?} | {} | {}d old", e.kind, &e.id, age_days);
         }
+        return Ok(EXIT_SUCCESS);
+    }
+
+    // Confirm destructive operation (skipped in quiet / non-TTY mode).
+    let prompt_msg = format!(
+        "Archive {} engram(s) older than {older_than}?",
+        candidates.len()
+    );
+    if !confirm_destructive(&prompt_msg, cli.quiet) {
+        println!("aborted");
         return Ok(EXIT_SUCCESS);
     }
 
@@ -8932,6 +8943,102 @@ fn resolve_workdir(cli: &Cli) -> PathBuf {
     }
 
     dir
+}
+
+/// Apply environment variable fallbacks to CLI flags.
+///
+/// When a CLI flag was not explicitly provided, its corresponding `ROKO_*`
+/// environment variable is consulted. This runs once immediately after
+/// `Cli::parse()` so every downstream consumer sees the resolved value.
+///
+/// | Env var          | CLI flag       | Behaviour                                  |
+/// |------------------|----------------|---------------------------------------------|
+/// | `ROKO_MODEL`     | `--model`      | Override when `--model` not given            |
+/// | `ROKO_EFFORT`    | `--effort`     | Override when `--effort` not given            |
+/// | `ROKO_ROLE`      | `--role`       | Override when `--role` not given              |
+/// | `ROKO_QUIET`     | `--quiet`      | Enable quiet if "1" or "true"                |
+/// | `ROKO_LOG_FORMAT` | `--log-format` | Override when default "text" is in effect     |
+fn apply_env_overrides(cli: &mut Cli) {
+    if cli.model.is_none() {
+        if let Ok(val) = env::var("ROKO_MODEL") {
+            if !val.is_empty() {
+                cli.model = Some(val);
+            }
+        }
+    }
+
+    if cli.effort.is_none() {
+        if let Ok(val) = env::var("ROKO_EFFORT") {
+            match val.to_ascii_lowercase().as_str() {
+                "low" => cli.effort = Some(Effort::Low),
+                "medium" => cli.effort = Some(Effort::Medium),
+                "high" => cli.effort = Some(Effort::High),
+                "max" => cli.effort = Some(Effort::Max),
+                _ => {
+                    eprintln!(
+                        "warning: ROKO_EFFORT={val:?} is not valid (expected low/medium/high/max), ignoring"
+                    );
+                }
+            }
+        }
+    }
+
+    if cli.role.is_none() {
+        if let Ok(val) = env::var("ROKO_ROLE") {
+            if !val.is_empty() {
+                cli.role = Some(val);
+            }
+        }
+    }
+
+    if !cli.quiet {
+        if let Ok(val) = env::var("ROKO_QUIET") {
+            if val == "1" || val.eq_ignore_ascii_case("true") {
+                cli.quiet = true;
+            }
+        }
+    }
+
+    // log_format has a clap default of Text; override only when the user
+    // did not pass `--log-format` explicitly (we detect this by checking if
+    // the env var is set — the clap default means we can't distinguish
+    // "user typed --log-format text" from "default", but the env var path
+    // is still useful when the default is in effect).
+    if cli.log_format == LogFormat::Text {
+        if let Ok(val) = env::var("ROKO_LOG_FORMAT") {
+            match val.to_ascii_lowercase().as_str() {
+                "json" => cli.log_format = LogFormat::Json,
+                "text" => {} // already the default
+                _ => {
+                    eprintln!(
+                        "warning: ROKO_LOG_FORMAT={val:?} is not valid (expected text/json), ignoring"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Ask the user to confirm a destructive operation.
+///
+/// Returns `true` (proceed) immediately when:
+/// - `quiet` mode is active,
+/// - stdin is not a TTY (CI / pipes), or
+/// - the user types `y` or `Y`.
+///
+/// Returns `false` otherwise, meaning the operation should be skipped.
+fn confirm_destructive(message: &str, quiet: bool) -> bool {
+    if quiet || !std::io::stdin().is_terminal() {
+        return true;
+    }
+    eprint!("{message} [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_ok() {
+        input.trim().eq_ignore_ascii_case("y")
+    } else {
+        false
+    }
 }
 
 /// Resolve the config, applying CLI overrides for --role, --model, --effort.

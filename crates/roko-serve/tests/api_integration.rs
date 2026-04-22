@@ -569,3 +569,147 @@ async fn openapi_spec_returns_json() {
     // Should have standard OpenAPI top-level keys.
     assert!(body.get("openapi").is_some() || body.get("paths").is_some());
 }
+
+// ---------------------------------------------------------------------------
+// EventBus ↔ StateHub bridge
+// ---------------------------------------------------------------------------
+
+/// Verify that a `DashboardEvent` published to `StateHub` arrives on the
+/// `EventBus` and is visible to a WebSocket client via the orchestrator bridge.
+#[tokio::test]
+async fn orchestrator_events_reach_websocket_via_bridge() {
+    let (_dir, state, app) = test_app_state();
+    let _bridge = roko_serve::start_orchestrator_event_bridge(Arc::clone(&state));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ws server");
+    let addr = listener.local_addr().expect("listener addr");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app)
+            .await
+            .expect("serve test app");
+    });
+
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("connect websocket");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Publish a DashboardEvent directly to StateHub (simulating orchestrate.rs).
+    let sender = state.state_hub.sender();
+    sender.publish(roko_core::DashboardEvent::GateResult {
+        plan_id: "test-plan-1".to_string(),
+        task_id: "task-A".to_string(),
+        gate: "compile".to_string(),
+        passed: true,
+    });
+
+    // The bridge converts it to ServerEvent::GateResult → WS client sees it.
+    let event: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse gate event");
+    assert_eq!(event["type"], "gate_result");
+    assert_eq!(event["plan_id"], "test-plan-1");
+    assert_eq!(event["task_id"], "task-A");
+    assert_eq!(event["gate"], "compile");
+    assert_eq!(event["passed"], true);
+
+    let _ = socket.close(None).await;
+    server.abort();
+}
+
+/// Verify multiple `DashboardEvent` types bridge correctly in sequence.
+#[tokio::test]
+async fn bridge_converts_multiple_event_types() {
+    let (_dir, state, app) = test_app_state();
+    let _bridge = roko_serve::start_orchestrator_event_bridge(Arc::clone(&state));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ws server");
+    let addr = listener.local_addr().expect("listener addr");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app)
+            .await
+            .expect("serve test app");
+    });
+
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("connect websocket");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let sender = state.state_hub.sender();
+
+    // 1. PlanStarted
+    sender.publish(roko_core::DashboardEvent::PlanStarted {
+        plan_id: "plan-bridge".to_string(),
+    });
+    let ev: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse plan_started");
+    assert_eq!(ev["type"], "plan_started");
+    assert_eq!(ev["plan_id"], "plan-bridge");
+
+    // 2. TaskStarted (wrapped in Execution)
+    sender.publish(roko_core::DashboardEvent::TaskStarted {
+        plan_id: "plan-bridge".to_string(),
+        task_id: "task-1".to_string(),
+        phase: "implementing".to_string(),
+    });
+    let ev: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse task_started");
+    assert_eq!(ev["type"], "execution");
+    assert_eq!(ev["plan_id"], "plan-bridge");
+    assert_eq!(ev["event"]["type"], "task_started");
+    assert_eq!(ev["event"]["task_id"], "task-1");
+
+    // 3. PlanCompleted
+    sender.publish(roko_core::DashboardEvent::PlanCompleted {
+        plan_id: "plan-bridge".to_string(),
+        success: true,
+    });
+    let ev: serde_json::Value =
+        serde_json::from_str(&next_ws_text(&mut socket).await).expect("parse plan_completed");
+    assert_eq!(ev["type"], "plan_completed");
+    assert_eq!(ev["success"], true);
+
+    let _ = socket.close(None).await;
+    server.abort();
+}
+
+/// Verify unmapped `DashboardEvent` variants are silently dropped (no panic).
+#[tokio::test]
+async fn bridge_drops_unmapped_events_without_panic() {
+    let (_dir, state, _app) = test_app_state();
+    let _bridge = roko_serve::start_orchestrator_event_bridge(Arc::clone(&state));
+
+    let mut rx = state.event_bus.subscribe();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sender = state.state_hub.sender();
+
+    // Publish an unmapped event (CascadeRouterUpdated has no ServerEvent).
+    sender.publish(roko_core::DashboardEvent::CascadeRouterUpdated {
+        snapshot_json: "{}".to_string(),
+    });
+
+    // Then publish a mapped event that WILL come through.
+    sender.publish(roko_core::DashboardEvent::Error {
+        message: "sentinel".to_string(),
+    });
+
+    // The first event on EventBus should be the Error, not CascadeRouterUpdated.
+    let envelope = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("should receive within 2s")
+        .expect("recv should succeed");
+    match &envelope.payload {
+        roko_serve::events::ServerEvent::Error { message } => {
+            assert_eq!(message, "sentinel");
+        }
+        other => panic!("expected Error, got: {other:?}"),
+    }
+}
