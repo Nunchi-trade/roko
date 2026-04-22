@@ -5,7 +5,7 @@
 //! cost tracking, git state, and more.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -17,8 +17,8 @@ use roko_core::OperatingFrequency;
 use super::atmosphere::Atmosphere;
 use super::dashboard::{
     AgentSummary, AlertSummary, CascadeRouterState, DashboardData, EfficiencySummary,
-    ExperimentSummary, GateResultSummary, GateResultsPageData, PlanExecutionSnapshot,
-    PlanTaskListSnapshot, SignalSummary, TaskSummary, Theme,
+    ExperimentSummary, GateResultSummary, GateResultsPageData, KnowledgeBrowseEntry,
+    PlanExecutionSnapshot, PlanTaskListSnapshot, SignalSummary, TaskSummary, Theme,
 };
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
 use super::modals::ModalState;
@@ -591,7 +591,7 @@ impl LogEntryLevel {
 }
 
 /// A parsed, display-ready log row for the Logs tab.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
     /// Human-readable timestamp for the rendered row.
     pub timestamp: String,
@@ -613,6 +613,225 @@ impl LogEntry {
             source,
             message,
         }
+    }
+}
+
+/// Build a unified, time-sorted log from all available data sources.
+fn build_unified_log_cache(tui_state: &TuiState) -> Vec<LogEntry> {
+    let mut entries: BTreeMap<(i64, usize), LogEntry> = BTreeMap::new();
+    let mut seq = 0usize;
+
+    for signal in &tui_state.recent_signals {
+        let level = if signal.kind.contains("error") || signal.kind.contains("fail") {
+            LogEntryLevel::Error
+        } else if signal.kind.contains("warn") {
+            LogEntryLevel::Warn
+        } else if signal.kind.contains("gate:") {
+            if signal.payload_preview.contains("passed") {
+                LogEntryLevel::Info
+            } else {
+                LogEntryLevel::Warn
+            }
+        } else if signal.kind.contains("debug") {
+            LogEntryLevel::Debug
+        } else {
+            LogEntryLevel::Info
+        };
+
+        let message = if signal.payload_preview.is_empty() {
+            signal.kind.clone()
+        } else {
+            truncate_log(&signal.payload_preview, 120)
+        };
+
+        entries.insert(
+            (signal.created_at_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(signal.created_at_ms),
+                level,
+                format!("signal:{}", truncate_log_kind(&signal.kind)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for episode in &tui_state.episodes_cache {
+        let ts_ms = episode.timestamp.timestamp_millis();
+        let level = if !episode.success {
+            LogEntryLevel::Error
+        } else if episode.kind == "gate" {
+            LogEntryLevel::Warn
+        } else {
+            LogEntryLevel::Info
+        };
+        let duration_str = if episode.duration_secs > 0.0 {
+            format!(" ({:.1}s)", episode.duration_secs)
+        } else {
+            String::new()
+        };
+        let gate_summary = if !episode.gate_verdicts.is_empty() {
+            let passed = episode
+                .gate_verdicts
+                .iter()
+                .filter(|gate| gate.passed)
+                .count();
+            let total = episode.gate_verdicts.len();
+            format!(" gates:{passed}/{total}")
+        } else {
+            String::new()
+        };
+        let model = if episode.model.is_empty() {
+            String::new()
+        } else {
+            format!("model={}", episode.model)
+        };
+        let message = format!(
+            "{} [{}] task={}{}{} {}",
+            episode.kind,
+            if episode.success { "ok" } else { "FAIL" },
+            truncate_log(&episode.task_id, 30),
+            duration_str,
+            gate_summary,
+            model,
+        );
+
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                episode.timestamp.format("%H:%M:%S").to_string(),
+                level,
+                format!("episode:{}", truncate_log_kind(&episode.kind)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for event in &tui_state.efficiency_events {
+        let ts_ms = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp_millis());
+        let level = if event.cost_usd > 1.0 {
+            LogEntryLevel::Warn
+        } else {
+            LogEntryLevel::Debug
+        };
+        let cache_pct = if event.input_tokens > 0 {
+            format!(
+                " cache:{:.0}%",
+                event.cache_read_tokens as f64 / event.input_tokens as f64 * 100.0
+            )
+        } else {
+            String::new()
+        };
+        let message = format!(
+            "{} model={} in={} out={} ${:.4} {}ms{}",
+            event.role,
+            truncate_log(&event.model, 20),
+            format_log_count(event.input_tokens),
+            format_log_count(event.output_tokens),
+            event.cost_usd,
+            event.duration_ms,
+            cache_pct,
+        );
+
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(ts_ms),
+                level,
+                format!("efficiency:{}", truncate_log(&event.agent_id, 12)),
+                message,
+            ),
+        );
+        seq += 1;
+    }
+
+    for failure in &tui_state.gate_results_page.failure_rows {
+        entries.insert(
+            (failure.created_at_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(failure.created_at_ms),
+                LogEntryLevel::Error,
+                format!("gate:{}", failure.gate_name),
+                format!(
+                    "FAILED task={} {}",
+                    failure.task_id,
+                    truncate_log(&failure.error_excerpt, 80),
+                ),
+            ),
+        );
+        seq += 1;
+    }
+
+    for event in &tui_state.event_log {
+        let ts_ms = event.timestamp_ms as i64;
+        let level = match event.event_type.as_str() {
+            "error" | "task_failed" | "gate_failed" => LogEntryLevel::Error,
+            "warning" | "retry" => LogEntryLevel::Warn,
+            "debug" => LogEntryLevel::Debug,
+            _ => LogEntryLevel::Info,
+        };
+        let detail = if event.task_id.is_empty() {
+            event.message.clone()
+        } else {
+            format!("[{}] {}", event.task_id, event.message)
+        };
+        entries.insert(
+            (ts_ms, seq),
+            LogEntry::new(
+                format_log_timestamp_ms(ts_ms),
+                level,
+                format!("event:{}", truncate_log(&event.event_type, 16)),
+                detail,
+            ),
+        );
+        seq += 1;
+    }
+
+    const MAX_UNIFIED_LOG_ENTRIES: usize = 10_000;
+    let all: Vec<LogEntry> = entries.into_values().collect();
+    let len = all.len();
+    if len > MAX_UNIFIED_LOG_ENTRIES {
+        all.into_iter()
+            .skip(len - MAX_UNIFIED_LOG_ENTRIES)
+            .collect()
+    } else {
+        all
+    }
+}
+
+fn format_log_timestamp_ms(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| String::from("??:??:??"))
+}
+
+fn truncate_log_kind(kind: &str) -> String {
+    let parts: Vec<&str> = kind.split(':').collect();
+    if parts.len() <= 2 {
+        kind.to_string()
+    } else {
+        parts[parts.len() - 2..].join(":")
+    }
+}
+
+fn truncate_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+fn format_log_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -754,6 +973,27 @@ impl SmoothedValue {
 // TuiState
 // ---------------------------------------------------------------------------
 
+/// Which field has focus in the job creation form.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobFormField {
+    #[default]
+    Title,
+    Type,
+    Priority,
+    Description,
+}
+
+/// Result of a TUI-initiated command (e.g. job creation, PRD publish).
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    /// Whether the command succeeded.
+    pub ok: bool,
+    /// Short label describing the command (e.g. "create-job").
+    pub label: String,
+    /// Human-readable result message.
+    pub message: String,
+}
+
 /// Complete TUI state, matching Mori's `RunState` field set.
 #[derive(Debug, Clone)]
 pub struct TuiState {
@@ -815,6 +1055,14 @@ pub struct TuiState {
     pub selected_agent: usize,
     /// Selected agent sub-tab index.
     pub selected_agent_tab: usize,
+    /// Selected Config tab sub-view index.
+    pub config_sub_tab: usize,
+    /// Selected Inspect tab sub-view index.
+    pub inspect_sub_tab: usize,
+    /// Selected Marketplace tab sub-view index.
+    pub marketplace_sub_tab: usize,
+    /// Selected Atelier tab sub-view index.
+    pub atelier_sub_tab: usize,
     /// Which panel has keyboard focus.
     pub focus: FocusZone,
 
@@ -993,6 +1241,50 @@ pub struct TuiState {
     pub gate_result_summaries: Vec<GateResultSummary>,
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
+    /// Cached unified log for the logs tab.
+    pub cached_unified_log: Vec<LogEntry>,
+
+    // -- network stats (header bar) --
+    /// Number of agents currently online/discovered.
+    pub agents_online: usize,
+    /// Inter-Signal Frequency Ratio (ISFR) — median inter-signal interval.
+    pub isfr: Option<f64>,
+
+    // -- knowledge browse --
+    /// Knowledge entries for the Inspect tab's KnowledgeBrowse sub-view.
+    pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
+
+    // -- marketplace / atelier --
+    /// Jobs loaded from .roko/jobs/ for the Marketplace tab.
+    pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
+    /// Selected job index in the Marketplace tab.
+    pub marketplace_selected_job: usize,
+    /// PRD summaries for the Atelier tab.
+    pub atelier_prds: Vec<roko_core::PrdSummary>,
+    /// Selected PRD index in the Atelier tab.
+    pub atelier_selected_prd: usize,
+    /// Per-slug task lists for the Atelier tab.
+    pub atelier_tasks_by_slug: HashMap<String, Vec<roko_core::job::TaskSummary>>,
+    /// Whether the job creation form is in editing mode.
+    pub job_form_editing: bool,
+    /// Job form: title field.
+    pub job_form_title: String,
+    /// Job form: type field.
+    pub job_form_type: String,
+    /// Job form: priority field.
+    pub job_form_priority: String,
+    /// Job form: description field.
+    pub job_form_description: String,
+    /// Job form: currently focused field.
+    pub job_form_focus: JobFormField,
+    /// Whether the job assign inline prompt is active.
+    pub job_assign_editing: bool,
+    /// Text buffer for the assign-agent prompt.
+    pub job_assign_buffer: String,
+    /// Per-job progress entries (job_id → progress).
+    pub job_progress: HashMap<String, roko_core::JobProgressEntry>,
+    /// Results of TUI-initiated commands (e.g. job creation feedback).
+    pub command_results: Vec<CommandResult>,
 
     cpu_pct_smoothed: SmoothedValue,
     token_rate_smoothed: SmoothedValue,
@@ -1032,6 +1324,10 @@ impl Default for TuiState {
             selected_plan_idx: 0,
             selected_agent: 0,
             selected_agent_tab: 0,
+            config_sub_tab: 0,
+            inspect_sub_tab: 0,
+            marketplace_sub_tab: 0,
+            atelier_sub_tab: 0,
             focus: FocusZone::default(),
 
             atmosphere: Atmosphere::default(),
@@ -1121,6 +1417,28 @@ impl Default for TuiState {
             active_task_summaries: Vec::new(),
             gate_result_summaries: Vec::new(),
             episodes_cache: Vec::new(),
+            cached_unified_log: Vec::new(),
+
+            agents_online: 0,
+            isfr: None,
+
+            knowledge_entries: Vec::new(),
+
+            marketplace_jobs: Vec::new(),
+            marketplace_selected_job: 0,
+            atelier_prds: Vec::new(),
+            atelier_selected_prd: 0,
+            atelier_tasks_by_slug: HashMap::new(),
+            job_form_editing: false,
+            job_form_title: String::new(),
+            job_form_type: String::new(),
+            job_form_priority: String::new(),
+            job_form_description: String::new(),
+            job_form_focus: JobFormField::default(),
+            job_assign_editing: false,
+            job_assign_buffer: String::new(),
+            job_progress: HashMap::new(),
+            command_results: Vec::new(),
 
             cpu_pct_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
             token_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
@@ -1148,6 +1466,51 @@ const CANONICAL_PHASES: &[&str] = &[
     "verdict",
     "committing",
 ];
+
+fn is_online_agent_status(status: &str) -> bool {
+    !matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "done" | "completed" | "failed" | "cancelled"
+    )
+}
+
+fn gate_pass_rate(gates: &[GateResultSummary]) -> Option<f64> {
+    if gates.is_empty() {
+        return None;
+    }
+    let passed = gates.iter().filter(|gate| gate.passed).count();
+    Some(passed as f64 / gates.len() as f64)
+}
+
+fn snapshot_gate_pass_rate(gates: &[roko_core::dashboard_snapshot::GateVerdict]) -> Option<f64> {
+    if gates.is_empty() {
+        return None;
+    }
+    let passed = gates.iter().filter(|gate| gate.passed).count();
+    Some(passed as f64 / gates.len() as f64)
+}
+
+fn count_online_from_files(root: &Path) -> usize {
+    let jobs_dir = root.join(".roko").join("jobs");
+    let Ok(entries) = std::fs::read_dir(jobs_dir) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| {
+            let content = std::fs::read_to_string(entry.path()).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+            let status = value
+                .get("status")
+                .or_else(|| value.get("state"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            is_online_agent_status(status).then_some(())
+        })
+        .count()
+}
 
 impl TuiState {
     /// Create a new default state.
@@ -1201,6 +1564,33 @@ impl TuiState {
     #[must_use]
     pub fn active_agent_count(&self) -> usize {
         self.agents.iter().filter(|a| a.active).count()
+    }
+
+    /// Read the active sub-view index for a tab.
+    #[must_use]
+    pub fn sub_tab_for(&self, tab: Tab) -> usize {
+        match tab {
+            Tab::Dashboard | Tab::Plans => self.plan_detail_tab,
+            Tab::Agents => self.selected_agent_tab,
+            Tab::Config => self.config_sub_tab,
+            Tab::Inspect => self.inspect_sub_tab,
+            Tab::Marketplace => self.marketplace_sub_tab,
+            Tab::Atelier => self.atelier_sub_tab,
+            Tab::Git | Tab::Logs => 0,
+        }
+    }
+
+    /// Store the active sub-view index for a tab.
+    pub fn set_sub_tab_for(&mut self, tab: Tab, idx: usize) {
+        match tab {
+            Tab::Dashboard | Tab::Plans => self.plan_detail_tab = idx,
+            Tab::Agents => self.selected_agent_tab = idx,
+            Tab::Config => self.config_sub_tab = idx,
+            Tab::Inspect => self.inspect_sub_tab = idx,
+            Tab::Marketplace => self.marketplace_sub_tab = idx,
+            Tab::Atelier => self.atelier_sub_tab = idx,
+            Tab::Git | Tab::Logs => {}
+        }
     }
 
     /// Return the current filter text.
@@ -1547,6 +1937,38 @@ impl TuiState {
         self.active_task_summaries = data.active_tasks.clone();
         self.gate_result_summaries = data.gate_results.clone();
         self.episodes_cache = data.episodes().to_vec();
+        self.refresh_cached_unified_log();
+
+        // -- knowledge browse --
+        self.knowledge_entries = data.knowledge_entries.clone();
+
+        // -- network stats --
+        self.agents_online = if data.agents.is_empty() {
+            count_online_from_files(data.root())
+        } else {
+            data.agents
+                .iter()
+                .filter(|agent| is_online_agent_status(&agent.status))
+                .count()
+        };
+        self.isfr = gate_pass_rate(&data.gate_results);
+
+        // -- marketplace / atelier --
+        self.marketplace_jobs = data.marketplace_jobs.clone();
+        self.atelier_prds = data.atelier_prds.clone();
+        self.atelier_tasks_by_slug = data.atelier_tasks_by_slug.clone();
+
+        // Clamp marketplace/atelier selections to valid range after data refresh.
+        if self.marketplace_jobs.is_empty() {
+            self.marketplace_selected_job = 0;
+        } else if self.marketplace_selected_job >= self.marketplace_jobs.len() {
+            self.marketplace_selected_job = self.marketplace_jobs.len() - 1;
+        }
+        if self.atelier_prds.is_empty() {
+            self.atelier_selected_prd = 0;
+        } else if self.atelier_selected_prd >= self.atelier_prds.len() {
+            self.atelier_selected_prd = self.atelier_prds.len() - 1;
+        }
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.
@@ -1870,6 +2292,10 @@ impl TuiState {
             self.cost_dollars = snap.stats.cost_usd_total;
         }
 
+        // -- network stats --
+        self.agents_online = snap.agents.values().filter(|agent| agent.active).count();
+        self.isfr = snapshot_gate_pass_rate(&snap.gates);
+
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
 
@@ -1915,6 +2341,18 @@ impl TuiState {
             self.task_output_tails
                 .insert(task_id.clone(), lines.iter().cloned().collect());
         }
+        self.refresh_cached_unified_log();
+    }
+
+    /// Return the display-ready cached log rows for the Logs tab.
+    #[must_use]
+    pub fn unified_log_entries(&self) -> &[LogEntry] {
+        &self.cached_unified_log
+    }
+
+    /// Rebuild the unified log cache from the current dashboard-derived sources.
+    pub fn refresh_cached_unified_log(&mut self) {
+        self.cached_unified_log = build_unified_log_cache(self);
     }
 
     /// Return cached, styled agent output lines for the selected agent pane.
@@ -3218,6 +3656,29 @@ mod tests {
     }
 
     #[test]
+    fn unified_log_cache_refreshes_from_sources() {
+        let mut state = TuiState::default();
+        state.recent_signals.push(SignalSummary {
+            id: "sig-1".into(),
+            kind: "gate:compile".into(),
+            created_at_ms: 1_700_000_000_000,
+            confidence: None,
+            plan_id: None,
+            task_id: None,
+            parent_hash: None,
+            lineage: Vec::new(),
+            payload_preview: "passed".into(),
+        });
+
+        assert!(state.unified_log_entries().is_empty());
+        state.refresh_cached_unified_log();
+
+        assert_eq!(state.unified_log_entries().len(), 1);
+        assert_eq!(state.unified_log_entries()[0].source, "signal:gate:compile");
+        assert_eq!(state.unified_log_entries()[0].level, LogEntryLevel::Info);
+    }
+
+    #[test]
     fn elapsed_secs_zero_when_not_started() {
         let state = TuiState::default();
         assert_eq!(state.elapsed_secs(), 0.0);
@@ -3404,6 +3865,71 @@ depends_on = ["plan-b:T1"]
         assert!(state.agents.is_empty());
         assert_eq!(state.token_total, 0);
         assert_eq!(state.cost_dollars, 0.0);
+    }
+
+    #[test]
+    fn from_dashboard_data_populates_header_network_stats() {
+        let mut data = DashboardData::default();
+        data.agents = vec![
+            AgentSummary {
+                id: "active".into(),
+                label: "Active".into(),
+                plan_id: None,
+                status: "active".into(),
+            },
+            AgentSummary {
+                id: "done".into(),
+                label: "Done".into(),
+                plan_id: None,
+                status: "completed".into(),
+            },
+            AgentSummary {
+                id: "idle".into(),
+                label: "Idle".into(),
+                plan_id: None,
+                status: "idle".into(),
+            },
+        ];
+        data.gate_results = vec![
+            GateResultSummary {
+                plan_id: "p".into(),
+                gate_name: "compile".into(),
+                passed: true,
+                rung: 1,
+                duration_ms: 10,
+                summary: String::new(),
+            },
+            GateResultSummary {
+                plan_id: "p".into(),
+                gate_name: "test".into(),
+                passed: false,
+                rung: 1,
+                duration_ms: 20,
+                summary: String::new(),
+            },
+        ];
+
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.agents_online, 2);
+        assert_eq!(state.isfr, Some(0.5));
+    }
+
+    #[test]
+    fn from_dashboard_data_counts_online_jobs_when_agents_are_missing() {
+        let tmpdir = tempdir().expect("tempdir");
+        let jobs_dir = tmpdir.path().join(".roko").join("jobs");
+        fs::create_dir_all(&jobs_dir).expect("create jobs dir");
+        fs::write(jobs_dir.join("open.json"), r#"{"status":"open"}"#).expect("write open job");
+        fs::write(jobs_dir.join("assigned.json"), r#"{"state":"assigned"}"#)
+            .expect("write assigned job");
+        fs::write(jobs_dir.join("done.json"), r#"{"status":"completed"}"#).expect("write done job");
+
+        let data = DashboardData::load_best_effort(tmpdir.path());
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.agents_online, 2);
+        assert_eq!(state.isfr, None);
     }
 
     #[test]

@@ -85,6 +85,26 @@ impl ApiError {
         }
     }
 
+    /// 422 Unprocessable Entity.
+    pub fn unprocessable_entity(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unprocessable_entity".into(),
+            message: msg.into(),
+            details: None,
+        }
+    }
+
+    /// 422 Unprocessable Entity with an actionable hint.
+    pub fn unprocessable_with_hint(msg: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unprocessable_entity".into(),
+            message: msg.into(),
+            details: Some(Box::new(json!({ "hint": hint.into() }))),
+        }
+    }
+
     /// 401 Unauthorized.
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self {

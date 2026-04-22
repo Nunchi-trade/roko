@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+use roko_core::tool::{ExternalAction, ToolCall, ToolContext, ToolError, ToolResult};
 
 const CONTRACT_DIR: &str = "src/safety/contracts";
 const NETWORK_TOOLS: &[&str] = &["web_fetch", "web_search"];
@@ -327,9 +327,16 @@ impl GovernanceRule {
                 // TODO(UX26): enforce cumulative per-turn spend once tool-cost
                 // accounting is threaded into ToolContext.
             }
-            // TODO(UX26): enforce consecutive-failure caps once dispatcher
-            // failure counters are exposed through ToolContext.
-            Self::MaxConsecutiveFailures(_) => {}
+            Self::MaxConsecutiveFailures(max) => {
+                let consecutive = count_trailing_failures(&ctx.external_actions.read());
+                if consecutive >= *max {
+                    return Err(ContractViolation::new(
+                        role,
+                        "MaxConsecutiveFailures",
+                        format!("{consecutive} consecutive failures >= limit {max}"),
+                    ));
+                }
+            }
             Self::RequireToolBeforeEdit(required_tool) => {
                 if EDIT_TOOLS.contains(&call.name.as_str()) && !has_prior_tool(ctx, required_tool) {
                     return Err(ContractViolation::new(
@@ -494,6 +501,39 @@ fn has_gate_approval(call: &ToolCall, ctx: &ToolContext) -> bool {
     })
 }
 
+/// Count trailing consecutive failures from the external actions buffer.
+///
+/// An action is considered a failure if its metadata contains `"success": false`
+/// or `"error": true`, or if its `action_type` contains "error" or "fail".
+/// We walk backwards from the most recent action; the first success (or non-failure)
+/// resets the count.
+fn count_trailing_failures(actions: &[ExternalAction]) -> u32 {
+    let mut count: u32 = 0;
+    for action in actions.iter().rev() {
+        if is_failure_action(action) {
+            count = count.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+/// Heuristic: does this external action represent a tool failure?
+fn is_failure_action(action: &ExternalAction) -> bool {
+    // Explicit success=false marker.
+    if action.metadata.get("success").and_then(|v| v.as_bool()) == Some(false) {
+        return true;
+    }
+    // Explicit error=true marker.
+    if action.metadata.get("error").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    // action_type heuristic (e.g. "tool_error", "execution_failed").
+    let at = action.action_type.to_ascii_lowercase();
+    at.contains("error") || at.contains("fail")
+}
+
 fn has_prior_tool(ctx: &ToolContext, required_tool: &str) -> bool {
     ctx.external_actions.read().iter().any(|action| {
         action.action_type == required_tool
@@ -612,5 +652,147 @@ mod tests {
         );
 
         assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn max_consecutive_failures_blocks_after_threshold() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
+            recovery: Vec::new(),
+        };
+
+        // Build 3 consecutive failure actions.
+        let failure_actions: Vec<ExternalAction> = (0..3)
+            .map(|i| ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: format!("tool_call_{i}"),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": false }),
+                performed_at: chrono::Utc::now(),
+            })
+            .collect();
+
+        let actions = Arc::new(RwLock::new(failure_actions));
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        )
+        .with_external_actions(actions);
+
+        let call = ToolCall::new("call-1", "bash", serde_json::json!({"command": "ls"}));
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("should deny after 3 consecutive failures");
+        assert_eq!(err.rule, "MaxConsecutiveFailures");
+    }
+
+    #[test]
+    fn max_consecutive_failures_resets_on_success() {
+        let contract = AgentContract {
+            role: "implementer".into(),
+            invariants: Vec::new(),
+            governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
+            recovery: Vec::new(),
+        };
+
+        // 2 failures, then 1 success, then 2 more failures = 2 trailing failures.
+        let actions = Arc::new(RwLock::new(vec![
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "call_0".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": false }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "call_1".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": false }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "call_2".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": true }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "call_3".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": false }),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "call_4".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({ "success": false }),
+                performed_at: chrono::Utc::now(),
+            },
+        ]));
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        )
+        .with_external_actions(actions);
+
+        let call = ToolCall::new("call-5", "bash", serde_json::json!({"command": "ls"}));
+        // Only 2 trailing failures, limit is 3, so this should pass.
+        assert!(contract.check_pre_execution(&call, &ctx).is_ok());
+    }
+
+    #[test]
+    fn count_trailing_failures_with_error_action_type() {
+        let actions = vec![
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "read_file".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({}),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "tool_error".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({}),
+                performed_at: chrono::Utc::now(),
+            },
+            ExternalAction {
+                service: "tool_dispatcher".into(),
+                action_type: "execution_failed".into(),
+                resource_id: String::new(),
+                metadata: serde_json::json!({}),
+                performed_at: chrono::Utc::now(),
+            },
+        ];
+        assert_eq!(super::count_trailing_failures(&actions), 2);
     }
 }

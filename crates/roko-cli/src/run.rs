@@ -49,6 +49,8 @@ pub struct RunReport {
     pub gate_verdicts: Vec<(String, bool)>,
     /// How many signals are now in the substrate.
     pub total_signals: usize,
+    /// Final agent output text, if it was a text payload.
+    pub output_text: Option<String>,
 }
 
 impl RunReport {
@@ -216,6 +218,7 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         agent_success: agent_result.success,
         gate_verdicts: verdict_summary,
         total_signals,
+        output_text: final_output_sig.body.as_text().ok().map(ToOwned::to_owned),
     })
 }
 
@@ -348,6 +351,9 @@ async fn dispatch_agent(
             format!("create agent for model {model}"),
         )?;
         Ok((agent.run(prompt, ctx).await, Vec::new()))
+    } else if config.agent.command == "claude" && has_anthropic_api_key(config) {
+        // Anthropic API tool loop — direct HTTP calls with full tool visibility.
+        return run_anthropic_api_tool_loop(workdir, config, prompt_text).await;
     } else if config.agent.command == "claude" {
         // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
@@ -551,6 +557,217 @@ async fn run_ollama_agentic_single(
         (AgentResult::ok(sig).with_usage(usage), external_actions)
     } else {
         (AgentResult::fail(sig).with_usage(usage), external_actions)
+    }
+}
+
+/// Check whether an Anthropic API key is available for the direct-API path.
+fn has_anthropic_api_key(config: &Config) -> bool {
+    // Check env var first, then config secret store.
+    if std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .is_some()
+    {
+        return true;
+    }
+    // Check if any env entry in the agent config provides it.
+    config
+        .agent
+        .env
+        .iter()
+        .any(|(k, v)| k == "ANTHROPIC_API_KEY" && !v.is_empty())
+}
+
+/// Resolve the Anthropic API key from env or config.
+fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            config
+                .agent
+                .env
+                .iter()
+                .find(|(k, _)| k == "ANTHROPIC_API_KEY")
+                .map(|(_, v)| v.clone())
+                .filter(|v| !v.is_empty())
+        })
+}
+
+/// Anthropic API tool loop path for `roko run`.
+///
+/// Uses the Anthropic Messages API directly with the ToolLoop, giving full
+/// tool-call visibility, chain tool support, and real-time turn output.
+async fn run_anthropic_api_tool_loop(
+    workdir: &Path,
+    config: &Config,
+    prompt_text: &str,
+) -> Result<(AgentResult, Vec<ExternalAction>)> {
+    use parking_lot::RwLock;
+    use roko_agent::dispatcher::ToolDispatcher;
+    use roko_agent::provider::anthropic_api::tool_loop::create_anthropic_backend_simple;
+    use roko_agent::tool_loop::{OnTurnCallback, StopReason, ToolLoop, TurnProgress};
+    use roko_core::tool::{ToolContext, ToolHandler};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let api_key =
+        resolve_anthropic_api_key(config).ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not found"))?;
+
+    let model = config
+        .agent
+        .model
+        .clone()
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+
+    // Build backend + translator.
+    let (backend, translator) =
+        create_anthropic_backend_simple(api_key, &model, config.agent.timeout_ms);
+
+    // Build tool registry + dispatcher with optional chain tools.
+    let registry = Arc::new(StaticToolRegistry::new());
+    let tools: Vec<roko_core::tool::ToolDef> = registry.all().into_iter().cloned().collect();
+
+    let resolver: Arc<dyn roko_agent::dispatcher::HandlerResolver> =
+        match build_chain_resolver(workdir) {
+            Some(chain_resolver) => chain_resolver,
+            None => Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
+                roko_std::tool::handlers::handler_for(name)
+            }),
+        };
+    let dispatcher = Arc::new(ToolDispatcher::new(
+        registry as Arc<dyn ToolRegistry>,
+        resolver,
+    ));
+
+    // Build tool loop with progress callback.
+    let on_turn: OnTurnCallback = Arc::new(|progress: &TurnProgress| {
+        if progress.tool_calls.is_empty() {
+            return;
+        }
+        for (i, call) in progress.tool_calls.iter().enumerate() {
+            let result_summary = progress
+                .tool_results
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            // Truncate result for display.
+            let display_result = if result_summary.len() > 80 {
+                format!("{}…", &result_summary[..79])
+            } else {
+                result_summary.to_string()
+            };
+            eprintln!(
+                "\x1b[2m[roko] tool: {}({})\x1b[0m",
+                call.name,
+                truncate_json_args(&call.arguments, 60),
+            );
+            if !display_result.is_empty() {
+                eprintln!("\x1b[2m[roko] \u{2192} {display_result}\x1b[0m");
+            }
+        }
+    });
+
+    let tool_loop = ToolLoop::new(translator, dispatcher, backend).with_on_turn(on_turn);
+
+    let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
+    let external_actions = Arc::new(RwLock::new(Vec::new()));
+    let tool_ctx =
+        ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
+
+    eprintln!("\x1b[2m[roko] using Anthropic API ({model})\x1b[0m");
+    let output = tool_loop
+        .run(&system_prompt, prompt_text, &tools, &tool_ctx)
+        .await;
+    let external_actions = external_actions.read().clone();
+
+    let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let agent_name = format!("anthropic-api:{model}");
+    let success = matches!(output.stop_reason, StopReason::Stop);
+    let body_text = if success {
+        output.final_text.clone()
+    } else {
+        format!(
+            "agent stopped: {:?} after {} iterations",
+            output.stop_reason, output.iterations
+        )
+    };
+
+    let sig = Engram::builder(Kind::AgentOutput)
+        .body(Body::text(body_text))
+        .provenance(Provenance::agent(&agent_name))
+        .tag("agent", &agent_name)
+        .tag("model", &model)
+        .tag("tool_calls", output.tool_calls.len().to_string())
+        .tag("iterations", output.iterations.to_string())
+        .tag("backend", "anthropic-api")
+        .build();
+
+    let usage = roko_agent::usage::Usage {
+        wall_ms,
+        input_tokens: output.total_usage.input_tokens,
+        output_tokens: output.total_usage.output_tokens,
+        cache_read_tokens: output.total_usage.cache_read_tokens,
+        cache_create_tokens: output.total_usage.cache_create_tokens,
+        cost_usd: output.total_usage.cost_usd,
+        ..Default::default()
+    };
+
+    if success {
+        Ok((AgentResult::ok(sig).with_usage(usage), external_actions))
+    } else {
+        Ok((AgentResult::fail(sig).with_usage(usage), external_actions))
+    }
+}
+
+/// Build a chain-aware handler resolver if chain config is present in the workspace.
+fn build_chain_resolver(
+    workdir: &Path,
+) -> Option<std::sync::Arc<dyn roko_agent::dispatcher::HandlerResolver>> {
+    use roko_chain::alloy_impl::AlloyChainClient;
+    use std::sync::Arc;
+
+    let roko_config = roko_core::config::load_config(workdir).ok()?;
+    let rpc_url = roko_config.chain.rpc_url.as_deref()?;
+
+    let client: Arc<dyn roko_chain::ChainClient> = match AlloyChainClient::http(rpc_url) {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!(
+                "\x1b[33m\u{26a0} chain client init failed: {e}, chain tools unavailable\x1b[0m"
+            );
+            return None;
+        }
+    };
+
+    let wallet: Option<Arc<dyn roko_chain::ChainWallet>> = (|| {
+        let key = roko_config.chain.wallet_key.as_deref()?;
+        let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+        match roko_chain::alloy_impl::AlloyChainWallet::from_hex_key(rpc_url, key, chain_id) {
+            Ok(w) => Some(Arc::new(w) as Arc<dyn roko_chain::ChainWallet>),
+            Err(e) => {
+                eprintln!(
+                    "\x1b[33m\u{26a0} chain wallet init failed: {e}, write ops unavailable\x1b[0m"
+                );
+                None
+            }
+        }
+    })();
+
+    let chain_map = crate::chain_registry::chain_handler_map(client, wallet);
+    Some(Arc::new(crate::chain_registry::chain_aware_resolver(
+        chain_map,
+    )))
+}
+
+/// Truncate JSON arguments for display.
+fn truncate_json_args(args: &serde_json::Value, max_len: usize) -> String {
+    let s = args.to_string();
+    if s.len() > max_len {
+        format!("{}…", &s[..max_len.saturating_sub(1)])
+    } else {
+        s
     }
 }
 
@@ -1004,6 +1221,7 @@ mod tests {
             agent_success: true,
             gate_verdicts: vec![("g1".into(), true), ("g2".into(), true)],
             total_signals: 5,
+            output_text: Some("done".into()),
         };
         assert!(r.overall_success());
 

@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -64,16 +64,23 @@ pub(crate) fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let ctx_data = build_context_data(tui_state);
-    render_with_context_data(
-        frame,
-        area,
-        tui_state,
-        &ctx_data,
-        view_state,
-        theme,
-        matches!(tui_state.focus, FocusZone::RightPanel),
-    );
+    match view_state.sub_tab {
+        1 => render_engram_dag(frame, area, tui_state, view_state, theme),
+        2 => render_episode_replay(frame, area, tui_state, view_state, theme),
+        3 => render_knowledge_browse(frame, area, tui_state, view_state, theme),
+        _ => {
+            let ctx_data = build_context_data(tui_state);
+            render_with_context_data(
+                frame,
+                area,
+                tui_state,
+                &ctx_data,
+                view_state,
+                theme,
+                matches!(tui_state.focus, FocusZone::RightPanel),
+            );
+        }
+    }
 }
 
 /// Render the context view with explicit context data (for integration layer).
@@ -133,8 +140,7 @@ fn render_health_summary(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" System Health ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -288,8 +294,7 @@ fn render_token_burn_by_role(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Token Burn by Role ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -402,8 +407,7 @@ fn render_cost_by_model(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Cost by Model ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -502,8 +506,7 @@ fn render_cascade_router(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Cascade Router ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -638,8 +641,7 @@ fn render_alerts_and_health(
     } else {
         theme.muted()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Alerts & Gates ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -724,6 +726,298 @@ fn render_alerts_and_health(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sub-view: Engram DAG (sub_tab == 1)
+// ---------------------------------------------------------------------------
+
+fn render_engram_dag(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    let block = Block::bordered().title(Span::styled(" Engram DAG ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.recent_signals.is_empty() {
+        let empty = Paragraph::new("no signals -- run agents to populate engram DAG")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let header_height = 1usize;
+    let visible_height = (inner.height as usize).saturating_sub(header_height);
+    let scroll = bounded_scroll(
+        view_state.scroll as usize,
+        tui_state.recent_signals.len(),
+        visible_height,
+    );
+    let selected = selected_in_window(view_state.selected, scroll, visible_height);
+
+    let rows: Vec<Row<'_>> = tui_state
+        .recent_signals
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|(idx, sig)| {
+            let depth = engram_depth(sig);
+            let connector = if depth == 0 {
+                "\u{2500} "
+            } else {
+                "\u{2514}\u{2500} "
+            };
+            let tree = format!("{}{}", "  ".repeat(depth), connector);
+            let confidence = confidence_bar(sig.confidence, 6);
+            let confidence_style = confidence_style(sig.confidence, theme);
+            let row_style = if Some(idx - scroll) == selected {
+                theme.selection()
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(tree),
+                Cell::from(truncate(&sig.id, 8)),
+                Cell::from(truncate(&sig.kind, 16)),
+                Cell::from(Span::styled(confidence, confidence_style)),
+                Cell::from(
+                    sig.parent_hash
+                        .as_deref()
+                        .map_or("-".to_string(), |p| truncate(p, 8)),
+                ),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Min(12),
+        Constraint::Length(11),
+        Constraint::Length(10),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["tree", "hash", "kind", "conf", "parent"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Episode Replay (sub_tab == 2)
+// ---------------------------------------------------------------------------
+
+fn render_episode_replay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    let block = Block::bordered().title(Span::styled(" Episode Replay ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.episodes_cache.is_empty() {
+        let empty = Paragraph::new("no episodes -- run agents to populate episode log")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let header_height = 1usize;
+    let visible_height = (inner.height as usize).saturating_sub(header_height);
+    let scroll = bounded_scroll(
+        view_state.scroll as usize,
+        tui_state.episodes_cache.len(),
+        visible_height,
+    );
+    let selected = selected_in_window(view_state.selected, scroll, visible_height);
+
+    let rows: Vec<Row<'_>> = tui_state
+        .episodes_cache
+        .iter()
+        .rev()
+        .enumerate()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|(idx, ep)| {
+            let outcome_style = if ep.success {
+                theme.success()
+            } else {
+                theme.danger()
+            };
+            let outcome = if ep.success { "pass" } else { "fail" };
+            let row_style = if Some(idx - scroll) == selected {
+                theme.selection()
+            } else {
+                Style::default()
+            };
+            let wall_time_ms = (ep.duration_secs.max(0.0) * 1000.0).round() as u64;
+            Row::new(vec![
+                Cell::from(ep.timestamp.format("%H:%M:%S").to_string()),
+                Cell::from(truncate(&ep.agent_id, 16)),
+                Cell::from(Span::styled(outcome.to_string(), outcome_style)),
+                Cell::from(format!("{wall_time_ms}ms")),
+                Cell::from(format_count(ep.usage.input_tokens + ep.usage.output_tokens)),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Min(12),
+        Constraint::Length(6),
+        Constraint::Length(9),
+        Constraint::Length(8),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["time", "agent", "result", "wall", "tokens"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Knowledge Browse (sub_tab == 3)
+// ---------------------------------------------------------------------------
+
+fn render_knowledge_browse(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    view_state: &ViewState,
+    theme: &Theme,
+) {
+    let block = Block::bordered().title(Span::styled(" Knowledge Browse ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.knowledge_entries.is_empty() {
+        let empty = Paragraph::new("no knowledge entries -- neuro store is empty")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let query = view_state.search_query.trim().to_ascii_lowercase();
+    let filtered = tui_state
+        .knowledge_entries
+        .iter()
+        .filter(|entry| {
+            query.is_empty()
+                || entry.kind.to_ascii_lowercase().contains(&query)
+                || entry.content_preview.to_ascii_lowercase().contains(&query)
+                || entry
+                    .tags
+                    .iter()
+                    .any(|t| t.to_ascii_lowercase().contains(&query))
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        let empty = Paragraph::new(format!(
+            "no knowledge entries match '{}'",
+            view_state.search_query.trim()
+        ))
+        .alignment(Alignment::Center)
+        .style(theme.muted())
+        .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let visible_height = inner.height as usize;
+    let scroll = bounded_scroll(view_state.scroll as usize, filtered.len(), visible_height);
+    let selected = selected_in_window(view_state.selected, scroll, visible_height);
+
+    let items: Vec<ListItem<'_>> = filtered
+        .iter()
+        .skip(scroll)
+        .take(visible_height)
+        .map(|entry| {
+            ListItem::new(Line::from(vec![
+                Span::styled(truncate(&entry.kind, 12), theme.accent()),
+                Span::raw("  "),
+                Span::styled(
+                    confidence_bar(Some(entry.confidence), 5),
+                    confidence_style(Some(entry.confidence), theme),
+                ),
+                Span::raw("  "),
+                Span::styled(truncate(&entry.content_preview, 50), theme.text()),
+            ]))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(selected);
+    frame.render_stateful_widget(
+        List::new(items).highlight_symbol("> "),
+        inner,
+        &mut list_state,
+    );
+}
+
+fn bounded_scroll(requested: usize, total: usize, visible_height: usize) -> usize {
+    if visible_height == 0 || total <= visible_height {
+        0
+    } else {
+        requested.min(total - visible_height)
+    }
+}
+
+fn selected_in_window(selected: usize, scroll: usize, visible_height: usize) -> Option<usize> {
+    if visible_height == 0 || selected < scroll {
+        None
+    } else {
+        let relative = selected - scroll;
+        (relative < visible_height).then_some(relative)
+    }
+}
+
+fn engram_depth(signal: &crate::tui::dashboard::SignalSummary) -> usize {
+    if signal.lineage.is_empty() {
+        usize::from(signal.parent_hash.is_some())
+    } else {
+        signal.lineage.len().min(4)
+    }
+}
+
+fn confidence_bar(confidence: Option<f64>, width: usize) -> String {
+    let Some(confidence) = confidence else {
+        return format!("[{}]", "\u{2500}".repeat(width));
+    };
+    let filled = (confidence.clamp(0.0, 1.0) * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!(
+        "[{}{}]",
+        "\u{2588}".repeat(filled.min(width)),
+        "\u{2591}".repeat(empty)
+    )
+}
+
+fn confidence_style(confidence: Option<f64>, theme: &Theme) -> Style {
+    match confidence {
+        Some(value) if value >= 0.75 => theme.success(),
+        Some(value) if value >= 0.45 => theme.warning(),
+        Some(_) => theme.danger(),
+        None => theme.muted(),
+    }
+}
+
 /// Build context data from available dashboard data.
 fn build_context_data(tui_state: &TuiState) -> ContextViewData {
     // Build token burn sparklines from efficiency events
@@ -766,5 +1060,57 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::dashboard::SignalSummary;
+
+    fn signal(parent_hash: Option<&str>, lineage: &[&str]) -> SignalSummary {
+        SignalSummary {
+            id: "abcdef0123456789".into(),
+            kind: "gate:compile".into(),
+            created_at_ms: 0,
+            confidence: Some(0.5),
+            plan_id: None,
+            task_id: None,
+            parent_hash: parent_hash.map(str::to_string),
+            lineage: lineage.iter().map(|value| (*value).to_string()).collect(),
+            payload_preview: String::new(),
+        }
+    }
+
+    #[test]
+    fn confidence_bar_renders_known_and_unknown_values() {
+        assert_eq!(confidence_bar(Some(0.5), 6), "[███░░░]");
+        assert_eq!(confidence_bar(Some(1.2), 4), "[████]");
+        assert_eq!(confidence_bar(None, 4), "[────]");
+    }
+
+    #[test]
+    fn bounded_scroll_clamps_to_last_full_window() {
+        assert_eq!(bounded_scroll(10, 5, 3), 2);
+        assert_eq!(bounded_scroll(10, 3, 5), 0);
+        assert_eq!(bounded_scroll(10, 5, 0), 0);
+    }
+
+    #[test]
+    fn selected_in_window_is_relative_when_visible() {
+        assert_eq!(selected_in_window(5, 3, 4), Some(2));
+        assert_eq!(selected_in_window(2, 3, 4), None);
+        assert_eq!(selected_in_window(8, 3, 4), None);
+    }
+
+    #[test]
+    fn engram_depth_prefers_lineage_then_parent() {
+        assert_eq!(engram_depth(&signal(None, &[])), 0);
+        assert_eq!(engram_depth(&signal(Some("parent"), &[])), 1);
+        assert_eq!(engram_depth(&signal(Some("parent"), &["a", "b", "c"])), 3);
+        assert_eq!(
+            engram_depth(&signal(Some("parent"), &["a", "b", "c", "d", "e"])),
+            4
+        );
     }
 }

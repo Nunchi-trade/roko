@@ -60,6 +60,9 @@ pub trait ChainClient: Send + Sync {
         block: Option<BlockNumber>,
     ) -> ChainResult<CallResult>;
 
+    /// Native token balance in wei at the given block (or latest).
+    async fn get_balance(&self, address: &str, block: Option<BlockNumber>) -> ChainResult<u128>;
+
     /// EVM chain id.
     async fn chain_id(&self) -> ChainResult<u64>;
 

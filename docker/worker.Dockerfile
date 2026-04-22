@@ -42,7 +42,10 @@ RUN apt-get update \
         curl \
         nodejs \
         npm \
+        python3 \
+        python3-pip \
     && npm install -g @anthropic-ai/claude-code \
+    && pip3 install --no-cache-dir --break-system-packages openai \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

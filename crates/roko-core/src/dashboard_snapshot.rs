@@ -112,6 +112,27 @@ pub enum DashboardEvent {
     GateThresholdsUpdated { snapshot_json: String },
     /// Agent completed execution (item 70).
     AgentCompleted { agent_id: String },
+    /// Marketplace jobs were refreshed from disk.
+    MarketplaceJobsUpdated {
+        jobs: Vec<crate::job::MarketplaceJob>,
+    },
+    /// Atelier PRDs and associated task data were refreshed.
+    AtelierPrdsUpdated {
+        prds: Vec<crate::job::PrdSummary>,
+        tasks: std::collections::HashMap<String, Vec<crate::job::TaskSummary>>,
+    },
+    /// A job execution started.
+    JobExecutionStarted {
+        job_id: String,
+        job_type: String,
+        agent_id: String,
+    },
+    /// Job execution progress update.
+    JobProgress {
+        job_id: String,
+        percent: u8,
+        message: String,
+    },
     /// An error occurred.
     Error { message: String },
 }
@@ -999,6 +1020,12 @@ impl DashboardSnapshot {
                     ts_millis: ts,
                 });
             }
+            // Marketplace/atelier events are consumed by the TUI state layer
+            // directly; the snapshot doesn't need to store them.
+            DashboardEvent::MarketplaceJobsUpdated { .. }
+            | DashboardEvent::AtelierPrdsUpdated { .. }
+            | DashboardEvent::JobExecutionStarted { .. }
+            | DashboardEvent::JobProgress { .. } => {}
         }
     }
 

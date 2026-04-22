@@ -48,8 +48,13 @@ pub struct EnrichmentConfig {
 impl EnrichmentConfig {
     /// Resolve the plan directory for a given plan base name.
     ///
-    /// Returns `{repo_root}/.roko/plans/{plan_base}/`.
+    /// Checks `{repo_root}/plans/{plan_base}` first (top-level layout used by
+    /// `roko plan run`), falling back to `{repo_root}/.roko/plans/{plan_base}`.
     pub fn plan_dir(&self, plan_base: &str) -> PathBuf {
+        let top = self.repo_root.join("plans").join(plan_base);
+        if top.is_dir() {
+            return top;
+        }
         self.repo_root.join(".roko").join("plans").join(plan_base)
     }
 }

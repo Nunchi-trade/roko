@@ -1,4 +1,8 @@
-//! Composable system prompt builder with 9 layers.
+//! Composable system prompt builder with 9 layers ("role prompt templates").
+//!
+//! These are *internal* prompt assembly fragments — not to be confused with
+//! "agent blueprints" in `roko-serve/src/templates.rs`, which define cloud
+//! worker deployment configurations (model, tools, provider, MCP servers).
 //!
 //! Generates cache-aligned, role-specific system prompts from composable
 //! fragments. Each layer targets a different stability tier:

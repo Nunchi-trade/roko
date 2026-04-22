@@ -935,10 +935,8 @@ async fn known_agents(state: &Arc<AppState>) -> Result<Vec<DiscoveredAgent>, Api
             card_uri: None,
             capabilities: Vec::new(),
             domain_tags: Vec::new(),
-            token_hash: None,
-            token_expires_at: None,
             status: "managed".to_string(),
-            proxy_token: None,
+            ..Default::default()
         });
     }
 

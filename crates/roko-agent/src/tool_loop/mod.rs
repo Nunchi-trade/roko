@@ -34,6 +34,22 @@ use crate::streaming::StreamChunk;
 use crate::translate::{BackendResponse, RenderedTools, SessionState, Translator};
 use crate::usage::Usage;
 
+/// Per-turn progress information emitted by [`ToolLoop`] via its `on_turn` callback.
+#[derive(Debug, Clone)]
+pub struct TurnProgress {
+    /// Zero-based iteration number.
+    pub iteration: usize,
+    /// Tool calls dispatched this turn.
+    pub tool_calls: Vec<ToolCall>,
+    /// Brief text summaries of tool results (truncated to 120 chars each).
+    pub tool_results: Vec<String>,
+    /// Any text the LLM produced alongside tool calls (often empty).
+    pub text_output: String,
+}
+
+/// Type-erased callback invoked after each tool-dispatch iteration.
+pub type OnTurnCallback = Arc<dyn Fn(&TurnProgress) + Send + Sync>;
+
 pub mod agent_wrapper;
 pub mod backends;
 pub mod checkpoint;
@@ -180,6 +196,8 @@ pub struct ToolLoop {
     monitor: Option<MetacognitiveMonitor>,
     /// Optional budget tracker checked before each LLM call (LIFE-03).
     budget: Option<SharedBudgetTracker>,
+    /// Optional callback fired after each tool-dispatch iteration.
+    on_turn: Option<OnTurnCallback>,
 }
 
 impl ToolLoop {
@@ -201,6 +219,7 @@ impl ToolLoop {
             retry_policy: RetryPolicy::default(),
             monitor: None,
             budget: None,
+            on_turn: None,
         }
     }
 
@@ -260,6 +279,17 @@ impl ToolLoop {
     #[must_use]
     pub fn with_budget(mut self, budget: SharedBudgetTracker) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    /// Attach a callback fired after each tool-dispatch iteration.
+    ///
+    /// The callback receives a [`TurnProgress`] snapshot of what happened
+    /// in the iteration — which tools were called, brief result summaries,
+    /// and any text the model emitted alongside tool calls.
+    #[must_use]
+    pub fn with_on_turn(mut self, cb: OnTurnCallback) -> Self {
+        self.on_turn = Some(cb);
         self
     }
 
@@ -512,6 +542,31 @@ impl ToolLoop {
             // §36.56 — shape results into messages for the next turn.
             let rendered_results = self.translator.render_results(&results);
             result_msg::append_results(&mut messages, rendered_results);
+
+            // Fire on_turn callback with a snapshot of this iteration.
+            if let Some(ref cb) = self.on_turn {
+                let text_output = response.extract_text();
+                let tool_results: Vec<String> = results
+                    .iter()
+                    .map(|(_call, result)| {
+                        let s = match result {
+                            roko_core::tool::ToolResult::Ok { content, .. } => content.clone(),
+                            roko_core::tool::ToolResult::Err(e) => format!("error: {e}"),
+                        };
+                        if s.len() > 120 {
+                            format!("{}…", &s[..119])
+                        } else {
+                            s
+                        }
+                    })
+                    .collect();
+                cb(&TurnProgress {
+                    iteration: iterations,
+                    tool_calls: current_calls.clone(),
+                    tool_results,
+                    text_output,
+                });
+            }
 
             // Metacognitive intervention point: analyze the turn before the
             // conversation advances.

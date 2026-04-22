@@ -74,6 +74,20 @@ pub(crate) fn create_tool_loop_backend(
     create_tool_loop_backend_with_api_key(api_key, provider, model, options, poster)
 }
 
+/// Create an Anthropic Messages API backend + translator pair from a raw API key.
+///
+/// This is the lightweight entry point for callers that have an API key but
+/// no `ProviderConfig` / `ModelProfile` (e.g. `roko run`).
+pub fn create_anthropic_backend_simple(
+    api_key: String,
+    model: &str,
+    timeout_ms: u64,
+) -> (Arc<dyn LlmBackend>, Arc<dyn Translator>) {
+    let backend = AnthropicMessagesBackend::new(api_key, model).with_timeout_ms(timeout_ms);
+    let translator: Arc<dyn Translator> = Arc::new(AnthropicTranslator);
+    (Arc::new(backend), translator)
+}
+
 fn create_tool_loop_backend_with_api_key(
     api_key: String,
     provider: &ProviderConfig,

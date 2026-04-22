@@ -1,4 +1,4 @@
-pub(crate) mod tool_loop;
+pub mod tool_loop;
 
 use crate::Agent;
 use crate::claude_agent::{ClaudeAgent, DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS};

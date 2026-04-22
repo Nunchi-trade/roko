@@ -180,6 +180,15 @@ pub fn discover_plans(plans_dir: &Path) -> Result<Vec<PlanInfo>, DiscoveryError>
         if !starts_with_plan_prefix(&name) {
             continue;
         }
+        // Skip well-known non-plan files that happen to start with an
+        // alphanumeric character (e.g. INDEX.md, README.md, CONTEXT.md).
+        let name_lower = name.to_ascii_lowercase();
+        if matches!(
+            name_lower.as_str(),
+            "index" | "index.md" | "readme" | "readme.md" | "context" | "context.md"
+        ) {
+            continue;
+        }
         let kind = entry
             .file_type()
             .map_err(|source| DiscoveryError::ReadFailed {
@@ -471,6 +480,19 @@ mod tests {
         fs::write(dir.path().join("CONTEXT.md"), "not a plan").unwrap();
         let plans = discover_plans(dir.path()).unwrap();
         assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn index_md_and_readme_md_are_skipped() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("INDEX.md"), "not a plan").unwrap();
+        fs::write(dir.path().join("README.md"), "not a plan").unwrap();
+        // Also test case-insensitive variants.
+        fs::write(dir.path().join("index.md"), "not a plan").unwrap();
+        write_plan(dir.path(), "01-real-plan", "---\nplan: real\n---\n");
+        let plans = discover_plans(dir.path()).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].base, "01-real-plan");
     }
 
     #[test]

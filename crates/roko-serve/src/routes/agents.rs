@@ -24,6 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/managed-agents", get(list_managed_agents))
         .route("/agents/register", post(register_agent))
+        .route("/agents/create", post(create_agent))
         .route("/agents/{id}", get(get_agent))
         .route("/agents/{id}/stop", post(stop_agent))
         .route("/agents/{id}/episodes", get(agent_episodes))
@@ -32,18 +33,64 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/{id}/token", get(token_status).post(issue_token))
 }
 
-/// `GET /api/managed-agents` — list all managed agent processes.
+/// `GET /api/managed-agents` — list all managed agent processes **and** registered
+/// (discovered) agents that aren't supervised locally.  The dashboard's `useAgents()`
+/// hook relies on this endpoint for the fleet roster and live-dot indicator.
 async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
     let entries = state.supervisor.list().await;
-    let items: Vec<Value> = entries
-        .into_iter()
-        .map(|(id, label)| {
-            json!({
-                "id": id.0,
-                "label": label,
-            })
-        })
-        .collect();
+    let discovered = state.discovered_agents.read().await;
+
+    let mut seen_agent_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut items: Vec<Value> = Vec::with_capacity(entries.len() + discovered.len());
+
+    // 1. Supervised processes (locally spawned via `roko agent start`).
+    for (id, label) in &entries {
+        let agent_info = discovered
+            .values()
+            .find(|a| a.agent_id == *label)
+            .or_else(|| discovered.get(label.as_str()));
+        if let Some(info) = agent_info {
+            seen_agent_ids.insert(info.agent_id.clone());
+        }
+        items.push(json!({
+            "id": agent_info.map_or_else(|| label.clone(), |a| a.agent_id.clone()),
+            "process_id": id.0,
+            "label": agent_info.and_then(|a| a.label.clone()).unwrap_or_else(|| label.clone()),
+            "status": agent_info.map_or("running", |a| {
+                if a.status.is_empty() { "running" } else { &a.status }
+            }),
+            "role": agent_info.and_then(|a| a.capabilities.first()).cloned(),
+            "model": Value::Null,
+            "tier": agent_info.and_then(|a| a.tier.clone()),
+            "current_task": Value::Null,
+            "endpoints": agent_info.map(|a| json!({
+                "rest": a.endpoints.rest,
+                "websocket": a.endpoints.websocket,
+            })),
+        }));
+    }
+
+    // 2. Discovered-only agents (registered via POST /api/agents/register or
+    //    self-registered by a remote sidecar) that aren't already supervised.
+    for agent in discovered.values() {
+        if seen_agent_ids.contains(&agent.agent_id) {
+            continue;
+        }
+        items.push(json!({
+            "id": agent.agent_id,
+            "label": agent.label.clone().unwrap_or_else(|| agent.agent_id.clone()),
+            "status": if agent.status.is_empty() { "registered" } else { &agent.status },
+            "role": agent.capabilities.first().cloned(),
+            "model": Value::Null,
+            "tier": agent.tier.clone(),
+            "current_task": Value::Null,
+            "endpoints": json!({
+                "rest": agent.endpoints.rest,
+                "websocket": agent.endpoints.websocket,
+            }),
+        }));
+    }
+
     Json(Value::Array(items))
 }
 
@@ -67,6 +114,11 @@ async fn register_agent(
             card_uri: req.card_uri,
             capabilities: req.capabilities,
             domain_tags: req.domain_tags,
+            tier: req.tier,
+            reputation: req.reputation,
+            skills: req.skills,
+            past_jobs_completed: req.past_jobs_completed,
+            max_concurrent_jobs: req.max_concurrent_jobs,
         })
         .await;
 
@@ -80,6 +132,146 @@ async fn register_agent(
         "agent": agent,
         "token": token,
     })))
+}
+
+/// Request payload for `POST /api/agents/create`.
+#[derive(Debug, Deserialize, Validate)]
+struct CreateAgentRequest {
+    /// Agent name / identifier (required, 1–128 chars).
+    #[validate(
+        length(min = 1, max = 128),
+        custom(function = "crate::extract::validate_non_blank")
+    )]
+    name: String,
+    /// Agent domain: coding, research, chain, or general.
+    #[serde(default = "default_domain")]
+    domain: String,
+    /// Natural-language prompt describing what the agent should do.
+    #[serde(default)]
+    prompt: Option<String>,
+    /// Skill tags for matchmaking.
+    #[serde(default)]
+    skills: Vec<String>,
+    /// Agent tier label.
+    #[serde(default)]
+    tier: Option<String>,
+    /// Reputation score (0–100).
+    #[serde(default)]
+    reputation: u32,
+    /// Maximum concurrent jobs.
+    #[serde(default)]
+    max_concurrent_jobs: u32,
+    /// Capabilities (e.g. messaging, tasks, research).
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+fn default_domain() -> String {
+    "general".to_string()
+}
+
+impl RequestPayload for CreateAgentRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        validate_with_validator(self)?;
+        let valid_domains = ["coding", "research", "chain", "general"];
+        if !valid_domains.contains(&self.domain.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "unknown domain '{}'; valid: {}",
+                self.domain,
+                valid_domains.join(", ")
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `POST /api/agents/create` — create an agent manifest on disk and register it.
+///
+/// Writes a minimal manifest to `.roko/agents/<name>/manifest.toml` and upserts
+/// a discovery entry so the agent appears in the fleet roster immediately.
+async fn create_agent(
+    State(state): State<Arc<AppState>>,
+    ValidJson(req): ValidJson<CreateAgentRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let agents_dir = state.workdir.join(".roko").join("agents").join(&req.name);
+    let manifest_path = agents_dir.join("manifest.toml");
+
+    // Don't overwrite an existing agent.
+    if manifest_path.exists() {
+        return Err(ApiError::conflict(format!(
+            "agent '{}' already exists at {}",
+            req.name,
+            manifest_path.display()
+        )));
+    }
+
+    // Build a minimal TOML manifest.
+    let prompt = req
+        .prompt
+        .as_deref()
+        .unwrap_or("You are a helpful autonomous agent.");
+    let manifest_toml = format!(
+        r#"# Auto-generated by POST /api/agents/create
+schema_version = 1
+
+[core]
+prompt = {prompt}
+mode = "self_hosted"
+
+[core.domain.{domain}]
+"#,
+        prompt = toml_quote(prompt),
+        domain = req.domain,
+    );
+
+    tokio::fs::create_dir_all(&agents_dir)
+        .await
+        .map_err(|e| ApiError::internal(format!("create agent dir: {e}")))?;
+    tokio::fs::write(&manifest_path, &manifest_toml)
+        .await
+        .map_err(|e| ApiError::internal(format!("write manifest: {e}")))?;
+
+    // Also register in the discovery registry.
+    let capabilities = if req.capabilities.is_empty() {
+        match req.domain.as_str() {
+            "research" => vec!["messaging".to_string(), "research".to_string()],
+            _ => vec!["messaging".to_string(), "tasks".to_string()],
+        }
+    } else {
+        req.capabilities
+    };
+
+    let agent = state
+        .upsert_discovered_agent(AgentRegistrationRecord {
+            agent_id: req.name.clone(),
+            label: Some(req.name.clone()),
+            capabilities,
+            domain_tags: vec![req.domain.clone()],
+            skills: req.skills,
+            tier: req.tier,
+            reputation: req.reputation,
+            max_concurrent_jobs: req.max_concurrent_jobs,
+            ..Default::default()
+        })
+        .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "agent": agent,
+            "manifest_path": manifest_path.display().to_string(),
+            "domain": req.domain,
+        })),
+    ))
+}
+
+/// Quote a string for TOML (triple-quoted for multi-line safety).
+fn toml_quote(s: &str) -> String {
+    if s.contains('\n') || s.contains('"') {
+        format!("\"\"\"{}\"\"\"", s.replace('\\', "\\\\"))
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 /// `GET /api/agents/{id}` — get info about a discovered or supervised agent.
@@ -123,9 +315,11 @@ async fn stop_agent(
 }
 
 /// `GET /api/agents/{id}/episodes` — filter episodes for a specific agent.
+///
+/// Accepts both string agent IDs (`sam-local-qwen`) and numeric process IDs (`42`).
 async fn agent_episodes(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let path = state.layout.episodes_path();
     let content = match tokio::fs::read_to_string(&path).await {
@@ -136,7 +330,7 @@ async fn agent_episodes(
         }
     };
 
-    let agent_id_str = id.to_string();
+    let numeric_id = id.parse::<u64>().ok();
     let mut filtered: Vec<Value> = Vec::new();
     for (line_no, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
@@ -144,10 +338,10 @@ async fn agent_episodes(
         }
         let value = serde_json::from_str::<Value>(line)
             .map_err(|e| ApiError::internal(format!("parse episodes line {}: {e}", line_no + 1)))?;
-        if value
-            .get("agent_id")
-            .is_some_and(|a| a.as_str() == Some(&agent_id_str) || a.as_u64() == Some(id))
-        {
+        let matches = value.get("agent_id").is_some_and(|a| {
+            a.as_str() == Some(id.as_str()) || numeric_id.is_some_and(|n| a.as_u64() == Some(n))
+        });
+        if matches {
             filtered.push(value);
         }
     }
@@ -248,6 +442,44 @@ async fn send_message(
         }
 
         match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .unwrap_or_else(|_| json!({ "status": "proxy_error" }));
+
+                // Extract text from sidecar response.  If the response
+                // field contains raw JSON (e.g. Claude CLI streaming
+                // protocol), try to extract the result text.
+                let response_text = body
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .map(extract_response_text)
+                    .unwrap_or_default();
+
+                let run_id = uuid::Uuid::new_v4().to_string();
+
+                // Emit an agent_output event so WS/SSE clients see it.
+                state
+                    .event_bus
+                    .publish(crate::events::ServerEvent::AgentOutput {
+                        agent_id: agent_id.clone(),
+                        run_id: Some(run_id.clone()),
+                        content: response_text.clone(),
+                        done: true,
+                        metadata: None,
+                    });
+
+                return Ok((
+                    StatusCode::OK,
+                    Json(json!({
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "status": "completed",
+                        "response": response_text,
+                    })),
+                ));
+            }
             Ok(response) => {
                 let status = response.status();
                 let body = response
@@ -305,6 +537,75 @@ async fn token_status(
     Ok(Json(json!(status)))
 }
 
+/// Best-effort extraction of clean text from a sidecar response that may
+/// contain raw Claude CLI streaming-protocol JSONL.
+fn extract_response_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    // Fast path: not JSON at all → return as-is.
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return raw.to_string();
+    }
+    // Single JSON object with a `result` or `content` text field.
+    if let Ok(obj) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(t) = obj
+            .get("result")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return t.to_string();
+        }
+        if let Some(t) = obj
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return t.to_string();
+        }
+    }
+    // Multi-line JSONL (Claude CLI streaming protocol).
+    if trimmed.contains('\n') {
+        let mut parts = Vec::new();
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(obj) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let event_type = obj.get("type").and_then(Value::as_str);
+            match event_type {
+                Some("result") => {
+                    if let Some(t) = obj
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                    {
+                        parts.push(t.to_string());
+                    }
+                }
+                Some("assistant") => {
+                    if let Some(blocks) = obj.pointer("/message/content").and_then(Value::as_array)
+                    {
+                        for block in blocks {
+                            if block.get("type").and_then(Value::as_str) == Some("text") {
+                                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                    parts.push(t.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("");
+        }
+    }
+    raw.to_string()
+}
+
 fn build_agent_prompt(agent_id: &str, message: &str, context: Option<&Value>) -> String {
     let mut prompt = format!("[agent:{agent_id}] {message}");
     if let Some(context) = context {
@@ -343,6 +644,18 @@ struct RegisterAgentRequest {
     a2a_endpoint: Option<String>,
     #[serde(default)]
     mcp_endpoint: Option<String>,
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    reputation: u32,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    #[serde(alias = "pastJobsCompleted")]
+    past_jobs_completed: u32,
+    #[serde(default)]
+    #[serde(alias = "maxConcurrentJobs")]
+    max_concurrent_jobs: u32,
     #[serde(default)]
     issue_token: Option<bool>,
 }
@@ -521,6 +834,11 @@ mod tests {
                 websocket_endpoint: None,
                 a2a_endpoint: None,
                 mcp_endpoint: None,
+                tier: None,
+                reputation: 0,
+                skills: Vec::new(),
+                past_jobs_completed: 0,
+                max_concurrent_jobs: 0,
                 issue_token: Some(true),
             }),
         )
@@ -566,6 +884,7 @@ mod tests {
                 card_uri: None,
                 capabilities: Vec::new(),
                 domain_tags: Vec::new(),
+                ..Default::default()
             })
             .await;
 
@@ -649,6 +968,7 @@ mod tests {
                 card_uri: None,
                 capabilities: Vec::new(),
                 domain_tags: Vec::new(),
+                ..Default::default()
             })
             .await;
 

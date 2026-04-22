@@ -44,6 +44,7 @@
 
 use crate::bandits::EwcRegularizer;
 use crate::cost_table::CostTable;
+use crate::provider_health::ProviderHealthTracker;
 use parking_lot::RwLock;
 use rand::Rng;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
@@ -1224,6 +1225,131 @@ impl LinUCBRouter {
             persist_path: Some(path.to_path_buf()),
             static_table: default_static_table(&model_slugs),
         })
+    }
+
+    // ─── Health-aware selection ──────────────────────────────────────────
+
+    /// Select the best model, skipping arms whose provider is unhealthy.
+    ///
+    /// `provider_of` maps a model slug to its provider name (e.g.
+    /// `"claude-sonnet-4-5"` -> `"anthropic"`). If all providers are
+    /// unhealthy, falls back to the least-unhealthy arm so the caller
+    /// always gets a usable model.
+    pub fn select_model_with_health<F>(
+        &self,
+        ctx: &RoutingContext,
+        health: &ProviderHealthTracker,
+        provider_of: F,
+    ) -> ModelSpec
+    where
+        F: Fn(&str) -> String,
+    {
+        let state = self.state.read();
+
+        // Cold start: use static routing but respect health.
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = complexity_to_tier(ctx.complexity);
+            let slug = self
+                .static_table
+                .get(&tier)
+                .cloned()
+                .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+            // If the static pick is healthy, use it.
+            if health.is_healthy(&provider_of(&slug)) {
+                return ModelSpec::from_slug(slug);
+            }
+
+            // Otherwise, try other static entries.
+            for (_, candidate) in &self.static_table {
+                if health.is_healthy(&provider_of(candidate)) {
+                    return ModelSpec::from_slug(candidate.clone());
+                }
+            }
+
+            // All static picks unhealthy; return the original (circuit
+            // breaker will probe it).
+            return ModelSpec::from_slug(slug);
+        }
+
+        let alpha = alpha_for_observations(state.total_observations);
+
+        // First pass: score only healthy arms.
+        let mut best_slug: Option<String> = None;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for arm in &state.arms {
+            if !health.is_healthy(&provider_of(&arm.slug)) {
+                continue;
+            }
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let score = linucb_score(arm, &x, alpha);
+            if score > best_score {
+                best_score = score;
+                best_slug = Some(arm.slug.clone());
+            }
+        }
+
+        if let Some(slug) = best_slug {
+            drop(state);
+            return ModelSpec::from_slug(slug);
+        }
+
+        // All providers unhealthy: fall back to the best-scoring arm
+        // overall so the caller still gets a model (the circuit breaker
+        // will let a probe through eventually).
+        let mut fallback_slug = state.arms[0].slug.clone();
+        let mut fallback_score = f64::NEG_INFINITY;
+        for arm in &state.arms {
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let score = linucb_score(arm, &x, alpha);
+            if score > fallback_score {
+                fallback_score = score;
+                fallback_slug.clone_from(&arm.slug);
+            }
+        }
+
+        drop(state);
+        ModelSpec::from_slug(fallback_slug)
+    }
+
+    /// Select the best model from a filtered candidate set, also
+    /// excluding candidates whose provider is unhealthy.
+    ///
+    /// Combines the candidate restriction of
+    /// [`select_features_from_candidates`] with
+    /// [`ProviderHealthTracker`]-based filtering.
+    pub fn select_from_candidates_with_health<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        health: &ProviderHealthTracker,
+        provider_of: F,
+    ) -> ModelSpec
+    where
+        F: Fn(&str) -> String,
+    {
+        if candidate_slugs.is_empty() {
+            return self.select_model(ctx);
+        }
+
+        // Filter candidates to healthy providers, with a fallback.
+        let healthy_candidates: Vec<String> =
+            health.filter_arms_or_best(candidate_slugs, &provider_of);
+
+        self.select_features_from_candidates(ctx, &healthy_candidates)
+    }
+
+    /// Return all arm slugs registered in the router.
+    ///
+    /// Useful for feeding into [`ProviderHealthTracker::filter_arms`].
+    pub fn arm_slugs(&self) -> Vec<String> {
+        self.state
+            .read()
+            .arms
+            .iter()
+            .map(|a| a.slug.clone())
+            .collect()
     }
 }
 

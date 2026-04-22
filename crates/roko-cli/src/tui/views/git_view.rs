@@ -688,32 +688,35 @@ fn collect_commits(workdir: &Path) -> Vec<CommitEntry> {
         workdir,
         &[
             "log",
-            "--oneline",
             "--graph",
             "--decorate=short",
             "-30",
-            "--format=%h\t%s\t%an\t%cr",
+            "--format=%H%x00%h%x00%an%x00%cr%x00%s%x1e",
         ],
     );
     let Some(output) = output else {
         return Vec::new();
     };
 
+    parse_commit_records(&output)
+}
+
+fn parse_commit_records(output: &str) -> Vec<CommitEntry> {
     let mut commits = Vec::new();
-    for line in output.lines() {
-        if line.trim().is_empty() {
+    for record in output.split('\x1e') {
+        let record = record.trim_start_matches('\n');
+        if record.trim().is_empty() {
             continue;
         }
-
-        // The graph characters come before the hash. Split on the first
-        // non-graph character sequence that looks like a short hash.
-        let (graph_prefix, rest) = split_graph_line(line);
-        let parts: Vec<&str> = rest.splitn(4, '\t').collect();
-
-        let hash_short = parts.first().map_or("", |s| s.trim()).to_string();
-        let subject = parts.get(1).map_or("", |s| s.trim()).to_string();
-        let author = parts.get(2).map_or("", |s| s.trim()).to_string();
-        let age = parts.get(3).map_or("", |s| s.trim()).to_string();
+        let parts: Vec<&str> = record.split('\0').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let (graph_prefix, _) = split_graph_line(parts[0]);
+        let hash_short = parts[1].trim().to_string();
+        let author = parts[2].trim().to_string();
+        let age = parts[3].trim().to_string();
+        let subject = parts[4].trim().to_string();
 
         if !hash_short.is_empty() {
             commits.push(CommitEntry {
@@ -760,5 +763,33 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_nul_delimited_commit_subject_with_tabs_and_pipes() {
+        let raw = concat!(
+            "* 0123456789abcdef0123456789abcdef01234567",
+            "\0",
+            "abc1234",
+            "\0",
+            "Will",
+            "\0",
+            "2h ago",
+            "\0",
+            "fix: handle a\tb | c edge",
+            "\x1e"
+        );
+        let commits = parse_commit_records(raw);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].hash_short, "abc1234");
+        assert_eq!(commits[0].author, "Will");
+        assert_eq!(commits[0].age, "2h ago");
+        assert_eq!(commits[0].subject, "fix: handle a\tb | c edge");
+        assert_eq!(commits[0].graph_prefix, "* ");
     }
 }

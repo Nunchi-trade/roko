@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -53,6 +54,11 @@ struct CreateDeploymentRequest {
     /// If omitted, uses the default from config.
     #[serde(default)]
     backend: Option<String>,
+    /// Per-request Railway API token. Alternative to the `X-Railway-Token` header.
+    /// Enables dashboard users to bring their own Railway token without storing it
+    /// in the server config.
+    #[serde(default)]
+    railway_token: Option<String>,
 }
 
 impl RequestPayload for CreateDeploymentRequest {
@@ -77,6 +83,7 @@ const fn default_tail() -> usize {
 #[allow(clippy::too_many_lines)]
 async fn create_deployment(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     ValidJson(req): ValidJson<CreateDeploymentRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Look up template
@@ -128,20 +135,33 @@ async fn create_deployment(
         region,
     };
 
-    // Create per-request backend if overridden, otherwise use the server default
-    let backend: Arc<dyn crate::deploy::DeployBackend> = if let Some(ref name) = req.backend {
-        let rc = state.load_roko_config();
-        let b = crate::deploy::create_backend(
-            name,
-            rc.deploy.railway_api_token.as_deref(),
-            rc.deploy.project_id.as_deref(),
-            rc.deploy.environment_id.as_deref(),
-        )
-        .map_err(|e| ApiError::bad_request(format!("invalid backend '{name}': {e}")))?;
-        Arc::from(b)
-    } else {
-        Arc::clone(&state.deploy_backend)
-    };
+    // Per-user Railway token: header takes priority, then body field, then config.
+    let user_railway_token = headers
+        .get("x-railway-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.railway_token.clone());
+
+    // Create per-request backend if overridden or a per-user token is supplied,
+    // otherwise use the server default.
+    let backend: Arc<dyn crate::deploy::DeployBackend> =
+        if req.backend.is_some() || user_railway_token.is_some() {
+            let rc = state.load_roko_config();
+            let backend_name = req.backend.as_deref().unwrap_or(&rc.deploy.backend);
+            let token = user_railway_token
+                .as_deref()
+                .or(rc.deploy.railway_api_token.as_deref());
+            let b = crate::deploy::create_backend(
+                backend_name,
+                token,
+                rc.deploy.project_id.as_deref(),
+                rc.deploy.environment_id.as_deref(),
+            )
+            .map_err(|e| ApiError::bad_request(format!("invalid backend '{backend_name}': {e}")))?;
+            Arc::from(b)
+        } else {
+            Arc::clone(&state.deploy_backend)
+        };
 
     // Deploy
     let deployment = backend
@@ -552,6 +572,7 @@ mod tests {
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             experiment: None,
+            provider: None,
         }
     }
 

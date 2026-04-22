@@ -390,6 +390,18 @@ pub struct DashboardData {
     pub event_log: Vec<EventLogEntry>,
     /// Whole-file reload cursor over `.roko/state/events.json`.
     event_log_cursor: EventLogCursor,
+    /// Marketplace jobs from `.roko/jobs/`.
+    pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
+    /// PRD summaries from `.roko/prd/`.
+    pub atelier_prds: Vec<roko_core::PrdSummary>,
+    /// Per-slug task lists for Atelier.
+    pub atelier_tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
+    /// Knowledge entries from `.roko/neuro/knowledge.jsonl` for the Inspect tab.
+    pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
+    /// Incremental tailer for `.roko/learn/efficiency.jsonl`.
+    efficiency_tailer: super::jsonl_tailer::IncrementalTailer<AgentEfficiencyEvent>,
+    /// Incremental tailer for `.roko/learn/c-factor.jsonl`.
+    cfactor_tailer: super::jsonl_tailer::IncrementalTailer<CFactor>,
 }
 
 /// Derived executor snapshot fields used by TUI orchestration chrome.
@@ -439,7 +451,8 @@ impl DashboardData {
 
         let plans = load_plan_summaries(&root, &state);
         let active_tasks = load_active_tasks(&state);
-        let agents = load_agents(&state);
+        let mut agents = load_agents(&state);
+        merge_runtime_agents(&mut agents, &root);
         let gate_results = load_gate_results(&state, &signal_gate_results);
         let efficiency_events = read_efficiency_events_sync(&efficiency_path);
         let efficiency = load_efficiency_summary(&efficiency_path);
@@ -499,6 +512,18 @@ impl DashboardData {
             },
         );
 
+        let (atelier_prds, atelier_tasks_by_slug) = scan_atelier_prds(&roko_dir);
+        let knowledge_entries = load_knowledge_browse_entries(&root);
+
+        // Initialize incremental tailers and do the first tick so items are
+        // populated to match the full-read data already loaded above.
+        let mut efficiency_tailer =
+            super::jsonl_tailer::IncrementalTailer::<AgentEfficiencyEvent>::new(&efficiency_path);
+        let _ = efficiency_tailer.tick();
+        let mut cfactor_tailer =
+            super::jsonl_tailer::IncrementalTailer::<CFactor>::new(&cfactor_path);
+        let _ = cfactor_tailer.tick();
+
         Self {
             root,
             generation,
@@ -538,6 +563,12 @@ impl DashboardData {
             git_diff_is_staged,
             event_log,
             event_log_cursor,
+            marketplace_jobs: scan_marketplace_jobs(&roko_dir),
+            atelier_prds,
+            atelier_tasks_by_slug,
+            knowledge_entries,
+            efficiency_tailer,
+            cfactor_tailer,
         }
     }
 
@@ -594,12 +625,14 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&efficiency_path);
-        if stamp != self.efficiency_stamp {
-            self.efficiency_stamp = stamp;
-            self.efficiency_events = read_efficiency_events_sync(&efficiency_path);
-            self.efficiency = load_efficiency_summary(&efficiency_path);
+        // Incremental efficiency tailer: only deserialize newly appended lines.
+        if self.efficiency_tailer.tick().unwrap_or(0) > 0 {
+            self.efficiency_events = self.efficiency_tailer.items().to_vec();
+            self.efficiency = efficiency_summary_from_events(&self.efficiency_events);
+            // Trend still reads the file — only the O(N) deserialization of the
+            // raw event list is avoided here.
             self.efficiency_trend = load_efficiency_trend(&efficiency_path);
+            self.efficiency_stamp = file_stamp(&efficiency_path);
             generation_changed = true;
         }
 
@@ -635,11 +668,11 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&cfactor_path);
-        if stamp != self.cfactor_stamp {
-            self.cfactor_stamp = stamp;
-            self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+        // Incremental c-factor tailer: pick up the latest CFactor snapshot.
+        if self.cfactor_tailer.tick().unwrap_or(0) > 0 {
+            self.cfactor = self.cfactor_tailer.items().last().cloned();
             self.cfactor_trend = load_cfactor_trend(&cfactor_path);
+            self.cfactor_stamp = file_stamp(&cfactor_path);
             generation_changed = true;
         }
 
@@ -668,12 +701,19 @@ impl DashboardData {
             self.plans = load_plan_summaries(&self.root, &self.executor_state);
             self.active_tasks = load_active_tasks(&self.executor_state);
             self.agents = load_agents(&self.executor_state);
+            merge_runtime_agents(&mut self.agents, &self.root);
             self.gate_results = load_gate_results(&self.executor_state, &self.signal_gate_results);
             self.current_plan_execution = backfill_agent_output_tail(
                 load_current_plan_execution(&self.root, &self.executor_state, &self.episodes),
                 &self.task_output_cursors,
             );
         }
+
+        // Refresh marketplace jobs + PRDs each tick.
+        self.marketplace_jobs = scan_marketplace_jobs(&roko_dir);
+        let (prds, tasks_by_slug) = scan_atelier_prds(&roko_dir);
+        self.atelier_prds = prds;
+        self.atelier_tasks_by_slug = tasks_by_slug;
 
         if generation_changed {
             self.generation = self.generation.saturating_add(1);
@@ -744,6 +784,161 @@ impl DashboardData {
             &self.episodes,
         )
     }
+}
+
+/// Scan `.roko/jobs/` for marketplace job JSON files.
+fn scan_marketplace_jobs(roko_dir: &Path) -> Vec<roko_core::MarketplaceJob> {
+    let dir = roko_dir.join("jobs");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut jobs: Vec<roko_core::MarketplaceJob> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "json")
+        })
+        .filter_map(|e| {
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data).ok()?;
+            if job.id.is_empty() {
+                job.id = e
+                    .path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            Some(job)
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    jobs
+}
+
+/// Scan `.roko/prd/` for PRD markdown files, then correlate with plan task
+/// files to populate task counts and per-slug task lists.
+fn scan_atelier_prds(
+    roko_dir: &Path,
+) -> (
+    Vec<roko_core::PrdSummary>,
+    std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
+) {
+    let dir = roko_dir.join("prd");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (Vec::new(), std::collections::HashMap::new());
+    };
+    let mut prds: Vec<roko_core::PrdSummary> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "md")
+        })
+        .filter_map(|e| {
+            let slug = e
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            // Extract title from first markdown heading.
+            let title = data
+                .lines()
+                .find(|l| l.starts_with("# "))
+                .map(|l| l.trim_start_matches("# ").trim().to_string())
+                .unwrap_or_else(|| slug.clone());
+            // Detect status from frontmatter or content.
+            let status = if data.contains("status: published") || data.contains("Status: Published")
+            {
+                "published"
+            } else if data.contains("status: planned") || data.contains("Status: Planned") {
+                "planned"
+            } else if data.contains("status: draft") || data.contains("Status: Draft") {
+                "draft"
+            } else {
+                "idea"
+            };
+            Some(roko_core::PrdSummary {
+                slug,
+                title,
+                status: status.to_string(),
+                ..Default::default()
+            })
+        })
+        .collect();
+    prds.sort_by(|a, b| a.slug.cmp(&b.slug));
+
+    // Scan plan directories for tasks.toml files and correlate with PRD slugs.
+    let mut tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>> =
+        std::collections::HashMap::new();
+
+    // Workspace root is one level up from .roko/
+    let workspace_root = roko_dir.parent().unwrap_or(roko_dir);
+    let plan_dirs: Vec<PathBuf> = [workspace_root.join("plans"), roko_dir.join("plans")]
+        .into_iter()
+        .filter(|d| d.is_dir())
+        .collect();
+
+    for plan_dir in &plan_dirs {
+        let Ok(plan_entries) = std::fs::read_dir(plan_dir) else {
+            continue;
+        };
+        for entry in plan_entries.filter_map(|e| e.ok()) {
+            let tasks_path = entry.path().join("tasks.toml");
+            if !tasks_path.is_file() {
+                continue;
+            }
+            let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
+                continue;
+            };
+            let plan_name = entry
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // Match plan to PRD: check if any PRD slug is a substring of the plan name,
+            // or the plan name contains the slug.
+            for prd in &mut prds {
+                let slug_lower = prd.slug.to_lowercase();
+                let plan_lower = plan_name.to_lowercase();
+                if plan_lower.contains(&slug_lower) || slug_lower.contains(&plan_lower) {
+                    prd.plan_count += 1;
+                    prd.task_total += tasks_file.tasks.len();
+                    let mut done = 0usize;
+                    let mut failed = 0usize;
+                    let mut task_summaries = Vec::new();
+                    for task in &tasks_file.tasks {
+                        match task.status.as_str() {
+                            "done" | "completed" | "passed" => done += 1,
+                            "failed" | "error" => failed += 1,
+                            _ => {}
+                        }
+                        task_summaries.push(roko_core::job::TaskSummary {
+                            id: task.id.clone(),
+                            title: task.title.clone(),
+                            status: task.status.clone(),
+                            agent: String::new(),
+                        });
+                    }
+                    prd.task_done += done;
+                    prd.task_failed += failed;
+                    tasks_by_slug
+                        .entry(prd.slug.clone())
+                        .or_default()
+                        .extend(task_summaries);
+                }
+            }
+        }
+    }
+
+    (prds, tasks_by_slug)
 }
 
 fn load_dashboard_git_diff(root: &Path) -> (String, bool) {
@@ -1044,11 +1239,13 @@ pub struct ExperimentSummary {
 }
 
 /// Recent signal summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalSummary {
     pub id: String,
     pub kind: String,
     pub created_at_ms: i64,
+    #[serde(default)]
+    pub confidence: Option<f64>,
     #[serde(default)]
     pub plan_id: Option<String>,
     #[serde(default)]
@@ -1087,6 +1284,30 @@ impl AlertSummary {
             message: signal.kind.clone(),
         }
     }
+}
+
+/// Lightweight knowledge-entry summary for the Inspect tab's KnowledgeBrowse sub-view.
+///
+/// Projected from `roko_neuro::KnowledgeEntry` to avoid pulling HDC vectors
+/// and other heavy fields into the TUI state.
+#[derive(Debug, Clone)]
+pub struct KnowledgeBrowseEntry {
+    /// Entry identifier.
+    pub id: String,
+    /// Knowledge category label (e.g. "insight", "heuristic", "pattern").
+    pub kind: String,
+    /// Truncated content for preview.
+    pub content_preview: String,
+    /// Confidence score 0.0..=1.0.
+    pub confidence: f64,
+    /// Tier label (transient, working, consolidated, persistent).
+    pub tier: String,
+    /// Topic tags.
+    pub tags: Vec<String>,
+    /// When the entry was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the entry is frozen (cold storage).
+    pub frozen: bool,
 }
 
 /// Build the agent activity snapshot from active agents and efficiency events.
@@ -1309,6 +1530,7 @@ impl SignalSummary {
             id: value.get("id")?.as_str()?.to_string(),
             kind: value.get("kind")?.as_str()?.to_string(),
             created_at_ms: entry_timestamp_ms(value)?,
+            confidence: signal_confidence(value),
             plan_id: value
                 .pointer("/tags/plan_id")
                 .and_then(Value::as_str)
@@ -1990,6 +2212,56 @@ fn load_agents(state: &Value) -> Vec<AgentSummary> {
     agents
 }
 
+/// Runtime entry from `.roko/runtime/agents.json`.
+#[derive(Debug, Deserialize)]
+struct RuntimeAgentEntry {
+    name: String,
+    pid: u32,
+    #[allow(dead_code)]
+    bind: String,
+}
+
+/// Check whether a process with the given PID is alive.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn is_process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 is an existence check — no signal is delivered.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Merge agents from `.roko/runtime/agents.json` (alive PIDs) into the
+/// agent list, deduplicating by ID.
+fn merge_runtime_agents(agents: &mut Vec<AgentSummary>, workdir: &Path) {
+    let path = workdir.join(".roko").join("runtime").join("agents.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<RuntimeAgentEntry>>(&contents) else {
+        return;
+    };
+    let existing: HashSet<String> = agents.iter().map(|a| a.id.clone()).collect();
+    for entry in entries {
+        if !is_process_alive(entry.pid) {
+            continue;
+        }
+        if existing.contains(&entry.name) {
+            continue;
+        }
+        agents.push(AgentSummary {
+            id: entry.name.clone(),
+            label: entry.name,
+            plan_id: None,
+            status: "running".to_string(),
+        });
+    }
+    agents.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.plan_id.cmp(&b.plan_id)));
+}
+
 fn load_gate_results(
     state: &Value,
     signal_gate_results: &[GateResultSummary],
@@ -2579,6 +2851,28 @@ fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
     }
 }
 
+/// Compute [`EfficiencySummary`] from an already-loaded slice of events.
+fn efficiency_summary_from_events(events: &[AgentEfficiencyEvent]) -> EfficiencySummary {
+    if events.is_empty() {
+        return EfficiencySummary::default();
+    }
+    let event_count = events.len();
+    let total_cost_usd = events.iter().map(|e| e.cost_usd).sum();
+    let total_input_tokens = events.iter().map(|e| e.input_tokens).sum();
+    let total_output_tokens = events.iter().map(|e| e.output_tokens).sum();
+    let passed_count = events.iter().filter(|e| e.gate_passed).count();
+    let average_wall_time_ms =
+        events.iter().map(|e| e.wall_time_ms as f64).sum::<f64>() / count_to_f64(event_count);
+    EfficiencySummary {
+        event_count,
+        total_cost_usd,
+        total_input_tokens,
+        total_output_tokens,
+        passed_count,
+        average_wall_time_ms,
+    }
+}
+
 fn load_efficiency_trend(path: &Path) -> Vec<EfficiencyBucket> {
     efficiency_trend(path, Duration::hours(1), 24).unwrap_or_default()
 }
@@ -2944,6 +3238,29 @@ fn signal_payload_preview(value: &Value) -> String {
     };
     let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_str(compact.trim(), 60)
+}
+
+fn signal_confidence(value: &Value) -> Option<f64> {
+    [
+        "/tags/confidence",
+        "/tags/score",
+        "/tags/trust",
+        "/body/data/confidence",
+        "/body/data/score",
+        "/body/data/trust",
+        "/payload/confidence",
+        "/payload/score",
+        "/payload/trust",
+    ]
+    .iter()
+    .find_map(|path| value.pointer(path).and_then(value_as_f64))
+    .map(|confidence| confidence.clamp(0.0, 1.0))
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
 }
 
 fn current_phase_label(plan_state: &Value) -> Option<String> {
@@ -4718,6 +5035,41 @@ fn load_knowledge_store_snapshot(root: &Path) -> KnowledgeStoreSnapshot {
     }
 }
 
+/// Load knowledge entries from `.roko/neuro/knowledge.jsonl`, projecting each
+/// full `KnowledgeEntry` to the lightweight `KnowledgeBrowseEntry` for the TUI.
+fn load_knowledge_browse_entries(root: &Path) -> Vec<KnowledgeBrowseEntry> {
+    let knowledge_path = root.join(NEURO_DIR).join(KNOWLEDGE_FILE);
+    let text = match std::fs::read_to_string(&knowledge_path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<KnowledgeBrowseEntry> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<roko_neuro::KnowledgeEntry>(line).ok())
+        .map(|entry| {
+            let preview = if entry.content.len() > 120 {
+                format!("{}...", &entry.content[..117])
+            } else {
+                entry.content.clone()
+            };
+            KnowledgeBrowseEntry {
+                id: entry.id.clone(),
+                kind: format!("{:?}", entry.kind).to_lowercase(),
+                content_preview: preview,
+                confidence: entry.confidence,
+                tier: format!("{:?}", entry.tier).to_lowercase(),
+                tags: entry.tags.clone(),
+                created_at: entry.created_at,
+                frozen: entry.frozen,
+            }
+        })
+        .collect();
+    // Most recent first
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    entries
+}
+
 fn count_nonempty_lines(path: &Path) -> usize {
     std::fs::read_to_string(path)
         .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
@@ -4911,6 +5263,45 @@ mod tests {
             frequency: roko_core::OperatingFrequency::Theta,
             reasoning_tokens: 0,
         }
+    }
+
+    #[test]
+    fn signal_summary_extracts_structured_confidence() {
+        let signal = SignalSummary::from_value(&serde_json::json!({
+            "id": "sig-1",
+            "kind": "gate:compile",
+            "created_at_ms": 42,
+            "body": {
+                "data": {
+                    "confidence": "0.82",
+                    "plan_id": "plan-a"
+                }
+            }
+        }))
+        .expect("valid signal");
+
+        assert_eq!(signal.confidence, Some(0.82));
+        assert_eq!(signal.plan_id.as_deref(), Some("plan-a"));
+    }
+
+    #[test]
+    fn signal_confidence_clamps_out_of_range_values() {
+        assert_eq!(
+            signal_confidence(&serde_json::json!({
+                "tags": {
+                    "score": 1.4
+                }
+            })),
+            Some(1.0)
+        );
+        assert_eq!(
+            signal_confidence(&serde_json::json!({
+                "payload": {
+                    "trust": -0.25
+                }
+            })),
+            Some(0.0)
+        );
     }
 
     #[test]

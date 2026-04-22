@@ -20,8 +20,15 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/projections/catalog", get(projections_catalog))
         .route("/projections/{name}", get(get_projection))
         .route("/projections/{name}/stream", get(stream_projection))
+}
+
+/// `GET /api/projections/catalog` — return projection names, versions, and invalidation policies.
+async fn projections_catalog() -> Json<Value> {
+    let entries = crate::projection_contract::projection_policies();
+    Json(json!({ "projections": entries }))
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

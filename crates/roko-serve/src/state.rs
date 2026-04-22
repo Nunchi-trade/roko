@@ -5,7 +5,7 @@
 //! layout, configuration, runtime services, and tracking maps for active
 //! runs, plans, and operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -32,6 +32,7 @@ use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
 use crate::event_bus::EventBus;
 use crate::runtime::CliRuntime;
+use crate::runtime::RunResult;
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
@@ -50,22 +51,8 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-/// Known endpoint set for an agent.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentEndpoints {
-    /// Base REST endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rest: Option<String>,
-    /// Streaming WebSocket endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub websocket: Option<String>,
-    /// Optional A2A endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub a2a: Option<String>,
-    /// Optional MCP endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<String>,
-}
+/// Re-export the shared endpoint type from roko-core.
+pub use roko_core::AgentEndpoints;
 
 /// Agent discovery entry used by the serve-side aggregator.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -99,6 +86,21 @@ pub struct DiscoveredAgent {
     /// Domain tags.
     #[serde(default)]
     pub domain_tags: Vec<String>,
+    /// Agent tier (e.g. "Unverified", "Verified", "Trusted", "Expert", "Pioneer").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Agent reputation score (0–100).
+    #[serde(default)]
+    pub reputation: u32,
+    /// Skill tags for matchmaking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Number of previously completed jobs.
+    #[serde(default)]
+    pub past_jobs_completed: u32,
+    /// Maximum concurrent jobs this agent accepts.
+    #[serde(default)]
+    pub max_concurrent_jobs: u32,
     /// Token hash used by the agent server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_hash: Option<String>,
@@ -143,6 +145,21 @@ pub struct AgentRegistrationRecord {
     /// Domain tags.
     #[serde(default)]
     pub domain_tags: Vec<String>,
+    /// Agent tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Agent reputation score.
+    #[serde(default)]
+    pub reputation: u32,
+    /// Skill tags.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Number of previously completed jobs.
+    #[serde(default)]
+    pub past_jobs_completed: u32,
+    /// Maximum concurrent jobs.
+    #[serde(default)]
+    pub max_concurrent_jobs: u32,
 }
 
 /// Returned when a new token is issued or rotated.
@@ -187,6 +204,8 @@ pub struct RunHandle {
     pub prompt: String,
     /// Current execution status.
     pub status: OperationStatus,
+    /// Final result payload once the run has completed.
+    pub result: Option<RunResult>,
     /// Background task driving the run.
     pub handle: JoinHandle<()>,
 }
@@ -303,6 +322,8 @@ pub struct AppState {
     pub discovered_agents: RwLock<HashMap<String, DiscoveredAgent>>,
     /// Short-lived aggregator cache keyed by route + query signature.
     pub aggregator_cache: RwLock<HashMap<String, CachedJsonValue>>,
+    /// Ring buffer of recent heartbeat payloads.
+    pub heartbeats: RwLock<VecDeque<roko_core::HeartbeatPayload>>,
 }
 
 impl AppState {
@@ -351,7 +372,7 @@ impl AppState {
             metrics: Arc::new(MetricRegistry::new()),
             supervisor,
             affect_engine: Mutex::new(affect_engine),
-            event_bus: EventBus::new(1024),
+            event_bus: EventBus::new(16_384),
             state_hub: roko_core::shared_state_hub(),
             subscriptions,
             runtime,
@@ -369,6 +390,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
+            heartbeats: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -386,9 +408,65 @@ impl AppState {
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
     pub async fn shutdown(&self) {
         tracing::info!("server shutdown initiated");
+        if let Err(err) = self.save_snapshot().await {
+            tracing::warn!(error = %err, "failed to save server state on shutdown");
+        }
         self.cancel.cancel();
         self.supervisor.shutdown_all().await;
         self.event_bus.publish(ServerEvent::ServerShutdown);
+    }
+
+    fn snapshot_path(&self) -> PathBuf {
+        self.workdir
+            .join(".roko")
+            .join("state")
+            .join("server-state.json")
+    }
+
+    /// Persist discovered agents and template run records to disk (atomic write).
+    pub async fn save_snapshot(&self) -> anyhow::Result<()> {
+        let agents: HashMap<String, DiscoveredAgent> = self.discovered_agents.read().await.clone();
+        let runs: HashMap<String, Vec<TemplateRunRecord>> = self.template_runs.read().await.clone();
+        let snapshot = ServerStateSnapshot {
+            discovered_agents: agents,
+            template_runs: runs,
+        };
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        let target = self.snapshot_path();
+        let parent = target
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid snapshot path"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = target.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await?;
+        tokio::fs::rename(&tmp, &target).await?;
+        tracing::debug!(path = %target.display(), "server state snapshot saved");
+        Ok(())
+    }
+
+    /// Restore discovered agents and template run records from disk.
+    pub async fn restore_snapshot(&self) -> anyhow::Result<()> {
+        let path = self.snapshot_path();
+        if !path.exists() {
+            tracing::debug!("no server state snapshot found; starting fresh");
+            return Ok(());
+        }
+        let data = tokio::fs::read_to_string(&path).await?;
+        let snapshot: ServerStateSnapshot = serde_json::from_str(&data)?;
+        {
+            let mut agents = self.discovered_agents.write().await;
+            for (id, agent) in snapshot.discovered_agents {
+                agents.entry(id).or_insert(agent);
+            }
+        }
+        {
+            let mut runs = self.template_runs.write().await;
+            for (name, records) in snapshot.template_runs {
+                runs.entry(name).or_insert(records);
+            }
+        }
+        tracing::info!(path = %path.display(), "restored server state from snapshot");
+        Ok(())
     }
 
     /// Insert or update a discovery entry and return the stored snapshot.
@@ -411,6 +489,11 @@ impl AppState {
                 card_uri: registration.card_uri.clone(),
                 capabilities: registration.capabilities.clone(),
                 domain_tags: registration.domain_tags.clone(),
+                tier: registration.tier.clone(),
+                reputation: registration.reputation,
+                skills: registration.skills.clone(),
+                past_jobs_completed: registration.past_jobs_completed,
+                max_concurrent_jobs: registration.max_concurrent_jobs,
                 token_hash: None,
                 token_expires_at: None,
                 status: "registered".to_string(),
@@ -442,6 +525,21 @@ impl AppState {
         }
         if !registration.domain_tags.is_empty() {
             entry.domain_tags = registration.domain_tags;
+        }
+        if registration.tier.is_some() {
+            entry.tier = registration.tier;
+        }
+        if registration.reputation > 0 {
+            entry.reputation = registration.reputation;
+        }
+        if !registration.skills.is_empty() {
+            entry.skills = registration.skills;
+        }
+        if registration.past_jobs_completed > 0 {
+            entry.past_jobs_completed = registration.past_jobs_completed;
+        }
+        if registration.max_concurrent_jobs > 0 {
+            entry.max_concurrent_jobs = registration.max_concurrent_jobs;
         }
         entry.last_seen_at = now;
         entry.status = "registered".to_string();
@@ -531,6 +629,17 @@ impl AppState {
             },
         );
     }
+}
+
+/// Serializable snapshot of server state that survives restarts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerStateSnapshot {
+    /// Discovery registry entries.
+    #[serde(default)]
+    pub discovered_agents: HashMap<String, DiscoveredAgent>,
+    /// Template run outcome records.
+    #[serde(default)]
+    pub template_runs: HashMap<String, Vec<TemplateRunRecord>>,
 }
 
 /// Shared `.roko/engrams.jsonl` persistence path.

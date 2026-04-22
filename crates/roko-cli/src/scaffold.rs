@@ -765,7 +765,6 @@ mod tests {{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn to_pascal_case_works() {
