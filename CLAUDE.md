@@ -41,9 +41,9 @@ control plane, per-agent sidecar, and interactive TUI:
 | PRD auto-plan trigger | **Wired** | roko-serve `prd_publish_subscriber` |
 | HDC fingerprint per-episode | **Wired** | Episode `hdc_fingerprint` field, computed + stored |
 | Playbook store queries | **Wired** | Queried at dispatch time → system prompt |
-| VCG auction in composition | **Wired** | `vcg_allocate` called from prompt.rs |
+| VCG auction in composition | **Partial** | `vcg_allocate` built + exported but greedy path dominates at runtime |
 | Context bidders (Neuro/Task/Research) | **Wired** | `AttentionBidder` variants in orchestrate.rs |
-| Safety contracts enforcement | **Wired** | `AgentContract` in `SafetyLayer::authorize_call_with_taint` |
+| Safety contracts enforcement | **Partial** | `AgentContract` wired but falls back to permissive default when YAML missing |
 | TUI file watcher | **Wired** | `notify::RecommendedWatcher` in `tui/fs_watch.rs` |
 
 ### Known blockers
@@ -151,8 +151,8 @@ cargo run -p roko-cli -- status
 | roko-mcp-github / slack / scripts / stdio | `crates/roko-mcp-*/` | Additional MCP integrations | Partial; see `tmp/ux-followup/05-partially-wired-subsystems.md` |
 | roko-index | `crates/roko-index/` | Parser + graph + HDC indexing | Built |
 | roko-lang-rust / typescript / go | `crates/roko-lang-*/` | Language support | Built |
-| roko-dreams | `crates/roko-dreams/` | Offline consolidation (hypnagogia, imagination, cycle) | Phase 2+ |
-| roko-daimon | `crates/roko-daimon/` | Behavior primitives | Phase 2+ |
+| roko-dreams | `crates/roko-dreams/` | Offline consolidation (hypnagogia, imagination, cycle) | Partial (used from orchestrate.rs but no runtime trigger/cron) |
+| roko-daimon | `crates/roko-daimon/` | Affect engine, somatic markers, dispatch modulation | Wired (DaimonState loaded + used per-task in orchestrate.rs) |
 | roko-chain | `crates/roko-chain/` | Chain witness primitives | Phase 2+ |
 
 ## Absolute paths
