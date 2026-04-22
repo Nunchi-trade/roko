@@ -50,20 +50,36 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/parity", get(parity_handler))
 }
 
-/// `GET /api/health` — liveness check.
+/// `GET /api/health` — liveness check with live telemetry.
 async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
     let active_plans = state.active_plans.read().await.len();
     let active_agents = state.supervisor.count().await;
+    let active_runs = state.active_runs.read().await.len();
+
+    // Build a compact provider health summary from the tracker.
+    let provider_snapshot = state.provider_health.snapshot();
+    let providers_total = provider_snapshot.len();
+    let providers_healthy = provider_snapshot
+        .iter()
+        .filter(|ps| ps.consecutive_failures == 0)
+        .count();
+    let provider_summary = json!({
+        "total": providers_total,
+        "healthy": providers_healthy,
+        "unhealthy": providers_total.saturating_sub(providers_healthy),
+    });
 
     (
         axum::http::StatusCode::OK,
         Json(json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_secs": uptime_secs,
-        "active_plans": active_plans,
-        "active_agents": active_agents,
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": uptime_secs,
+            "active_plans": active_plans,
+            "active_agents": active_agents,
+            "active_runs": active_runs,
+            "providers": provider_summary,
         })),
     )
 }
@@ -2123,6 +2139,11 @@ mod tests {
         assert!(body["uptime_secs"].as_u64().is_some());
         assert_eq!(body["active_plans"], 0);
         assert_eq!(body["active_agents"], 0);
+        assert_eq!(body["active_runs"], 0);
+        assert!(body["providers"].is_object());
+        assert_eq!(body["providers"]["total"], 0);
+        assert_eq!(body["providers"]["healthy"], 0);
+        assert_eq!(body["providers"]["unhealthy"], 0);
     }
 
     #[tokio::test]

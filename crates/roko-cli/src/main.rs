@@ -277,6 +277,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    // ── Core workflow ────────────────────────────────────────────────
+
     /// Create `.roko/` and a default `roko.toml` in `path` (default: cwd).
     #[command(after_help = "\
 Examples:
@@ -295,14 +297,11 @@ Examples:
         profile: Option<String>,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
-    #[command(
-        visible_alias = "do",
-        after_help = "\
+    #[command(after_help = "\
 Examples:
   roko run \"Fix the login bug\"      Single prompt through the universal loop
   roko run \"Add tests for auth\"     Generate and execute a plan
-  roko run \"Refactor db layer\" --role architect   Run with a specific role"
-    )]
+  roko run \"Refactor db layer\" --role architect   Run with a specific role")]
     Run {
         /// The user prompt text.
         prompt: String,
@@ -333,63 +332,10 @@ Examples:
         #[arg(long)]
         serve_url: Option<String>,
     },
-    /// Walk the lineage DAG rooted at a signal hash and print it.
-    #[command(visible_alias = "inspect")]
-    Replay {
-        /// Engram hash (64 hex chars) to walk.
-        hash: String,
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-        /// Show forensic detail: timestamps, full hashes, metadata.
-        #[arg(long)]
-        forensic: bool,
-    },
-    /// Manage dream replay, report, and scheduling.
-    Dream {
-        #[command(subcommand)]
-        cmd: DreamCmd,
-    },
-    /// Dream archive and journal inspection.
-    Dreams {
-        #[command(subcommand)]
-        cmd: DreamsCmd,
-    },
-    /// Manage global and project config (wizard, show, path, edit, set, set-secret).
-    Config {
-        #[command(subcommand)]
-        cmd: ConfigCmd,
-    },
-    /// Manage profile-aware secrets.
-    #[command(name = "secret", visible_alias = "secrets")]
-    Secret {
-        #[command(subcommand)]
-        cmd: roko_cli::SecretsCmd,
-    },
-    /// Inspect the custody audit chain (list, show, verify).
-    Custody {
-        #[command(subcommand)]
-        cmd: CustodyCmd,
-    },
-    /// Manage standalone agent runtimes.
-    Agent {
-        #[command(subcommand)]
-        cmd: AgentCmd,
-    },
-    /// Inject a signal into a running session.
-    Inject {
-        /// Target session ID.
-        session: String,
-        /// Kind of signal to inject (directive, abort, context).
-        #[arg(long, default_value = "directive")]
-        kind: String,
-        /// Payload text.
-        payload: String,
-        /// Working directory (to locate the daemon socket).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Manage plans (list, show, create, validate).
+
+    // ── Planning & PRDs ─────────────────────────────────────────────
+
+    /// Manage plans (list, show, create, validate, run, generate).
     Plan {
         #[command(subcommand)]
         cmd: PlanCmd,
@@ -399,79 +345,97 @@ Examples:
         #[command(subcommand)]
         cmd: PrdCmd,
     },
+
+    // ── Agents ──────────────────────────────────────────────────────
+
+    /// Manage standalone agent runtimes and chat.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
+
+    // ── Research ────────────────────────────────────────────────────
+
     /// Research topics, enhance documents, analyze execution data.
     Research {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
+
+    // ── Knowledge (neuro + dreams + custody + archive) ──────────────
+
+    /// Durable knowledge store, dream consolidation, custody chain, and archival.
+    Knowledge {
+        #[command(subcommand)]
+        cmd: KnowledgeCmd,
+    },
+
+    // ── Learning & feedback ─────────────────────────────────────────
+
+    /// Inspect learning state: cascade router, experiments, efficiency, episodes, tuning.
+    Learn {
+        #[command(subcommand)]
+        cmd: LearnCmd,
+    },
+
+    // ── Jobs ────────────────────────────────────────────────────────
+
     /// Manage marketplace jobs (list, create, show, execute, cancel).
     Job {
         #[command(subcommand)]
         cmd: JobCmd,
     },
-    /// Interactive chat REPL backed by roko-serve agent messaging.
-    Chat {
-        /// Agent ID to chat with.
-        #[arg(long, default_value = "nunchi-intelligence")]
-        agent: String,
-        /// roko-serve base URL.
-        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
-        serve_url: String,
-    },
-    /// Search durable knowledge and memory entries.
-    Neuro {
+
+    // ── Configuration (providers, models, subscriptions, etc.) ──────
+
+    /// Manage global and project config, providers, models, subscriptions, plugins.
+    Config {
         #[command(subcommand)]
-        cmd: NeuroCmd,
+        cmd: ConfigCmd,
     },
-    /// Manage event subscriptions.
-    Subscription {
+
+    // ── Code intelligence ───────────────────────────────────────────
+
+    /// Code intelligence: build, search, and inspect the workspace index.
+    Index {
         #[command(subcommand)]
-        cmd: SubscriptionCmd,
+        cmd: IndexCmd,
     },
-    /// Inspect configured event sources.
-    EventSources {
-        #[command(subcommand)]
-        cmd: EventSourcesCmd,
-    },
-    /// Inspect configured LLM providers.
-    Provider {
-        #[command(subcommand)]
-        cmd: ProviderCmd,
-    },
-    /// Inspect configured models and their capabilities.
-    Model {
-        #[command(subcommand)]
-        cmd: ModelCmd,
-    },
-    /// Manage model experiments.
-    Experiment {
-        #[command(subcommand)]
-        cmd: ExperimentCmd,
-    },
-    /// Manage cloud deployment targets.
-    Deploy {
-        #[command(subcommand)]
-        cmd: DeployCmd,
-    },
-    /// Update this binary when installed by a release installer.
-    Update {
-        /// Verify release artifacts with Sigstore/cosign after download.
+
+    // ── Server & deployment ─────────────────────────────────────────
+
+    /// Start the HTTP API server.
+    Serve {
+        /// Address to bind to (default: 127.0.0.1).
         #[arg(long)]
-        verify: bool,
+        bind: Option<String>,
+        /// Port number (default: 9090).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
-    /// Generate shell completion scripts.
-    Completions {
-        /// Shell to generate completions for.
-        #[arg(value_enum)]
-        shell: CompletionShell,
-    },
-    /// Manage daemon mode.
+    /// Manage daemon mode (start, stop, status, logs, install).
     Daemon {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
-    /// Launch the dashboard TUI, with text fallback for non-interactive use.
-    #[command(visible_alias = "watch")]
+    /// Deploy to cloud targets (Railway, Fly.io, Docker).
+    Deploy {
+        #[command(subcommand)]
+        cmd: DeployCmd,
+    },
+    /// Run as a deployed worker (reads template from env, serves tasks).
+    Worker {
+        /// Port to listen on (default: 8080, overridden by PORT env).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+
+    // ── Interactive ─────────────────────────────────────────────────
+
+    /// Launch the dashboard TUI.
     Dashboard {
         /// Specific dashboard page slug to render.
         #[arg(long)]
@@ -492,58 +456,38 @@ Examples:
         #[arg(long)]
         reduced_motion: bool,
     },
-    /// Start the HTTP API server.
-    Serve {
-        /// Address to bind to (default: 127.0.0.1).
+
+    // ── Utilities ───────────────────────────────────────────────────
+
+    /// Walk the lineage DAG rooted at a signal hash and print it.
+    Replay {
+        /// Engram hash (64 hex chars) to walk.
+        hash: String,
+        /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
-        bind: Option<String>,
-        /// Port number (default: 9090).
+        workdir: Option<PathBuf>,
+        /// Show forensic detail: timestamps, full hashes, metadata.
         #[arg(long)]
-        port: Option<u16>,
-        /// Working directory (default: cwd).
+        forensic: bool,
+    },
+    /// Inject a signal into a running session.
+    Inject {
+        /// Target session ID.
+        session: String,
+        /// Kind of signal to inject (directive, abort, context).
+        #[arg(long, default_value = "directive")]
+        kind: String,
+        /// Payload text.
+        payload: String,
+        /// Working directory (to locate the daemon socket).
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Run as a deployed worker (reads template from env, serves tasks).
-    Worker {
-        /// Port to listen on (default: 8080, overridden by PORT env).
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-    },
-    /// Code intelligence: build, search, and inspect the workspace index.
-    Index {
-        #[command(subcommand)]
-        cmd: IndexCmd,
-    },
-    /// Tune adaptive thresholds and model routing parameters.
-    Tune {
-        /// Subsystem to tune: gates, routing, budget.
-        #[arg(default_value = "gates")]
-        subsystem: String,
-        /// Display current values without modifying.
-        #[arg(long)]
-        dry_run: bool,
-        /// Working directory (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show learning subsystem state: cascade router, experiments, efficiency.
-    #[command(visible_alias = "ask")]
-    Learn {
-        /// What to show: router, experiments, efficiency, episodes, all.
-        #[arg(default_value = "all")]
-        what: String,
-        /// Working directory (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Explain a roko concept with progressive disclosure (3 depth levels).
-    Explain {
-        /// Topic to explain (e.g. gates, routing, cognitive, neuro, daimon, dreams, engram, cfactor).
-        topic: String,
-        /// Disclosure depth: 1 = summary, 2 = how it works, 3 = internals.
-        #[arg(long, default_value_t = 1)]
-        depth: u8,
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
     },
     /// Generate boilerplate for a Synapse trait or domain profile.
     ///
@@ -558,25 +502,13 @@ Examples:
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Manage plugins (list, install, audit).
-    Plugin {
-        #[command(subcommand)]
-        cmd: PluginCmd,
-    },
-    /// Move old engrams to cold storage (compressed monthly archives).
-    Archive {
-        /// Only archive engrams older than this duration (e.g. "30d", "7d").
-        #[arg(long, default_value = "30d")]
-        older_than: String,
-        /// Maximum number of engrams to archive per batch.
-        #[arg(long, default_value_t = 500)]
-        batch_size: usize,
-        /// Working directory (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-        /// Print what would be archived without doing it.
-        #[arg(long)]
-        dry_run: bool,
+    /// Explain a roko concept with progressive disclosure (3 depth levels).
+    Explain {
+        /// Topic to explain (e.g. gates, routing, cognitive, neuro, daimon, dreams, engram, cfactor).
+        topic: String,
+        /// Disclosure depth: 1 = summary, 2 = how it works, 3 = internals.
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
     },
 }
 
