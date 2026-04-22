@@ -3187,6 +3187,10 @@ pub struct PlanRunner {
     chain_client: Option<Arc<dyn ChainClient>>,
     /// Signing wallet. `None` if `wallet_key` is not configured.
     chain_wallet: Option<Arc<dyn ChainWallet>>,
+    /// Cached workspace code index for code-intelligence context injection.
+    /// The `Instant` records when the index was built so we can invalidate
+    /// after a configurable staleness window (default: 60 s).
+    code_index_cache: Option<(std::time::Instant, roko_index::WorkspaceIndex)>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4783,6 +4787,7 @@ impl PlanRunner {
             max_retries_override: None,
             chain_client,
             chain_wallet,
+            code_index_cache: None,
         })
     }
 
@@ -4973,6 +4978,7 @@ impl PlanRunner {
             max_retries_override: None,
             chain_client,
             chain_wallet,
+            code_index_cache: None,
         })
     }
 
@@ -5165,6 +5171,7 @@ impl PlanRunner {
             max_retries_override: None,
             chain_client,
             chain_wallet,
+            code_index_cache: None,
         })
     }
 
@@ -5845,6 +5852,29 @@ impl PlanRunner {
     #[must_use]
     pub fn supervisor_handle(&self) -> Arc<ProcessSupervisor> {
         Arc::clone(&self.supervisor)
+    }
+
+    /// Return a reference to a cached `WorkspaceIndex`, rebuilding it if the
+    /// cache is absent or older than 60 seconds.
+    fn cached_code_index(&mut self) -> Option<&roko_index::WorkspaceIndex> {
+        const STALENESS: std::time::Duration = std::time::Duration::from_secs(60);
+        let stale = self
+            .code_index_cache
+            .as_ref()
+            .is_none_or(|(built_at, _)| built_at.elapsed() > STALENESS);
+        if stale {
+            match roko_index::WorkspaceIndex::load(&self.workdir) {
+                Ok(idx) => {
+                    tracing::debug!("code-index cache refreshed");
+                    self.code_index_cache = Some((std::time::Instant::now(), idx));
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "code-index rebuild failed; clearing cache");
+                    self.code_index_cache = None;
+                }
+            }
+        }
+        self.code_index_cache.as_ref().map(|(_, idx)| idx)
     }
 
     /// The filesystem-backed observability sinks — exposed for status queries.
@@ -14062,7 +14092,9 @@ impl PlanRunner {
 
         let role_key = format!("{role:?}");
         let section_effectiveness = self.learning.section_effectiveness_snapshot();
-        let code_ctx = code_context_for_task(&self.workdir, task);
+        let workdir = self.workdir.clone();
+        let cached_idx = self.cached_code_index();
+        let code_ctx = code_context_for_task(&workdir, task, cached_idx);
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
@@ -16030,9 +16062,11 @@ impl PlanRunner {
             let task_id = t.last_impl_task_id.as_deref()?;
             t.tasks_file.tasks.iter().find(|task| task.id == task_id)
         });
+        // Gate runs are less frequent than dispatches; pass None to avoid
+        // requiring &mut self here.  The dispatch path uses the cached index.
         let code_intel_hints = task_def
             .and_then(|td| td.description.as_deref())
-            .map(|desc| code_context_for_task(&self.workdir, desc))
+            .map(|desc| code_context_for_task(&self.workdir, desc, None))
             .unwrap_or_default();
 
         // GATE-06: Build SymbolManifest from task context symbols for rung 3.
@@ -17792,20 +17826,35 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
 
 /// Extract code-intelligence context chunks for a task description.
 ///
-/// Builds a `WorkspaceIndex` from the workspace root, extracts keywords from
-/// the task description, runs a hybrid search, and formats results as context
-/// strings suitable for domain-context injection. Returns an empty vec if the
-/// index cannot be built or yields no results.
-fn code_context_for_task(workdir: &Path, task_description: &str) -> Vec<String> {
+/// When `cached_index` is `Some`, uses the pre-built index instead of loading
+/// from disk. This avoids a full workspace scan on every dispatch when the
+/// caller maintains a `code_index_cache` (see `PlanRunner::cached_code_index`).
+///
+/// Falls back to loading from `workdir` when no cached index is available.
+/// Returns an empty vec if the index cannot be built or yields no results.
+fn code_context_for_task(
+    workdir: &Path,
+    task_description: &str,
+    cached_index: Option<&roko_index::WorkspaceIndex>,
+) -> Vec<String> {
     const MAX_RESULTS: usize = 15;
     const MAX_TOKENS: usize = 3000;
     const TOKENS_PER_RESULT: usize = 200;
 
-    let index = match roko_index::WorkspaceIndex::load(workdir) {
-        Ok(idx) => idx,
-        Err(err) => {
-            tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
-            return Vec::new();
+    // Use the cached index if provided, otherwise load fresh.
+    let owned_index;
+    let index: &roko_index::WorkspaceIndex = if let Some(idx) = cached_index {
+        idx
+    } else {
+        match roko_index::WorkspaceIndex::load(workdir) {
+            Ok(idx) => {
+                owned_index = idx;
+                &owned_index
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
+                return Vec::new();
+            }
         }
     };
 
