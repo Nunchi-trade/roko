@@ -75,11 +75,35 @@ demo/demo-resources/bin/roko-demo run research
 demo/demo-resources/bin/roko-demo run fleet
 demo/demo-resources/bin/roko-demo run full
 demo/demo-resources/bin/roko-demo run smoke
+demo/demo-resources/bin/roko-demo run bench
 ```
 
 Some wrapped scripts remain interactive or require extra service/API-key setup.
 The reusable `seed-agents`, `dashboard-smoke`, `verify-local`, `run-all.sh`, and
 `smoke-test.sh` paths avoid `curl` and use Python's standard library for HTTP.
+
+## Benchmark Automation
+
+The benchmark flow is the reusable proof path for `roko bench swe` and C-factor
+telemetry. It does not need `roko serve`.
+
+```bash
+demo/demo-resources/bin/roko-demo run bench
+# or:
+bash demo/demo-resources/benchmark-flow/demo-benchmark.sh /tmp/roko-bench-demo
+```
+
+It runs three batches in one workspace:
+
+| Batch | Agent mode | Purpose | Expected proxy score |
+|---|---|---|---:|
+| Positive control | `gold` | Uses the built-in gold patches | `2/2` |
+| Negative control | `empty` | Proves empty patches fail and lower C-factor | `0/2` |
+| Command adapter | `command` | Wraps a process that receives instance JSON and prints a patch | `2/2` |
+
+The script validates the latest score rows and C-factor movement, then prints a
+`roko status --cfactor` snapshot. Use `benchmark-flow/README.md` for the custom
+dataset JSONL schema, artifact paths, and official SWE-bench export notes.
 
 ## Environment
 

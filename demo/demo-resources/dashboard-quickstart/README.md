@@ -38,7 +38,7 @@ roko serve                  # starts on http://localhost:6677
 
 ### Terminal 2: Seed agents (once per session)
 ```bash
-bash /path/to/roko/tmp/demo-resources/agent-matchmaking/seed-agents.sh
+bash /path/to/roko/demo/demo-resources/bin/roko-demo seed-agents
 ```
 
 ### Terminal 3: Dashboard

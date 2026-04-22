@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for tmp/demo-resources automation scripts.
+# Shared helpers for demo/demo-resources automation scripts.
 
 set -euo pipefail
 

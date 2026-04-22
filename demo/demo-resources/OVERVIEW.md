@@ -1,31 +1,43 @@
 # Demo Resources
 
-Scripts and automations for validating and demoing roko-serve, agent matchmaking, PRDs, research, and the self-hosting loop.
+Scripts and automations for validating and demoing roko-serve, agent
+matchmaking, PRDs, research, benchmark telemetry, the dashboard integration,
+and the self-hosting loop.
 
 ## Quick start
 
 ```bash
-# Build
-cargo build -p roko-cli
+# Check prerequisites and build
+demo/demo-resources/bin/roko-demo doctor
+demo/demo-resources/bin/roko-demo build
 
-# Init workspace + start serve
-./target/debug/roko init
-./target/debug/roko serve &
+# Prove the dashboard integration in a disposable workspace
+demo/demo-resources/bin/roko-demo verify-local
 
-# Run everything
+# Or run reusable checks against an existing serve
 bash demo/demo-resources/run-all.sh
 ```
+
+See `AUTOMATION.md` for command details, environment variables, and smoke-test
+coverage.
 
 ## Automation scripts
 
 | Script | What | Time | Exit |
 |--------|------|------|------|
-| `run-all.sh` | Runs every workflow below + e2e suite | ~30s | 0/1 |
-| `smoke-test.sh` | Server health, agents, match, jobs, endpoints | ~10s | 0/1 |
+| `bin/roko-demo` | Main reusable runner for build, serve, seed, smoke, and wrapped workflows | varies | 0/1 |
+| `run-all.sh` | Non-interactive reusable checks against an existing serve | ~10s | 0/1 |
+| `smoke-test.sh` | Compatibility entrypoint for `bin/roko-smoke.sh` | ~10s | 0/1 |
+| `bin/roko-up.sh` | Start roko-serve, wait for health, seed through `bin/roko-demo` | ~10s | 0/1 |
+| `bin/roko-down.sh` | Stop roko-serve started by `bin/roko-up.sh` | ~2s | 0/1 |
+| `bin/roko-smoke.sh` | Dashboard API smoke plus basic CLI checks | ~10s | 0/1 |
+| `bin/roko-demo.sh` | Compatibility wrapper for old workflow names | varies | 0/1 |
 | `agent-matchmaking/e2e-test.sh` | 40 automated checks (registration, match, lifecycle, edge cases) | ~15s | 0/1 |
 | `agent-matchmaking/seed-agents.sh` | Register 5 demo agents (rustsmith, ethdev, fullstack, researcher, auditor) | ~2s | 0/1 |
+| `benchmark-flow/demo-benchmark.sh` | SWE-bench proxy controls plus C-factor/learning telemetry proof | ~10s | 0/1 |
 
-All scripts accept an optional base URL argument (default `http://127.0.0.1:6677`).
+Reusable scripts accept an optional base URL argument, defaulting to
+`http://127.0.0.1:6677` or `ROKO_SERVE_URL`.
 
 ## Workflow directories
 
@@ -37,7 +49,9 @@ All scripts accept an optional base URL argument (default `http://127.0.0.1:6677
 | `prd-workflow/` | Idea capture, PRD listing, status, plan generation | CLI + API |
 | `research-workflow/` | Research dispatch, artifact listing, PRD enhancement | CLI + API |
 | `full-self-hosting/` | End-to-end: capture → jobs → match → observe | CLI + API |
+| `benchmark-flow/` | Native SWE-bench proxy scoring, prediction export, episodes, efficiency, C-factor | CLI |
 | `dashboard-quickstart/` | Setup guide for nunchi-dashboard + roko-serve | Docs only |
+| `bin/` | Shared helpers and reusable command wrappers | CLI + API |
 
 ## Interactive demo scripts
 
@@ -52,6 +66,24 @@ These have `pause()` calls for live walkthroughs (press Enter between steps):
 | `research-workflow/demo-research.sh` | Research dispatch + ideas + jobs |
 | `full-self-hosting/demo-full-loop.sh` | All 4 acts: capture, jobs, match, system state |
 | `agent-setup/setup-fleet.sh` | Create 3 agents + register for matchmaking |
+| `benchmark-flow/demo-benchmark.sh` | Gold/empty/command benchmark controls and C-factor proof |
+
+## Benchmark flow
+
+The benchmark flow does not require `roko serve`; it only needs the `roko`
+binary, Python 3, and git:
+
+```bash
+bash demo/demo-resources/benchmark-flow/demo-benchmark.sh
+bash demo/demo-resources/bin/roko-demo run bench
+```
+
+It runs a positive control, a negative control, and a command-adapter control
+against the built-in SWE-bench proxy dataset. It writes aggregate score rows,
+prediction exports, learning episodes, efficiency events, and C-factor
+snapshots to a reusable workspace. See
+`benchmark-flow/README.md` for the dataset format and real-agent command
+adapter contract.
 
 ## Ollama configuration
 
@@ -136,7 +168,8 @@ Verify: `curl -s http://localhost:6677/api/providers | python3 -m json.tool`
 - `roko` built (`cargo build -p roko-cli`)
 - `roko serve` running on port 6677
 - Python 3 (for JSON formatting in scripts)
-- `curl`
+- `curl` only for older one-off scripts; reusable `bin/` smoke and seed paths
+  use Python HTTP helpers instead
 
 ## Known gaps
 
@@ -150,7 +183,7 @@ Verify: `curl -s http://localhost:6677/api/providers | python3 -m json.tool`
 | Issue | Fix |
 |-------|-----|
 | `Connection refused` | Start `roko serve` |
-| No agents in match results | Run `seed-agents.sh` |
+| No agents in match results | Run `demo/demo-resources/bin/roko-demo seed-agents` |
 | Ollama provider not showing | Ensure `roko.toml` is at project root (not just `.roko/`), restart serve |
 | Provider test 404 | Set `base_url` to `http://localhost:11434/v1` (needs `/v1` suffix) |
 | Config changes not applied | Providers/models require restart; only budget/gates/prompt are hot-reloadable |
