@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::auth;
+
 #[derive(Debug, Deserialize)]
 struct SendMessageResponse {
     #[serde(default)]
@@ -29,17 +31,53 @@ struct RunStatusResponse {
     error: Option<String>,
 }
 
+/// Construct the health-check URL for a serve instance.
+fn health_url(serve_url: &str) -> String {
+    format!("{}/api/health", serve_url.trim_end_matches('/'))
+}
+
 /// Run the chat REPL against a roko-serve instance.
 pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
-    println!("roko chat — talking to agent '{agent_id}'");
+    println!("roko chat \u{2014} talking to agent '{agent_id}'");
     println!("Type a message. Press Ctrl-D to exit.\n");
 
-    let client = reqwest::Client::new();
+    // Resolve API key from CLI flag / env / config (best-effort).
+    let api_key = auth::resolve_api_key(
+        &roko_core::config::ServeAuthConfig::default(),
+        None,
+    )
+    .map(|r| r.key);
+
+    // Build client with auth headers when a key is available.
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(ref key) = api_key {
+        client_builder = client_builder.default_headers(auth::auth_headers(key));
+    }
+    let client = client_builder.build().context("build HTTP client")?;
+
+    // Health check: probe serve before entering the REPL.
+    match client.get(health_url(serve_url)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            eprintln!("Connected to roko-serve at {serve_url}");
+        }
+        Ok(resp) => {
+            eprintln!("\u{26a0} roko-serve at {serve_url} returned {}", resp.status());
+            eprintln!("  Chat may not work correctly.");
+        }
+        Err(err) => {
+            eprintln!("\u{26a0} Cannot reach roko-serve at {serve_url}: {err}");
+            eprintln!("  Start it with: roko serve");
+            eprintln!("  Or check --serve-url flag.");
+            eprintln!();
+        }
+    }
+
     let stdin = io::stdin();
     let mut stdin_lock = stdin.lock();
 
     loop {
-        print!("you> ");
+        // Cyan prompt for user input.
+        print!("\x1b[36myou>\x1b[0m ");
         io::stdout().flush().context("flush prompt")?;
 
         let mut line = String::new();
@@ -52,7 +90,7 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
             continue;
         }
 
-        let response = client
+        let response = match client
             .post(format!(
                 "{}/api/agents/{agent_id}/message",
                 serve_url.trim_end_matches('/')
@@ -60,7 +98,15 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
             .json(&json!({ "message": message }))
             .send()
             .await
-            .context("send chat message")?;
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                eprintln!("[connection error] {err}");
+                eprintln!("  Is roko-serve running? Try: roko serve");
+                println!();
+                continue;
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -70,7 +116,8 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
             continue;
         }
 
-        print!("{agent_id}> ");
+        // Yellow prompt for agent output.
+        print!("\x1b[33m{agent_id}>\x1b[0m ");
         io::stdout().flush().context("flush agent prompt")?;
         let body: SendMessageResponse = response.json().await.context("decode chat response")?;
         if let Some(run_id) = body
@@ -185,5 +232,17 @@ mod tests {
         assert!(response.run_id.is_none());
         assert_eq!(response.response.as_deref(), Some("done"));
         assert_eq!(response.reasoning.as_deref(), Some("looked at the diff"));
+    }
+
+    #[test]
+    fn health_url_strips_trailing_slash() {
+        assert_eq!(
+            health_url("http://localhost:6677/"),
+            "http://localhost:6677/api/health"
+        );
+        assert_eq!(
+            health_url("http://localhost:6677"),
+            "http://localhost:6677/api/health"
+        );
     }
 }

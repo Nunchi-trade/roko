@@ -20,9 +20,10 @@
 )]
 
 mod agent_serve;
-mod auth;
 mod commands;
 mod plan_validate;
+
+use roko_cli::auth;
 
 use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};

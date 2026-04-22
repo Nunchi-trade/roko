@@ -341,15 +341,23 @@ fn render_plan_detail(
         return;
     }
 
+    // Compute how many lines the actions section needs.
+    let status = PrdStatus::from_str(&prd.status);
+    let actions_height: u16 = match status {
+        PrdStatus::Idea | PrdStatus::Draft => 4,
+        PrdStatus::Published => 4,
+        PrdStatus::Planned => 3,
+    };
+
     let sections = Layout::vertical([
-        Constraint::Length(5), // PRD metadata
-        Constraint::Min(0),    // Task list
-        Constraint::Length(1), // Keybinding hints
+        Constraint::Length(5),              // PRD metadata
+        Constraint::Length(actions_height), // CLI actions
+        Constraint::Min(0),                // Task list
+        Constraint::Length(1),             // Keybinding hints
     ])
     .split(inner);
 
     // PRD metadata
-    let status = PrdStatus::from_str(&prd.status);
     let status_style = match status {
         PrdStatus::Idea => theme.muted(),
         PrdStatus::Draft => theme.warning(),
@@ -407,6 +415,43 @@ fn render_plan_detail(
         sections[0],
     );
 
+    // CLI actions block: show actionable commands based on PRD status.
+    let action_lines: Vec<Line<'_>> = match status {
+        PrdStatus::Idea | PrdStatus::Draft => vec![
+            Line::from(Span::styled("Actions:", theme.accent())),
+            Line::from(Span::styled(
+                "  roko prd draft promote    # publish this draft".to_string(),
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                format!("  roko prd plan {:<12}# generate implementation plan", &prd.slug),
+                theme.muted(),
+            )),
+        ],
+        PrdStatus::Published => vec![
+            Line::from(Span::styled("Actions:", theme.accent())),
+            Line::from(Span::styled(
+                format!("  roko prd plan {:<12}# generate implementation plan", &prd.slug),
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "  roko plan run plans/      # execute generated plan".to_string(),
+                theme.muted(),
+            )),
+        ],
+        PrdStatus::Planned => vec![
+            Line::from(Span::styled("Actions:", theme.accent())),
+            Line::from(Span::styled(
+                "  roko plan run plans/      # execute the plan".to_string(),
+                theme.muted(),
+            )),
+        ],
+    };
+    frame.render_widget(
+        Paragraph::new(action_lines).wrap(Wrap { trim: false }),
+        sections[1],
+    );
+
     // Task list: read from cached atelier tasks in TuiState.
     let empty_tasks = Vec::new();
     let tasks = tui_state
@@ -421,8 +466,8 @@ fn render_plan_detail(
             theme.muted(),
         ))
         .border_style(theme.muted());
-    let task_inner = task_block.inner(sections[1]);
-    frame.render_widget(task_block, sections[1]);
+    let task_inner = task_block.inner(sections[2]);
+    frame.render_widget(task_block, sections[2]);
 
     if tasks.is_empty() {
         frame.render_widget(
@@ -481,7 +526,7 @@ fn render_plan_detail(
     ]);
     frame.render_widget(
         Paragraph::new(hint_line).alignment(Alignment::Center),
-        sections[2],
+        sections[3],
     );
 }
 

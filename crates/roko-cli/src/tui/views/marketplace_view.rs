@@ -556,7 +556,7 @@ fn render_create_job(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
         sections[4],
     );
 
-    // Show command results feedback if any
+    // Show command results feedback, or fallback instructions for backend submission.
     if let Some(result) = tui_state.command_results.last() {
         let style = if result.ok {
             theme.success()
@@ -568,6 +568,42 @@ fn render_create_job(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
                 .style(style)
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: false }),
+            sections[5],
+        );
+    } else {
+        let help_lines = vec![
+            Line::from(Span::styled(
+                "Create a job from the CLI:",
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "  roko serve                               # start the server",
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "  curl -X POST http://localhost:6677/api/jobs \\",
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "    -H \"Content-Type: application/json\" \\",
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "    -d '{\"title\":\"...\", \"job_type\":\"research\"}'",
+                theme.muted(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Or use the roko-serve API directly.",
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                "Jobs appear here when created via the API.",
+                theme.muted(),
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
             sections[5],
         );
     }

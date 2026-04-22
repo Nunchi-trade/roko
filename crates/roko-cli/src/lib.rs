@@ -32,6 +32,7 @@ pub mod agent_config;
 pub mod agent_episode;
 pub mod agent_exec;
 pub mod agent_spawn;
+pub mod auth;
 pub mod chain_handler;
 pub mod chain_registry;
 pub mod chat;
