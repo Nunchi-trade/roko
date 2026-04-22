@@ -108,3 +108,11 @@ debounce_ms = 500
 [webhooks.github]
 secret = "${GITHUB_WEBHOOK_SECRET}"
 enabled = true
+
+# Cloud deployment for agent templates (1-click deploy from nunchi-dashboard).
+# `backend` and `railway_api_token` are overridden at request time or via env
+# (`ROKO_DEPLOY_RAILWAY_API_TOKEN`, `ROKO_DEPLOY_PROJECT_ID`,
+# `ROKO_DEPLOY_ENVIRONMENT_ID`) — see DEPLOY-RAILWAY.md.
+[deploy]
+worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
+default_region = "us-west1"
