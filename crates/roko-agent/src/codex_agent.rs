@@ -145,6 +145,7 @@ pub struct CodexAgent {
     poster: Arc<dyn HttpPoster>,
     provider_id: Option<String>,
     provider_semaphores: Option<Arc<ProviderSemaphores>>,
+    system_prompt: Option<String>,
 }
 
 impl std::fmt::Debug for CodexAgent {
@@ -177,7 +178,18 @@ impl CodexAgent {
             poster: Arc::new(ReqwestPoster::new()),
             provider_id: None,
             provider_semaphores: None,
+            system_prompt: None,
         }
+    }
+
+    /// Prepend a system-role message to every chat request. Used by callers
+    /// that want to thread a persona/role string (e.g. `roko agent serve
+    /// --role "..."`) into the underlying chat completions call.
+    #[must_use]
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let s = prompt.into();
+        self.system_prompt = if s.is_empty() { None } else { Some(s) };
+        self
     }
 
     /// Override the per-request timeout in milliseconds (default 120 s).
@@ -313,13 +325,22 @@ impl Agent for CodexAgent {
             },
         };
 
+        let mut messages: Vec<RequestMessage> = Vec::with_capacity(2);
+        if let Some(sp) = self.system_prompt.as_deref() {
+            messages.push(RequestMessage {
+                role: "system",
+                content: sp,
+            });
+        }
+        messages.push(RequestMessage {
+            role: "user",
+            content: &prompt_text,
+        });
+
         let req = ChatRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
-            messages: vec![RequestMessage {
-                role: "user",
-                content: &prompt_text,
-            }],
+            messages,
             extra_body_params: self.extra_body_params.clone(),
         };
         let body = match serde_json::to_vec(&req) {
@@ -975,5 +996,36 @@ mod tests {
     async fn with_name_overrides_default() {
         let agent = CodexAgent::new("k", "m").with_name("my-codex");
         assert_eq!(agent.name(), "my-codex");
+    }
+
+    #[tokio::test]
+    async fn system_prompt_is_prepended_to_messages() {
+        let poster = MockPoster::ok(canned_ok("ok", 1, 1));
+        let agent = CodexAgent::new("k", "m")
+            .with_http_poster(poster.clone())
+            .with_system_prompt("You are a test persona.");
+        let _ = agent.run(&prompt("hi"), &Context::now()).await;
+        let call = poster.last_call().expect("call recorded");
+        let v: serde_json::Value =
+            serde_json::from_slice(&call.body).expect("request body is valid JSON");
+        assert_eq!(v["messages"][0]["role"], "system");
+        assert_eq!(v["messages"][0]["content"], "You are a test persona.");
+        assert_eq!(v["messages"][1]["role"], "user");
+        assert_eq!(v["messages"][1]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn empty_system_prompt_is_treated_as_none() {
+        let poster = MockPoster::ok(canned_ok("ok", 1, 1));
+        let agent = CodexAgent::new("k", "m")
+            .with_http_poster(poster.clone())
+            .with_system_prompt("");
+        let _ = agent.run(&prompt("hi"), &Context::now()).await;
+        let call = poster.last_call().expect("call recorded");
+        let v: serde_json::Value =
+            serde_json::from_slice(&call.body).expect("request body is valid JSON");
+        assert_eq!(v["messages"][0]["role"], "user");
+        assert_eq!(v["messages"][0]["content"], "hi");
+        assert!(v["messages"].get(1).is_none());
     }
 }

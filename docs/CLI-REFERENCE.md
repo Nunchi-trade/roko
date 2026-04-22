@@ -1001,6 +1001,60 @@ Exposes REST endpoints for plans, PRDs, agents, config, learning data, templates
 
 ---
 
+### roko agent serve
+
+Run a per-agent HTTP sidecar with messaging, predictions, research, and task
+routes. When `--relay-url` is supplied, the sidecar registers with the mirage
+agent relay so the agent becomes discoverable from connected dashboards.
+
+```
+roko agent serve --agent-id <id> [--bind <addr>] [--relay-url <url>]
+                 [--role <text>] [--starter <text>]...
+                 [--chain-rpc-url <url>] [--identity-registry <addr>]
+                 [--passport-id <id>] [--wallet-key <hex>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--agent-id` | Unique agent identifier advertised by the runtime (required) |
+| `--bind` | Socket address to bind (default: `0.0.0.0:8081`) |
+| `--relay-url` | Base URL of a mirage agent relay (enables remote discovery) |
+| `--role` | Free-form persona / system-prompt string surfaced on the agent card and fed to the dispatcher |
+| `--starter` | Repeatable quick-start prompt surfaced on the agent card as `starters[]` |
+| `--chain-rpc-url` | JSON-RPC URL for ERC-8004 identity-registry updates |
+| `--identity-registry` | Address of the identity-registry contract |
+| `--passport-id` | Passport ID used for `updateAgentCardUri` |
+| `--wallet-key` | Wallet private key for signing (reserved; no-op today) |
+
+The sidecar loads its LLM backend configuration from `roko.toml` in the current
+working directory (or the path in `$ROKO_CONFIG`). When `--role` is supplied,
+the runtime attaches it as a system prompt on every dispatched message so
+responses match the persona — fixing the prior behaviour where `--role` only
+landed on the card but not in the dispatch transcript.
+
+**Examples:**
+
+```bash
+# Local LM Studio agent, relay-backed, with persona + starters
+roko agent serve \
+  --agent-id sam-signals \
+  --bind 127.0.0.1:8083 \
+  --relay-url https://mirage.example.com/relay \
+  --role "You are sam-signals — draft alerts, backtests, watchlists." \
+  --starter "Draft a signal for BTC breaking \$80k" \
+  --starter "Backtest ETH/USDC funding divergence"
+
+# Minimal local-only agent (no relay)
+roko agent serve --agent-id local-dev --bind 127.0.0.1:8081
+```
+
+The advertised agent card (served at `<relay>/relay/cards/<agent-id>` when the
+relay is connected) carries `role` and `starters[]` alongside `capabilities`
+and `endpoints`, allowing clients to render agent-specific landing surfaces
+without maintaining a local registry of agent-ids.
+
+---
+
 ### roko worker
 
 Run as a deployed cloud worker.

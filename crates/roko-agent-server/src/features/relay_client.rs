@@ -325,6 +325,8 @@ mod tests {
             },
             domain_tags: vec!["roko".to_string()],
             version: "1.0.0".to_string(),
+            role: None,
+            starters: Vec::new(),
         };
         assert_eq!(public_rest_endpoint(&card), None);
     }

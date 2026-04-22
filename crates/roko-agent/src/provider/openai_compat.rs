@@ -392,6 +392,10 @@ impl ProviderAdapter for OpenAiCompatAdapter {
             .with_extra_body_params(extra_body_params)
             .with_name(agent_name);
 
+        if let Some(prompt) = &options.system_prompt {
+            agent = agent.with_system_prompt(prompt.clone());
+        }
+
         if let Some(provider_semaphores) = options.provider_semaphores.clone() {
             agent = agent.with_provider_semaphores(model.provider.clone(), provider_semaphores);
         }

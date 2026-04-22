@@ -159,6 +159,8 @@ pub struct AgentServerBuilder {
     owner: Option<String>,
     version: Option<String>,
     capabilities: Vec<String>,
+    role: Option<String>,
+    starters: Vec<String>,
     auth: Option<BearerAuth>,
     chain_client: Option<Arc<dyn ChainClient>>,
     llm_backend: Option<Arc<dyn LlmBackend>>,
@@ -210,6 +212,44 @@ impl AgentServerBuilder {
     #[must_use]
     pub fn capability(mut self, capability: impl Into<String>) -> Self {
         self.capabilities.push(capability.into());
+        self
+    }
+
+    /// Set the advertised `role` (free-form persona / system-prompt string).
+    ///
+    /// Surfaces on the agent card and is fed to the message dispatcher as a
+    /// system prompt when no explicit prompt is supplied by the caller.
+    /// Empty or whitespace-only input is treated as "unset".
+    #[must_use]
+    pub fn role(mut self, role: impl Into<String>) -> Self {
+        let value = role.into();
+        self.role = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
+        self
+    }
+
+    /// Append one prompt starter surfaced on the agent card as a quick-start
+    /// chip. Whitespace-only entries are dropped.
+    #[must_use]
+    pub fn starter(mut self, starter: impl Into<String>) -> Self {
+        let value = starter.into();
+        if !value.trim().is_empty() {
+            self.starters.push(value);
+        }
+        self
+    }
+
+    /// Replace any configured starters with the supplied vector. Whitespace-
+    /// only entries are dropped.
+    #[must_use]
+    pub fn starters(mut self, starters: Vec<String>) -> Self {
+        self.starters = starters
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
         self
     }
 
@@ -326,6 +366,12 @@ impl AgentServerBuilder {
             self.llm_backend,
             self.knowledge_store,
         );
+        if let Some(role) = self.role {
+            state = state.with_role(role);
+        }
+        if !self.starters.is_empty() {
+            state = state.with_starters(self.starters);
+        }
         if let Some(log_path) = self.log_path {
             state = state.with_log_path(log_path);
         }
@@ -522,5 +568,66 @@ mod tests {
             .await
             .expect("message response");
         assert_eq!(message.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn builder_role_and_starters_surface_on_agent_card() {
+        let server = AgentServer::builder()
+            .agent_id("agent-1")
+            .bind("127.0.0.1:0")
+            .messaging()
+            .role("You are the signals agent — draft alerts.")
+            .starter("Draft a signal for BTC breaking $80k")
+            .starter("   ")
+            .starter("Backtest ETH/USDC funding divergence")
+            .build()
+            .expect("server");
+
+        let addr: std::net::SocketAddr = "127.0.0.1:1234".parse().expect("addr");
+        let card = server.state().build_agent_card(addr);
+
+        assert_eq!(
+            card.role.as_deref(),
+            Some("You are the signals agent — draft alerts.")
+        );
+        assert_eq!(
+            card.starters,
+            vec![
+                "Draft a signal for BTC breaking $80k".to_string(),
+                "Backtest ETH/USDC funding divergence".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_empty_role_is_treated_as_unset() {
+        let server = AgentServer::builder()
+            .agent_id("agent-2")
+            .bind("127.0.0.1:0")
+            .messaging()
+            .role("   ")
+            .build()
+            .expect("server");
+
+        let addr: std::net::SocketAddr = "127.0.0.1:1234".parse().expect("addr");
+        let card = server.state().build_agent_card(addr);
+        assert!(card.role.is_none());
+        assert!(card.starters.is_empty());
+    }
+
+    #[test]
+    fn agent_card_role_and_starters_are_skipped_when_empty() {
+        let card = AgentCard {
+            name: "agent".to_string(),
+            capabilities: vec![],
+            endpoints: AgentCardEndpoints::default(),
+            domain_tags: vec![],
+            version: "0.1.0".to_string(),
+            role: None,
+            starters: Vec::new(),
+        };
+        let json = serde_json::to_string(&card).expect("serialize");
+        assert!(!json.contains("\"role\""));
+        assert!(!json.contains("\"starters\""));
     }
 }

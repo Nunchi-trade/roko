@@ -30,6 +30,15 @@ pub struct AgentCard {
     pub domain_tags: Vec<String>,
     /// Card schema/version.
     pub version: String,
+    /// Free-form persona / system-prompt string. Dashboards use this to
+    /// select an agent-specific landing surface; the runtime feeds it to
+    /// the dispatcher as a system prompt when no other prompt is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Optional prompt starters surfaced by clients as quick-start chips.
+    /// Empty means "let the client fall back to its own heuristics".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starters: Vec<String>,
 }
 
 /// Agent-card endpoint fields.

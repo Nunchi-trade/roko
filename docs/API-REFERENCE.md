@@ -372,6 +372,46 @@ Check status of a background run.
 
 ## Agents
 
+### Agent card schema
+
+The ERC-8004 agent card is published by `roko agent serve` and served at
+`<relay-base>/relay/cards/<agent-id>` when a relay is configured. Clients can
+also read it from on-chain registrations via `getAgentCardUri(passport_id)`.
+
+```json
+{
+  "name": "sam-signals",
+  "capabilities": ["messaging", "predictions", "research", "tasks"],
+  "endpoints": {
+    "rest": "http://host:8083",
+    "websocket": "ws://host:8083/stream",
+    "a2a": null,
+    "mcp": null
+  },
+  "domain_tags": ["roko"],
+  "version": "0.1.0",
+  "role": "You are sam-signals — draft alerts, backtests, watchlists.",
+  "starters": [
+    "Draft a signal for BTC breaking $80k",
+    "Backtest ETH/USDC funding divergence"
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Human-readable agent name (defaults to `agent_id`) |
+| `capabilities` | string[] | Advertised feature surfaces (`messaging`, `predictions`, ...) |
+| `endpoints` | object | REST / WebSocket / A2A / MCP URLs (fields may be `null`) |
+| `domain_tags` | string[] | Off-chain discovery filters |
+| `version` | string | Card schema version |
+| `role` | string? | Optional free-form persona / system-prompt string. Omitted when unset |
+| `starters` | string[] | Optional quick-start prompts (client-rendered chips). Omitted when empty |
+
+Populate `role` via `roko agent serve --role "..."` and `starters` via one or
+more `--starter "..."` flags. Both are absent from the serialized card when
+empty, so older clients that don't know about them see no difference.
+
 ### `GET /api/managed-agents`
 
 List all managed agent processes (tracked by the ProcessSupervisor).

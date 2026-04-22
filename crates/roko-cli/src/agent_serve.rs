@@ -96,6 +96,16 @@ pub struct AgentServeArgs {
     /// Wallet private key reserved for future signing hooks.
     #[arg(long)]
     pub wallet_key: Option<String>,
+    /// Free-form persona / system-prompt string for this agent. Advertised
+    /// on the agent card as `role` and fed to the message dispatcher as a
+    /// system prompt. Overrides `[agent] role` in the loaded roko.toml when
+    /// both are set.
+    #[arg(long = "role", value_name = "TEXT")]
+    pub role: Option<String>,
+    /// Prompt starters surfaced on the agent card as quick-start chips.
+    /// Repeatable; each use contributes one entry in order.
+    #[arg(long = "starter", value_name = "TEXT")]
+    pub starters: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +114,8 @@ struct AgentServeRuntimeConfig {
     bind: String,
     relay: Option<RelayConfig>,
     chain: Option<ChainConfig>,
+    role: Option<String>,
+    starters: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,11 +135,23 @@ impl AgentServeRuntimeConfig {
     fn from_args(args: AgentServeArgs) -> Self {
         let chain = ChainConfig::from_args(&args);
         let relay = args.relay_url.map(|url| RelayConfig { url });
+        let role = args
+            .role
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
+        let starters = args
+            .starters
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         Self {
             agent_id: args.agent_id,
             bind: args.bind,
             relay,
             chain,
+            role,
+            starters,
         }
     }
 
@@ -150,6 +174,13 @@ impl AgentServeRuntimeConfig {
             .predictions()
             .research()
             .tasks();
+
+        if let Some(role) = &self.role {
+            builder = builder.role(role.clone());
+        }
+        if !self.starters.is_empty() {
+            builder = builder.starters(self.starters.clone());
+        }
 
         if let Some(dispatcher) = self.try_build_dispatcher()? {
             builder = builder.with_message_dispatcher(dispatcher);
@@ -226,7 +257,7 @@ impl AgentServeRuntimeConfig {
                 model: model.to_string(),
                 command: config.agent.command.clone(),
                 timeout_ms: config.agent.timeout_ms,
-                system_prompt: None,
+                system_prompt: self.role.clone(),
                 cached_content: None,
                 tools: None,
                 mcp_config: None,

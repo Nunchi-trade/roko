@@ -449,6 +449,8 @@ pub struct AgentState {
     owner: Option<String>,
     version: String,
     capabilities: Vec<String>,
+    role: Option<String>,
+    starters: Vec<String>,
     log_path: PathBuf,
     routes: Vec<String>,
     started_at: Instant,
@@ -488,6 +490,8 @@ impl AgentState {
             owner,
             version,
             capabilities,
+            role: None,
+            starters: Vec::new(),
             log_path,
             routes,
             started_at: Instant::now(),
@@ -596,6 +600,43 @@ impl AgentState {
         self
     }
 
+    /// Attach a free-form persona / system-prompt string. Surfaces on the
+    /// agent card as `role` and — when a dispatcher is configured with no
+    /// explicit prompt — is fed to the dispatcher as a system prompt.
+    #[must_use]
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        let role = role.into();
+        self.role = if role.trim().is_empty() {
+            None
+        } else {
+            Some(role)
+        };
+        self
+    }
+
+    /// Attach prompt starters surfaced on the agent card as `starters`.
+    /// Empty or whitespace-only entries are filtered out.
+    #[must_use]
+    pub fn with_starters(mut self, starters: Vec<String>) -> Self {
+        self.starters = starters
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        self
+    }
+
+    /// Borrow the attached persona, if any.
+    #[must_use]
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
+    /// Borrow the attached starter prompts.
+    #[must_use]
+    pub fn starters(&self) -> &[String] {
+        &self.starters
+    }
+
     /// Borrow the configured dispatcher, if one is attached.
     #[must_use]
     pub const fn dispatcher(&self) -> Option<&Arc<ToolDispatcher>> {
@@ -674,6 +715,8 @@ impl AgentState {
             },
             domain_tags: vec!["roko".to_string()],
             version: self.version.clone(),
+            role: self.role.clone(),
+            starters: self.starters.clone(),
         }
     }
 
