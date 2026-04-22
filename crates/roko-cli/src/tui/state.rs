@@ -836,6 +836,14 @@ pub struct TuiState {
     pub selected_agent: usize,
     /// Selected agent sub-tab index.
     pub selected_agent_tab: usize,
+    /// Selected Config tab sub-view index.
+    pub config_sub_tab: usize,
+    /// Selected Inspect tab sub-view index.
+    pub inspect_sub_tab: usize,
+    /// Selected Marketplace tab sub-view index.
+    pub marketplace_sub_tab: usize,
+    /// Selected Atelier tab sub-view index.
+    pub atelier_sub_tab: usize,
     /// Which panel has keyboard focus.
     pub focus: FocusZone,
 
@@ -1095,6 +1103,10 @@ impl Default for TuiState {
             selected_plan_idx: 0,
             selected_agent: 0,
             selected_agent_tab: 0,
+            config_sub_tab: 0,
+            inspect_sub_tab: 0,
+            marketplace_sub_tab: 0,
+            atelier_sub_tab: 0,
             focus: FocusZone::default(),
 
             atmosphere: Atmosphere::default(),
@@ -1233,6 +1245,51 @@ const CANONICAL_PHASES: &[&str] = &[
     "committing",
 ];
 
+fn is_online_agent_status(status: &str) -> bool {
+    !matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "done" | "completed" | "failed" | "cancelled"
+    )
+}
+
+fn gate_pass_rate(gates: &[GateResultSummary]) -> Option<f64> {
+    if gates.is_empty() {
+        return None;
+    }
+    let passed = gates.iter().filter(|gate| gate.passed).count();
+    Some(passed as f64 / gates.len() as f64)
+}
+
+fn snapshot_gate_pass_rate(gates: &[roko_core::dashboard_snapshot::GateVerdict]) -> Option<f64> {
+    if gates.is_empty() {
+        return None;
+    }
+    let passed = gates.iter().filter(|gate| gate.passed).count();
+    Some(passed as f64 / gates.len() as f64)
+}
+
+fn count_online_from_files(root: &Path) -> usize {
+    let jobs_dir = root.join(".roko").join("jobs");
+    let Ok(entries) = std::fs::read_dir(jobs_dir) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| {
+            let content = std::fs::read_to_string(entry.path()).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+            let status = value
+                .get("status")
+                .or_else(|| value.get("state"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            is_online_agent_status(status).then_some(())
+        })
+        .count()
+}
+
 impl TuiState {
     /// Create a new default state.
     #[must_use]
@@ -1285,6 +1342,33 @@ impl TuiState {
     #[must_use]
     pub fn active_agent_count(&self) -> usize {
         self.agents.iter().filter(|a| a.active).count()
+    }
+
+    /// Read the active sub-view index for a tab.
+    #[must_use]
+    pub fn sub_tab_for(&self, tab: Tab) -> usize {
+        match tab {
+            Tab::Dashboard | Tab::Plans => self.plan_detail_tab,
+            Tab::Agents => self.selected_agent_tab,
+            Tab::Config => self.config_sub_tab,
+            Tab::Inspect => self.inspect_sub_tab,
+            Tab::Marketplace => self.marketplace_sub_tab,
+            Tab::Atelier => self.atelier_sub_tab,
+            Tab::Git | Tab::Logs => 0,
+        }
+    }
+
+    /// Store the active sub-view index for a tab.
+    pub fn set_sub_tab_for(&mut self, tab: Tab, idx: usize) {
+        match tab {
+            Tab::Dashboard | Tab::Plans => self.plan_detail_tab = idx,
+            Tab::Agents => self.selected_agent_tab = idx,
+            Tab::Config => self.config_sub_tab = idx,
+            Tab::Inspect => self.inspect_sub_tab = idx,
+            Tab::Marketplace => self.marketplace_sub_tab = idx,
+            Tab::Atelier => self.atelier_sub_tab = idx,
+            Tab::Git | Tab::Logs => {}
+        }
     }
 
     /// Return the current filter text.
@@ -1636,24 +1720,15 @@ impl TuiState {
         self.knowledge_entries = data.knowledge_entries.clone();
 
         // -- network stats --
-        self.agents_online = data.agents.len();
-        // Compute ISFR from efficiency event timestamps.
-        if data.efficiency_events.len() >= 2 {
-            let mut intervals: Vec<f64> = data
-                .efficiency_events
-                .windows(2)
-                .filter_map(|pair| {
-                    let t0 = chrono::DateTime::parse_from_rfc3339(&pair[0].timestamp).ok()?;
-                    let t1 = chrono::DateTime::parse_from_rfc3339(&pair[1].timestamp).ok()?;
-                    let dt = t1.signed_duration_since(t0).num_milliseconds() as f64;
-                    if dt > 0.0 { Some(dt) } else { None }
-                })
-                .collect();
-            if !intervals.is_empty() {
-                intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                self.isfr = Some(intervals[intervals.len() / 2]);
-            }
-        }
+        self.agents_online = if data.agents.is_empty() {
+            count_online_from_files(data.root())
+        } else {
+            data.agents
+                .iter()
+                .filter(|agent| is_online_agent_status(&agent.status))
+                .count()
+        };
+        self.isfr = gate_pass_rate(&data.gate_results);
 
         // -- marketplace / atelier --
         self.marketplace_jobs = data.marketplace_jobs.clone();
@@ -1995,7 +2070,8 @@ impl TuiState {
         }
 
         // -- network stats --
-        self.agents_online = snap.agents.len();
+        self.agents_online = snap.agents.values().filter(|agent| agent.active).count();
+        self.isfr = snapshot_gate_pass_rate(&snap.gates);
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);
@@ -3531,6 +3607,71 @@ depends_on = ["plan-b:T1"]
         assert!(state.agents.is_empty());
         assert_eq!(state.token_total, 0);
         assert_eq!(state.cost_dollars, 0.0);
+    }
+
+    #[test]
+    fn from_dashboard_data_populates_header_network_stats() {
+        let mut data = DashboardData::default();
+        data.agents = vec![
+            AgentSummary {
+                id: "active".into(),
+                label: "Active".into(),
+                plan_id: None,
+                status: "active".into(),
+            },
+            AgentSummary {
+                id: "done".into(),
+                label: "Done".into(),
+                plan_id: None,
+                status: "completed".into(),
+            },
+            AgentSummary {
+                id: "idle".into(),
+                label: "Idle".into(),
+                plan_id: None,
+                status: "idle".into(),
+            },
+        ];
+        data.gate_results = vec![
+            GateResultSummary {
+                plan_id: "p".into(),
+                gate_name: "compile".into(),
+                passed: true,
+                rung: 1,
+                duration_ms: 10,
+                summary: String::new(),
+            },
+            GateResultSummary {
+                plan_id: "p".into(),
+                gate_name: "test".into(),
+                passed: false,
+                rung: 1,
+                duration_ms: 20,
+                summary: String::new(),
+            },
+        ];
+
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.agents_online, 2);
+        assert_eq!(state.isfr, Some(0.5));
+    }
+
+    #[test]
+    fn from_dashboard_data_counts_online_jobs_when_agents_are_missing() {
+        let tmpdir = tempdir().expect("tempdir");
+        let jobs_dir = tmpdir.path().join(".roko").join("jobs");
+        fs::create_dir_all(&jobs_dir).expect("create jobs dir");
+        fs::write(jobs_dir.join("open.json"), r#"{"status":"open"}"#).expect("write open job");
+        fs::write(jobs_dir.join("assigned.json"), r#"{"state":"assigned"}"#)
+            .expect("write assigned job");
+        fs::write(jobs_dir.join("done.json"), r#"{"status":"completed"}"#).expect("write done job");
+
+        let data = DashboardData::load_best_effort(tmpdir.path());
+        let state = TuiState::from_dashboard_data(&data);
+
+        assert_eq!(state.agents_online, 2);
+        assert_eq!(state.isfr, None);
     }
 
     #[test]

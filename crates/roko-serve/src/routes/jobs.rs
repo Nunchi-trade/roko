@@ -19,6 +19,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/stats", get(job_stats))
+        .route("/jobs/match", post(match_jobs))
         .route(
             "/jobs/{id}",
             get(get_job).patch(update_job).delete(cancel_job),
@@ -92,6 +93,14 @@ struct JobRecord {
     plan_id: String,
     #[serde(default)]
     auto_execute: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    committed_candidates: Vec<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deadline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     submission: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +148,14 @@ struct CreateJobRequest {
     plan_id: String,
     #[serde(default)]
     auto_execute: bool,
+    #[serde(default)]
+    committed_candidates: Vec<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    #[serde(default)]
+    required_capabilities: Vec<String>,
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 impl RequestPayload for CreateJobRequest {
@@ -154,6 +171,9 @@ impl RequestPayload for CreateJobRequest {
         }
         validate_string_items_non_blank(&self.tags)
             .map_err(|_| ApiError::bad_request("job tags must not contain blank entries"))?;
+        validate_string_items_non_blank(&self.required_capabilities).map_err(|_| {
+            ApiError::bad_request("job required_capabilities must not contain blank entries")
+        })?;
         Ok(())
     }
 }
@@ -220,6 +240,69 @@ impl RequestPayload for EvaluateJobRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct MatchJobRequest {
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default, alias = "language")]
+    language: Option<String>,
+    #[serde(default, alias = "minTier")]
+    min_tier: Option<String>,
+    #[serde(default)]
+    reward: String,
+    #[serde(default)]
+    skills: Vec<String>,
+}
+
+impl RequestPayload for MatchJobRequest {
+    fn validate_payload(&self) -> Result<(), ApiError> {
+        if self.title.trim().is_empty() {
+            return Err(ApiError::bad_request("match title must not be blank"));
+        }
+        if self
+            .min_tier
+            .as_deref()
+            .is_some_and(|tier| tier_index(tier).is_none())
+        {
+            return Err(ApiError::bad_request(format!(
+                "unknown minimum tier '{}'; valid tiers: {}",
+                self.min_tier.as_deref().unwrap_or_default(),
+                TIER_ORDER.join(", ")
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchJobResponse {
+    candidates: Vec<MatchCandidate>,
+    total_fee: String,
+    eta_hours: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatchCandidate {
+    agent_id: String,
+    label: String,
+    tier: String,
+    reputation: u32,
+    past_jobs: u32,
+    inflight_jobs: u32,
+    max_concurrent_jobs: u32,
+    matched_skills: Vec<String>,
+    bid_share: String,
+}
+
+const TIER_ORDER: &[&str] = &["Unverified", "Verified", "Trusted", "Expert", "Pioneer"];
+
+fn tier_index(tier: &str) -> Option<usize> {
+    TIER_ORDER.iter().position(|t| t.eq_ignore_ascii_case(tier))
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct JobListQuery {
     #[serde(default)]
@@ -277,6 +360,155 @@ async fn list_jobs(
     Ok(Json(jobs))
 }
 
+async fn match_jobs(
+    State(state): State<Arc<AppState>>,
+    ValidJson(body): ValidJson<MatchJobRequest>,
+) -> Result<Json<MatchJobResponse>, ApiError> {
+    let agents = state.list_discovered_agents().await;
+    let min_tier_idx = body.min_tier.as_deref().and_then(tier_index).unwrap_or(0);
+
+    let mut req_skills: Vec<String> = body
+        .skills
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Some(language) = body.language.as_deref() {
+        let language = language.trim().to_ascii_lowercase();
+        if !language.is_empty() && !req_skills.iter().any(|skill| skill == &language) {
+            req_skills.push(language);
+        }
+    }
+
+    let mut scored: Vec<(crate::state::DiscoveredAgent, f64, u32, u32, Vec<String>)> = Vec::new();
+    for agent in agents {
+        // Filter by tier
+        let agent_tier_idx = agent.tier.as_deref().and_then(tier_index).unwrap_or(0);
+        if agent_tier_idx < min_tier_idx {
+            continue;
+        }
+
+        // Filter by skill overlap
+        let agent_skills: Vec<String> = agent
+            .skills
+            .iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut matched_skills = Vec::new();
+        if !req_skills.is_empty() {
+            matched_skills = req_skills
+                .iter()
+                .filter(|rs| agent_skills.iter().any(|agent_skill| agent_skill == *rs))
+                .cloned()
+                .collect();
+            if matched_skills.is_empty() {
+                continue;
+            }
+        }
+
+        // Calculate load factor
+        let inflight = count_agent_inflight_jobs(&state.workdir, &agent.agent_id).await;
+        let max = if agent.max_concurrent_jobs > 0 {
+            agent.max_concurrent_jobs
+        } else {
+            5
+        };
+        if inflight >= max {
+            continue;
+        }
+        let load_factor = 1.0 - (inflight as f64 / max as f64).min(1.0);
+        let tier_bonus = 1.0 + (agent_tier_idx as f64 * 0.05);
+        let experience_bonus = 1.0 + ((agent.past_jobs_completed as f64).ln_1p() / 10.0);
+        let skill_bonus = if req_skills.is_empty() {
+            1.0
+        } else {
+            1.0 + (matched_skills.len() as f64 / req_skills.len() as f64)
+        };
+        let reputation = agent.reputation.max(1) as f64;
+        let score = reputation * load_factor * tier_bonus * experience_bonus * skill_bonus;
+
+        scored.push((agent, score, inflight, max, matched_skills));
+    }
+
+    // Sort descending by score, truncate to 5
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.0.reputation.cmp(&a.0.reputation))
+            .then_with(|| a.0.agent_id.cmp(&b.0.agent_id))
+    });
+    scored.truncate(5);
+
+    // Split reward proportionally by the same score used to rank candidates.
+    let total_score: f64 = scored.iter().map(|(_, score, _, _, _)| *score).sum();
+    let reward_str = body.reward.trim();
+    // Try to extract numeric portion from reward like "2500 KORAI"
+    let (reward_num, reward_suffix) = parse_reward(reward_str);
+
+    let candidates: Vec<MatchCandidate> = scored
+        .iter()
+        .map(|(agent, score, inflight, max, matched_skills)| {
+            let share = if total_score > 0.0 {
+                (score / total_score * reward_num).round() as u64
+            } else {
+                0
+            };
+            MatchCandidate {
+                agent_id: agent.agent_id.clone(),
+                label: agent
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| agent.agent_id.clone()),
+                tier: agent
+                    .tier
+                    .clone()
+                    .unwrap_or_else(|| "Unverified".to_string()),
+                reputation: agent.reputation,
+                past_jobs: agent.past_jobs_completed,
+                inflight_jobs: *inflight,
+                max_concurrent_jobs: *max,
+                matched_skills: matched_skills.clone(),
+                bid_share: if reward_suffix.is_empty() {
+                    share.to_string()
+                } else {
+                    format!("{share} {reward_suffix}")
+                },
+            }
+        })
+        .collect();
+
+    // ETA heuristic
+    let avg_rep = if candidates.is_empty() {
+        0.0
+    } else {
+        candidates.iter().map(|c| c.reputation as f64).sum::<f64>() / candidates.len() as f64
+    };
+    let description_factor = (body.description.len() as f64 / 1200.0).min(1.0);
+    let eta_hours = (48.0 - avg_rep / 100.0 * 24.0 + description_factor * 12.0).max(4.0);
+
+    Ok(Json(MatchJobResponse {
+        candidates,
+        total_fee: reward_str.to_string(),
+        eta_hours,
+    }))
+}
+
+fn parse_reward(reward: &str) -> (f64, &str) {
+    let reward = reward.trim();
+    if reward.is_empty() {
+        return (0.0, "");
+    }
+    // Find where the number ends and the suffix begins
+    let num_end = reward
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(reward.len());
+    let num_str = &reward[..num_end];
+    let suffix = reward[num_end..].trim();
+    let num = num_str.parse::<f64>().unwrap_or(0.0);
+    (num, suffix)
+}
+
 async fn get_job(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
@@ -317,11 +549,27 @@ async fn create_job(
         reward: body.reward.trim().to_string(),
         plan_id: body.plan_id.trim().to_string(),
         auto_execute: body.auto_execute,
+        committed_candidates: body.committed_candidates.clone(),
+        metadata: body.metadata.clone(),
+        required_capabilities: trim_items(body.required_capabilities),
+        deadline: body
+            .deadline
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned),
         submission: None,
         evaluation: None,
     };
     write_job(&path, &job).await?;
     publish_job_event(&state, ServerEventKind::Created, &job)?;
+    for candidate_id in &job.committed_candidates {
+        state.event_bus.publish(ServerEvent::JobPostedToCandidate {
+            job_id: job.id.clone(),
+            agent_id: candidate_id.clone(),
+            reward: job.reward.clone(),
+        });
+    }
     Ok((axum::http::StatusCode::CREATED, Json(job)))
 }
 
@@ -684,6 +932,38 @@ async fn execute_job_endpoint(
     ))
 }
 
+/// Count in-flight (assigned or in_progress) jobs for a specific agent by scanning job files.
+pub async fn count_agent_inflight_jobs(workdir: &Path, agent_id: &str) -> u32 {
+    let dir = jobs_dir(workdir);
+    if !dir.is_dir() {
+        return 0;
+    }
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut count = 0u32;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let job = match JobRecord::from_path(&path, &data) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let status = normalise_status(&job.status);
+        if (status == "assigned" || status == "in_progress") && job.assigned_to == agent_id {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn non_empty_or_default(value: &str, default: &str) -> String {
     let t = value.trim();
     if t.is_empty() {
@@ -698,4 +978,403 @@ fn trim_items(values: Vec<String>) -> Vec<String> {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    use crate::deploy::manual::ManualBackend;
+    use crate::runtime::NoOpRuntime;
+    use crate::state::{AgentRegistrationRecord, AppState};
+    use roko_core::config::schema::RokoConfig;
+
+    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+        let dir = tempdir().expect("tempdir");
+        let state = Arc::new(AppState::new(
+            dir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            RokoConfig::default(),
+            Arc::new(ManualBackend::default()),
+        ));
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn count_inflight_empty_dir() {
+        let dir = tempdir().expect("tempdir");
+        let count = count_agent_inflight_jobs(dir.path(), "agent-1").await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn count_inflight_counts_assigned_and_in_progress() {
+        let dir = tempdir().expect("tempdir");
+        let jobs = dir.path().join(".roko").join("jobs");
+        tokio::fs::create_dir_all(&jobs).await.expect("jobs dir");
+
+        // assigned to agent-1 → counted
+        tokio::fs::write(
+            jobs.join("j1.json"),
+            r#"{"id":"j1","status":"assigned","assigned_to":"agent-1"}"#,
+        )
+        .await
+        .unwrap();
+        // in_progress for agent-1 → counted
+        tokio::fs::write(
+            jobs.join("j2.json"),
+            r#"{"id":"j2","status":"in_progress","assigned_to":"agent-1"}"#,
+        )
+        .await
+        .unwrap();
+        // completed for agent-1 → NOT counted
+        tokio::fs::write(
+            jobs.join("j3.json"),
+            r#"{"id":"j3","status":"completed","assigned_to":"agent-1"}"#,
+        )
+        .await
+        .unwrap();
+        // assigned to agent-2 → NOT counted
+        tokio::fs::write(
+            jobs.join("j4.json"),
+            r#"{"id":"j4","status":"assigned","assigned_to":"agent-2"}"#,
+        )
+        .await
+        .unwrap();
+
+        let count = count_agent_inflight_jobs(dir.path(), "agent-1").await;
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn match_jobs_filters_by_tier_and_skills() {
+        let (_dir, state) = test_state();
+
+        // Register a Rust/Expert agent
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "rust-expert".into(),
+                label: Some("Rust Expert".into()),
+                tier: Some("Expert".into()),
+                reputation: 95,
+                skills: vec!["rust".into(), "networking".into()],
+                max_concurrent_jobs: 5,
+                ..Default::default()
+            })
+            .await;
+
+        // Register a JS/Verified agent
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "js-dev".into(),
+                label: Some("JS Dev".into()),
+                tier: Some("Verified".into()),
+                reputation: 70,
+                skills: vec!["javascript".into(), "react".into()],
+                max_concurrent_jobs: 3,
+                ..Default::default()
+            })
+            .await;
+
+        let result = match_jobs(
+            axum::extract::State(Arc::clone(&state)),
+            ValidJson(MatchJobRequest {
+                title: "Implement p2p transport".into(),
+                description: String::new(),
+                language: None,
+                min_tier: None,
+                reward: "2500 KORAI".into(),
+                skills: vec!["rust".into()],
+            }),
+        )
+        .await
+        .expect("match_jobs");
+
+        assert_eq!(result.0.candidates.len(), 1);
+        assert_eq!(result.0.candidates[0].agent_id, "rust-expert");
+        assert_eq!(result.0.candidates[0].tier, "Expert");
+        assert_eq!(result.0.total_fee, "2500 KORAI");
+        assert!(result.0.eta_hours > 0.0);
+    }
+
+    #[tokio::test]
+    async fn match_jobs_treats_language_as_required_skill_and_skips_loaded_agents() {
+        let (dir, state) = test_state();
+
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "busy-rust".into(),
+                label: Some("Busy Rust".into()),
+                tier: Some("Expert".into()),
+                reputation: 99,
+                skills: vec!["rust".into()],
+                max_concurrent_jobs: 1,
+                ..Default::default()
+            })
+            .await;
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "available-rust".into(),
+                label: Some("Available Rust".into()),
+                tier: Some("Trusted".into()),
+                reputation: 80,
+                skills: vec!["rust".into()],
+                max_concurrent_jobs: 2,
+                ..Default::default()
+            })
+            .await;
+
+        let jobs = dir.path().join(".roko").join("jobs");
+        tokio::fs::create_dir_all(&jobs).await.expect("jobs dir");
+        tokio::fs::write(
+            jobs.join("busy.json"),
+            r#"{"id":"busy","status":"assigned","assigned_to":"busy-rust"}"#,
+        )
+        .await
+        .unwrap();
+
+        let result = match_jobs(
+            axum::extract::State(Arc::clone(&state)),
+            ValidJson(MatchJobRequest {
+                title: "Implement Rust transport".into(),
+                description: String::new(),
+                language: Some("rust".into()),
+                min_tier: Some("Trusted".into()),
+                reward: "1000 KORAI".into(),
+                skills: Vec::new(),
+            }),
+        )
+        .await
+        .expect("match_jobs");
+
+        assert_eq!(result.0.candidates.len(), 1);
+        assert_eq!(result.0.candidates[0].agent_id, "available-rust");
+        assert_eq!(result.0.candidates[0].matched_skills, vec!["rust"]);
+        assert_eq!(result.0.candidates[0].inflight_jobs, 0);
+        assert_eq!(result.0.candidates[0].max_concurrent_jobs, 2);
+    }
+
+    #[test]
+    fn match_job_validation_rejects_unknown_min_tier() {
+        let req = MatchJobRequest {
+            title: "Job".into(),
+            description: String::new(),
+            language: None,
+            min_tier: Some("Principal".into()),
+            reward: String::new(),
+            skills: Vec::new(),
+        };
+
+        let err = req.validate_payload().expect_err("invalid tier");
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_reward_splits_number_and_suffix() {
+        assert_eq!(parse_reward("2500 KORAI"), (2500.0, "KORAI"));
+        assert_eq!(parse_reward("42"), (42.0, ""));
+        assert_eq!(parse_reward(""), (0.0, ""));
+    }
+
+    // ── Integration test: full matchmaking flow ──
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_router(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .nest("/api", super::routes())
+            .nest("/api", crate::routes::agents::routes())
+            .with_state(state)
+    }
+
+    async fn post_json(
+        router: &axum::Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, val)
+    }
+
+    async fn get_json(
+        router: &axum::Router,
+        uri: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, val)
+    }
+
+    #[tokio::test]
+    async fn matchmaking_full_flow() {
+        use serde_json::json;
+
+        let (_dir, state) = test_state();
+        let router = test_router(Arc::clone(&state));
+
+        // Step 1: Register 3 agents
+        let agents = vec![
+            json!({
+                "agent_id": "agent-alpha",
+                "label": "Alpha Agent",
+                "tier": "Expert",
+                "reputation": 95,
+                "skills": ["rust", "networking"],
+                "max_concurrent_jobs": 5,
+            }),
+            json!({
+                "agent_id": "agent-beta",
+                "label": "Beta Agent",
+                "tier": "Verified",
+                "reputation": 70,
+                "skills": ["rust", "testing"],
+                "max_concurrent_jobs": 3,
+            }),
+            json!({
+                "agent_id": "agent-gamma",
+                "label": "Gamma Agent",
+                "tier": "Verified",
+                "reputation": 80,
+                "skills": ["javascript", "react"],
+                "max_concurrent_jobs": 4,
+            }),
+        ];
+        for agent in &agents {
+            let (status, _) = post_json(&router, "/api/agents/register", agent.clone()).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "register agent");
+        }
+
+        // Step 2: Match — only rust-skilled agents should appear
+        let (status, match_result) = post_json(
+            &router,
+            "/api/jobs/match",
+            json!({
+                "title": "Build networking module",
+                "skills": ["rust"],
+                "reward": "2500 KORAI",
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let candidates = match_result["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2);
+        // Alpha ranks first (higher reputation)
+        assert_eq!(candidates[0]["agentId"], "agent-alpha");
+        assert_eq!(candidates[1]["agentId"], "agent-beta");
+        // Gamma excluded (no rust skill)
+        assert!(candidates.iter().all(|c| c["agentId"] != "agent-gamma"));
+        assert_eq!(match_result["totalFee"], "2500 KORAI");
+        assert!(match_result["etaHours"].as_f64().unwrap() > 0.0);
+
+        // Step 3: Create job with committed_candidates from match
+        let candidate_ids: Vec<String> = candidates
+            .iter()
+            .map(|c| c["agentId"].as_str().unwrap().to_string())
+            .collect();
+        let (status, job) = post_json(
+            &router,
+            "/api/jobs",
+            json!({
+                "title": "Build networking module",
+                "description": "Implement p2p transport",
+                "reward": "2500",
+                "committed_candidates": candidate_ids,
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        let job_id = job["id"].as_str().unwrap().to_string();
+        assert_eq!(job["status"], "open");
+        let persisted_candidates = job["committed_candidates"].as_array().unwrap();
+        assert_eq!(persisted_candidates.len(), 2);
+
+        // Step 4: Assign to agent-alpha
+        let (status, job) = post_json(
+            &router,
+            &format!("/api/jobs/{job_id}/assign"),
+            json!({ "agent_id": "agent-alpha" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(job["status"], "assigned");
+        assert_eq!(job["assigned_to"], "agent-alpha");
+
+        // Step 5: Start → Submit → Evaluate
+        let (status, _) = post_json(&router, &format!("/api/jobs/{job_id}/start"), json!({})).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        let (status, job) = post_json(
+            &router,
+            &format!("/api/jobs/{job_id}/submit"),
+            json!({ "result_summary": "Networking module complete" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(job["status"], "submitted");
+
+        let (status, job) = post_json(
+            &router,
+            &format!("/api/jobs/{job_id}/evaluate"),
+            json!({ "accepted": true, "feedback": "Great work" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(job["status"], "completed");
+
+        // Step 6: Verify final state via GET
+        let (status, final_job) = get_json(&router, &format!("/api/jobs/{job_id}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(final_job["status"], "completed");
+        assert_eq!(final_job["assigned_to"], "agent-alpha");
+        assert!(final_job["submission"].is_object());
+        assert!(final_job["evaluation"].is_object());
+
+        // Verify events were emitted
+        let events = state.event_bus.replay_from(0);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.payload, ServerEvent::JobCreated { .. }))
+        );
+        assert!(events.iter().any(|e| matches!(
+            &e.payload,
+            ServerEvent::JobPostedToCandidate { agent_id, .. } if agent_id == "agent-alpha"
+        )));
+    }
 }

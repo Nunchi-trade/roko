@@ -130,5 +130,5 @@ pub use task_runner::{
     AgentEvent, Anomaly, AnomalyDetector, BudgetAction, BudgetGuardrail, ConductorAction,
     ConductorBandit, CostTable, EventBus, ModelPricing, TaskResult, TaskRunner, TaskRunnerError,
 };
-pub use tool_loop::ToolLoopAgent;
+pub use tool_loop::{OnTurnCallback, ToolLoopAgent, TurnProgress};
 pub use usage::Usage;

@@ -85,7 +85,7 @@ pub enum SubView {
     /// Signal stream viewer.
     SignalStream,
 
-    // ���─ Region 6: Config / System (F6) ──
+    // ── Region 6: Config / System (F6) ──
     /// Effective configuration view.
     ConfigEditor,
     /// Provider health monitoring.
@@ -94,6 +94,8 @@ pub enum SubView {
     ModelComparison,
 
     // ── Region 7: Inspect / Knowledge (F7) ──
+    /// Context overview.
+    InspectOverview,
     /// Engram DAG inspector.
     EngramDag,
     /// Episode replay viewer.
@@ -148,6 +150,7 @@ impl SubView {
                 SubView::ModelComparison,
             ],
             Tab::Inspect => &[
+                SubView::InspectOverview,
                 SubView::EngramDag,
                 SubView::EpisodeReplay,
                 SubView::KnowledgeBrowse,
@@ -178,6 +181,7 @@ impl SubView {
             Self::ConfigEditor => "Config",
             Self::ProviderHealth => "Providers",
             Self::ModelComparison => "Models",
+            Self::InspectOverview => "Overview",
             Self::EngramDag => "Engrams",
             Self::EpisodeReplay => "Episodes",
             Self::KnowledgeBrowse => "Knowledge",

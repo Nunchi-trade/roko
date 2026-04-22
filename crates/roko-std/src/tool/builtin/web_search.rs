@@ -62,7 +62,10 @@ fn format_response(parsed: &serde_json::Value) -> String {
     }
 
     // Append citations if present.
-    if let Some(citations) = parsed.get("citations").and_then(serde_json::Value::as_array) {
+    if let Some(citations) = parsed
+        .get("citations")
+        .and_then(serde_json::Value::as_array)
+    {
         if !citations.is_empty() {
             out.push_str("\n\nSources:\n");
             for (i, cite) in citations.iter().enumerate() {

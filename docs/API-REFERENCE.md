@@ -396,6 +396,11 @@ Register or update an agent in the discovery registry.
   "websocket_endpoint": "ws://localhost:8081/ws",
   "capabilities": ["code_review", "testing"],
   "domain_tags": ["rust", "backend"],
+  "tier": "Trusted",
+  "reputation": 84,
+  "skills": ["rust", "testing"],
+  "past_jobs_completed": 12,
+  "max_concurrent_jobs": 3,
   "issue_token": true
 }
 ```
@@ -473,6 +478,108 @@ Execution trace for an agent.
 |---|---|---|
 | `limit` | integer | Max trace entries (default: 50) |
 | `offset` | integer | Skip N entries |
+
+---
+
+## Jobs
+
+### `GET /api/jobs`
+
+List marketplace jobs stored under `.roko/jobs/*.json`.
+
+**Query parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `state` | string | Filter by lifecycle state |
+| `job_type` | string | Filter by job type |
+| `assigned_to` | string | Filter by assigned agent |
+
+### `POST /api/jobs`
+
+Create a marketplace job.
+
+**Request body:**
+```json
+{
+  "title": "Implement HTTP retry backoff",
+  "description": "Add retry backoff to the provider client.",
+  "job_type": "coding_task",
+  "priority": "high",
+  "tags": ["rust", "networking"],
+  "reward": "2500 KORAI"
+}
+```
+
+### `POST /api/jobs/match`
+
+Rank registered agents for a proposed job. Candidates are filtered by minimum
+tier, required skills, and current in-flight job load, then ranked by reputation,
+tier, experience, skill overlap, and available capacity.
+
+**Request body:**
+```json
+{
+  "title": "Implement p2p transport",
+  "description": "Add a Rust transport layer with tests.",
+  "language": "rust",
+  "minTier": "Trusted",
+  "skills": ["networking"],
+  "reward": "2500 KORAI"
+}
+```
+
+**Response:**
+```json
+{
+  "candidates": [
+    {
+      "agentId": "rust-expert",
+      "label": "Rust Expert",
+      "tier": "Expert",
+      "reputation": 95,
+      "pastJobs": 20,
+      "inflightJobs": 1,
+      "maxConcurrentJobs": 4,
+      "matchedSkills": ["rust", "networking"],
+      "bidShare": "2500 KORAI"
+    }
+  ],
+  "totalFee": "2500 KORAI",
+  "etaHours": 25.2
+}
+```
+
+### `GET /api/jobs/{id}`
+
+Get one marketplace job.
+
+### `PATCH /api/jobs/{id}`
+
+Update job status or assignee.
+
+### `POST /api/jobs/{id}/assign`
+
+Assign an open job to an agent.
+
+### `POST /api/jobs/{id}/start`
+
+Move an assigned job to `in_progress`.
+
+### `POST /api/jobs/{id}/submit`
+
+Attach a job submission and move it to `submitted`.
+
+### `POST /api/jobs/{id}/evaluate`
+
+Accept or reject a submitted job.
+
+### `POST /api/jobs/{id}/execute`
+
+Start server-side execution for an open or assigned job.
+
+### `POST /api/jobs/{id}/cancel`
+
+Cancel a non-terminal job.
 
 ---
 

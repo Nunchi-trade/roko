@@ -66,7 +66,10 @@ impl Agent for PerplexityEmbedAgentAdapter {
                 let output = derived_output(input, Kind::AgentOutput, Body::text(&body_json))
                     .provenance(Provenance::agent(&self.name))
                     .tag("agent", &self.name)
-                    .tag("embedding_dims", vectors.first().map_or(0, |v| v.len()).to_string())
+                    .tag(
+                        "embedding_dims",
+                        vectors.first().map_or(0, |v| v.len()).to_string(),
+                    )
                     .build();
                 AgentResult::ok(output)
             }

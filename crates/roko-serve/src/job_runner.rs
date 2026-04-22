@@ -493,7 +493,11 @@ async fn execute_chain_analysis_job(
     Ok(JobExecutionOutcome {
         summary,
         artifacts: Vec::new(),
-        gate_results: vec![gate_result("chain_triage", true, "chain analysis completed")],
+        gate_results: vec![gate_result(
+            "chain_triage",
+            true,
+            "chain analysis completed",
+        )],
     })
 }
 
@@ -652,7 +656,9 @@ fn plan_artifacts(root: &Path, plan_id: &str) -> Vec<serde_json::Value> {
         root.join("plans").join(plan_id),
         root.join("plans").join(format!("{plan_id}.md")),
         root.join(".roko").join("plans").join(plan_id),
-        root.join(".roko").join("plans").join(format!("{plan_id}.md")),
+        root.join(".roko")
+            .join("plans")
+            .join(format!("{plan_id}.md")),
     ];
     candidates
         .into_iter()
@@ -728,8 +734,12 @@ fn extract_gate_name(line: &str) -> Option<String> {
     let token = cleaned
         .split(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
         .find(|part| !part.trim().is_empty())?;
-    Some(token.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_').to_string())
-        .filter(|value| !value.is_empty())
+    Some(
+        token
+            .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .to_string(),
+    )
+    .filter(|value| !value.is_empty())
 }
 
 fn gate_result(gate: &str, passed: bool, detail: &str) -> serde_json::Value {

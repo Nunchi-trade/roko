@@ -381,7 +381,7 @@ Examples:
     },
 
     // ── Jobs ────────────────────────────────────────────────────────
-    /// Manage marketplace jobs (list, create, show, execute, cancel).
+    /// Manage marketplace jobs (list, create, match, show, execute, cancel).
     Job {
         #[command(subcommand)]
         cmd: JobCmd,
@@ -1049,6 +1049,32 @@ enum JobCmd {
         #[arg(long)]
         plan_id: Option<String>,
         /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Match a proposed job against registered agents via roko-serve.
+    Match {
+        /// Job title.
+        title: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value = "http://localhost:6677")]
+        serve_url: String,
+        /// Job description.
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Primary implementation language, also treated as a required skill.
+        #[arg(long)]
+        language: Option<String>,
+        /// Minimum agent tier: Unverified, Verified, Trusted, Expert, Pioneer.
+        #[arg(long)]
+        min_tier: Option<String>,
+        /// Reward string, e.g. "2500 KORAI".
+        #[arg(long, default_value = "")]
+        reward: String,
+        /// Required skills, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
+        /// Working directory (default: cwd / --repo), used for auth config.
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
@@ -6150,6 +6176,117 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             println!("  path:     {}", path.display());
             Ok(EXIT_SUCCESS)
         }
+        JobCmd::Match {
+            title,
+            serve_url,
+            description,
+            language,
+            min_tier,
+            reward,
+            skills,
+            workdir,
+        } => {
+            let default_wd = resolve_workdir(cli);
+            let wd = workdir.as_deref().unwrap_or(&default_wd);
+            let auth_cfg = load_layered(wd)
+                .map(|r| r.config.serve.auth)
+                .unwrap_or_default();
+            let headers = match auth::resolve_api_key(&auth_cfg, None) {
+                Some(resolved) => auth::auth_headers(&resolved.key),
+                None => reqwest::header::HeaderMap::new(),
+            };
+            let body = serde_json::json!({
+                "title": title,
+                "description": description,
+                "language": language,
+                "minTier": min_tier,
+                "reward": reward,
+                "skills": skills,
+            });
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!(
+                    "{}/api/jobs/match",
+                    serve_url.trim_end_matches('/')
+                ))
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+            if !status.is_success() {
+                eprintln!(
+                    "Failed to match job: {} {}",
+                    status,
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+                return Ok(EXIT_FAILURE);
+            }
+
+            let candidates = payload
+                .get("candidates")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if candidates.is_empty() {
+                println!("No matching agents found.");
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!(
+                "Matched {} candidate(s), total_fee={}, eta_hours={}",
+                candidates.len(),
+                payload
+                    .get("totalFee")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                payload
+                    .get("etaHours")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "?".to_string())
+            );
+            println!(
+                "{:<24} {:<11} {:>5} {:>9} {:>9} {:>14}",
+                "agent", "tier", "rep", "inflight", "jobs", "bid"
+            );
+            for candidate in candidates {
+                let agent = candidate
+                    .get("agentId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let tier = candidate
+                    .get("tier")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let reputation = candidate
+                    .get("reputation")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let inflight = candidate
+                    .get("inflightJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let max_concurrent = candidate
+                    .get("maxConcurrentJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let past_jobs = candidate
+                    .get("pastJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let bid = candidate
+                    .get("bidShare")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                println!(
+                    "{:<24} {:<11} {:>5} {:>4}/{:<4} {:>9} {:>14}",
+                    agent, tier, reputation, inflight, max_concurrent, past_jobs, bid
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
         JobCmd::Show { id, workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let path = jobs_dir(&wd).join(format!("{id}.json"));
@@ -9480,24 +9617,20 @@ destination = "/data/.roko"
 fn resolve_workdir(cli: &Cli) -> PathBuf {
     let dir = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
 
-    // Detect if we're running from inside a .roko/ directory.
+    // Detect if we're running from inside a .roko/ directory and auto-correct
+    // to the project root to avoid nested .roko/.roko/ data dirs.
     if let Ok(abs) = dir.canonicalize() {
         for ancestor in abs.ancestors() {
             if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
+                let project_root = ancestor
+                    .parent()
+                    .unwrap_or(ancestor)
+                    .to_path_buf();
                 eprintln!(
-                    "\x1b[33m\u{26a0} Warning: running from inside a .roko/ directory ({}).\x1b[0m",
-                    abs.display()
+                    "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
+                    project_root.display()
                 );
-                eprintln!("  This will create a nested .roko/.roko/ which causes data loss.");
-                eprintln!(
-                    "  Run from the project root instead: cd {}",
-                    ancestor
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "..".to_string())
-                );
-                eprintln!();
-                break;
+                return project_root;
             }
         }
     }

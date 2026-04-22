@@ -54,7 +54,10 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
     let active_plans = state.active_plans.read().await.len();
-    let active_agents = state.supervisor.count().await;
+    // Use discovered agents count (includes both local and remote agents).
+    let supervised = state.supervisor.count().await;
+    let discovered = state.discovered_agents.read().await.len();
+    let active_agents = supervised.max(discovered);
     let active_runs = state.active_runs.read().await.len();
 
     // Build a compact provider health summary from the tracker.
@@ -64,16 +67,26 @@ async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, 
         .iter()
         .filter(|ps| ps.consecutive_failures == 0)
         .count();
+    let providers_unhealthy = providers_total.saturating_sub(providers_healthy);
     let provider_summary = json!({
         "total": providers_total,
         "healthy": providers_healthy,
-        "unhealthy": providers_total.saturating_sub(providers_healthy),
+        "unhealthy": providers_unhealthy,
     });
+
+    // Determine status: "ok" / "degraded" / "down"
+    let status = if providers_total > 0 && providers_healthy == 0 {
+        "down"
+    } else if providers_unhealthy > 0 {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     (
         axum::http::StatusCode::OK,
         Json(json!({
-            "status": "ok",
+            "status": status,
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_secs": uptime_secs,
             "active_plans": active_plans,

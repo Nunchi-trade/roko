@@ -1648,19 +1648,10 @@ impl App {
                 // Map the sub-view index to the appropriate TuiState field
                 // based on which tab is active. The sub_tab in ViewState
                 // is derived from these fields via current_view_state().
-                let max = views::SubView::for_tab(self.tui_state.active_tab).len();
+                let tab = self.tui_state.active_tab;
+                let max = views::SubView::for_tab(tab).len();
                 if idx < max {
-                    match self.tui_state.active_tab {
-                        Tab::Plans => self.tui_state.plan_detail_tab = idx,
-                        Tab::Agents => self.tui_state.selected_agent_tab = idx,
-                        _ => {
-                            // For tabs without a dedicated sub-tab field,
-                            // we store the selection in plan_detail_tab as
-                            // a generic sub-view index (it will be picked up
-                            // by current_view_state).
-                            self.tui_state.plan_detail_tab = idx;
-                        }
-                    }
+                    self.tui_state.set_sub_tab_for(tab, idx);
                 }
             }
             TuiAction::SubmitJob => {
@@ -2472,13 +2463,13 @@ impl App {
         match serde_json::to_string_pretty(&job) {
             Ok(json) => match std::fs::write(&path, json) {
                 Ok(()) => {
-                    self.tui_state.command_results.push(
-                        super::state::CommandResult {
+                    self.tui_state
+                        .command_results
+                        .push(super::state::CommandResult {
                             ok: true,
                             label: "create-job".to_string(),
                             message: format!("Created job '{title}' ({id})"),
-                        },
-                    );
+                        });
                     // Reset form fields.
                     self.tui_state.job_form_title.clear();
                     self.tui_state.job_form_type.clear();
@@ -2487,9 +2478,10 @@ impl App {
                     self.tui_state.job_form_editing = false;
 
                     self.refresh_snapshot();
-                    self.notifications.push(super::modals::Notification::info(
-                        format!("Job '{title}' created"),
-                    ));
+                    self.notifications
+                        .push(super::modals::Notification::info(format!(
+                            "Job '{title}' created"
+                        )));
                 }
                 Err(e) => {
                     self.notifications
@@ -2552,7 +2544,7 @@ impl App {
             Tab::Config => ViewState {
                 scroll: self.tui_state.config_scroll_offset.min(u16::MAX as usize) as u16,
                 selected: self.tui_state.config_cursor,
-                sub_tab: 0,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Config),
                 secondary_selected: 0,
                 auto_tail: false,
                 search_query: self.tui_state.filter.clone(),
@@ -2560,7 +2552,7 @@ impl App {
             Tab::Inspect => ViewState {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: 0,
-                sub_tab: 0,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Inspect),
                 secondary_selected: 0,
                 auto_tail: false,
                 search_query: self.tui_state.filter.clone(),
@@ -2568,7 +2560,7 @@ impl App {
             Tab::Marketplace => ViewState {
                 scroll: 0,
                 selected: self.tui_state.marketplace_selected_job,
-                sub_tab: self.tui_state.plan_detail_tab,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Marketplace),
                 secondary_selected: 0,
                 auto_tail: false,
                 search_query: self.tui_state.filter.clone(),
@@ -2576,7 +2568,7 @@ impl App {
             Tab::Atelier => ViewState {
                 scroll: 0,
                 selected: self.tui_state.atelier_selected_prd,
-                sub_tab: self.tui_state.plan_detail_tab,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Atelier),
                 secondary_selected: 0,
                 auto_tail: false,
                 search_query: self.tui_state.filter.clone(),
@@ -3941,6 +3933,37 @@ mod tests {
         assert_eq!(view.scroll, 11);
         assert_eq!(view.selected, app.tui_state.git_branch_cursor);
         assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Config;
+        app.tui_state.config_sub_tab = 2;
+        let view = app.current_view_state();
+        assert_eq!(view.sub_tab, 2);
+
+        app.tui_state.active_tab = Tab::Inspect;
+        app.tui_state.inspect_sub_tab = 3;
+        let view = app.current_view_state();
+        assert_eq!(view.sub_tab, 3);
+    }
+
+    #[test]
+    fn switch_subview_updates_active_tab_slot_only() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+
+        app.tui_state.active_tab = Tab::Config;
+        app.dispatch_action(TuiAction::SwitchSubView(2));
+        assert_eq!(app.tui_state.config_sub_tab, 2);
+        assert_eq!(app.tui_state.plan_detail_tab, 0);
+
+        app.tui_state.active_tab = Tab::Inspect;
+        app.dispatch_action(TuiAction::SwitchSubView(3));
+        assert_eq!(app.tui_state.inspect_sub_tab, 3);
+        assert_eq!(app.tui_state.config_sub_tab, 2);
+
+        app.tui_state.active_tab = Tab::Marketplace;
+        app.dispatch_action(TuiAction::SwitchSubView(1));
+        assert_eq!(app.tui_state.marketplace_sub_tab, 1);
+        assert_eq!(app.tui_state.inspect_sub_tab, 3);
     }
 
     #[test]

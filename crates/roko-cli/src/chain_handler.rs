@@ -49,9 +49,7 @@ impl ToolHandler for ChainToolHandler {
             "chain.get_position" => self.handle_get_position(args).await,
             "chain.wallet_create" => self.handle_wallet_create(args).await,
             "chain.wallet_export_address" => self.handle_wallet_export_address(args).await,
-            other => ToolResult::err(ToolError::Other(format!(
-                "unknown chain tool: {other}"
-            ))),
+            other => ToolResult::err(ToolError::Other(format!("unknown chain tool: {other}"))),
         }
     }
 }
@@ -463,17 +461,17 @@ impl ChainToolHandler {
             }
         };
 
-        let fee: u64 = args
-            .get("fee")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3000);
+        let fee: u64 = args.get("fee").and_then(|v| v.as_u64()).unwrap_or(3000);
 
-        let deadline: u64 = args.get("deadline").and_then(|v| v.as_u64()).unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() + 1200) // now + 20 minutes
-                .unwrap_or(u64::MAX)
-        });
+        let deadline: u64 = args
+            .get("deadline")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() + 1200) // now + 20 minutes
+                    .unwrap_or(u64::MAX)
+            });
 
         let recipient = match args.get("recipient").and_then(|v| v.as_str()) {
             Some(r) => r.to_string(),
@@ -488,7 +486,7 @@ impl ChainToolHandler {
         data.extend_from_slice(&abi::EXACT_INPUT_SINGLE);
         data.extend_from_slice(&abi::encode_address(token_in));
         data.extend_from_slice(&abi::encode_address(token_out));
-        data.extend_from_slice(&abi::encode_u64(fee));          // fee tier
+        data.extend_from_slice(&abi::encode_u64(fee)); // fee tier
         data.extend_from_slice(&abi::encode_address(&recipient));
         data.extend_from_slice(&abi::encode_u64(deadline));
         data.extend_from_slice(&abi::encode_u128(amount_in));
@@ -581,8 +579,16 @@ impl ChainToolHandler {
         };
 
         let fee: u64 = args.get("fee").and_then(|v| v.as_u64()).unwrap_or(3000);
-        let tick_lower: i32 = args.get("tick_lower").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(-887220);
-        let tick_upper: i32 = args.get("tick_upper").and_then(|v| v.as_i64()).map(|v| v as i32).unwrap_or(887220);
+        let tick_lower: i32 = args
+            .get("tick_lower")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(-887220);
+        let tick_upper: i32 = args
+            .get("tick_upper")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(887220);
 
         let deadline: u64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -604,8 +610,8 @@ impl ChainToolHandler {
         data.extend_from_slice(&abi::encode_i32(tick_upper));
         data.extend_from_slice(&abi::encode_u128(amount_a)); // amount0Desired
         data.extend_from_slice(&abi::encode_u128(amount_b)); // amount1Desired
-        data.extend_from_slice(&[0u8; 32]);                  // amount0Min = 0
-        data.extend_from_slice(&[0u8; 32]);                  // amount1Min = 0
+        data.extend_from_slice(&[0u8; 32]); // amount0Min = 0
+        data.extend_from_slice(&[0u8; 32]); // amount1Min = 0
         data.extend_from_slice(&abi::encode_address(&recipient));
         data.extend_from_slice(&abi::encode_u64(deadline));
 
@@ -757,7 +763,7 @@ impl ChainToolHandler {
         let liquidity_result = match self.client.eth_call(&liquidity_tx, None).await {
             Ok(r) => r,
             Err(e) => {
-                return ToolResult::err(ToolError::Other(format!("liquidity query failed: {e}")))
+                return ToolResult::err(ToolError::Other(format!("liquidity query failed: {e}")));
             }
         };
 
@@ -788,9 +794,7 @@ impl ChainToolHandler {
         let token_id_u128: u128 = match token_id.parse() {
             Ok(v) => v,
             Err(e) => {
-                return ToolResult::err(ToolError::SchemaInvalid(format!(
-                    "invalid token_id: {e}"
-                )));
+                return ToolResult::err(ToolError::SchemaInvalid(format!("invalid token_id: {e}")));
             }
         };
 

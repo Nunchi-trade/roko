@@ -49,11 +49,13 @@ async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
             continue;
         }
         let plan = load_plan_file(&path).await?;
+        let completed_count = plan.tasks.iter().filter(|t| t.completed).count();
         summaries.push(json!({
             "id": plan.id,
             "title": plan.title,
             "task_count": plan.tasks.len(),
             "completed": plan.tasks.iter().all(|t| t.completed),
+            "completed_task_count": completed_count,
         }));
     }
 
@@ -372,6 +374,15 @@ async fn load_plan_file(path: &std::path::Path) -> Result<Plan, ApiError> {
     Ok(plan)
 }
 
+/// Derive a status string from a task's completion state.
+fn task_status(task: &PlanTask) -> &'static str {
+    if task.completed {
+        "completed"
+    } else {
+        "pending"
+    }
+}
+
 /// Serialize a `Plan` into a `serde_json::Value`.
 fn plan_to_json(plan: &Plan) -> Value {
     json!({
@@ -384,6 +395,7 @@ fn plan_to_json(plan: &Plan) -> Value {
             "depends_on": t.depends_on,
             "files": t.files,
             "completed": t.completed,
+            "status": task_status(t),
         })).collect::<Vec<_>>(),
     })
 }

@@ -32,18 +32,27 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/{id}/token", get(token_status).post(issue_token))
 }
 
-/// `GET /api/managed-agents` — list all managed agent processes.
+/// `GET /api/managed-agents` — list all managed agent processes with enriched info.
 async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
     let entries = state.supervisor.list().await;
-    let items: Vec<Value> = entries
-        .into_iter()
-        .map(|(id, label)| {
-            json!({
-                "id": id.0,
-                "label": label,
-            })
-        })
-        .collect();
+    let discovered = state.discovered_agents.read().await;
+
+    let mut items: Vec<Value> = Vec::with_capacity(entries.len());
+    for (id, label) in entries {
+        let agent_info = discovered.get(&label);
+        items.push(json!({
+            "id": id.0,
+            "label": label,
+            "status": agent_info.map_or("running", |a| {
+                if a.status.is_empty() { "running" } else { &a.status }
+            }),
+            "role": agent_info.and_then(|a| a.capabilities.first()).cloned(),
+            "model": Value::Null,
+            "tier": agent_info.and_then(|a| a.tier.clone()),
+            "current_task": Value::Null,
+        }));
+    }
+
     Json(Value::Array(items))
 }
 
@@ -67,6 +76,11 @@ async fn register_agent(
             card_uri: req.card_uri,
             capabilities: req.capabilities,
             domain_tags: req.domain_tags,
+            tier: req.tier,
+            reputation: req.reputation,
+            skills: req.skills,
+            past_jobs_completed: req.past_jobs_completed,
+            max_concurrent_jobs: req.max_concurrent_jobs,
         })
         .await;
 
@@ -344,6 +358,18 @@ struct RegisterAgentRequest {
     #[serde(default)]
     mcp_endpoint: Option<String>,
     #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    reputation: u32,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    #[serde(alias = "pastJobsCompleted")]
+    past_jobs_completed: u32,
+    #[serde(default)]
+    #[serde(alias = "maxConcurrentJobs")]
+    max_concurrent_jobs: u32,
+    #[serde(default)]
     issue_token: Option<bool>,
 }
 
@@ -521,6 +547,11 @@ mod tests {
                 websocket_endpoint: None,
                 a2a_endpoint: None,
                 mcp_endpoint: None,
+                tier: None,
+                reputation: 0,
+                skills: Vec::new(),
+                past_jobs_completed: 0,
+                max_concurrent_jobs: 0,
                 issue_token: Some(true),
             }),
         )
@@ -566,6 +597,7 @@ mod tests {
                 card_uri: None,
                 capabilities: Vec::new(),
                 domain_tags: Vec::new(),
+                ..Default::default()
             })
             .await;
 
@@ -649,6 +681,7 @@ mod tests {
                 card_uri: None,
                 capabilities: Vec::new(),
                 domain_tags: Vec::new(),
+                ..Default::default()
             })
             .await;
 

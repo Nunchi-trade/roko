@@ -19,7 +19,9 @@ use tracing::{debug, warn};
 use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/ws", get(ws_upgrade))
+    Router::new()
+        .route("/ws", get(ws_upgrade))
+        .route("/roko-ws", get(ws_upgrade))
 }
 
 /// `GET /ws` — upgrade to a WebSocket connection.

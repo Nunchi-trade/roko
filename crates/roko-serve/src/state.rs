@@ -86,6 +86,21 @@ pub struct DiscoveredAgent {
     /// Domain tags.
     #[serde(default)]
     pub domain_tags: Vec<String>,
+    /// Agent tier (e.g. "Unverified", "Verified", "Trusted", "Expert", "Pioneer").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Agent reputation score (0–100).
+    #[serde(default)]
+    pub reputation: u32,
+    /// Skill tags for matchmaking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    /// Number of previously completed jobs.
+    #[serde(default)]
+    pub past_jobs_completed: u32,
+    /// Maximum concurrent jobs this agent accepts.
+    #[serde(default)]
+    pub max_concurrent_jobs: u32,
     /// Token hash used by the agent server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_hash: Option<String>,
@@ -130,6 +145,21 @@ pub struct AgentRegistrationRecord {
     /// Domain tags.
     #[serde(default)]
     pub domain_tags: Vec<String>,
+    /// Agent tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Agent reputation score.
+    #[serde(default)]
+    pub reputation: u32,
+    /// Skill tags.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Number of previously completed jobs.
+    #[serde(default)]
+    pub past_jobs_completed: u32,
+    /// Maximum concurrent jobs.
+    #[serde(default)]
+    pub max_concurrent_jobs: u32,
 }
 
 /// Returned when a new token is issued or rotated.
@@ -459,6 +489,11 @@ impl AppState {
                 card_uri: registration.card_uri.clone(),
                 capabilities: registration.capabilities.clone(),
                 domain_tags: registration.domain_tags.clone(),
+                tier: registration.tier.clone(),
+                reputation: registration.reputation,
+                skills: registration.skills.clone(),
+                past_jobs_completed: registration.past_jobs_completed,
+                max_concurrent_jobs: registration.max_concurrent_jobs,
                 token_hash: None,
                 token_expires_at: None,
                 status: "registered".to_string(),
@@ -490,6 +525,21 @@ impl AppState {
         }
         if !registration.domain_tags.is_empty() {
             entry.domain_tags = registration.domain_tags;
+        }
+        if registration.tier.is_some() {
+            entry.tier = registration.tier;
+        }
+        if registration.reputation > 0 {
+            entry.reputation = registration.reputation;
+        }
+        if !registration.skills.is_empty() {
+            entry.skills = registration.skills;
+        }
+        if registration.past_jobs_completed > 0 {
+            entry.past_jobs_completed = registration.past_jobs_completed;
+        }
+        if registration.max_concurrent_jobs > 0 {
+            entry.max_concurrent_jobs = registration.max_concurrent_jobs;
         }
         entry.last_seen_at = now;
         entry.status = "registered".to_string();

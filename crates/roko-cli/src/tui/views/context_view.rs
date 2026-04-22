@@ -12,9 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
-};
+use ratatui::widgets::{Block, Cell, List, ListItem, ListState, Paragraph, Row, Table, Wrap};
 
 use super::ViewState;
 use crate::tui::dashboard::{DashboardData, Theme};
@@ -142,8 +140,7 @@ fn render_health_summary(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" System Health ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -297,8 +294,7 @@ fn render_token_burn_by_role(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Token Burn by Role ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -411,8 +407,7 @@ fn render_cost_by_model(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Cost by Model ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -511,8 +506,7 @@ fn render_cascade_router(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Cascade Router ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -647,8 +641,7 @@ fn render_alerts_and_health(
     } else {
         theme.muted()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Alerts & Gates ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -744,9 +737,7 @@ fn render_engram_dag(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Engram DAG ", theme.accent()));
+    let block = Block::bordered().title(Span::styled(" Engram DAG ", theme.accent()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -800,9 +791,7 @@ fn render_episode_replay(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Episode Replay ", theme.accent()));
+    let block = Block::bordered().title(Span::styled(" Episode Replay ", theme.accent()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -862,9 +851,7 @@ fn render_knowledge_browse(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Knowledge Browse ", theme.accent()));
+    let block = Block::bordered().title(Span::styled(" Knowledge Browse ", theme.accent()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -884,7 +871,10 @@ fn render_knowledge_browse(
             query.is_empty()
                 || entry.kind.to_ascii_lowercase().contains(&query)
                 || entry.content_preview.to_ascii_lowercase().contains(&query)
-                || entry.tags.iter().any(|t| t.to_ascii_lowercase().contains(&query))
+                || entry
+                    .tags
+                    .iter()
+                    .any(|t| t.to_ascii_lowercase().contains(&query))
         })
         .collect::<Vec<_>>();
 
@@ -918,7 +908,11 @@ fn render_knowledge_browse(
     if visible_len > 0 {
         list_state.select(Some(view_state.selected.min(visible_len - 1)));
     }
-    frame.render_stateful_widget(List::new(items).highlight_symbol("> "), inner, &mut list_state);
+    frame.render_stateful_widget(
+        List::new(items).highlight_symbol("> "),
+        inner,
+        &mut list_state,
+    );
 }
 
 /// Build context data from available dashboard data.

@@ -310,7 +310,9 @@ async fn coding_job_execution_persists_artifacts_and_gate_results() {
 
     let final_job = read_job_file(dir.path(), "coding-payload");
     assert_eq!(final_job["status"], "completed");
-    let submission = final_job["submission"].as_object().expect("submission object");
+    let submission = final_job["submission"]
+        .as_object()
+        .expect("submission object");
     assert!(
         submission["result_summary"]
             .as_str()

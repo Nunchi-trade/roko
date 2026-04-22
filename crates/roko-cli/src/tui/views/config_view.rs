@@ -640,12 +640,12 @@ fn render_model_comparison(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiSta
             } else {
                 theme.muted()
             };
-            let rate_style = if best_gate.is_some_and(|best| (*gate_rate - best).abs() < f64::EPSILON)
-            {
-                rate_style.add_modifier(Modifier::BOLD)
-            } else {
-                rate_style
-            };
+            let rate_style =
+                if best_gate.is_some_and(|best| (*gate_rate - best).abs() < f64::EPSILON) {
+                    rate_style.add_modifier(Modifier::BOLD)
+                } else {
+                    rate_style
+                };
             let cost_style = if best_cost.is_some_and(|best| (*cost - best).abs() < f64::EPSILON) {
                 theme.success().add_modifier(Modifier::BOLD)
             } else {

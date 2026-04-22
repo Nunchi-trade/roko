@@ -1344,7 +1344,12 @@ impl LinUCBRouter {
     ///
     /// Useful for feeding into [`ProviderHealthTracker::filter_arms`].
     pub fn arm_slugs(&self) -> Vec<String> {
-        self.state.read().arms.iter().map(|a| a.slug.clone()).collect()
+        self.state
+            .read()
+            .arms
+            .iter()
+            .map(|a| a.slug.clone())
+            .collect()
     }
 }
 

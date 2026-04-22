@@ -154,10 +154,7 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
             "web_fetch: only http(s) URLs are supported, got `{url}`"
         )));
     }
-    if scheme == "http"
-        && !url.starts_with("http://localhost")
-        && !url.starts_with("http://127.")
-    {
+    if scheme == "http" && !url.starts_with("http://localhost") && !url.starts_with("http://127.") {
         return Err(ToolError::NetworkBlocked(format!(
             "web_fetch: plain http is only allowed for localhost, got `{url}`"
         )));
@@ -207,8 +204,7 @@ async fn do_fetch(url: &str, call: &ToolCall) -> ToolResult {
         }
     };
 
-    let request_builder =
-        request_builder.header("User-Agent", "roko-agent/0.1 (web_fetch tool)");
+    let request_builder = request_builder.header("User-Agent", "roko-agent/0.1 (web_fetch tool)");
 
     let response = match request_builder.send().await {
         Ok(r) => r,

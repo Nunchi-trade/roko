@@ -333,9 +333,7 @@ impl GovernanceRule {
                     return Err(ContractViolation::new(
                         role,
                         "MaxConsecutiveFailures",
-                        format!(
-                            "{consecutive} consecutive failures >= limit {max}"
-                        ),
+                        format!("{consecutive} consecutive failures >= limit {max}"),
                     ));
                 }
             }
@@ -524,21 +522,11 @@ fn count_trailing_failures(actions: &[ExternalAction]) -> u32 {
 /// Heuristic: does this external action represent a tool failure?
 fn is_failure_action(action: &ExternalAction) -> bool {
     // Explicit success=false marker.
-    if action
-        .metadata
-        .get("success")
-        .and_then(|v| v.as_bool())
-        == Some(false)
-    {
+    if action.metadata.get("success").and_then(|v| v.as_bool()) == Some(false) {
         return true;
     }
     // Explicit error=true marker.
-    if action
-        .metadata
-        .get("error")
-        .and_then(|v| v.as_bool())
-        == Some(true)
-    {
+    if action.metadata.get("error").and_then(|v| v.as_bool()) == Some(true) {
         return true;
     }
     // action_type heuristic (e.g. "tool_error", "execution_failed").

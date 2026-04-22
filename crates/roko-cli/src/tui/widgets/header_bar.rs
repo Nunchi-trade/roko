@@ -39,6 +39,16 @@ fn hdr_pct_color(pct: f64) -> Color {
     }
 }
 
+fn hdr_success_color(pct: f64) -> Color {
+    if pct >= 0.8 {
+        Theme::SAGE
+    } else if pct >= 0.5 {
+        Theme::WARNING
+    } else {
+        Theme::EMBER
+    }
+}
+
 fn hdr_fmt_bytes(b: u64) -> String {
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
@@ -273,22 +283,33 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     }
 
     // ── 6b. Network stats (agents online + ISFR) ──────────────────────
-    if state.agents_online > 0 {
-        spans.push(Span::styled(
-            format!(" {}agt", state.agents_online),
-            Style::default().fg(Theme::SAGE).bg(Theme::BG_SECONDARY),
-        ));
-    }
-    if let Some(isfr) = state.isfr {
-        let isfr_str = if isfr >= 1000.0 {
-            format!("{:.0}s", isfr / 1000.0)
-        } else {
-            format!("{:.0}ms", isfr)
-        };
-        spans.push(Span::styled(
-            format!(" isfr:{isfr_str}"),
-            Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
-        ));
+    let agent_color = if state.agents_online > 0 {
+        Theme::SAGE
+    } else {
+        Theme::TEXT_GHOST
+    };
+    spans.push(Span::styled(
+        format!(" {}ag", state.agents_online),
+        Style::default().fg(agent_color).bg(Theme::BG_SECONDARY),
+    ));
+    match state.isfr {
+        Some(isfr) => {
+            let pct = (isfr.clamp(0.0, 1.0) * 100.0).round();
+            spans.push(Span::styled(
+                format!(" ISFR:{pct:.0}%"),
+                Style::default()
+                    .fg(hdr_success_color(isfr))
+                    .bg(Theme::BG_SECONDARY),
+            ));
+        }
+        None => {
+            spans.push(Span::styled(
+                " ISFR:—",
+                Style::default()
+                    .fg(Theme::TEXT_GHOST)
+                    .bg(Theme::BG_SECONDARY),
+            ));
+        }
     }
 
     spans.push(sep());
@@ -379,6 +400,17 @@ mod tests {
     use super::super::super::dashboard::DashboardData;
     use super::super::super::state::TuiState;
 
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn header_bar_renders_without_panic() {
         let data = DashboardData::default();
@@ -405,5 +437,43 @@ mod tests {
                 render_header_bar(frame, area, &state);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn header_bar_renders_network_stats_and_missing_isfr() {
+        let mut state = TuiState::from_dashboard_data(&DashboardData::default());
+        state.agents_online = 0;
+        state.isfr = None;
+        let backend = TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_header_bar(frame, area, &state);
+            })
+            .unwrap();
+
+        let text = rendered_text(&terminal);
+        assert!(text.contains("0ag"));
+        assert!(text.contains("ISFR:—"));
+    }
+
+    #[test]
+    fn header_bar_renders_isfr_as_percentage() {
+        let mut state = TuiState::from_dashboard_data(&DashboardData::default());
+        state.agents_online = 3;
+        state.isfr = Some(0.75);
+        let backend = TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_header_bar(frame, area, &state);
+            })
+            .unwrap();
+
+        let text = rendered_text(&terminal);
+        assert!(text.contains("3ag"));
+        assert!(text.contains("ISFR:75%"));
     }
 }

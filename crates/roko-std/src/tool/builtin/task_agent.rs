@@ -148,7 +148,10 @@ impl ToolHandler for Handler {
         };
 
         let worktree = ctx.worktree().to_path_buf();
-        match dispatcher.dispatch(&subagent_type, &prompt, &worktree).await {
+        match dispatcher
+            .dispatch(&subagent_type, &prompt, &worktree)
+            .await
+        {
             Ok(output) => ToolResult::text(output),
             Err(err) => ToolResult::Err(ToolError::Other(format!(
                 "task: sub-agent ({subagent_type}) failed: {err}"

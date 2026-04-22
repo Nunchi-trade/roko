@@ -30,6 +30,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/prds", get(list_prds))
         .route("/prds/ideas", post(post_idea))
         .route("/prds/status", get(prds_coverage))
+        .route("/prd/consolidate", post(consolidate_prds))
         .route("/prds/{slug}", get(get_prd))
         .route("/prds/{slug}/draft", post(draft_prd))
         .route("/prds/{slug}/promote", post(promote_prd))
@@ -259,12 +260,57 @@ pub(crate) fn start_prd_publish_subscriber(state: Arc<AppState>) -> JoinHandle<(
     spawn_prd_publish_subscriber(state, global_event_bus())
 }
 
-/// `GET /api/prds` — list PRD slugs from drafts/ and published/.
+/// Extract title from frontmatter or first heading.
+fn extract_title(content: &str) -> String {
+    let (fm, body) = split_frontmatter(content);
+    if let Some(title) = fm.get("title").and_then(|v| v.as_str()) {
+        if !title.is_empty() {
+            return title.to_string();
+        }
+    }
+    // Fall back to first markdown heading
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("# ") {
+            return heading.trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// Extract optional section from frontmatter.
+fn extract_section(content: &str) -> Option<String> {
+    let (fm, _) = split_frontmatter(content);
+    fm.get("section")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Check if a plan exists for this slug.
+async fn has_plan_for_slug(workdir: &std::path::Path, slug: &str) -> bool {
+    let plans_dir = workdir.join(".roko").join("plans");
+    if !plans_dir.is_dir() {
+        return false;
+    }
+    // Check for plan file with matching slug
+    for ext in &["json", "toml"] {
+        if plans_dir.join(format!("{slug}.{ext}")).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// `GET /api/prds` — list PRDs from ideas/, drafts/, and published/.
 async fn list_prds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
     let mut entries = Vec::new();
 
-    for (status, subdir) in [("draft", "drafts"), ("published", "published")] {
+    for (status, subdir) in [
+        ("idea", "ideas"),
+        ("draft", "drafts"),
+        ("published", "published"),
+    ] {
         let dir = prd_dir.join(subdir);
         if !dir.is_dir() {
             continue;
@@ -286,7 +332,17 @@ async fn list_prds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Ap
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
-            entries.push(json!({ "slug": slug, "status": status }));
+            let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            let title = extract_title(&content);
+            let section = extract_section(&content);
+            let has_plan = has_plan_for_slug(&state.workdir, &slug).await;
+            entries.push(json!({
+                "slug": slug,
+                "title": if title.is_empty() { slug.clone() } else { title },
+                "status": status,
+                "section": section,
+                "has_plan": has_plan,
+            }));
         }
     }
 
@@ -326,39 +382,70 @@ impl RequestPayload for IdeaRequest {
     }
 }
 
-/// `POST /api/prds/ideas` — append a line to `.roko/prd/ideas.md`.
+/// Generate a slug from text: first 5 words lowercased + 4-char random suffix.
+fn slugify(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().take(5).collect();
+    let base: String = words
+        .join("-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let suffix: String = uuid::Uuid::new_v4().to_string()[..4].to_string();
+    if base.is_empty() {
+        format!("idea-{suffix}")
+    } else {
+        format!("{base}-{suffix}")
+    }
+}
+
+/// `POST /api/prds/ideas` — create a per-idea file and return its slug.
 async fn post_idea(
     State(state): State<Arc<AppState>>,
     ValidJson(body): ValidJson<IdeaRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let prd_dir = state.workdir.join(".roko").join("prd");
-    tokio::fs::create_dir_all(&prd_dir)
+    let ideas_dir = prd_dir.join("ideas");
+    tokio::fs::create_dir_all(&ideas_dir)
         .await
-        .map_err(|e| ApiError::internal(format!("create prd dir: {e}")))?;
+        .map_err(|e| ApiError::internal(format!("create ideas dir: {e}")))?;
 
+    let slug = slugify(&body.text);
+    let idea_path = ideas_dir.join(format!("{slug}.md"));
+    let now = chrono::Local::now().format("%Y-%m-%d");
+    let content = format!(
+        "---\ntitle: {title}\nstatus: idea\ncreated: {now}\n---\n\n{title}\n",
+        title = body.text.trim(),
+        now = now,
+    );
+    tokio::fs::write(&idea_path, content)
+        .await
+        .map_err(|e| ApiError::internal(format!("write idea file: {e}")))?;
+
+    // Also append to legacy ideas.md for backwards compat
     let ideas_path = prd_dir.join("ideas.md");
-    let line = format!("- {}\n", body.text);
-
-    if !ideas_path.exists() {
-        let header = "# Ideas\n\nQuick captures. Run `roko prd idea \"text\"` to append.\n\n";
-        tokio::fs::write(&ideas_path, header)
+    if ideas_path.exists() || !ideas_dir.join("..").join("ideas.md").exists() {
+        use tokio::io::AsyncWriteExt;
+        if !ideas_path.exists() {
+            let header = "# Ideas\n\nQuick captures. Run `roko prd idea \"text\"` to append.\n\n";
+            tokio::fs::write(&ideas_path, header)
+                .await
+                .map_err(|e| ApiError::internal(format!("write ideas header: {e}")))?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&ideas_path)
             .await
-            .map_err(|e| ApiError::internal(format!("write ideas header: {e}")))?;
+            .map_err(|e| ApiError::internal(format!("open ideas for append: {e}")))?;
+        let line = format!("- {}\n", body.text);
+        file.write_all(line.as_bytes())
+            .await
+            .map_err(|e| ApiError::internal(format!("append idea: {e}")))?;
     }
-
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(&ideas_path)
-        .await
-        .map_err(|e| ApiError::internal(format!("open ideas for append: {e}")))?;
-    file.write_all(line.as_bytes())
-        .await
-        .map_err(|e| ApiError::internal(format!("append idea: {e}")))?;
 
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(json!({ "status": "appended" })),
+        Json(json!({ "slug": slug })),
     ))
 }
 
@@ -571,9 +658,64 @@ async fn prds_coverage(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     })))
 }
 
+/// `POST /api/prd/consolidate` — spawn background PRD consolidation.
+async fn consolidate_prds(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let op_id = uuid::Uuid::new_v4().to_string();
+    let bus = state.event_bus.clone();
+    let runtime = state.runtime.clone();
+    let workdir = state.workdir.clone();
+
+    let handle = tokio::spawn({
+        let op_id = op_id.clone();
+        async move {
+            bus.publish(ServerEvent::OperationStarted {
+                op_id: op_id.clone(),
+                kind: "prd_consolidate".into(),
+            });
+
+            let prompt = format!(
+                "Scan all PRDs under {prd_dir} for gaps, duplicates, and missing coverage. \
+                 Output a consolidation report summarizing findings.",
+                prd_dir = workdir.join(".roko").join("prd").display(),
+            );
+
+            let success = match runtime.run_once(&workdir, &prompt).await {
+                Ok(result) => result.success,
+                Err(err) => {
+                    bus.publish(ServerEvent::Error {
+                        message: format!("PRD consolidation failed: {err}"),
+                    });
+                    false
+                }
+            };
+
+            bus.publish(ServerEvent::OperationCompleted {
+                op_id,
+                kind: "prd_consolidate".into(),
+                success,
+            });
+        }
+    });
+
+    let op = OperationHandle {
+        id: op_id.clone(),
+        kind: "prd_consolidate".into(),
+        status: OperationStatus::Running,
+        handle,
+    };
+    state.operations.write().await.insert(op_id.clone(), op);
+
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(json!({ "id": op_id })),
+    ))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────
 
-/// Read a PRD file, checking published/ first, then drafts/.
+/// Read a PRD file, checking published/ first, then drafts/, then ideas/.
 async fn read_prd_file(
     workdir: &std::path::Path,
     slug: &str,
@@ -581,20 +723,18 @@ async fn read_prd_file(
     validate_path_segment(slug, "slug")?;
     let prd_dir = workdir.join(".roko").join("prd");
 
-    let published = prd_dir.join("published").join(format!("{slug}.md"));
-    if published.is_file() {
-        let content = tokio::fs::read_to_string(&published)
-            .await
-            .map_err(|e| ApiError::internal(format!("read prd: {e}")))?;
-        return Ok(("published".into(), content));
-    }
-
-    let draft = prd_dir.join("drafts").join(format!("{slug}.md"));
-    if draft.is_file() {
-        let content = tokio::fs::read_to_string(&draft)
-            .await
-            .map_err(|e| ApiError::internal(format!("read prd: {e}")))?;
-        return Ok(("draft".into(), content));
+    for (status, subdir) in [
+        ("published", "published"),
+        ("draft", "drafts"),
+        ("idea", "ideas"),
+    ] {
+        let path = prd_dir.join(subdir).join(format!("{slug}.md"));
+        if path.is_file() {
+            let content = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| ApiError::internal(format!("read prd: {e}")))?;
+            return Ok((status.into(), content));
+        }
     }
 
     Err(ApiError::not_found(format!("PRD '{slug}' not found")))
