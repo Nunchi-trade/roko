@@ -4,6 +4,7 @@
 //! for lifecycle management (LIFE-01, LIFE-06).
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
@@ -17,6 +18,7 @@ use roko_agent::{
         CodingConfig, DeploymentMode, DomainPlugin, ResearchConfig, resolve_manifest,
         validate_manifest,
     },
+    process::registry::{register_spawned_pid, unregister_pid},
 };
 use roko_agent_server::{
     AgentRegistration, AgentServer, DispatchError, DispatchLike, RelayClientConfig,
@@ -24,6 +26,7 @@ use roko_agent_server::{
 use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind, MessageContent};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Agent-focused CLI subtree.
@@ -64,6 +67,45 @@ pub enum AgentCmd {
         /// Skip ordered shutdown and remove immediately.
         #[arg(long)]
         force: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// List all agents with their status.
+    List {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Start a previously created agent.
+    Start {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Socket address to bind (default: 127.0.0.1:0 for auto-port).
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Stop a running agent.
+    Stop {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Force kill (SIGKILL instead of SIGTERM).
+        #[arg(long)]
+        force: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show detailed status for one agent.
+    Status {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -392,8 +434,396 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
             force,
             workdir,
         } => run_agent_delete(&name, force, workdir.as_deref()).await,
+        AgentCmd::List { workdir } => run_agent_list(workdir.as_deref()),
+        AgentCmd::Start {
+            name,
+            bind,
+            workdir,
+        } => run_agent_start(&name, &bind, workdir.as_deref()),
+        AgentCmd::Stop {
+            name,
+            force,
+            workdir,
+        } => run_agent_stop(&name, force, workdir.as_deref()),
+        AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
     }
+}
+
+// ─── Structured agent tracking ──────────────────────────────────────────
+
+/// Runtime state for a single agent, persisted to `.roko/runtime/agents.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentEntry {
+    name: String,
+    pid: u32,
+    bind: String,
+    domain: String,
+    started_at: String, // RFC 3339
+}
+
+/// Path to the structured agent tracking file.
+fn agents_file_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("runtime").join("agents.json")
+}
+
+/// Load all agent entries from disk. Returns empty vec if file is missing or corrupt.
+fn load_agent_entries(workdir: &Path) -> Vec<AgentEntry> {
+    let path = agents_file_path(workdir);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// Persist agent entries to disk.
+fn save_agent_entries(workdir: &Path, entries: &[AgentEntry]) -> Result<()> {
+    let path = agents_file_path(workdir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create runtime directory at {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(entries).context("serialize agent entries")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("write agent entries to {}", path.display()))?;
+    Ok(())
+}
+
+/// Check whether a process with the given PID is alive.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn is_process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 is an existence check — no signal is delivered.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Send a signal to a process.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn send_signal(pid: u32, sig: i32) {
+    unsafe {
+        libc::kill(pid as i32, sig);
+    }
+}
+
+#[cfg(not(unix))]
+fn send_signal(_pid: u32, _sig: i32) {}
+
+/// Extract the domain string from a manifest TOML on disk.
+fn read_domain_from_manifest(manifest_path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(manifest_path) else {
+        return "unknown".to_string();
+    };
+    let Ok(manifest) = toml::from_str::<AgentExtendedManifest>(&text) else {
+        return "unknown".to_string();
+    };
+    match &manifest.core.domain {
+        Some(DomainPlugin::Coding(_)) => "coding".to_string(),
+        Some(DomainPlugin::Research(_)) => "research".to_string(),
+        Some(DomainPlugin::Chain(_)) => "chain".to_string(),
+        Some(DomainPlugin::Custom(c)) => c.id.clone(),
+        None => "general".to_string(),
+    }
+}
+
+/// Format a duration in a human-readable way.
+fn format_duration(dur: chrono::Duration) -> String {
+    let secs = dur.num_seconds();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+// ─── Agent list ─────────────────────────────────────────────────────────
+
+fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agents_dir = wd.join(".roko").join("agents");
+    if !agents_dir.exists() {
+        println!("No agents found.");
+        return Ok(());
+    }
+
+    // Scan manifests.
+    let mut agents: Vec<(String, String)> = Vec::new(); // (name, domain)
+    let entries = std::fs::read_dir(&agents_dir)
+        .with_context(|| format!("read agents directory at {}", agents_dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let agent_path = entry.path();
+
+        // Skip deleted agents.
+        if agent_path.join("DELETED").exists() {
+            continue;
+        }
+        let manifest_path = agent_path.join("manifest.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let domain = read_domain_from_manifest(&manifest_path);
+        agents.push((name, domain));
+    }
+
+    if agents.is_empty() {
+        println!("No agents found.");
+        return Ok(());
+    }
+
+    agents.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Load runtime state.
+    let runtime_entries = load_agent_entries(&wd);
+
+    // Print table header.
+    println!(
+        "{:<20} {:<10} {:<8} {:<22} {}",
+        "NAME", "STATUS", "PID", "BIND", "DOMAIN"
+    );
+
+    for (name, domain) in &agents {
+        let rt = runtime_entries.iter().find(|e| e.name == *name);
+        let (status, pid_str, bind_str) = match rt {
+            Some(entry) if is_process_alive(entry.pid) => {
+                ("running".to_string(), entry.pid.to_string(), entry.bind.clone())
+            }
+            Some(entry) => {
+                // Stale entry — process is dead. We'll clean up later.
+                let _ = entry; // suppress unused warning
+                ("stopped".to_string(), "-".to_string(), "-".to_string())
+            }
+            None => ("created".to_string(), "-".to_string(), "-".to_string()),
+        };
+        println!("{:<20} {:<10} {:<8} {:<22} {}", name, status, pid_str, bind_str, domain);
+    }
+
+    // Clean up stale entries.
+    let live: Vec<AgentEntry> = runtime_entries
+        .into_iter()
+        .filter(|e| is_process_alive(e.pid))
+        .collect();
+    let _ = save_agent_entries(&wd, &live);
+
+    Ok(())
+}
+
+// ─── Agent start ────────────────────────────────────────────────────────
+
+fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agent_dir = wd.join(".roko").join("agents").join(name);
+    let manifest_path = agent_dir.join("manifest.toml");
+
+    if !manifest_path.exists() {
+        bail!("agent '{}' not found (no manifest at {})", name, manifest_path.display());
+    }
+    if agent_dir.join("DELETED").exists() {
+        bail!("agent '{}' has been deleted", name);
+    }
+
+    // Check if already running.
+    let mut entries = load_agent_entries(&wd);
+    if let Some(existing) = entries.iter().find(|e| e.name == name) {
+        if is_process_alive(existing.pid) {
+            bail!(
+                "agent '{}' is already running (pid {}, bind {})",
+                name,
+                existing.pid,
+                existing.bind
+            );
+        }
+        // Stale entry — remove it.
+        entries.retain(|e| e.name != name);
+    }
+
+    let domain = read_domain_from_manifest(&manifest_path);
+
+    // Spawn `roko agent serve --agent-id <name> --bind <bind>` as detached child.
+    let roko_bin = std::env::current_exe().context("determine roko binary path")?;
+    let child = std::process::Command::new(&roko_bin)
+        .arg("agent")
+        .arg("serve")
+        .arg("--agent-id")
+        .arg(name)
+        .arg("--bind")
+        .arg(bind)
+        .current_dir(&wd)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn agent serve for '{}'", name))?;
+
+    let pid = child.id();
+    register_spawned_pid(pid);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    entries.push(AgentEntry {
+        name: name.to_string(),
+        pid,
+        bind: bind.to_string(),
+        domain,
+        started_at: now,
+    });
+    save_agent_entries(&wd, &entries)?;
+
+    println!("Agent '{}' started (pid {}, bind {}).", name, pid, bind);
+    Ok(())
+}
+
+// ─── Agent stop ─────────────────────────────────────────────────────────
+
+fn run_agent_stop(name: &str, force: bool, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut entries = load_agent_entries(&wd);
+    let entry_idx = entries.iter().position(|e| e.name == name);
+
+    let Some(idx) = entry_idx else {
+        println!("Agent '{}' is not running.", name);
+        return Ok(());
+    };
+
+    let entry = entries[idx].clone();
+    if !is_process_alive(entry.pid) {
+        println!("Agent '{}' is not running (stale entry cleaned up).", name);
+        entries.remove(idx);
+        save_agent_entries(&wd, &entries)?;
+        unregister_pid(entry.pid);
+        return Ok(());
+    }
+
+    // Send initial signal.
+    if force {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGKILL);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 9);
+    } else {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGTERM);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 15);
+    }
+
+    // Wait up to 5 seconds for exit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !is_process_alive(entry.pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // If still alive after timeout and not force, escalate to SIGKILL.
+    if is_process_alive(entry.pid) && !force {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGKILL);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 9);
+
+        // Brief wait for SIGKILL to take effect.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // Compute run duration.
+    let duration_str = chrono::DateTime::parse_from_rfc3339(&entry.started_at)
+        .ok()
+        .map(|started| {
+            let dur = chrono::Utc::now().signed_duration_since(started);
+            format_duration(dur)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    entries.remove(idx);
+    save_agent_entries(&wd, &entries)?;
+    unregister_pid(entry.pid);
+
+    println!(
+        "Agent '{}' stopped (pid {}, ran for {}).",
+        name, entry.pid, duration_str
+    );
+    Ok(())
+}
+
+// ─── Agent status ───────────────────────────────────────────────────────
+
+fn run_agent_status(name: &str, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agent_dir = wd.join(".roko").join("agents").join(name);
+    let manifest_path = agent_dir.join("manifest.toml");
+
+    if !manifest_path.exists() {
+        bail!("agent '{}' not found (no manifest at {})", name, manifest_path.display());
+    }
+    if agent_dir.join("DELETED").exists() {
+        bail!("agent '{}' has been deleted", name);
+    }
+
+    let domain = read_domain_from_manifest(&manifest_path);
+    let entries = load_agent_entries(&wd);
+    let rt = entries.iter().find(|e| e.name == name);
+
+    let (status, pid_str, bind_str, started_str) = match rt {
+        Some(entry) if is_process_alive(entry.pid) => {
+            let ago = chrono::DateTime::parse_from_rfc3339(&entry.started_at)
+                .ok()
+                .map(|started| {
+                    let dur = chrono::Utc::now().signed_duration_since(started);
+                    format!("{} ({} ago)", entry.started_at, format_duration(dur))
+                })
+                .unwrap_or_else(|| entry.started_at.clone());
+            (
+                "running",
+                entry.pid.to_string(),
+                entry.bind.clone(),
+                ago,
+            )
+        }
+        Some(_) => (
+            "stopped",
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ),
+        None => (
+            "created",
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ),
+    };
+
+    println!("Agent:    {}", name);
+    println!("Status:   {}", status);
+    println!("Domain:   {}", domain);
+    println!("PID:      {}", pid_str);
+    println!("Bind:     {}", bind_str);
+    println!("Started:  {}", started_str);
+    println!("Manifest: {}", manifest_path.display());
+
+    Ok(())
 }
 
 // ─── LIFE-01: Agent creation ────────────────────────────────────────────

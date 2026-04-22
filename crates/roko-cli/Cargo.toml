@@ -64,6 +64,7 @@ dotenvy = "0.15"
 dirs = "6"
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
+libc = "0.2"
 
 [dev-dependencies]
 agent-relay = { path = "../../apps/agent-relay" }
