@@ -215,7 +215,8 @@ async fn session_status_returns_workdir() {
 #[tokio::test]
 async fn run_status_returns_terminal_output_text() {
     let (_dir, app) = test_app();
-    let (status, body) = post_json(&app, "/api/run", serde_json::json!({ "prompt": "hello" })).await;
+    let (status, body) =
+        post_json(&app, "/api/run", serde_json::json!({ "prompt": "hello" })).await;
 
     assert_eq!(status, StatusCode::ACCEPTED);
     let run_id = body["id"].as_str().expect("run id");
@@ -678,6 +679,77 @@ async fn bridge_converts_multiple_event_types() {
 
     let _ = socket.close(None).await;
     server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Relay health
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn relay_health_returns_local_default() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/relay/health").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["connection"]["mode"], "local");
+    assert_eq!(body["freshness"]["stale"], false);
+}
+
+// ---------------------------------------------------------------------------
+// Truth map
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn truth_map_returns_all_entity_kinds() {
+    let (_dir, app) = test_app();
+    let (status, body) = get_json(&app, "/api/truth_map").await;
+
+    assert_eq!(status, StatusCode::OK);
+    let entries = body.as_array().expect("truth_map should be an array");
+    assert!(entries.len() >= 10, "expected at least 10 entity kinds");
+    // Verify each entry has the expected fields.
+    for entry in entries {
+        assert!(entry.get("kind").is_some(), "missing kind field");
+        assert!(entry.get("source").is_some(), "missing source field");
+        assert!(entry.get("read_path").is_some(), "missing read_path field");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server state persistence roundtrip
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn state_persistence_roundtrip() {
+    let (dir, state, app) = test_app_state();
+
+    // Create a job via the API.
+    let (status, created) = post_json(
+        &app,
+        "/api/jobs",
+        serde_json::json!({
+            "title": "Persistence test job",
+            "description": "Should survive a roundtrip."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = created["id"].as_str().expect("job id");
+
+    // Verify the job file exists on disk.
+    let job_path = dir
+        .path()
+        .join(".roko")
+        .join("jobs")
+        .join(format!("{job_id}.json"));
+    assert!(job_path.exists(), "job file should be persisted to disk");
+
+    // Read back via the API.
+    let (status, fetched) = get_json(&app, &format!("/api/jobs/{job_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["title"], "Persistence test job");
+
+    state.shutdown().await;
 }
 
 /// Verify unmapped `DashboardEvent` variants are silently dropped (no panic).

@@ -57,7 +57,7 @@ impl ChainToolHandler {
             None => {
                 return ToolResult::err(ToolError::SchemaInvalid(
                     "missing required field: address".into(),
-                ))
+                ));
             }
         };
 
@@ -80,7 +80,7 @@ impl ChainToolHandler {
             None => {
                 return ToolResult::err(ToolError::Other(
                     "no wallet configured for chain.transfer".into(),
-                ))
+                ));
             }
         };
 
@@ -89,7 +89,7 @@ impl ChainToolHandler {
             None => {
                 return ToolResult::err(ToolError::SchemaInvalid(
                     "missing required field: to".into(),
-                ))
+                ));
             }
         };
 
@@ -98,16 +98,14 @@ impl ChainToolHandler {
             None => {
                 return ToolResult::err(ToolError::SchemaInvalid(
                     "missing required field: amount".into(),
-                ))
+                ));
             }
         };
 
         let value: u128 = match amount_str.parse() {
             Ok(v) => v,
             Err(e) => {
-                return ToolResult::err(ToolError::SchemaInvalid(format!(
-                    "invalid amount: {e}"
-                )))
+                return ToolResult::err(ToolError::SchemaInvalid(format!("invalid amount: {e}")));
             }
         };
 
@@ -131,10 +129,7 @@ impl ChainToolHandler {
     async fn handle_simulate_tx(&self, args: &serde_json::Value) -> ToolResult {
         let to = args.get("to").and_then(|v| v.as_str()).map(String::from);
         let from = args.get("from").and_then(|v| v.as_str()).map(String::from);
-        let data = args
-            .get("data")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0x");
+        let data = args.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
         let value_str = args.get("value").and_then(|v| v.as_str()).unwrap_or("0");
         let block = args.get("block").and_then(|v| v.as_u64());
 
@@ -167,10 +162,7 @@ impl ChainToolHandler {
     async fn handle_gas_estimate(&self, args: &serde_json::Value) -> ToolResult {
         let to = args.get("to").and_then(|v| v.as_str()).map(String::from);
         let from = args.get("from").and_then(|v| v.as_str()).map(String::from);
-        let data = args
-            .get("data")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0x");
+        let data = args.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
         let value_str = args.get("value").and_then(|v| v.as_str()).unwrap_or("0");
 
         let value: u128 = value_str.parse().unwrap_or(0);
@@ -206,7 +198,7 @@ impl ChainToolHandler {
             None => {
                 return ToolResult::err(ToolError::Other(
                     "no wallet configured for chain.wallet_info".into(),
-                ))
+                ));
             }
         };
 

@@ -601,9 +601,11 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
     for (name, domain) in &agents {
         let rt = runtime_entries.iter().find(|e| e.name == *name);
         let (status, pid_str, bind_str) = match rt {
-            Some(entry) if is_process_alive(entry.pid) => {
-                ("running".to_string(), entry.pid.to_string(), entry.bind.clone())
-            }
+            Some(entry) if is_process_alive(entry.pid) => (
+                "running".to_string(),
+                entry.pid.to_string(),
+                entry.bind.clone(),
+            ),
             Some(entry) => {
                 // Stale entry — process is dead. We'll clean up later.
                 let _ = entry; // suppress unused warning
@@ -611,7 +613,10 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
             }
             None => ("created".to_string(), "-".to_string(), "-".to_string()),
         };
-        println!("{:<20} {:<10} {:<8} {:<22} {}", name, status, pid_str, bind_str, domain);
+        println!(
+            "{:<20} {:<10} {:<8} {:<22} {}",
+            name, status, pid_str, bind_str, domain
+        );
     }
 
     // Clean up stale entries.
@@ -635,7 +640,11 @@ fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()>
     let manifest_path = agent_dir.join("manifest.toml");
 
     if !manifest_path.exists() {
-        bail!("agent '{}' not found (no manifest at {})", name, manifest_path.display());
+        bail!(
+            "agent '{}' not found (no manifest at {})",
+            name,
+            manifest_path.display()
+        );
     }
     if agent_dir.join("DELETED").exists() {
         bail!("agent '{}' has been deleted", name);
@@ -778,7 +787,11 @@ fn run_agent_status(name: &str, workdir: Option<&Path>) -> Result<()> {
     let manifest_path = agent_dir.join("manifest.toml");
 
     if !manifest_path.exists() {
-        bail!("agent '{}' not found (no manifest at {})", name, manifest_path.display());
+        bail!(
+            "agent '{}' not found (no manifest at {})",
+            name,
+            manifest_path.display()
+        );
     }
     if agent_dir.join("DELETED").exists() {
         bail!("agent '{}' has been deleted", name);
@@ -797,25 +810,10 @@ fn run_agent_status(name: &str, workdir: Option<&Path>) -> Result<()> {
                     format!("{} ({} ago)", entry.started_at, format_duration(dur))
                 })
                 .unwrap_or_else(|| entry.started_at.clone());
-            (
-                "running",
-                entry.pid.to_string(),
-                entry.bind.clone(),
-                ago,
-            )
+            ("running", entry.pid.to_string(), entry.bind.clone(), ago)
         }
-        Some(_) => (
-            "stopped",
-            "-".to_string(),
-            "-".to_string(),
-            "-".to_string(),
-        ),
-        None => (
-            "created",
-            "-".to_string(),
-            "-".to_string(),
-            "-".to_string(),
-        ),
+        Some(_) => ("stopped", "-".to_string(), "-".to_string(), "-".to_string()),
+        None => ("created", "-".to_string(), "-".to_string(), "-".to_string()),
     };
 
     println!("Agent:    {}", name);

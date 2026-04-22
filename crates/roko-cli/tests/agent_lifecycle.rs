@@ -24,7 +24,14 @@ fn agent_create_and_list() {
     // Create agent.
     roko(
         dir.path(),
-        &["agent", "create", "--name", "test-agent", "--domain", "coding"],
+        &[
+            "agent",
+            "create",
+            "--name",
+            "test-agent",
+            "--domain",
+            "coding",
+        ],
     )
     .success();
 
@@ -52,12 +59,7 @@ fn agent_status_shows_created() {
     roko(
         dir.path(),
         &[
-            "agent",
-            "create",
-            "--name",
-            "my-agent",
-            "--domain",
-            "research",
+            "agent", "create", "--name", "my-agent", "--domain", "research",
         ],
     )
     .success();
@@ -128,7 +130,14 @@ fn agent_list_skips_deleted() {
     .success();
     roko(
         dir.path(),
-        &["agent", "create", "--name", "delete-me", "--domain", "general"],
+        &[
+            "agent",
+            "create",
+            "--name",
+            "delete-me",
+            "--domain",
+            "general",
+        ],
     )
     .success();
 

@@ -272,6 +272,25 @@ pub fn render_header_bar(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         ));
     }
 
+    // ── 6b. Network stats (agents online + ISFR) ──────────────────────
+    if state.agents_online > 0 {
+        spans.push(Span::styled(
+            format!(" {}agt", state.agents_online),
+            Style::default().fg(Theme::SAGE).bg(Theme::BG_SECONDARY),
+        ));
+    }
+    if let Some(isfr) = state.isfr {
+        let isfr_str = if isfr >= 1000.0 {
+            format!("{:.0}s", isfr / 1000.0)
+        } else {
+            format!("{:.0}ms", isfr)
+        };
+        spans.push(Span::styled(
+            format!(" isfr:{isfr_str}"),
+            Style::default().fg(Theme::FG_DIM).bg(Theme::BG_SECONDARY),
+        ));
+    }
+
     spans.push(sep());
 
     // ── 7. Active agent spinner with role label ───────────────────────

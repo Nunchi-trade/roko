@@ -114,9 +114,11 @@ pub(crate) async fn spawn_background_run(
                         &run_id,
                         agent_target.as_deref(),
                         result.success,
-                        result.output_text.as_ref().map(|output| json!({
-                            "output_text": output,
-                        })),
+                        result.output_text.as_ref().map(|output| {
+                            json!({
+                                "output_text": output,
+                            })
+                        }),
                     );
                 }
                 Err(e) => {

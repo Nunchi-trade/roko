@@ -237,10 +237,7 @@ pub async fn execute_job(state: &AppState, job_id: &str) -> anyhow::Result<Strin
 }
 
 /// Execute a research job: build a research prompt and run it.
-async fn execute_research_job(
-    state: &AppState,
-    job: &MarketplaceJob,
-) -> anyhow::Result<String> {
+async fn execute_research_job(state: &AppState, job: &MarketplaceJob) -> anyhow::Result<String> {
     let prompt = format!(
         "Research the following topic and produce a detailed report with citations:\n\n{}",
         job.description
@@ -261,17 +258,11 @@ async fn execute_research_job(
 }
 
 /// Execute a coding job: use plan_id if available, otherwise description.
-async fn execute_coding_job(
-    state: &AppState,
-    job: &MarketplaceJob,
-) -> anyhow::Result<String> {
+async fn execute_coding_job(state: &AppState, job: &MarketplaceJob) -> anyhow::Result<String> {
     let prompt = if job.plan_id.is_empty() {
         job.description.clone()
     } else {
-        format!(
-            "Execute plan '{}' in the current workspace",
-            job.plan_id
-        )
+        format!("Execute plan '{}' in the current workspace", job.plan_id)
     };
     let result = state.runtime.run_once(&state.workdir, &prompt).await?;
     Ok(result
@@ -379,10 +370,7 @@ async fn execute_chain_analysis_job(
     let results = pipeline.triage_batch(events);
 
     let anomalous_count = results.iter().filter(|r| r.is_anomalous).count();
-    let curious_count = results
-        .iter()
-        .filter(|r| r.curiosity_score >= 0.5)
-        .count();
+    let curious_count = results.iter().filter(|r| r.curiosity_score >= 0.5).count();
     let rule_matched = results.iter().filter(|r| r.rule_matched).count();
 
     let summary = format!(

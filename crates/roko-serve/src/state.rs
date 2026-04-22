@@ -401,17 +401,25 @@ impl AppState {
     }
 
     fn snapshot_path(&self) -> PathBuf {
-        self.workdir.join(".roko").join("state").join("server-state.json")
+        self.workdir
+            .join(".roko")
+            .join("state")
+            .join("server-state.json")
     }
 
     /// Persist discovered agents and template run records to disk (atomic write).
     pub async fn save_snapshot(&self) -> anyhow::Result<()> {
         let agents: HashMap<String, DiscoveredAgent> = self.discovered_agents.read().await.clone();
         let runs: HashMap<String, Vec<TemplateRunRecord>> = self.template_runs.read().await.clone();
-        let snapshot = ServerStateSnapshot { discovered_agents: agents, template_runs: runs };
+        let snapshot = ServerStateSnapshot {
+            discovered_agents: agents,
+            template_runs: runs,
+        };
         let json = serde_json::to_string_pretty(&snapshot)?;
         let target = self.snapshot_path();
-        let parent = target.parent().ok_or_else(|| anyhow::anyhow!("invalid snapshot path"))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid snapshot path"))?;
         tokio::fs::create_dir_all(parent).await?;
         let tmp = target.with_extension("json.tmp");
         tokio::fs::write(&tmp, json).await?;
@@ -423,11 +431,24 @@ impl AppState {
     /// Restore discovered agents and template run records from disk.
     pub async fn restore_snapshot(&self) -> anyhow::Result<()> {
         let path = self.snapshot_path();
-        if !path.exists() { tracing::debug!("no server state snapshot found; starting fresh"); return Ok(()); }
+        if !path.exists() {
+            tracing::debug!("no server state snapshot found; starting fresh");
+            return Ok(());
+        }
         let data = tokio::fs::read_to_string(&path).await?;
         let snapshot: ServerStateSnapshot = serde_json::from_str(&data)?;
-        { let mut agents = self.discovered_agents.write().await; for (id, agent) in snapshot.discovered_agents { agents.entry(id).or_insert(agent); } }
-        { let mut runs = self.template_runs.write().await; for (name, records) in snapshot.template_runs { runs.entry(name).or_insert(records); } }
+        {
+            let mut agents = self.discovered_agents.write().await;
+            for (id, agent) in snapshot.discovered_agents {
+                agents.entry(id).or_insert(agent);
+            }
+        }
+        {
+            let mut runs = self.template_runs.write().await;
+            for (name, records) in snapshot.template_runs {
+                runs.entry(name).or_insert(records);
+            }
+        }
         tracing::info!(path = %path.display(), "restored server state from snapshot");
         Ok(())
     }

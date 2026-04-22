@@ -396,6 +396,8 @@ pub struct DashboardData {
     pub atelier_prds: Vec<roko_core::PrdSummary>,
     /// Per-slug task lists for Atelier.
     pub atelier_tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
+    /// Knowledge entries from `.roko/neuro/knowledge.jsonl` for the Inspect tab.
+    pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
 }
 
 /// Derived executor snapshot fields used by TUI orchestration chrome.
@@ -506,6 +508,7 @@ impl DashboardData {
         );
 
         let (atelier_prds, atelier_tasks_by_slug) = scan_atelier_prds(&roko_dir);
+        let knowledge_entries = load_knowledge_browse_entries(&root);
 
         Self {
             root,
@@ -549,6 +552,7 @@ impl DashboardData {
             marketplace_jobs: scan_marketplace_jobs(&roko_dir),
             atelier_prds,
             atelier_tasks_by_slug,
+            knowledge_entries,
         }
     }
 
@@ -856,13 +860,10 @@ fn scan_atelier_prds(
 
     // Workspace root is one level up from .roko/
     let workspace_root = roko_dir.parent().unwrap_or(roko_dir);
-    let plan_dirs: Vec<PathBuf> = [
-        workspace_root.join("plans"),
-        roko_dir.join("plans"),
-    ]
-    .into_iter()
-    .filter(|d| d.is_dir())
-    .collect();
+    let plan_dirs: Vec<PathBuf> = [workspace_root.join("plans"), roko_dir.join("plans")]
+        .into_iter()
+        .filter(|d| d.is_dir())
+        .collect();
 
     for plan_dir in &plan_dirs {
         let Ok(plan_entries) = std::fs::read_dir(plan_dir) else {
@@ -1262,6 +1263,30 @@ impl AlertSummary {
             message: signal.kind.clone(),
         }
     }
+}
+
+/// Lightweight knowledge-entry summary for the Inspect tab's KnowledgeBrowse sub-view.
+///
+/// Projected from `roko_neuro::KnowledgeEntry` to avoid pulling HDC vectors
+/// and other heavy fields into the TUI state.
+#[derive(Debug, Clone)]
+pub struct KnowledgeBrowseEntry {
+    /// Entry identifier.
+    pub id: String,
+    /// Knowledge category label (e.g. "insight", "heuristic", "pattern").
+    pub kind: String,
+    /// Truncated content for preview.
+    pub content_preview: String,
+    /// Confidence score 0.0..=1.0.
+    pub confidence: f64,
+    /// Tier label (transient, working, consolidated, persistent).
+    pub tier: String,
+    /// Topic tags.
+    pub tags: Vec<String>,
+    /// When the entry was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the entry is frozen (cold storage).
+    pub frozen: bool,
 }
 
 /// Build the agent activity snapshot from active agents and efficiency events.
@@ -4891,6 +4916,41 @@ fn load_knowledge_store_snapshot(root: &Path) -> KnowledgeStoreSnapshot {
             + count_nonempty_lines(&confirmations_path),
         last_updated,
     }
+}
+
+/// Load knowledge entries from `.roko/neuro/knowledge.jsonl`, projecting each
+/// full `KnowledgeEntry` to the lightweight `KnowledgeBrowseEntry` for the TUI.
+fn load_knowledge_browse_entries(root: &Path) -> Vec<KnowledgeBrowseEntry> {
+    let knowledge_path = root.join(NEURO_DIR).join(KNOWLEDGE_FILE);
+    let text = match std::fs::read_to_string(&knowledge_path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<KnowledgeBrowseEntry> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<roko_neuro::KnowledgeEntry>(line).ok())
+        .map(|entry| {
+            let preview = if entry.content.len() > 120 {
+                format!("{}...", &entry.content[..117])
+            } else {
+                entry.content.clone()
+            };
+            KnowledgeBrowseEntry {
+                id: entry.id.clone(),
+                kind: format!("{:?}", entry.kind).to_lowercase(),
+                content_preview: preview,
+                confidence: entry.confidence,
+                tier: format!("{:?}", entry.tier).to_lowercase(),
+                tags: entry.tags.clone(),
+                created_at: entry.created_at,
+                frozen: entry.frozen,
+            }
+        })
+        .collect();
+    // Most recent first
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    entries
 }
 
 fn count_nonempty_lines(path: &Path) -> usize {

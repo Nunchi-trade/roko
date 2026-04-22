@@ -47,7 +47,7 @@ pub fn is_structurally_valid_jwt(token: &str) -> bool {
     }
     segments
         .iter()
-        .all(|s| !s.is_empty() && s.bytes().all(|b| is_base64url_byte(b)))
+        .all(|s| !s.is_empty() && s.bytes().all(is_base64url_byte))
 }
 
 fn is_base64url_byte(b: u8) -> bool {
@@ -580,7 +580,12 @@ mod tests {
         let response = auth_response(app, |req| req.header("X-Api-Key", "secret-key-123")).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            response.headers().get("X-Auth-Method").unwrap().to_str().unwrap(),
+            response
+                .headers()
+                .get("X-Auth-Method")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "api_key"
         );
     }
@@ -597,7 +602,12 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            response.headers().get("X-Auth-Method").unwrap().to_str().unwrap(),
+            response
+                .headers()
+                .get("X-Auth-Method")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "bearer"
         );
     }
@@ -616,7 +626,12 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            response.headers().get("X-Auth-Method").unwrap().to_str().unwrap(),
+            response
+                .headers()
+                .get("X-Auth-Method")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "jwt"
         );
     }

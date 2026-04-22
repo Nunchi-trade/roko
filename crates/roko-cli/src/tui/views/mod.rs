@@ -152,11 +152,7 @@ impl SubView {
                 SubView::EpisodeReplay,
                 SubView::KnowledgeBrowse,
             ],
-            Tab::Marketplace => &[
-                SubView::JobList,
-                SubView::JobDetail,
-                SubView::CreateJob,
-            ],
+            Tab::Marketplace => &[SubView::JobList, SubView::JobDetail, SubView::CreateJob],
             Tab::Atelier => &[SubView::PrdWorkshop, SubView::PlanExplorer],
         }
     }

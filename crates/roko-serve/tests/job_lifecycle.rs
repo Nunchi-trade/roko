@@ -96,8 +96,7 @@ async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_json::
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -121,8 +120,7 @@ async fn post_json(
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -146,8 +144,7 @@ async fn patch_json(
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -166,8 +163,7 @@ async fn delete_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_jso
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -277,7 +273,10 @@ async fn test_full_job_lifecycle_happy_path() {
     .await;
     assert_eq!(status, StatusCode::OK, "start should return 200");
     assert_eq!(started["status"], "in_progress");
-    assert_eq!(started["assigned_to"], "agent-alpha", "assigned_to preserved");
+    assert_eq!(
+        started["assigned_to"], "agent-alpha",
+        "assigned_to preserved"
+    );
 
     // -- Step 6: POST /api/jobs/{id}/submit -> status becomes submitted
     let (status, submitted) = post_json(
@@ -506,22 +505,14 @@ async fn test_job_cancellation_from_in_progress() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, started) = post_json(
-        &app,
-        "/api/jobs/cancel-ip/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, started) =
+        post_json(&app, "/api/jobs/cancel-ip/start", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(started["status"], "in_progress");
 
     // POST /api/jobs/{id}/cancel from in_progress.
-    let (status, cancelled) = post_json(
-        &app,
-        "/api/jobs/cancel-ip/cancel",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, cancelled) =
+        post_json(&app, "/api/jobs/cancel-ip/cancel", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "POST cancel should return 200");
     assert_eq!(cancelled["status"], "cancelled");
 
@@ -577,12 +568,7 @@ async fn test_job_stats_reflect_state() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = post_json(
-        &app,
-        "/api/jobs/stats-b/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (s, _) = post_json(&app, "/api/jobs/stats-b/start", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::OK);
 
     // Advance stats-c: open -> cancelled.
@@ -715,12 +701,7 @@ async fn test_evaluate_non_submitted_fails_422() {
     .await;
     assert_eq!(s, StatusCode::OK);
 
-    let (s, _) = post_json(
-        &app,
-        "/api/jobs/eval-err/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (s, _) = post_json(&app, "/api/jobs/eval-err/start", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::OK);
 
     // Attempt to evaluate while in_progress (not submitted) -> 422.
@@ -770,12 +751,7 @@ async fn test_cancel_terminal_job_fails_422() {
     .await;
     assert_eq!(s, StatusCode::OK);
 
-    let (s, _) = post_json(
-        &app,
-        "/api/jobs/cancel-term/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (s, _) = post_json(&app, "/api/jobs/cancel-term/start", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::OK);
 
     let (s, _) = post_json(
@@ -811,12 +787,8 @@ async fn test_cancel_terminal_job_fails_422() {
     );
 
     // Also try POST /cancel -> same 422.
-    let (status, err_body) = post_json(
-        &app,
-        "/api/jobs/cancel-term/cancel",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, err_body) =
+        post_json(&app, "/api/jobs/cancel-term/cancel", serde_json::json!({})).await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1214,12 +1186,7 @@ async fn test_job_events_fire_on_websocket() {
     assert_eq!(transition_event["assigned_to"], "ws-agent");
 
     // -- Start the job: should fire JobUpdated then JobTransitioned.
-    let (status, _) = post_json(
-        &app,
-        "/api/jobs/ws-events-job/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, _) = post_json(&app, "/api/jobs/ws-events-job/start", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
 
     let start_update: serde_json::Value =
@@ -1259,12 +1226,8 @@ async fn test_start_non_assigned_job_fails_422() {
     assert_eq!(s, StatusCode::CREATED);
 
     // Attempt to start while still open -> 422.
-    let (status, err_body) = post_json(
-        &app,
-        "/api/jobs/start-err/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, err_body) =
+        post_json(&app, "/api/jobs/start-err/start", serde_json::json!({})).await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1324,12 +1287,7 @@ async fn test_patch_empty_body_returns_400() {
     assert_eq!(s, StatusCode::CREATED);
 
     // PATCH with neither status nor assigned_to -> validation error.
-    let (status, err_body) = patch_json(
-        &app,
-        "/api/jobs/patch-empty",
-        serde_json::json!({}),
-    )
-    .await;
+    let (status, err_body) = patch_json(&app, "/api/jobs/patch-empty", serde_json::json!({})).await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -1404,12 +1362,7 @@ async fn test_cancel_from_submitted_state() {
     .await;
     assert_eq!(s, StatusCode::OK);
 
-    let (s, _) = post_json(
-        &app,
-        "/api/jobs/cancel-sub/start",
-        serde_json::json!({}),
-    )
-    .await;
+    let (s, _) = post_json(&app, "/api/jobs/cancel-sub/start", serde_json::json!({})).await;
     assert_eq!(s, StatusCode::OK);
 
     let (s, _) = post_json(

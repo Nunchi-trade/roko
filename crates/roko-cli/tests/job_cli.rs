@@ -16,7 +16,10 @@ fn write_job(workdir: &std::path::Path, job: &MarketplaceJob) {
 
 /// Read a job from `.roko/jobs/{id}.json`.
 fn read_job(workdir: &std::path::Path, id: &str) -> MarketplaceJob {
-    let path = workdir.join(".roko").join("jobs").join(format!("{id}.json"));
+    let path = workdir
+        .join(".roko")
+        .join("jobs")
+        .join(format!("{id}.json"));
     let data = std::fs::read_to_string(&path).unwrap();
     serde_json::from_str(&data).unwrap()
 }

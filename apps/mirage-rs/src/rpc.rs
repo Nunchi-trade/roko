@@ -1314,7 +1314,10 @@ fn build_rpc_module(
         let (filter,): (serde_json::Value,) = params.parse().map_err(invalid_params)?;
         let addresses: Vec<Address> = match filter.get("address") {
             Some(serde_json::Value::String(s)) => {
-                vec![s.parse::<Address>().map_err(|e| invalid_params_message(e.to_string()))?]
+                vec![
+                    s.parse::<Address>()
+                        .map_err(|e| invalid_params_message(e.to_string()))?,
+                ]
             }
             Some(serde_json::Value::Array(arr)) => arr
                 .iter()
@@ -1394,7 +1397,9 @@ fn build_rpc_module(
         // Extract filter state and advance cursor under the mutable borrow,
         // then drop the mutable ref so we can read blocks/receipts.
         enum PollKind {
-            Block { from: u64 },
+            Block {
+                from: u64,
+            },
             Pending,
             Log {
                 from: u64,
@@ -1408,9 +1413,7 @@ fn build_rpc_module(
                 *last_poll_block = tip;
                 PollKind::Block { from }
             }
-            EthFilter::PendingTransaction { .. } => {
-                PollKind::Pending
-            }
+            EthFilter::PendingTransaction { .. } => PollKind::Pending,
             EthFilter::Log {
                 topics,
                 addresses,
@@ -1434,8 +1437,7 @@ fn build_rpc_module(
                 Ok(serde_json::json!(hashes))
             }
             PollKind::Pending => {
-                let all_tx_hashes: Vec<B256> =
-                    state.fork.transactions.keys().copied().collect();
+                let all_tx_hashes: Vec<B256> = state.fork.transactions.keys().copied().collect();
                 // Re-acquire mutable ref to update the seen set.
                 if let Some(EthFilter::PendingTransaction { seen }) =
                     state.fork.filters.get_mut(&id)
@@ -1454,13 +1456,7 @@ fn build_rpc_module(
                 topics,
                 addresses,
             } => {
-                let out = collect_filter_logs(
-                    &state.fork,
-                    from,
-                    tip,
-                    &topics,
-                    &addresses,
-                );
+                let out = collect_filter_logs(&state.fork, from, tip, &topics, &addresses);
                 Ok(serde_json::json!(out))
             }
         }
@@ -1552,9 +1548,7 @@ fn register_chain_methods(
     module.register_async_method("chain_confirmInsight", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
         let payload: ConfirmInsightParams = params.parse().map_err(|e| {
-            invalid_params_message(format!(
-                "{e}. Expected: {{id: string, confirmer: string}}"
-            ))
+            invalid_params_message(format!("{e}. Expected: {{id: string, confirmer: string}}"))
         })?;
         let result = handle_confirm_insight(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)
@@ -1563,9 +1557,7 @@ fn register_chain_methods(
     module.register_async_method("chain_challengeInsight", |params, ctx, _| async move {
         let chain = require_chain(&ctx)?;
         let payload: ChallengeInsightParams = params.parse().map_err(|e| {
-            invalid_params_message(format!(
-                "{e}. Expected: {{id: string, challenger: string}}"
-            ))
+            invalid_params_message(format!("{e}. Expected: {{id: string, challenger: string}}"))
         })?;
         let result = handle_challenge_insight(&chain, payload)?;
         Ok::<_, ErrorObjectOwned>(result)

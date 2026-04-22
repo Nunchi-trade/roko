@@ -549,7 +549,11 @@ mod tests {
         assert!(!open.is_terminal());
         assert_eq!(
             open.valid_transitions(),
-            &[JobStatus::Assigned, JobStatus::InProgress, JobStatus::Cancelled]
+            &[
+                JobStatus::Assigned,
+                JobStatus::InProgress,
+                JobStatus::Cancelled
+            ]
         );
 
         let completed = JobStatus::Completed;

@@ -83,7 +83,10 @@ fn write_job_file(workdir: &std::path::Path, job: &serde_json::Value) {
 
 /// Read a job file back from disk.
 fn read_job_file(workdir: &std::path::Path, id: &str) -> serde_json::Value {
-    let path = workdir.join(".roko").join("jobs").join(format!("{id}.json"));
+    let path = workdir
+        .join(".roko")
+        .join("jobs")
+        .join(format!("{id}.json"));
     let data = std::fs::read_to_string(&path).unwrap();
     serde_json::from_str(&data).unwrap()
 }
@@ -102,8 +105,7 @@ async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_json::
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -127,8 +129,7 @@ async fn post_json(
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -152,8 +153,7 @@ async fn patch_json(
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -172,8 +172,7 @@ async fn delete_json(router: &axum::Router, uri: &str) -> (StatusCode, serde_jso
         .await
         .expect("collect body")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -555,7 +554,12 @@ async fn invalid_status_transition_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(err_body["message"].as_str().unwrap_or("").contains("invalid"));
+    assert!(
+        err_body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("invalid")
+    );
 
     // Try to go directly from open to completed (invalid).
     let (status, _) = patch_json(
@@ -597,7 +601,12 @@ async fn duplicate_job_id_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(err_body["message"].as_str().unwrap_or("").contains("already exists"));
+    assert!(
+        err_body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already exists")
+    );
 }
 
 // ---------------------------------------------------------------------------

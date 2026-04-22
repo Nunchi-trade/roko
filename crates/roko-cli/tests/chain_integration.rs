@@ -23,8 +23,7 @@ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolHandler, ToolResult}
 const MIRAGE_RPC: &str = "https://mirage-devnet.up.railway.app";
 const CHAIN_ID: u64 = 1;
 /// Anvil account #0 private key — safe for devnet only.
-const DEPLOYER_KEY: &str =
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const DEPLOYER_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 /// Anvil account #0 address.
 const DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 /// Anvil account #1 address (recipient for transfers).
@@ -106,10 +105,7 @@ async fn chain_transfer_sends_wei_on_mirage() {
         tool_name: "chain.transfer".to_string(),
     };
 
-    let call = make_call(
-        "chain.transfer",
-        json!({ "to": RECIPIENT, "amount": "1" }),
-    );
+    let call = make_call("chain.transfer", json!({ "to": RECIPIENT, "amount": "1" }));
     let (_tmp, ctx) = test_ctx();
     let result = handler.execute(call, &ctx).await;
 
@@ -139,10 +135,7 @@ async fn chain_transfer_without_wallet_returns_error() {
         tool_name: "chain.transfer".to_string(),
     };
 
-    let call = make_call(
-        "chain.transfer",
-        json!({ "to": RECIPIENT, "amount": "1" }),
-    );
+    let call = make_call("chain.transfer", json!({ "to": RECIPIENT, "amount": "1" }));
     let (_tmp, ctx) = test_ctx();
     let result = handler.execute(call, &ctx).await;
 
@@ -201,7 +194,9 @@ async fn chain_handler_map_creates_all_14_tools() {
     assert_eq!(map.len(), 14, "should create exactly 14 handlers");
 
     for name in CHAIN_TOOL_NAMES {
-        let handler = map.get(name).unwrap_or_else(|| panic!("missing tool: {name}"));
+        let handler = map
+            .get(name)
+            .unwrap_or_else(|| panic!("missing tool: {name}"));
         assert_eq!(handler.name(), name, "handler name mismatch");
     }
 }
@@ -215,15 +210,27 @@ async fn chain_aware_resolver_resolves_both_domains() {
     let resolver = chain_aware_resolver(map);
 
     // Chain tool resolves.
-    assert!(resolver("chain.balance").is_some(), "chain.balance should resolve");
-    assert!(resolver("chain.transfer").is_some(), "chain.transfer should resolve");
+    assert!(
+        resolver("chain.balance").is_some(),
+        "chain.balance should resolve"
+    );
+    assert!(
+        resolver("chain.transfer").is_some(),
+        "chain.transfer should resolve"
+    );
 
     // Std builtin falls through.
-    assert!(resolver("read_file").is_some(), "read_file should resolve via std");
+    assert!(
+        resolver("read_file").is_some(),
+        "read_file should resolve via std"
+    );
     assert!(resolver("bash").is_some(), "bash should resolve via std");
 
     // Unknown returns None.
-    assert!(resolver("nonexistent_tool").is_none(), "unknown tool should be None");
+    assert!(
+        resolver("nonexistent_tool").is_none(),
+        "unknown tool should be None"
+    );
 }
 
 // ── Test 7: ChainConfig round-trips through TOML ────────────────────────
@@ -242,16 +249,31 @@ fn chain_config_round_trips_through_toml() {
     };
 
     let toml_str = toml::to_string_pretty(&config).expect("serialize to TOML");
-    assert!(toml_str.contains("[chain]"), "TOML should contain [chain] section");
-    assert!(toml_str.contains("mirage-devnet"), "TOML should contain RPC URL");
+    assert!(
+        toml_str.contains("[chain]"),
+        "TOML should contain [chain] section"
+    );
+    assert!(
+        toml_str.contains("mirage-devnet"),
+        "TOML should contain RPC URL"
+    );
 
     let decoded: RokoConfig = toml::from_str(&toml_str).expect("deserialize from TOML");
     assert_eq!(decoded.chain.rpc_url, config.chain.rpc_url);
     assert_eq!(decoded.chain.chain_id, config.chain.chain_id);
     assert_eq!(decoded.chain.wallet_key, config.chain.wallet_key);
-    assert_eq!(decoded.chain.identity_registry, config.chain.identity_registry);
-    assert_eq!(decoded.chain.reputation_registry, config.chain.reputation_registry);
-    assert_eq!(decoded.chain.validation_registry, config.chain.validation_registry);
+    assert_eq!(
+        decoded.chain.identity_registry,
+        config.chain.identity_registry
+    );
+    assert_eq!(
+        decoded.chain.reputation_registry,
+        config.chain.reputation_registry
+    );
+    assert_eq!(
+        decoded.chain.validation_registry,
+        config.chain.validation_registry
+    );
     assert_eq!(decoded.chain.deployer, config.chain.deployer);
 }
 
@@ -270,7 +292,10 @@ async fn full_round_trip_balance_transfer_balance() {
         tool_name: "chain.balance".to_string(),
     };
     let result = bal_handler
-        .execute(make_call("chain.balance", json!({ "address": RECIPIENT })), &ctx)
+        .execute(
+            make_call("chain.balance", json!({ "address": RECIPIENT })),
+            &ctx,
+        )
         .await;
     let before: u128 = parse_ok_json(&result)["balance_wei"]
         .as_str()
@@ -286,7 +311,10 @@ async fn full_round_trip_balance_transfer_balance() {
     };
     let result = tx_handler
         .execute(
-            make_call("chain.transfer", json!({ "to": RECIPIENT, "amount": "1000" })),
+            make_call(
+                "chain.transfer",
+                json!({ "to": RECIPIENT, "amount": "1000" }),
+            ),
             &ctx,
         )
         .await;
@@ -298,7 +326,10 @@ async fn full_round_trip_balance_transfer_balance() {
 
     // Step 3: Read recipient balance after.
     let result = bal_handler
-        .execute(make_call("chain.balance", json!({ "address": RECIPIENT })), &ctx)
+        .execute(
+            make_call("chain.balance", json!({ "address": RECIPIENT })),
+            &ctx,
+        )
         .await;
     let after: u128 = parse_ok_json(&result)["balance_wei"]
         .as_str()

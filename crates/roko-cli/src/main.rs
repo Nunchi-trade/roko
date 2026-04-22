@@ -278,6 +278,12 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Create `.roko/` and a default `roko.toml` in `path` (default: cwd).
+    #[command(after_help = "\
+Examples:
+  roko init                         Initialize in the current directory
+  roko init /path/to/project        Initialize in a specific directory
+  roko init --cloud                 Initialize with cloud-ready defaults
+  roko init --profile rust          Initialize with Rust project profile")]
     Init {
         /// Directory to initialize (default: current dir).
         path: Option<PathBuf>,
@@ -289,7 +295,14 @@ enum Command {
         profile: Option<String>,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
-    #[command(visible_alias = "do")]
+    #[command(
+        visible_alias = "do",
+        after_help = "\
+Examples:
+  roko run \"Fix the login bug\"      Single prompt through the universal loop
+  roko run \"Add tests for auth\"     Generate and execute a plan
+  roko run \"Refactor db layer\" --role architect   Run with a specific role"
+    )]
     Run {
         /// The user prompt text.
         prompt: String,
@@ -298,6 +311,11 @@ enum Command {
         workdir: Option<PathBuf>,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
+    #[command(after_help = "\
+Examples:
+  roko status                       Show workspace health summary
+  roko status --json                Output status as JSON for scripting
+  roko status --cfactor             Compute and show C-Factor metrics")]
     Status {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
@@ -781,6 +799,13 @@ enum PlanCmd {
         json: bool,
     },
     /// Run a plan directory through the orchestration loop.
+    #[command(after_help = "\
+Examples:
+  roko plan run plans/              Run all plans in the plans/ directory
+  roko plan run plans/my-plan       Run a specific plan
+  roko plan run plans/ --approval   Run with interactive TUI approval
+  roko plan run plans/ --dry-run    Preview without executing
+  roko plan run plans/ --resume-plan .roko/state/executor.json   Resume from snapshot")]
     Run {
         /// Path to the plans directory.
         plans_dir: PathBuf,
@@ -1426,7 +1451,9 @@ fn error_hint(msg: &str) -> Option<&'static str> {
         || lower.contains("plans directory does not exist")
         || lower.contains("no plans found")
     {
-        return Some("run `roko plan list` to see available plans, or `roko plan create` to make one");
+        return Some(
+            "run `roko plan list` to see available plans, or `roko plan create` to make one",
+        );
     }
 
     if lower.contains("connection refused")
@@ -4650,12 +4677,15 @@ async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
 
     if plans.is_empty() {
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "dry_run": true,
-                "plans": [],
-                "total_plans": 0,
-                "total_tasks": 0,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "dry_run": true,
+                    "plans": [],
+                    "total_plans": 0,
+                    "total_tasks": 0,
+                }))?
+            );
         } else {
             println!("No plans found in {}", plans_dir.display());
         }
@@ -4669,22 +4699,29 @@ async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
 
     for plan in &plans {
         // Try loading the tasks.toml adjacent to the plan file.
-        let tasks_path = plan.path.parent().map(|p| p.join("tasks.toml"))
+        let tasks_path = plan
+            .path
+            .parent()
+            .map(|p| p.join("tasks.toml"))
             .filter(|p| p.exists());
 
         let (task_count, task_details) = if let Some(ref tp) = tasks_path {
             match roko_cli::task_parser::TasksFile::parse(tp) {
                 Ok(tf) => {
-                    let details: Vec<serde_json::Value> = tf.tasks.iter().map(|t| {
-                        json!({
-                            "id": t.id,
-                            "title": t.title,
-                            "status": t.status,
-                            "tier": t.tier,
-                            "depends_on": t.depends_on,
-                            "files": t.files.len(),
+                    let details: Vec<serde_json::Value> = tf
+                        .tasks
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "status": t.status,
+                                "tier": t.tier,
+                                "depends_on": t.depends_on,
+                                "files": t.files.len(),
+                            })
                         })
-                    }).collect();
+                        .collect();
                     (tf.tasks.len(), details)
                 }
                 Err(_) => (0, vec![]),
@@ -4695,16 +4732,20 @@ async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
             if dir_tasks.exists() {
                 match roko_cli::task_parser::TasksFile::parse(&dir_tasks) {
                     Ok(tf) => {
-                        let details: Vec<serde_json::Value> = tf.tasks.iter().map(|t| {
-                            json!({
-                                "id": t.id,
-                                "title": t.title,
-                                "status": t.status,
-                                "tier": t.tier,
-                                "depends_on": t.depends_on,
-                                "files": t.files.len(),
+                        let details: Vec<serde_json::Value> = tf
+                            .tasks
+                            .iter()
+                            .map(|t| {
+                                json!({
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "status": t.status,
+                                    "tier": t.tier,
+                                    "depends_on": t.depends_on,
+                                    "files": t.files.len(),
+                                })
                             })
-                        }).collect();
+                            .collect();
                         (tf.tasks.len(), details)
                     }
                     Err(_) => (0, vec![]),
@@ -4744,15 +4785,23 @@ async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        println!("Dry run: {} plan(s), {} task(s) in {}\n",
-            plans.len(), total_tasks, plans_dir.display());
+        println!(
+            "Dry run: {} plan(s), {} task(s) in {}\n",
+            plans.len(),
+            total_tasks,
+            plans_dir.display()
+        );
 
         for (i, plan) in plans.iter().enumerate() {
-            let est = plan.frontmatter.as_ref()
+            let est = plan
+                .frontmatter
+                .as_ref()
                 .and_then(|f| f.estimated_minutes)
                 .map(|m| format!(" (~{m} min)"))
                 .unwrap_or_default();
-            let priority = plan.frontmatter.as_ref()
+            let priority = plan
+                .frontmatter
+                .as_ref()
                 .and_then(|f| f.priority)
                 .map(|p| format!(" [priority={p}]"))
                 .unwrap_or_default();
@@ -4763,16 +4812,21 @@ async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
                 for t in tasks {
                     let tid = t.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                    let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                    let status = t
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending");
                     let tier = t.get("tier").and_then(|v| v.as_str()).unwrap_or("?");
-                    let deps = t.get("depends_on")
+                    let deps = t
+                        .get("depends_on")
                         .and_then(|v| v.as_array())
                         .map(|arr| {
-                            let ids: Vec<&str> = arr.iter()
-                                .filter_map(|v| v.as_str())
-                                .collect();
-                            if ids.is_empty() { String::new() }
-                            else { format!(" (after {})", ids.join(", ")) }
+                            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                            if ids.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (after {})", ids.join(", "))
+                            }
                         })
                         .unwrap_or_default();
                     println!("     {tid}: {title} [{tier}, {status}]{deps}");
@@ -5701,7 +5755,10 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let dir = jobs_dir(&wd);
             if !dir.is_dir() {
-                println!("No jobs found (directory does not exist: {})", dir.display());
+                println!(
+                    "No jobs found (directory does not exist: {})",
+                    dir.display()
+                );
                 return Ok(EXIT_SUCCESS);
             }
             let mut entries: Vec<_> = std::fs::read_dir(&dir)?
@@ -5728,9 +5785,7 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                     "unknown"
                 };
                 if let Some(ref filter) = status {
-                    if !effective_status
-                        .eq_ignore_ascii_case(filter)
-                    {
+                    if !effective_status.eq_ignore_ascii_case(filter) {
                         continue;
                     }
                 }
@@ -5950,13 +6005,8 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             } else {
                 "unknown"
             };
-            if matches!(
-                effective_status,
-                "completed" | "failed" | "cancelled"
-            ) {
-                bail!(
-                    "cannot cancel job '{id}': status '{effective_status}' is terminal"
-                );
+            if matches!(effective_status, "completed" | "failed" | "cancelled") {
+                bail!("cannot cancel job '{id}': status '{effective_status}' is terminal");
             }
             job.status = "cancelled".to_string();
             job.updated_at = chrono::Utc::now().to_rfc3339();
@@ -7548,18 +7598,87 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             *counts.entry(sig.kind.to_string()).or_default() += 1;
         }
         let episode_count = counts.get("episode").copied().unwrap_or(0);
+
+        // Gate verdicts from substrate.
+        let verdicts_json = substrate
+            .query(&Query::of_kind(Kind::GateVerdict), &ctx)
+            .await
+            .map_err(|e| anyhow!("query verdicts: {e}"))?;
+        let gate_pass = verdicts_json
+            .iter()
+            .filter(|v| v.tag("passed") == Some("true"))
+            .count();
+        let gate_fail = verdicts_json
+            .iter()
+            .filter(|v| v.tag("passed") == Some("false"))
+            .count();
+
+        // Running agents from runtime directory.
+        let runtime_dir_json = workdir.join(".roko").join("runtime");
+        let mut running_agents_json: usize = 0;
+        if let Ok(mut entries) = tokio::fs::read_dir(&runtime_dir_json).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".pid") {
+                    running_agents_json += 1;
+                }
+            }
+        }
+
+        // Active plans from executor snapshot.
+        let executor_path_json = workdir.join(".roko").join("state").join("executor.json");
+        let active_plans_json: usize = if executor_path_json.is_file() {
+            tokio::fs::read_to_string(&executor_path_json)
+                .await
+                .ok()
+                .and_then(|contents| {
+                    serde_json::from_str::<serde_json::Value>(&contents)
+                        .ok()?
+                        .get("plans")?
+                        .as_array()
+                        .map(|arr| arr.len())
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Most recent episode.
+        let mut episodes_json = substrate
+            .query(&Query::of_kind(Kind::Episode), &ctx)
+            .await
+            .map_err(|e| anyhow!("query episodes: {e}"))?;
+        episodes_json.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
+        let last_passed = episodes_json
+            .first()
+            .and_then(|ep| ep.tag("passed").map(|v| v == "true"));
+
         let status = SessionStatus {
             session_id: cli.resume.clone(),
             workdir: workdir.clone(),
             daemon_running: false,
             signal_count: Some(all.len()),
             episode_count: Some(episode_count),
-            last_episode_passed: None,
+            last_episode_passed: last_passed,
             cfactor: cfactor_snapshot,
             total_cost_usd,
             today_cost_usd,
         };
-        println!("{}", status.display_json());
+
+        // Build enriched JSON with gate verdicts, workspace info, and signal counts.
+        let counts_json = serde_json::to_string(&counts).unwrap_or_else(|_| "{}".to_string());
+        let cost_by_model_json =
+            serde_json::to_string(&cost_by_model).unwrap_or_else(|_| "{}".to_string());
+        let cost_by_plan_json =
+            serde_json::to_string(&cost_by_plan).unwrap_or_else(|_| "{}".to_string());
+        let base = status.display_json();
+        // Splice additional fields before the closing brace.
+        let enriched = format!(
+            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"health\":\"ready\"}}",
+            &base[..base.len() - 1],
+        );
+        println!("{enriched}");
         return Ok(());
     }
 
@@ -8423,17 +8542,37 @@ fn dynamic_completion_words() -> Vec<(String, Vec<String>)> {
     result
 }
 
+/// Global flag names for flag completion (UX-1c).
+fn completion_flag_words() -> Vec<String> {
+    let mut command = Cli::command();
+    command.build();
+    let mut flags: Vec<String> = command
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(|l| format!("--{l}")))
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
 fn print_bash_completions(
     words: &[String],
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
     let top_words = words.join(" ");
-    println!(r#"# roko bash completions (DEPLOY-06: dynamic + nested)"#);
+    let flag_words = completion_flag_words().join(" ");
+    println!(r#"# roko bash completions (DEPLOY-06: dynamic + nested + flags)"#);
     println!(r#"_roko()"#);
     println!(r#"{{"#);
     println!(r#"    local cur="${{COMP_WORDS[COMP_CWORD]}}""#);
     println!(r#"    local prev="${{COMP_WORDS[COMP_CWORD-1]}}""#);
+    println!();
+    // Flag completions when current word starts with -.
+    println!(r#"    if [[ "$cur" == -* ]]; then"#);
+    println!(r#"        COMPREPLY=( $(compgen -W "{flag_words}" -- "$cur") )"#);
+    println!(r#"        return 0"#);
+    println!(r#"    fi"#);
     println!();
     // Nested subcommand completions.
     println!(r#"    case "$prev" in"#);
@@ -8466,12 +8605,21 @@ fn print_zsh_completions(
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
+    let flags = completion_flag_words();
     println!(r#"#compdef roko"#);
-    println!(r#"# roko zsh completions (DEPLOY-06: dynamic + nested)"#);
+    println!(r#"# roko zsh completions (DEPLOY-06: dynamic + nested + flags)"#);
     println!(r#"_roko() {{"#);
-    println!(r#"  local -a commands"#);
+    println!(r#"  local -a commands flags"#);
     let top_words = words.join(" ");
+    let flag_words = flags.join(" ");
     println!(r#"  commands=({top_words})"#);
+    println!(r#"  flags=({flag_words})"#);
+    println!();
+    // Flag completion at any position when current word starts with -.
+    println!(r#"  if [[ "$words[CURRENT]" == -* ]]; then"#);
+    println!(r#"    _describe 'roko flag' flags"#);
+    println!(r#"    return"#);
+    println!(r#"  fi"#);
     println!();
     println!(r#"  if (( CURRENT == 2 )); then"#);
     println!(r#"    _describe 'roko command' commands"#);
@@ -8504,9 +8652,15 @@ fn print_fish_completions(
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
-    println!("# roko fish completions (DEPLOY-06: dynamic + nested)");
+    let flags = completion_flag_words();
+    println!("# roko fish completions (DEPLOY-06: dynamic + nested + flags)");
     for word in words {
         println!("complete -c roko -f -n '__fish_use_subcommand' -a '{word}'");
+    }
+    // Global flag completions.
+    for flag in &flags {
+        let short = flag.trim_start_matches('-');
+        println!("complete -c roko -l '{short}'");
     }
     // Nested subcommand completions.
     for (parent, children) in subcommands {
@@ -8926,9 +9080,7 @@ fn resolve_workdir(cli: &Cli) -> PathBuf {
                     "\x1b[33m\u{26a0} Warning: running from inside a .roko/ directory ({}).\x1b[0m",
                     abs.display()
                 );
-                eprintln!(
-                    "  This will create a nested .roko/.roko/ which causes data loss."
-                );
+                eprintln!("  This will create a nested .roko/.roko/ which causes data loss.");
                 eprintln!(
                     "  Run from the project root instead: cd {}",
                     ancestor

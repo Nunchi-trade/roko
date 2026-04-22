@@ -6,12 +6,14 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 // ---------------------------------------------------------------------------
 // TruthSource — where the authoritative data lives
 // ---------------------------------------------------------------------------
 
 /// Where the authoritative copy of an entity lives at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum TruthSource {
     /// Materialized snapshot inside [`SharedStateHub`](roko_core::SharedStateHub).
     /// Updated via `DashboardEvent` and served by the watch channel.
@@ -45,7 +47,7 @@ impl fmt::Display for TruthSource {
 
 /// Exhaustive list of entity kinds surfaced to operators through any of the
 /// four consumer surfaces (CLI, TUI, HTTP API, WebSocket).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum EntityKind {
     /// Marketplace job (`.roko/jobs/*.json` -> StateHub snapshot).
     Job,
@@ -115,7 +117,7 @@ impl fmt::Display for EntityKind {
 /// The `truth_map()` function returns one entry per [`EntityKind`]. Route
 /// handlers and TUI views should consult this registry to decide where to
 /// read from, avoiding dual-source divergence.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EntityOwnership {
     /// Which entity this record describes.
     pub kind: EntityKind,
@@ -326,10 +328,7 @@ mod tests {
         assert_eq!(entity_source(EntityKind::Episode), TruthSource::Filesystem);
         assert_eq!(entity_source(EntityKind::Signal), TruthSource::Filesystem);
         assert_eq!(entity_source(EntityKind::GateResult), TruthSource::StateHub);
-        assert_eq!(
-            entity_source(EntityKind::Deployment),
-            TruthSource::InMemory
-        );
+        assert_eq!(entity_source(EntityKind::Deployment), TruthSource::InMemory);
         assert_eq!(
             entity_source(EntityKind::ProviderHealth),
             TruthSource::InMemory

@@ -76,14 +76,19 @@ impl std::fmt::Display for PlanSummary {
             if self.tasks_failed > 0 {
                 parts.push(format!("{} failed", self.tasks_failed));
             }
-            let in_progress =
-                self.task_count
-                    .saturating_sub(self.tasks_done)
-                    .saturating_sub(self.tasks_failed);
+            let in_progress = self
+                .task_count
+                .saturating_sub(self.tasks_done)
+                .saturating_sub(self.tasks_failed);
             if in_progress > 0 {
                 parts.push(format!("{in_progress} remaining"));
             }
-            format!("{}/{} ({})", self.tasks_done, self.task_count, parts.join(", "))
+            format!(
+                "{}/{} ({})",
+                self.tasks_done,
+                self.task_count,
+                parts.join(", ")
+            )
         } else if self.task_count > 0 {
             format!("pending 0/{}", self.task_count)
         } else {
@@ -257,10 +262,7 @@ pub fn summarize_plan_info(plan_info: &PlanInfo) -> PlanSummary {
                         .tasks
                         .iter()
                         .filter(|t| {
-                            matches!(
-                                t.status.as_str(),
-                                "failed" | "error" | "gate_rejected"
-                            )
+                            matches!(t.status.as_str(), "failed" | "error" | "gate_rejected")
                         })
                         .count();
                     (total, done, failed, old_format)

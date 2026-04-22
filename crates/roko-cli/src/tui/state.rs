@@ -17,8 +17,8 @@ use roko_core::OperatingFrequency;
 use super::atmosphere::Atmosphere;
 use super::dashboard::{
     AgentSummary, AlertSummary, CascadeRouterState, DashboardData, EfficiencySummary,
-    ExperimentSummary, GateResultSummary, GateResultsPageData, PlanExecutionSnapshot,
-    PlanTaskListSnapshot, SignalSummary, TaskSummary, Theme,
+    ExperimentSummary, GateResultSummary, GateResultsPageData, KnowledgeBrowseEntry,
+    PlanExecutionSnapshot, PlanTaskListSnapshot, SignalSummary, TaskSummary, Theme,
 };
 use super::input::{ConfirmAction, FocusZone, InputMode, LogFilterLevel};
 use super::modals::ModalState;
@@ -1015,6 +1015,16 @@ pub struct TuiState {
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
 
+    // -- network stats (header bar) --
+    /// Number of agents currently online/discovered.
+    pub agents_online: usize,
+    /// Inter-Signal Frequency Ratio (ISFR) — median inter-signal interval.
+    pub isfr: Option<f64>,
+
+    // -- knowledge browse --
+    /// Knowledge entries for the Inspect tab's KnowledgeBrowse sub-view.
+    pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
+
     // -- marketplace / atelier --
     /// Jobs loaded from .roko/jobs/ for the Marketplace tab.
     pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
@@ -1174,6 +1184,11 @@ impl Default for TuiState {
             active_task_summaries: Vec::new(),
             gate_result_summaries: Vec::new(),
             episodes_cache: Vec::new(),
+
+            agents_online: 0,
+            isfr: None,
+
+            knowledge_entries: Vec::new(),
 
             marketplace_jobs: Vec::new(),
             marketplace_selected_job: 0,
@@ -1617,6 +1632,29 @@ impl TuiState {
         self.gate_result_summaries = data.gate_results.clone();
         self.episodes_cache = data.episodes().to_vec();
 
+        // -- knowledge browse --
+        self.knowledge_entries = data.knowledge_entries.clone();
+
+        // -- network stats --
+        self.agents_online = data.agents.len();
+        // Compute ISFR from efficiency event timestamps.
+        if data.efficiency_events.len() >= 2 {
+            let mut intervals: Vec<f64> = data
+                .efficiency_events
+                .windows(2)
+                .filter_map(|pair| {
+                    let t0 = chrono::DateTime::parse_from_rfc3339(&pair[0].timestamp).ok()?;
+                    let t1 = chrono::DateTime::parse_from_rfc3339(&pair[1].timestamp).ok()?;
+                    let dt = t1.signed_duration_since(t0).num_milliseconds() as f64;
+                    if dt > 0.0 { Some(dt) } else { None }
+                })
+                .collect();
+            if !intervals.is_empty() {
+                intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                self.isfr = Some(intervals[intervals.len() / 2]);
+            }
+        }
+
         // -- marketplace / atelier --
         self.marketplace_jobs = data.marketplace_jobs.clone();
         self.atelier_prds = data.atelier_prds.clone();
@@ -1955,6 +1993,9 @@ impl TuiState {
         if snap.stats.cost_usd_total > 0.0 {
             self.cost_dollars = snap.stats.cost_usd_total;
         }
+
+        // -- network stats --
+        self.agents_online = snap.agents.len();
 
         self.phase_pipeline = build_phase_pipeline_from_dashboard_snapshot(snap);
         self.execution_waves = rebuild_execution_waves(&self.plans, &self.execution_waves);

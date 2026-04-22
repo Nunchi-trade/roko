@@ -147,10 +147,12 @@ async fn audit_publish_triggers_plan_generation() {
     let (_dir, state, call_count, notify) = test_state();
     let published_path = write_published_prd(&state.workdir, "demo").await;
     let _subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
+    // Allow the subscriber task to start and register its watcher.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     append_publish_episode(&state.workdir, "demo", &published_path, PublishOrigin::Cli).await;
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
         .await
         .expect("publish audit should trigger plan generation");
 
@@ -160,12 +162,12 @@ async fn audit_publish_triggers_plan_generation() {
         .join("plans")
         .join("demo")
         .join("tasks.toml");
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if tasks_path.is_file() {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
@@ -192,7 +194,7 @@ async fn repeated_publish_events_are_deduped() {
     global_event_bus().emit(event.clone());
     global_event_bus().emit(event);
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), notify.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
         .await
         .expect("first publish should trigger plan generation");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

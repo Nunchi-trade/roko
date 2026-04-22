@@ -352,8 +352,8 @@ fn render_plan_detail(
     let sections = Layout::vertical([
         Constraint::Length(5),              // PRD metadata
         Constraint::Length(actions_height), // CLI actions
-        Constraint::Min(0),                // Task list
-        Constraint::Length(1),             // Keybinding hints
+        Constraint::Min(0),                 // Task list
+        Constraint::Length(1),              // Keybinding hints
     ])
     .split(inner);
 
@@ -424,14 +424,20 @@ fn render_plan_detail(
                 theme.muted(),
             )),
             Line::from(Span::styled(
-                format!("  roko prd plan {:<12}# generate implementation plan", &prd.slug),
+                format!(
+                    "  roko prd plan {:<12}# generate implementation plan",
+                    &prd.slug
+                ),
                 theme.muted(),
             )),
         ],
         PrdStatus::Published => vec![
             Line::from(Span::styled("Actions:", theme.accent())),
             Line::from(Span::styled(
-                format!("  roko prd plan {:<12}# generate implementation plan", &prd.slug),
+                format!(
+                    "  roko prd plan {:<12}# generate implementation plan",
+                    &prd.slug
+                ),
                 theme.muted(),
             )),
             Line::from(Span::styled(

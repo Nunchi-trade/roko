@@ -172,7 +172,9 @@ pub fn daemon_socket_exists(workdir: &Path, session_id: &str) -> bool {
 #[must_use]
 pub fn collect_session_status(workdir: &Path) -> SessionStatus {
     let daemon_info = read_daemon_info(workdir);
-    let signal_count = Some(count_non_empty_lines(&workdir.join(".roko").join("engrams.jsonl")));
+    let signal_count = Some(count_non_empty_lines(
+        &workdir.join(".roko").join("engrams.jsonl"),
+    ));
     let (episode_count, last_episode_passed) = read_episode_summary(workdir);
 
     SessionStatus {

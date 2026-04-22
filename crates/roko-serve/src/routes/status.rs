@@ -1813,19 +1813,7 @@ async fn relay_health() -> Json<Value> {
 
 /// `GET /api/truth_map` — return the entity truth-source registry.
 async fn truth_map_handler() -> Json<Value> {
-    let entries: Vec<Value> = crate::truth_map::truth_map()
-        .into_iter()
-        .map(|entry| {
-            json!({
-                "kind": entry.kind.to_string(),
-                "source": entry.source.to_string(),
-                "read_path": entry.read_path,
-                "ws_event": entry.ws_event,
-                "projection": entry.projection,
-            })
-        })
-        .collect();
-    Json(Value::Array(entries))
+    Json(serde_json::to_value(crate::truth_map::truth_map()).unwrap_or_default())
 }
 
 #[cfg(test)]

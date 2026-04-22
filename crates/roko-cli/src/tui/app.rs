@@ -1824,8 +1824,8 @@ impl App {
             (Tab::Atelier, _) => {
                 if !self.tui_state.atelier_prds.is_empty() {
                     let max = self.tui_state.atelier_prds.len().saturating_sub(1);
-                    let next = (self.tui_state.atelier_selected_prd as i32 + delta)
-                        .clamp(0, max as i32);
+                    let next =
+                        (self.tui_state.atelier_selected_prd as i32 + delta).clamp(0, max as i32);
                     self.tui_state.atelier_selected_prd = next as usize;
                 }
             }

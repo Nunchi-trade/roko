@@ -235,15 +235,14 @@ fn render_job_detail(
         return;
     }
 
-    let is_in_progress =
-        matches!(effective_status(job), "in_progress" | "active" | "running");
+    let is_in_progress = matches!(effective_status(job), "in_progress" | "active" | "running");
     let has_progress = is_in_progress && tui_state.job_progress.contains_key(&job.id);
 
     let sections = Layout::vertical([
-        Constraint::Length(8),                                  // Metadata table
-        Constraint::Min(0),                                     // Description (word-wrapped)
-        Constraint::Length(if has_progress { 4 } else { 0 }),   // Progress bar
-        Constraint::Length(3),                                   // Keybinding hints + assign prompt
+        Constraint::Length(8),                                // Metadata table
+        Constraint::Min(0),                                   // Description (word-wrapped)
+        Constraint::Length(if has_progress { 4 } else { 0 }), // Progress bar
+        Constraint::Length(3),                                // Keybinding hints + assign prompt
     ])
     .split(inner);
 
@@ -572,10 +571,7 @@ fn render_create_job(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, th
         );
     } else {
         let help_lines = vec![
-            Line::from(Span::styled(
-                "Create a job from the CLI:",
-                theme.muted(),
-            )),
+            Line::from(Span::styled("Create a job from the CLI:", theme.muted())),
             Line::from(Span::styled(
                 "  roko serve                               # start the server",
                 theme.muted(),

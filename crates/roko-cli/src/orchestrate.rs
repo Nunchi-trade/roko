@@ -29,6 +29,8 @@ use roko_agent::task_runner::{
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
+use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
+use roko_chain::{ChainClient, ChainWallet};
 use roko_compose::enrichment::{
     ALL_ORDERED, EnrichStep, EnrichmentConfig, EnrichmentPipeline,
     LlmBackend as EnrichmentLlmBackend, LlmClient as EnrichmentLlmClient, PlanInfo, SkipReason,
@@ -138,8 +140,6 @@ use roko_orchestrator::{
     PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanState, PostMergeRunner,
     ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
 };
-use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
-use roko_chain::{ChainClient, ChainWallet};
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
     Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
@@ -159,11 +159,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
-use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::agent_config::{
     synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
+use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::config::Config;
 use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
@@ -4658,20 +4658,20 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
-        let chain_client: Option<Arc<dyn ChainClient>> =
-            match roko_config.chain.rpc_url.as_deref() {
-                Some(url) => match AlloyChainClient::http(url) {
-                    Ok(c) => {
-                        tracing::info!(rpc_url = url, "chain client initialized");
-                        Some(Arc::new(c))
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                        None
-                    }
-                },
-                None => None,
-            };
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -4848,20 +4848,20 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
-        let chain_client: Option<Arc<dyn ChainClient>> =
-            match roko_config.chain.rpc_url.as_deref() {
-                Some(url) => match AlloyChainClient::http(url) {
-                    Ok(c) => {
-                        tracing::info!(rpc_url = url, "chain client initialized");
-                        Some(Arc::new(c))
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                        None
-                    }
-                },
-                None => None,
-            };
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -5040,20 +5040,20 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
-        let chain_client: Option<Arc<dyn ChainClient>> =
-            match roko_config.chain.rpc_url.as_deref() {
-                Some(url) => match AlloyChainClient::http(url) {
-                    Ok(c) => {
-                        tracing::info!(rpc_url = url, "chain client initialized");
-                        Some(Arc::new(c))
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
-                        None
-                    }
-                },
-                None => None,
-            };
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
         let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
             roko_config.chain.rpc_url.as_deref(),
             roko_config.chain.wallet_key.as_deref(),
@@ -6751,6 +6751,7 @@ impl PlanRunner {
     /// Flush accumulated conductor signals to `.roko/engrams.jsonl` so the
     /// background `WatcherRunner` can detect anomalies in real time (not just
     /// from stale data on disk).
+    #[allow(dead_code)]
     async fn flush_conductor_signals_to_disk(&mut self) {
         if self.conductor_signals.is_empty() {
             return;
@@ -7625,7 +7626,11 @@ impl PlanRunner {
 
         // ── Final summary line ───────────────────────────────────────
         {
-            let status = if tasks_failed == 0 { "\u{2713}" } else { "\u{2717}" };
+            let status = if tasks_failed == 0 {
+                "\u{2713}"
+            } else {
+                "\u{2717}"
+            };
             eprintln!();
             eprintln!(
                 "\x1b[1m{status} Plan run complete: {tasks_completed} succeeded, {tasks_failed} failed, ${total_cost_usd:.2}, {duration_secs:.0}s\x1b[0m"
@@ -10742,11 +10747,7 @@ impl PlanRunner {
 
         // ── Structured progress line ─────────────────────────────────
         {
-            let completed: usize = self
-                .task_trackers
-                .values()
-                .map(|t| t.completed.len())
-                .sum();
+            let completed: usize = self.task_trackers.values().map(|t| t.completed.len()).sum();
             let total: usize = self
                 .task_trackers
                 .values()
@@ -10754,10 +10755,7 @@ impl PlanRunner {
                 .sum();
             let elapsed_secs = wall_ms as f64 / 1000.0;
             let cost = f64::from(result.usage.cost_usd);
-            let title = task_def
-                .as_ref()
-                .map(|td| td.title.as_str())
-                .unwrap_or("");
+            let title = task_def.as_ref().map(|td| td.title.as_str()).unwrap_or("");
             if title.is_empty() {
                 eprintln!(
                     "  [{completed}/{total}] \u{2713} {task_id} ({elapsed_secs:.1}s, ${cost:.2})"
@@ -12425,26 +12423,15 @@ impl PlanRunner {
 
         // ── Structured failure progress line ──────────────────────────
         {
-            let completed: usize = self
-                .task_trackers
-                .values()
-                .map(|t| t.completed.len())
-                .sum();
-            let failed: usize = self
-                .task_trackers
-                .values()
-                .map(|t| t.failed.len())
-                .sum();
+            let completed: usize = self.task_trackers.values().map(|t| t.completed.len()).sum();
+            let failed: usize = self.task_trackers.values().map(|t| t.failed.len()).sum();
             let total: usize = self
                 .task_trackers
                 .values()
                 .map(|t| t.tasks_file.tasks.len())
                 .sum();
             let done = completed + failed;
-            let title = task_def
-                .as_ref()
-                .map(|td| td.title.as_str())
-                .unwrap_or("");
+            let title = task_def.as_ref().map(|td| td.title.as_str()).unwrap_or("");
             let reason_brief: String = error
                 .to_string()
                 .lines()
@@ -12454,9 +12441,7 @@ impl PlanRunner {
                 .take(120)
                 .collect();
             if title.is_empty() {
-                eprintln!(
-                    "  [{done}/{total}] \u{2717} {task_id} \u{2014} {reason_brief}"
-                );
+                eprintln!("  [{done}/{total}] \u{2717} {task_id} \u{2014} {reason_brief}");
             } else {
                 eprintln!(
                     "  [{done}/{total}] \u{2717} {task_id} \"{title}\" \u{2014} {reason_brief}"
@@ -14570,18 +14555,17 @@ impl PlanRunner {
                 };
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
-            let resolver: Arc<dyn HandlerResolver> =
-                if self.chain_client.is_some() {
-                    let chain_map = chain_handler_map(
-                        Arc::clone(self.chain_client.as_ref().unwrap()),
-                        self.chain_wallet.clone(),
-                    );
-                    Arc::new(chain_aware_resolver(chain_map))
-                } else {
-                    Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
-                        roko_std::tool::handlers::handler_for(name)
-                    })
-                };
+            let resolver: Arc<dyn HandlerResolver> = if self.chain_client.is_some() {
+                let chain_map = chain_handler_map(
+                    Arc::clone(self.chain_client.as_ref().unwrap()),
+                    self.chain_wallet.clone(),
+                );
+                Arc::new(chain_aware_resolver(chain_map))
+            } else {
+                Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
+                    roko_std::tool::handlers::handler_for(name)
+                })
+            };
             let dispatcher = Arc::new(
                 ToolDispatcher::new(registry, resolver).with_safety(self.safety_layer.clone()),
             );

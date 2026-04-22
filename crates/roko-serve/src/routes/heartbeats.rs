@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use roko_core::{HeartbeatPayload, HEARTBEAT_RING_CAPACITY};
+use roko_core::{HEARTBEAT_RING_CAPACITY, HeartbeatPayload};
 
 use crate::events::ServerEvent;
 use crate::state::AppState;
@@ -57,9 +57,7 @@ async fn list_heartbeats(
     Json(items)
 }
 
-async fn network_stats(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<roko_core::NetworkStats>> {
+async fn network_stats(State(state): State<Arc<AppState>>) -> Json<Vec<roko_core::NetworkStats>> {
     let ring = state.heartbeats.read().await;
     let mut per_sender: std::collections::HashMap<String, (usize, String, f64)> =
         std::collections::HashMap::new();
@@ -75,8 +73,8 @@ async fn network_stats(
     }
     let stats: Vec<roko_core::NetworkStats> = per_sender
         .into_iter()
-        .map(|(sender_id, (count, last_seen, total_tasks))| {
-            roko_core::NetworkStats {
+        .map(
+            |(sender_id, (count, last_seen, total_tasks))| roko_core::NetworkStats {
                 sender_id,
                 heartbeat_count: count,
                 last_seen,
@@ -85,8 +83,8 @@ async fn network_stats(
                 } else {
                     0.0
                 },
-            }
-        })
+            },
+        )
         .collect();
     Json(stats)
 }

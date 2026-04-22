@@ -152,10 +152,7 @@ fn every_top_level_command_has_help_output() {
             "'{cmd} --help' failed with exit code {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
             output.status.code()
         );
-        assert!(
-            !stdout.is_empty(),
-            "'{cmd} --help' produced empty stdout"
-        );
+        assert!(!stdout.is_empty(), "'{cmd} --help' produced empty stdout");
     }
 }
 
@@ -178,10 +175,7 @@ fn every_nested_command_has_help_output() {
             "'{label} --help' failed with exit code {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
             output.status.code()
         );
-        assert!(
-            !stdout.is_empty(),
-            "'{label} --help' produced empty stdout"
-        );
+        assert!(!stdout.is_empty(), "'{label} --help' produced empty stdout");
     }
 }
 
@@ -306,8 +300,10 @@ fn status_works_offline_with_filesystem() {
 
     // Should report signal/episode counts (even if zero)
     assert!(
-        stdout.contains("signals:") || stdout.contains("episodes:")
-            || stdout.contains("Signal") || stdout.contains("Episode")
+        stdout.contains("signals:")
+            || stdout.contains("episodes:")
+            || stdout.contains("Signal")
+            || stdout.contains("Episode")
             || stdout.contains("0"),
         "offline status did not produce recognizable output\n{stdout}"
     );
@@ -545,9 +541,7 @@ fn subcommand_help_has_description_and_usage() {
 #[test]
 fn keybinding_consistency_no_conflicting_global_keys() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let key = |code: KeyCode| -> KeyEvent {
@@ -583,9 +577,7 @@ fn keybinding_consistency_no_conflicting_global_keys() {
 #[test]
 fn keybinding_ctrl_c_always_quits_in_all_modes() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let ctrl_c = KeyEvent {
@@ -620,9 +612,7 @@ fn keybinding_ctrl_c_always_quits_in_all_modes() {
 #[test]
 fn keybinding_modal_intercepts_override_normal_keys() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::modals::ModalState;
     use roko_cli::tui::tabs::Tab;
 
@@ -669,9 +659,7 @@ fn keybinding_modal_intercepts_override_normal_keys() {
 #[test]
 fn keybinding_text_input_modes_capture_all_chars() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let modals = ModalVisibility::default();
@@ -728,9 +716,7 @@ fn keybinding_text_input_modes_capture_all_chars() {
 #[test]
 fn keybinding_no_tab_loses_navigation() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let modals = ModalVisibility::default();
@@ -778,9 +764,7 @@ fn keybinding_no_tab_loses_navigation() {
 #[test]
 fn keybinding_tab_key_cycles_focus_globally() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let modals = ModalVisibility::default();
@@ -811,9 +795,7 @@ fn keybinding_tab_key_cycles_focus_globally() {
 #[test]
 fn keybinding_confirm_mode_only_accepts_yes_no() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-    use roko_cli::tui::input::{
-        FocusZone, InputMode, ModalVisibility, TuiAction, handle_key,
-    };
+    use roko_cli::tui::input::{FocusZone, InputMode, ModalVisibility, TuiAction, handle_key};
     use roko_cli::tui::tabs::Tab;
 
     let modals = ModalVisibility::default();
@@ -932,12 +914,20 @@ fn tab_next_prev_cycle_returns_to_start() {
     for _ in 0..Tab::ALL.len() {
         t = t.next();
     }
-    assert_eq!(t, Tab::Dashboard, "Tab::next did not cycle back to Dashboard");
+    assert_eq!(
+        t,
+        Tab::Dashboard,
+        "Tab::next did not cycle back to Dashboard"
+    );
 
     for _ in 0..Tab::ALL.len() {
         t = t.prev();
     }
-    assert_eq!(t, Tab::Dashboard, "Tab::prev did not cycle back to Dashboard");
+    assert_eq!(
+        t,
+        Tab::Dashboard,
+        "Tab::prev did not cycle back to Dashboard"
+    );
 }
 
 #[test]

@@ -42,11 +42,8 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
     println!("Type a message. Press Ctrl-D to exit.\n");
 
     // Resolve API key from CLI flag / env / config (best-effort).
-    let api_key = auth::resolve_api_key(
-        &roko_core::config::ServeAuthConfig::default(),
-        None,
-    )
-    .map(|r| r.key);
+    let api_key =
+        auth::resolve_api_key(&roko_core::config::ServeAuthConfig::default(), None).map(|r| r.key);
 
     // Build client with auth headers when a key is available.
     let mut client_builder = reqwest::Client::builder();
@@ -61,7 +58,10 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
             eprintln!("Connected to roko-serve at {serve_url}");
         }
         Ok(resp) => {
-            eprintln!("\u{26a0} roko-serve at {serve_url} returned {}", resp.status());
+            eprintln!(
+                "\u{26a0} roko-serve at {serve_url} returned {}",
+                resp.status()
+            );
             eprintln!("  Chat may not work correctly.");
         }
         Err(err) => {
@@ -177,7 +177,10 @@ async fn wait_for_run_completion(
             .context("decode run status response")?;
         if status.finished {
             if status.status.eq_ignore_ascii_case("failed") {
-                if let Some(error) = status.error.as_deref().filter(|value| !value.trim().is_empty())
+                if let Some(error) = status
+                    .error
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
                 {
                     println!("[failed] {error}");
                 } else {

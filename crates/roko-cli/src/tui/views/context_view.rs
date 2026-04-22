@@ -64,16 +64,23 @@ pub(crate) fn render(
     view_state: &ViewState,
     theme: &Theme,
 ) {
-    let ctx_data = build_context_data(tui_state);
-    render_with_context_data(
-        frame,
-        area,
-        tui_state,
-        &ctx_data,
-        view_state,
-        theme,
-        matches!(tui_state.focus, FocusZone::RightPanel),
-    );
+    match view_state.sub_tab {
+        1 => render_engram_dag(frame, area, tui_state, theme),
+        2 => render_episode_replay(frame, area, tui_state, theme),
+        3 => render_knowledge_browse(frame, area, tui_state, theme),
+        _ => {
+            let ctx_data = build_context_data(tui_state);
+            render_with_context_data(
+                frame,
+                area,
+                tui_state,
+                &ctx_data,
+                view_state,
+                theme,
+                matches!(tui_state.focus, FocusZone::RightPanel),
+            );
+        }
+    }
 }
 
 /// Render the context view with explicit context data (for integration layer).
@@ -722,6 +729,145 @@ fn render_alerts_and_health(
             .column_spacing(1);
         frame.render_widget(table, sections[1]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Engram DAG (sub_tab == 1)
+// ---------------------------------------------------------------------------
+
+fn render_engram_dag(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Engram DAG ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.recent_signals.is_empty() {
+        let empty = Paragraph::new("no signals -- run agents to populate engram DAG")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = tui_state
+        .recent_signals
+        .iter()
+        .take(inner.height as usize)
+        .map(|sig| {
+            Row::new(vec![
+                Cell::from(truncate(&sig.id, 12)),
+                Cell::from(truncate(&sig.kind, 16)),
+                Cell::from(
+                    sig.parent_hash
+                        .as_deref()
+                        .map_or("-".to_string(), |p| truncate(p, 12)),
+                ),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(14),
+        Constraint::Min(12),
+        Constraint::Length(14),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["hash", "kind", "parent"]).style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Episode Replay (sub_tab == 2)
+// ---------------------------------------------------------------------------
+
+fn render_episode_replay(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Episode Replay ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.episodes_cache.is_empty() {
+        let empty = Paragraph::new("no episodes -- run agents to populate episode log")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = tui_state
+        .episodes_cache
+        .iter()
+        .rev()
+        .take(inner.height as usize)
+        .map(|ep| {
+            let outcome_style = if ep.success {
+                theme.success()
+            } else {
+                theme.danger()
+            };
+            let outcome = if ep.success { "pass" } else { "fail" };
+            Row::new(vec![
+                Cell::from(ep.timestamp.format("%H:%M:%S").to_string()),
+                Cell::from(truncate(&ep.agent_id, 16)),
+                Cell::from(Span::styled(outcome.to_string(), outcome_style)),
+                Cell::from(format_count(ep.usage.input_tokens + ep.usage.output_tokens)),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Min(12),
+        Constraint::Length(6),
+        Constraint::Length(8),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["time", "agent", "result", "tokens"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Knowledge Browse (sub_tab == 3)
+// ---------------------------------------------------------------------------
+
+fn render_knowledge_browse(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Knowledge Browse ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.knowledge_entries.is_empty() {
+        let empty = Paragraph::new("no knowledge entries -- neuro store is empty")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let items: Vec<ListItem<'_>> = tui_state
+        .knowledge_entries
+        .iter()
+        .take(inner.height as usize)
+        .map(|entry| {
+            ListItem::new(Line::from(vec![
+                Span::styled(truncate(&entry.kind, 12), theme.accent()),
+                Span::raw("  "),
+                Span::styled(truncate(&entry.content_preview, 50), theme.text()),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
 }
 
 /// Build context data from available dashboard data.

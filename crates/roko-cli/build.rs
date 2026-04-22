@@ -15,8 +15,7 @@ fn main() {
                 None
             }
         })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string());
     println!("cargo:rustc-env=ROKO_GIT_HASH={git_hash}");
 
     // rustc version
@@ -31,8 +30,7 @@ fn main() {
                 None
             }
         })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string());
     println!("cargo:rustc-env=ROKO_RUSTC_VERSION={rustc_version}");
 
     // Target triple

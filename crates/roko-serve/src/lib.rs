@@ -238,7 +238,9 @@ impl ServerBuilder {
                     .await
                 {
                     Ok(s) => tracing::info!(exit = %s, "chain-watcher exited"),
-                    Err(e) => tracing::debug!(error = %e, path = ?watcher, "chain-watcher not available"),
+                    Err(e) => {
+                        tracing::debug!(error = %e, path = ?watcher, "chain-watcher not available")
+                    }
                 }
             });
         }
