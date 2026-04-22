@@ -185,6 +185,14 @@ pub enum ServerEvent {
     /// A marketplace job was updated.
     JobUpdated { job: Value },
 
+    /// A marketplace job transitioned between lifecycle states.
+    JobTransitioned {
+        job_id: String,
+        from: String,
+        to: String,
+        assigned_to: Option<String>,
+    },
+
     /// A worker started executing a task.
     WorkerTaskStarted {
         deployment_id: String,
@@ -196,6 +204,36 @@ pub enum ServerEvent {
         deployment_id: String,
         task_id: String,
         success: bool,
+    },
+
+    /// A job execution started (from job runner).
+    JobExecutionStarted {
+        job_id: String,
+        job_type: String,
+        agent_id: String,
+    },
+
+    /// Job execution progress update.
+    JobProgress {
+        job_id: String,
+        percent: u8,
+        message: String,
+    },
+
+    /// Agent output for a specific job.
+    JobAgentOutput {
+        job_id: String,
+        agent_id: String,
+        content: String,
+        done: bool,
+    },
+
+    /// Chain triage results for a job.
+    ChainTriageResult {
+        job_id: String,
+        event_count: usize,
+        anomaly_count: usize,
+        summary: String,
     },
 
     /// The server is shutting down.

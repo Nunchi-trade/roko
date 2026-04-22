@@ -62,6 +62,7 @@ pub mod extract;
 pub mod feedback;
 pub mod fswatcher;
 pub mod integrations;
+pub mod job_runner;
 pub mod openapi;
 pub mod plan_types;
 pub mod routes;
@@ -189,6 +190,9 @@ impl ServerBuilder {
             self.state
                 .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
         );
+        if let Err(err) = state.restore_snapshot().await {
+            warn!(error = %err, "failed to restore server state snapshot; starting fresh");
+        }
         let dispatcher_roko_config = state.load_roko_config().as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
@@ -201,6 +205,8 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+        let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
+        let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
@@ -267,10 +273,15 @@ pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
 /// Returns an error if the listener cannot bind to `bind:port` or if the
 /// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
+    if let Err(err) = state.restore_snapshot().await {
+        warn!(error = %err, "failed to restore server state snapshot; starting fresh");
+    }
     let roko_config = state.load_roko_config().as_ref().clone();
     let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+    let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
+    let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
@@ -410,6 +421,24 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             metric: metric.clone(),
             value: *value,
         }),
+        ServerEvent::JobExecutionStarted {
+            job_id,
+            job_type,
+            agent_id,
+        } => Some(DashboardEvent::JobExecutionStarted {
+            job_id: job_id.clone(),
+            job_type: job_type.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        ServerEvent::JobProgress {
+            job_id,
+            percent,
+            message,
+        } => Some(DashboardEvent::JobProgress {
+            job_id: job_id.clone(),
+            percent: *percent,
+            message: message.clone(),
+        }),
         ServerEvent::Error { message } => Some(DashboardEvent::Error {
             message: message.clone(),
         }),
@@ -459,6 +488,21 @@ pub(crate) fn start_event_source_group(
     }
 
     tokio::spawn(async {})
+}
+
+fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            if let Err(err) = state.save_snapshot().await {
+                warn!(error = %err, "periodic server state snapshot save failed");
+            }
+        }
+    })
 }
 
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {

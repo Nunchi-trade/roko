@@ -389,9 +389,44 @@ impl AppState {
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
     pub async fn shutdown(&self) {
         tracing::info!("server shutdown initiated");
+        if let Err(err) = self.save_snapshot().await {
+            tracing::warn!(error = %err, "failed to save server state on shutdown");
+        }
         self.cancel.cancel();
         self.supervisor.shutdown_all().await;
         self.event_bus.publish(ServerEvent::ServerShutdown);
+    }
+
+    fn snapshot_path(&self) -> PathBuf {
+        self.workdir.join(".roko").join("state").join("server-state.json")
+    }
+
+    /// Persist discovered agents and template run records to disk (atomic write).
+    pub async fn save_snapshot(&self) -> anyhow::Result<()> {
+        let agents: HashMap<String, DiscoveredAgent> = self.discovered_agents.read().await.clone();
+        let runs: HashMap<String, Vec<TemplateRunRecord>> = self.template_runs.read().await.clone();
+        let snapshot = ServerStateSnapshot { discovered_agents: agents, template_runs: runs };
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        let target = self.snapshot_path();
+        let parent = target.parent().ok_or_else(|| anyhow::anyhow!("invalid snapshot path"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let tmp = target.with_extension("json.tmp");
+        tokio::fs::write(&tmp, json).await?;
+        tokio::fs::rename(&tmp, &target).await?;
+        tracing::debug!(path = %target.display(), "server state snapshot saved");
+        Ok(())
+    }
+
+    /// Restore discovered agents and template run records from disk.
+    pub async fn restore_snapshot(&self) -> anyhow::Result<()> {
+        let path = self.snapshot_path();
+        if !path.exists() { tracing::debug!("no server state snapshot found; starting fresh"); return Ok(()); }
+        let data = tokio::fs::read_to_string(&path).await?;
+        let snapshot: ServerStateSnapshot = serde_json::from_str(&data)?;
+        { let mut agents = self.discovered_agents.write().await; for (id, agent) in snapshot.discovered_agents { agents.entry(id).or_insert(agent); } }
+        { let mut runs = self.template_runs.write().await; for (name, records) in snapshot.template_runs { runs.entry(name).or_insert(records); } }
+        tracing::info!(path = %path.display(), "restored server state from snapshot");
+        Ok(())
     }
 
     /// Insert or update a discovery entry and return the stored snapshot.
@@ -534,6 +569,17 @@ impl AppState {
             },
         );
     }
+}
+
+/// Serializable snapshot of server state that survives restarts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ServerStateSnapshot {
+    /// Discovery registry entries.
+    #[serde(default)]
+    pub discovered_agents: HashMap<String, DiscoveredAgent>,
+    /// Template run outcome records.
+    #[serde(default)]
+    pub template_runs: HashMap<String, Vec<TemplateRunRecord>>,
 }
 
 /// Shared `.roko/engrams.jsonl` persistence path.

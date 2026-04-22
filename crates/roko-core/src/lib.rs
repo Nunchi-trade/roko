@@ -75,6 +75,8 @@ pub mod forensic;
 pub mod hash;
 /// Cognitive immune system -- quarantine, anomaly detection, incident linking.
 pub mod immune;
+/// Marketplace job types shared between serve, TUI, and CLI.
+pub mod job;
 pub mod kind;
 pub mod language;
 pub mod loop_tick;
@@ -185,6 +187,7 @@ pub use dashboard_snapshot::{
     DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry, SnapshotStats,
     TrendBucket, TrendBuckets,
 };
+pub use job::{JobProgressEntry, JobStatus, MarketplaceJob, PrdSummary, TaskSummary as JobTaskSummary};
 pub use namespace::{
     Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };
