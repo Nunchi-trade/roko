@@ -32,7 +32,7 @@ npm run dev        # opens http://localhost:5173
 
 | Script | What it does |
 |---|---|
-| `seed-agents.sh` | Register 3 demo agents with different skills/tiers |
+| `seed-agents.sh` | Register 5 demo agents (rustsmith, ethdev, fullstack, researcher, auditor) |
 | `demo-match.sh` | Run matchmaking queries showing filtering and ranking |
 | `demo-lifecycle.sh` | Walk a job through the full lifecycle |
 | `e2e-test.sh` | Automated test suite (40 checks, CI-grade) |
@@ -74,4 +74,4 @@ running (just shows fake data).
 | `Connection refused` on match | Start `roko serve` first |
 | Dashboard shows stub data | Check `VITE_ROKO_URL` in `.env` points to roko-serve |
 | No agents in match results | Run `seed-agents.sh` to register test agents |
-| `job list` shows `unknown` state | Job was written by a different serializer; safe to ignore |
+| `job list` shows `unknown` state | Rebuild roko — `state`/`status` field mismatch is fixed (skip_serializing_if on empty `state`) |

@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# Reusable command runner for tmp/demo-resources.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+print_usage() {
+    cat <<'EOF'
+Usage:
+  tmp/demo-resources/bin/roko-demo <command> [args]
+
+Commands:
+  help                         Show this help
+  list                         List wrapped one-off demo scripts
+  doctor                       Check local prerequisites
+  build                        Build the roko CLI binary used by demos
+  serve [workdir] [port]       Run roko serve in the foreground
+  seed-agents [base-url]       Register the reusable demo fleet
+  dashboard-smoke [base-url]   Query dashboard-facing APIs on an existing serve
+  verify-local [port]          Start a temp serve, seed agents, run dashboard-smoke
+  run <name> [args...]         Run an existing demo script by short name
+
+Environment:
+  ROKO=/path/to/roko           Default: target/debug/roko in this repo
+  PYTHON=python3               Python executable for JSON and HTTP helpers
+  ROKO_SERVE_URL=http://...    Default base URL for HTTP commands
+  HTTP_TIMEOUT_SECS=20         Per-request timeout
+
+Examples:
+  tmp/demo-resources/bin/roko-demo build
+  tmp/demo-resources/bin/roko-demo verify-local
+  tmp/demo-resources/bin/roko-demo seed-agents http://127.0.0.1:6677
+  tmp/demo-resources/bin/roko-demo dashboard-smoke http://127.0.0.1:6677
+  tmp/demo-resources/bin/roko-demo run match
+EOF
+}
+
+demo_script_path() {
+    case "$1" in
+        match) printf '%s\n' "agent-matchmaking/demo-match.sh" ;;
+        lifecycle) printf '%s\n' "agent-matchmaking/demo-lifecycle.sh" ;;
+        matchmaking-e2e|e2e) printf '%s\n' "agent-matchmaking/e2e-test.sh" ;;
+        setup-fleet|fleet) printf '%s\n' "agent-setup/setup-fleet.sh" ;;
+        single-agent) printf '%s\n' "agent-workflows/01-single-agent.sh" ;;
+        multi-agent) printf '%s\n' "agent-workflows/02-multi-agent.sh" ;;
+        chat) printf '%s\n' "agent-workflows/03-chat-repl.sh" ;;
+        prd-cli|prd) printf '%s\n' "prd-workflow/demo-prd-cli.sh" ;;
+        prd-api) printf '%s\n' "prd-workflow/demo-prd-api.sh" ;;
+        research) printf '%s\n' "research-workflow/demo-research.sh" ;;
+        full-loop|full) printf '%s\n' "full-self-hosting/demo-full-loop.sh" ;;
+        smoke) printf '%s\n' "bin/roko-smoke.sh" ;;
+        *) return 1 ;;
+    esac
+}
+
+list_demos() {
+    cat <<'EOF'
+match              agent-matchmaking/demo-match.sh
+lifecycle          agent-matchmaking/demo-lifecycle.sh
+matchmaking-e2e    agent-matchmaking/e2e-test.sh
+setup-fleet        agent-setup/setup-fleet.sh
+fleet              agent-setup/setup-fleet.sh
+single-agent       agent-workflows/01-single-agent.sh
+multi-agent        agent-workflows/02-multi-agent.sh
+chat               agent-workflows/03-chat-repl.sh
+prd-cli            prd-workflow/demo-prd-cli.sh
+prd                prd-workflow/demo-prd-cli.sh
+prd-api            prd-workflow/demo-prd-api.sh
+research           research-workflow/demo-research.sh
+full-loop          full-self-hosting/demo-full-loop.sh
+full               full-self-hosting/demo-full-loop.sh
+smoke              bin/roko-smoke.sh
+EOF
+}
+
+doctor() {
+    local failures=0
+
+    log "Checking demo prerequisites"
+    if command -v "$PYTHON" >/dev/null 2>&1; then
+        printf '  ok python: %s\n' "$("$PYTHON" --version 2>&1)"
+    else
+        printf '  missing python: %s\n' "$PYTHON"
+        failures=$((failures + 1))
+    fi
+
+    if [[ -x "$ROKO" ]]; then
+        printf '  ok roko: %s\n' "$ROKO"
+    else
+        printf '  missing roko binary: %s\n' "$ROKO"
+        printf '     run: tmp/demo-resources/bin/roko-demo build\n'
+        failures=$((failures + 1))
+    fi
+
+    if [[ -d "$ROKO_REPO_ROOT/crates/roko-cli" ]]; then
+        printf '  ok repo root: %s\n' "$ROKO_REPO_ROOT"
+    else
+        printf '  missing repo root marker: %s\n' "$ROKO_REPO_ROOT/crates/roko-cli"
+        failures=$((failures + 1))
+    fi
+
+    if command -v cargo >/dev/null 2>&1; then
+        printf '  ok cargo: %s\n' "$(cargo --version)"
+    else
+        printf '  missing cargo\n'
+        failures=$((failures + 1))
+    fi
+
+    if http_get_json "$(api_url "$ROKO_SERVE_URL")/health" >/dev/null 2>&1; then
+        printf '  ok roko serve: %s\n' "$ROKO_SERVE_URL"
+    else
+        printf '  note roko serve not reachable at: %s\n' "$ROKO_SERVE_URL"
+    fi
+
+    [[ "$failures" -eq 0 ]] || return 1
+}
+
+build_roko() {
+    log "Building roko CLI"
+    (cd "$ROKO_REPO_ROOT" && cargo build -p roko-cli)
+}
+
+serve_foreground() {
+    local workdir="${1:-$PWD}"
+    local port="${2:-6677}"
+    require_roko
+    mkdir -p "$workdir"
+    log "Starting roko serve on http://127.0.0.1:$port"
+    exec "$ROKO" serve --workdir "$workdir" --bind 127.0.0.1 --port "$port"
+}
+
+register_agent() {
+    local base_api="$1"
+    local payload="$2"
+    local agent_id
+    agent_id="$(printf '%s' "$payload" | json_eval 'data["agent_id"]')"
+    http_post_json "$base_api/agents/register" "$payload" >/dev/null
+    printf '  ok %s\n' "$agent_id"
+}
+
+seed_agents() {
+    local base_api
+    base_api="$(api_url "${1:-$ROKO_SERVE_URL}")"
+    log "Seeding demo agents into $base_api"
+
+    register_agent "$base_api" '{"agent_id":"agent-rustsmith","label":"rustsmith","capabilities":["messaging","tasks"],"skills":["rust","p2p","eth","networking"],"tier":"Expert","reputation":94,"past_jobs_completed":37,"max_concurrent_jobs":5}'
+    register_agent "$base_api" '{"agent_id":"agent-ethdev","label":"ethdev","capabilities":["messaging","tasks"],"skills":["solidity","eth","defi","evm"],"tier":"Trusted","reputation":82,"past_jobs_completed":21,"max_concurrent_jobs":3}'
+    register_agent "$base_api" '{"agent_id":"agent-fullstack","label":"fullstack","capabilities":["messaging","tasks"],"skills":["typescript","react","rust","graphql"],"tier":"Verified","reputation":75,"past_jobs_completed":18,"max_concurrent_jobs":4}'
+    register_agent "$base_api" '{"agent_id":"agent-researcher","label":"researcher","capabilities":["messaging","research"],"skills":["defi","tokenomics","governance","analysis"],"tier":"Expert","reputation":91,"past_jobs_completed":45,"max_concurrent_jobs":6}'
+    register_agent "$base_api" '{"agent_id":"agent-auditor","label":"auditor","capabilities":["messaging","tasks"],"skills":["solidity","security","audit","evm"],"tier":"Expert","reputation":97,"past_jobs_completed":52,"max_concurrent_jobs":2}'
+}
+
+assert_json_expr() {
+    local label="$1"
+    local expr="$2"
+    local payload="$3"
+    local actual
+    actual="$(printf '%s' "$payload" | json_eval "$expr")"
+    if [[ "$actual" == "True" || "$actual" == "true" || "$actual" == "1" ]]; then
+        printf '  ok %s\n' "$label"
+    else
+        printf '  fail %s\n     expression: %s\n     actual: %s\n' "$label" "$expr" "$actual" >&2
+        return 1
+    fi
+}
+
+dashboard_smoke() {
+    local base_api
+    base_api="$(api_url "${1:-$ROKO_SERVE_URL}")"
+    local smoke_id="demo-smoke-$(date +%s)-$$"
+    local payload
+
+    log "Querying dashboard-facing APIs at $base_api"
+
+    payload="$(http_get_json "$base_api/health")"
+    assert_json_expr "health endpoint returns status" 'data.get("status") in ["ok", "degraded", "down"]' "$payload"
+
+    payload="$(http_get_json "$base_api/dashboard")"
+    assert_json_expr "dashboard scaffold renders" '"rendered" in data' "$payload"
+
+    payload="$(http_get_json "$base_api/managed-agents")"
+    assert_json_expr "managed-agents returns an array" 'isinstance(data, list)' "$payload"
+
+    payload="$(http_get_json "$base_api/agents")"
+    assert_json_expr "agents aggregator returns paginated items" 'isinstance(data.get("items"), list) and isinstance(data.get("total"), int)' "$payload"
+
+    register_agent "$base_api" "{\"agent_id\":\"$smoke_id\",\"label\":\"dashboard-smoke\",\"owner\":\"demo\",\"capabilities\":[\"messaging\",\"tasks\"],\"skills\":[\"rust\",\"dashboard\",\"smoke\"],\"tier\":\"Expert\",\"reputation\":99,\"past_jobs_completed\":1,\"max_concurrent_jobs\":2}" >/dev/null
+    printf '  ok registered smoke agent: %s\n' "$smoke_id"
+
+    payload="$(http_get_json "$base_api/managed-agents")"
+    assert_json_expr "managed-agents includes smoke registration" "any(item.get('id') == '$smoke_id' for item in data)" "$payload"
+
+    payload="$(http_get_json "$base_api/agents")"
+    assert_json_expr "agents cache refresh includes smoke registration" "any(item.get('id') == '$smoke_id' for item in data.get('items', []))" "$payload"
+
+    payload="$(http_get_json "$base_api/agents/topology")"
+    assert_json_expr "agent topology returns JSON object" 'isinstance(data, dict)' "$payload"
+
+    payload="$(http_get_json "$base_api/projections/dashboard")"
+    assert_json_expr "dashboard projection returns JSON object" 'isinstance(data, dict)' "$payload"
+
+    payload="$(http_post_json "$base_api/jobs/match" '{"title":"dashboard smoke rust task","skills":["rust"],"minTier":"Verified","reward":"100 KORAI"}')"
+    assert_json_expr "matchmaking returns candidates" 'isinstance(data.get("candidates"), list)' "$payload"
+    assert_json_expr "matchmaking sees smoke agent skills" "any(item.get('agentId') == '$smoke_id' for item in data.get('candidates', []))" "$payload"
+
+    payload="$(http_post_json "$base_api/jobs" "{\"title\":\"dashboard smoke lifecycle\",\"reward\":\"100 KORAI\",\"committed_candidates\":[\"$smoke_id\"]}")"
+    local job_id
+    job_id="$(printf '%s' "$payload" | json_eval 'data["id"]')"
+    assert_json_expr "job create starts open" 'data.get("state") == "open"' "$payload"
+
+    payload="$(http_post_json "$base_api/jobs/$job_id/assign" "{\"agent_id\":\"$smoke_id\"}")"
+    assert_json_expr "job assign works" 'data.get("state") == "assigned"' "$payload"
+
+    payload="$(http_post_json "$base_api/jobs/$job_id/start" "")"
+    assert_json_expr "job start works" 'data.get("state") == "in_progress"' "$payload"
+
+    payload="$(http_post_json "$base_api/jobs/$job_id/submit" '{"result_summary":"dashboard smoke complete"}')"
+    assert_json_expr "job submit works" 'data.get("state") == "submitted"' "$payload"
+
+    payload="$(http_post_json "$base_api/jobs/$job_id/evaluate" '{"accepted":true,"feedback":"accepted by dashboard smoke"}')"
+    assert_json_expr "job evaluate completes" 'data.get("state") == "completed"' "$payload"
+
+    log "Dashboard smoke passed"
+}
+
+verify_local() {
+    local port="${1:-}"
+    local workdir pid base_url log_path
+    require_roko
+    workdir="$(with_temp_workspace)"
+    port="${port:-$(free_port)}"
+    base_url="http://127.0.0.1:$port"
+    log_path="$workdir/roko-serve.log"
+
+    log "Starting disposable roko serve on $base_url"
+    pid="$(start_roko_serve_bg "$workdir" "$port" "$log_path")"
+    trap 'stop_pid "$pid"' EXIT
+
+    if ! wait_for_http "$base_url/api/health" 45; then
+        sed -n '1,160p' "$log_path" >&2 || true
+        die "roko serve did not become healthy"
+    fi
+
+    seed_agents "$base_url"
+    dashboard_smoke "$base_url"
+
+    stop_pid "$pid"
+    trap - EXIT
+    log "verify-local passed; workspace was $workdir"
+}
+
+run_named_demo() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "missing demo name; run: roko-demo list"
+    shift || true
+    local script
+    script="$(demo_script_path "$name")" || die "unknown demo '$name'; run: roko-demo list"
+    run_script "$script" "$@"
+}
+
+run_all_demos() {
+    local base_url="${1:-$ROKO_SERVE_URL}"
+    seed_agents "$base_url"
+    run_named_demo prd
+    run_named_demo research "$base_url"
+    run_named_demo full "$base_url"
+}
+
+main() {
+    local command="${1:-help}"
+    if [[ $# -gt 0 ]]; then
+        shift
+    fi
+
+    case "$command" in
+        help|-h|--help) print_usage ;;
+        list) list_demos ;;
+        doctor) doctor "$@" ;;
+        build) build_roko "$@" ;;
+        serve) serve_foreground "$@" ;;
+        seed-agents) seed_agents "$@" ;;
+        dashboard-smoke) dashboard_smoke "$@" ;;
+        verify-local) verify_local "$@" ;;
+        run) run_named_demo "$@" ;;
+        all) run_all_demos "$@" ;;
+        *) die "unknown command '$command'; run: tmp/demo-resources/bin/roko-demo help" ;;
+    esac
+}
+
+main "$@"
