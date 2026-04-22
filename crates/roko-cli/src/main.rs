@@ -124,6 +124,70 @@ impl std::fmt::Display for Effort {
 }
 
 // -----------------------------------------------------------------------
+// Color mode
+// -----------------------------------------------------------------------
+
+/// Controls ANSI color output.
+///
+/// Respects the `NO_COLOR` (https://no-color.org/), `CLICOLOR`, and
+/// `CLICOLOR_FORCE` conventions when set to `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorMode {
+    /// Detect from terminal and environment (default).
+    Auto,
+    /// Always emit ANSI colors.
+    Always,
+    /// Never emit ANSI colors.
+    Never,
+}
+
+impl ColorMode {
+    /// Resolve the effective color decision, consulting env vars when `Auto`.
+    ///
+    /// Precedence (highest first):
+    /// 1. `--color always|never` (not Auto)
+    /// 2. `NO_COLOR` set and non-empty  -> off
+    /// 3. `CLICOLOR_FORCE` set and != "0" -> on
+    /// 4. `CLICOLOR=0`                   -> off
+    /// 5. stdout is a TTY               -> on
+    /// 6. otherwise                      -> off
+    fn should_color(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                if env::var("NO_COLOR").map_or(false, |v| !v.is_empty()) {
+                    return false;
+                }
+                if env::var("CLICOLOR_FORCE").map_or(false, |v| v != "0") {
+                    return true;
+                }
+                if env::var("CLICOLOR").map_or(false, |v| v == "0") {
+                    return false;
+                }
+                std::io::stdout().is_terminal()
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Enhanced version string
+// -----------------------------------------------------------------------
+
+fn long_version() -> &'static str {
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let git_hash = env!("ROKO_GIT_HASH");
+        let rustc = env!("ROKO_RUSTC_VERSION");
+        let target = env!("ROKO_TARGET");
+        format!("{version} ({rustc}, {target}, git {git_hash})")
+    })
+}
+
+// -----------------------------------------------------------------------
 // CLI structure
 // -----------------------------------------------------------------------
 
@@ -132,7 +196,17 @@ impl std::fmt::Display for Effort {
 #[command(
     name = "roko",
     version,
-    about = "Minimal CLI for the Roko universal loop"
+    long_version = long_version(),
+    about = "Minimal CLI for the Roko universal loop",
+    after_long_help = "\
+COMMAND GROUPS:
+  Development:     run, plan, prd, research, chat
+  Agent:           agent, inject
+  Monitoring:      status, dashboard, serve, doctor, learn, replay, explain
+  Configuration:   init, config, secret, tune
+  Knowledge:       neuro, dream, dreams, experiment
+  Infrastructure:  provider, model, subscription, event-sources, daemon, worker, deploy, custody
+  Tooling:         index, new, plugin, archive, update, completions"
 )]
 struct Cli {
     /// Override the config file (default: `./roko.toml`).
@@ -178,6 +252,18 @@ struct Cli {
     /// Run as a headless daemon (background service).
     #[arg(long, global = true)]
     headless: bool,
+
+    /// Control color output: auto (default), always, never.
+    ///
+    /// Respects NO_COLOR, CLICOLOR, and CLICOLOR_FORCE env vars in auto mode.
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
+
+    /// Print elapsed time after command execution.
+    ///
+    /// Also enabled by setting ROKO_TIMING=1 in the environment.
+    #[arg(long, global = true)]
+    timing: bool,
 
     /// One-shot mode: execute this prompt and exit.
     #[arg(global = false)]
@@ -297,6 +383,11 @@ enum Command {
     Research {
         #[command(subcommand)]
         cmd: ResearchCmd,
+    },
+    /// Manage marketplace jobs (list, create, show, execute, cancel).
+    Job {
+        #[command(subcommand)]
+        cmd: JobCmd,
     },
     /// Interactive chat REPL backed by roko-serve agent messaging.
     Chat {
@@ -703,6 +794,9 @@ enum PlanCmd {
         /// Maximum retry attempts per task (overrides per-task and config values).
         #[arg(long)]
         max_retries: Option<u32>,
+        /// Parse and display the plan without executing. Shows tasks, dependencies, and estimates.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -813,6 +907,69 @@ enum ResearchCmd {
         /// Recency filter: day, week, month, year.
         #[arg(long)]
         recency: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum JobCmd {
+    /// List all marketplace jobs.
+    List {
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Filter by status (open, assigned, in_progress, completed, failed, cancelled).
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Create a new marketplace job.
+    Create {
+        /// Job title.
+        title: String,
+        /// Job type: research, coding_task, chain_monitor, chain_analysis.
+        #[arg(long, default_value = "research")]
+        r#type: String,
+        /// Job description.
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Priority: low, medium, high, critical.
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        /// Auto-execute the job when the runner picks it up.
+        #[arg(long)]
+        auto_execute: bool,
+        /// Associated plan ID.
+        #[arg(long)]
+        plan_id: Option<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show details for a specific job.
+    Show {
+        /// Job ID.
+        id: String,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Execute a job (locally or via roko-serve).
+    Execute {
+        /// Job ID.
+        id: String,
+        /// roko-serve base URL. If set, POST to /api/jobs/{id}/execute.
+        #[arg(long)]
+        serve_url: Option<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Cancel a job.
+    Cancel {
+        /// Job ID.
+        id: String,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
 }
 
@@ -1126,6 +1283,17 @@ fn main() {
     };
 
     let cli = Cli::parse();
+
+    // ── Color mode ──────────────────────────────────────────────────
+    let use_color = cli.color.should_color();
+
+    // ── Timing mode ─────────────────────────────────────────────────
+    let timing_enabled = cli.timing
+        || env::var("ROKO_TIMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let started_at = Instant::now();
+
     let filter = tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"));
 
@@ -1134,11 +1302,13 @@ fn main() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    let ansi_logs = use_color;
     if raw_logs {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .json()
                     .with_env_filter(filter)
                     .init();
@@ -1146,6 +1316,7 @@ fn main() {
             LogFormat::Text => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .with_env_filter(filter)
                     .init();
             }
@@ -1156,6 +1327,7 @@ fn main() {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format().json(),
                         scrubber,
@@ -1166,6 +1338,7 @@ fn main() {
             LogFormat::Text => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format(),
                         scrubber,
@@ -1182,13 +1355,99 @@ fn main() {
         .expect("failed to build Tokio runtime");
 
     let code = match runtime.block_on(dispatch(cli)) {
-        Ok(code) => code,
+        Ok(code) => {
+            if timing_enabled {
+                print_timing(started_at);
+            }
+            code
+        }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            if timing_enabled {
+                print_timing(started_at);
+            }
+            let msg = format_error_with_hint(&e);
+            eprintln!("error: {msg}");
             EXIT_SYSTEM_ERROR
         }
     };
     std::process::exit(code);
+}
+
+// -----------------------------------------------------------------------
+// Timing helper
+// -----------------------------------------------------------------------
+
+fn print_timing(started_at: Instant) {
+    let elapsed = started_at.elapsed();
+    let secs = elapsed.as_secs_f64();
+    if secs < 60.0 {
+        eprintln!("Completed in {secs:.1}s");
+    } else {
+        let mins = (secs / 60.0).floor() as u64;
+        let rem = secs - (mins as f64 * 60.0);
+        eprintln!("Completed in {mins}m {rem:.1}s");
+    }
+}
+
+// -----------------------------------------------------------------------
+// Contextual error suggestions
+// -----------------------------------------------------------------------
+
+/// Format an error with a helpful hint when the message matches a known pattern.
+fn format_error_with_hint(err: &anyhow::Error) -> String {
+    let msg = format!("{err:#}");
+    match error_hint(&msg) {
+        Some(h) => format!("{msg}\n\nhint: {h}"),
+        None => msg,
+    }
+}
+
+/// Return an optional hint string based on common error patterns.
+fn error_hint(msg: &str) -> Option<&'static str> {
+    let lower = msg.to_lowercase();
+
+    if lower.contains("no .roko directory")
+        || lower.contains(".roko/")
+            && (lower.contains("not found") || lower.contains("no such file"))
+        || lower.contains("roko.toml")
+            && (lower.contains("not found") || lower.contains("no such file"))
+    {
+        return Some("run `roko init` to create a workspace in the current directory");
+    }
+
+    if lower.contains("agent not found") || lower.contains("unknown agent") {
+        return Some("run `roko agent list` to see available agents");
+    }
+
+    if lower.contains("plan not found")
+        || lower.contains("plans directory does not exist")
+        || lower.contains("no plans found")
+    {
+        return Some("run `roko plan list` to see available plans, or `roko plan create` to make one");
+    }
+
+    if lower.contains("connection refused")
+        || lower.contains("connect error")
+        || lower.contains("failed to connect")
+    {
+        return Some("is the server running? Start it with `roko serve`");
+    }
+
+    if lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.contains("auth")
+            && (lower.contains("failed") || lower.contains("invalid") || lower.contains("denied"))
+    {
+        return Some(
+            "check your API key: set ROKO_API_KEY or run `roko config set-secret ROKO_API_KEY <key>`",
+        );
+    }
+
+    if lower.contains("prd not found") || lower.contains("no prd") {
+        return Some("run `roko prd list` to see available PRDs, or `roko prd idea` to create one");
+    }
+
+    None
 }
 
 #[derive(Debug)]
@@ -1337,6 +1596,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+        Command::Job { cmd } => cmd_job(cli, cmd).await,
         Command::Chat { agent, serve_url } => {
             roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
             Ok(EXIT_SUCCESS)
@@ -3988,7 +4248,13 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             resume_plan,
             approval,
             max_retries,
+            dry_run,
         } => {
+            // ── Dry-run mode: parse plans + show summary without executing ──
+            if dry_run {
+                return cmd_plan_dry_run(&plans_dir, cli).await;
+            }
+
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
@@ -4358,6 +4624,156 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Dry-run for `plan run`
+// -----------------------------------------------------------------------
+
+/// Parse and display a plan directory without executing anything.
+async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
+    let plans = roko_orchestrator::discover_plans(plans_dir)
+        .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+
+    if plans.is_empty() {
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&json!({
+                "dry_run": true,
+                "plans": [],
+                "total_plans": 0,
+                "total_tasks": 0,
+            }))?);
+        } else {
+            println!("No plans found in {}", plans_dir.display());
+        }
+        return Ok(EXIT_SUCCESS);
+    }
+
+    // For each plan, try to load and count tasks.
+    let mut plan_summaries: Vec<serde_json::Value> = Vec::new();
+    let mut total_tasks: usize = 0;
+    let mut total_estimated_minutes: u32 = 0;
+
+    for plan in &plans {
+        // Try loading the tasks.toml adjacent to the plan file.
+        let tasks_path = plan.path.parent().map(|p| p.join("tasks.toml"))
+            .filter(|p| p.exists());
+
+        let (task_count, task_details) = if let Some(ref tp) = tasks_path {
+            match roko_cli::task_parser::TasksFile::parse(tp) {
+                Ok(tf) => {
+                    let details: Vec<serde_json::Value> = tf.tasks.iter().map(|t| {
+                        json!({
+                            "id": t.id,
+                            "title": t.title,
+                            "status": t.status,
+                            "tier": t.tier,
+                            "depends_on": t.depends_on,
+                            "files": t.files.len(),
+                        })
+                    }).collect();
+                    (tf.tasks.len(), details)
+                }
+                Err(_) => (0, vec![]),
+            }
+        } else {
+            // New-layout plans might have tasks.toml at plans_dir/plan_name/tasks.toml
+            let dir_tasks = plans_dir.join(&plan.base).join("tasks.toml");
+            if dir_tasks.exists() {
+                match roko_cli::task_parser::TasksFile::parse(&dir_tasks) {
+                    Ok(tf) => {
+                        let details: Vec<serde_json::Value> = tf.tasks.iter().map(|t| {
+                            json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "status": t.status,
+                                "tier": t.tier,
+                                "depends_on": t.depends_on,
+                                "files": t.files.len(),
+                            })
+                        }).collect();
+                        (tf.tasks.len(), details)
+                    }
+                    Err(_) => (0, vec![]),
+                }
+            } else {
+                (0, vec![])
+            }
+        };
+
+        total_tasks += task_count;
+        if let Some(ref fm) = plan.frontmatter {
+            if let Some(mins) = fm.estimated_minutes {
+                total_estimated_minutes += mins;
+            }
+        }
+
+        plan_summaries.push(json!({
+            "plan": plan.base,
+            "num": plan.num,
+            "task_count": task_count,
+            "estimated_minutes": plan.frontmatter.as_ref().and_then(|f| f.estimated_minutes),
+            "parallel_width": plan.frontmatter.as_ref().and_then(|f| f.estimated_parallel_width),
+            "priority": plan.frontmatter.as_ref().and_then(|f| f.priority),
+            "tags": plan.frontmatter.as_ref().map(|f| &f.tags),
+            "tasks": task_details,
+        }));
+    }
+
+    if cli.json {
+        let payload = json!({
+            "dry_run": true,
+            "plans_dir": plans_dir,
+            "total_plans": plans.len(),
+            "total_tasks": total_tasks,
+            "total_estimated_minutes": total_estimated_minutes,
+            "plans": plan_summaries,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Dry run: {} plan(s), {} task(s) in {}\n",
+            plans.len(), total_tasks, plans_dir.display());
+
+        for (i, plan) in plans.iter().enumerate() {
+            let est = plan.frontmatter.as_ref()
+                .and_then(|f| f.estimated_minutes)
+                .map(|m| format!(" (~{m} min)"))
+                .unwrap_or_default();
+            let priority = plan.frontmatter.as_ref()
+                .and_then(|f| f.priority)
+                .map(|p| format!(" [priority={p}]"))
+                .unwrap_or_default();
+            println!("  {}. {}{}{}", i + 1, plan.base, est, priority);
+
+            // Print task list if available.
+            if let Some(tasks) = plan_summaries[i].get("tasks").and_then(|v| v.as_array()) {
+                for t in tasks {
+                    let tid = t.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                    let tier = t.get("tier").and_then(|v| v.as_str()).unwrap_or("?");
+                    let deps = t.get("depends_on")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            let ids: Vec<&str> = arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect();
+                            if ids.is_empty() { String::new() }
+                            else { format!(" (after {})", ids.join(", ")) }
+                        })
+                        .unwrap_or_default();
+                    println!("     {tid}: {title} [{tier}, {status}]{deps}");
+                }
+            }
+        }
+
+        if total_estimated_minutes > 0 {
+            println!("\nEstimated total: ~{total_estimated_minutes} min");
+        }
+        println!("\nNo tasks were executed. Remove --dry-run to run the plan.");
+    }
+
+    Ok(EXIT_SUCCESS)
 }
 
 fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
@@ -5260,6 +5676,270 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
             }
 
             Ok(0)
+        }
+    }
+}
+
+async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
+    let jobs_dir = |wd: &Path| wd.join(".roko").join("jobs");
+
+    match cmd {
+        JobCmd::List { workdir, status } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let dir = jobs_dir(&wd);
+            if !dir.is_dir() {
+                println!("No jobs found (directory does not exist: {})", dir.display());
+                return Ok(EXIT_SUCCESS);
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext == "json")
+                })
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+
+            let mut count = 0usize;
+            for entry in &entries {
+                let data = std::fs::read_to_string(entry.path())?;
+                let job: roko_core::MarketplaceJob =
+                    serde_json::from_str(&data).unwrap_or_default();
+                let effective_status = if !job.status.is_empty() {
+                    &job.status
+                } else if !job.state.is_empty() {
+                    &job.state
+                } else {
+                    "unknown"
+                };
+                if let Some(ref filter) = status {
+                    if !effective_status
+                        .eq_ignore_ascii_case(filter)
+                    {
+                        continue;
+                    }
+                }
+                let icon = match effective_status {
+                    "open" | "pending" => "\u{25cb}",
+                    "assigned" => "\u{25d4}",
+                    "in_progress" | "active" | "running" => "\u{25b6}",
+                    "submitted" => "\u{25d1}",
+                    "completed" | "done" => "\u{2713}",
+                    "failed" | "cancelled" => "\u{2717}",
+                    _ => "\u{00b7}",
+                };
+                println!(
+                    "{icon} [{:>12}] {:>10}  {}  {}",
+                    job.job_type,
+                    effective_status,
+                    &job.id[..job.id.len().min(8)],
+                    job.title
+                );
+                count += 1;
+            }
+            if count == 0 {
+                println!("No jobs found.");
+            } else {
+                println!("\n{count} job(s)");
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Create {
+            title,
+            r#type,
+            description,
+            priority,
+            auto_execute,
+            plan_id,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let dir = jobs_dir(&wd);
+            std::fs::create_dir_all(&dir)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let job = roko_core::MarketplaceJob {
+                id: id.clone(),
+                title: title.trim().to_string(),
+                description: description.trim().to_string(),
+                job_type: r#type.trim().to_string(),
+                status: "open".to_string(),
+                priority: priority.trim().to_string(),
+                auto_execute,
+                plan_id: plan_id.unwrap_or_default(),
+                created_at: now.clone(),
+                updated_at: now,
+                ..Default::default()
+            };
+            let path = dir.join(format!("{id}.json"));
+            let rendered = serde_json::to_string_pretty(&job)?;
+            std::fs::write(&path, &rendered)?;
+            println!("Created job: {id}");
+            println!("  title:    {}", job.title);
+            println!("  type:     {}", job.job_type);
+            println!("  priority: {}", job.priority);
+            println!("  auto_execute: {}", job.auto_execute);
+            println!("  path:     {}", path.display());
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Show { id, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let path = jobs_dir(&wd).join(format!("{id}.json"));
+            if !path.exists() {
+                bail!("job '{id}' not found at {}", path.display());
+            }
+            let data = std::fs::read_to_string(&path)?;
+            let job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+            let effective_status = if !job.status.is_empty() {
+                &job.status
+            } else if !job.state.is_empty() {
+                &job.state
+            } else {
+                "unknown"
+            };
+            println!("id:           {}", job.id);
+            println!("title:        {}", job.title);
+            println!("type:         {}", job.job_type);
+            println!("status:       {effective_status}");
+            println!("priority:     {}", job.priority);
+            println!("posted_by:    {}", job.posted_by);
+            println!("assigned_to:  {}", job.assigned_to);
+            println!("auto_execute: {}", job.auto_execute);
+            println!("plan_id:      {}", job.plan_id);
+            println!("created_at:   {}", job.created_at);
+            println!("updated_at:   {}", job.updated_at);
+            if !job.tags.is_empty() {
+                println!("tags:         {}", job.tags.join(", "));
+            }
+            if !job.description.is_empty() {
+                println!("\n--- description ---\n{}", job.description);
+            }
+            if let Some(ref sub) = job.submission {
+                println!(
+                    "\n--- submission ---\n{}",
+                    serde_json::to_string_pretty(sub).unwrap_or_default()
+                );
+            }
+            if let Some(ref eval) = job.evaluation {
+                println!(
+                    "\n--- evaluation ---\n{}",
+                    serde_json::to_string_pretty(eval).unwrap_or_default()
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Execute {
+            id,
+            serve_url,
+            workdir,
+        } => {
+            if let Some(url) = serve_url {
+                // Delegate to roko-serve
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(format!("{url}/api/jobs/{id}/execute"))
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                if status.is_success() {
+                    println!("Job '{id}' execution started via serve.");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                } else {
+                    eprintln!(
+                        "Failed to execute job '{id}': {} {}",
+                        status,
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                    return Ok(EXIT_FAILURE);
+                }
+            } else {
+                // Local inline execution — load config and use run_once
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                let path = jobs_dir(&wd).join(format!("{id}.json"));
+                if !path.exists() {
+                    bail!("job '{id}' not found at {}", path.display());
+                }
+                let data = std::fs::read_to_string(&path)?;
+                let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+                println!("Executing job '{id}' locally...");
+
+                // Transition to in_progress
+                job.status = "in_progress".to_string();
+                job.updated_at = chrono::Utc::now().to_rfc3339();
+                std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+
+                // Build prompt based on job type
+                let prompt = match job.job_type.as_str() {
+                    "research" => format!(
+                        "Research the following topic and produce a detailed report with citations:\n\n{}",
+                        job.description
+                    ),
+                    "coding_task" | "coding" => {
+                        if !job.plan_id.is_empty() {
+                            format!("Execute plan '{}' in the current workspace", job.plan_id)
+                        } else {
+                            job.description.clone()
+                        }
+                    }
+                    _ => job.description.clone(),
+                };
+
+                let config = resolve_config_for_workdir(cli, &wd)?;
+                let result = run_once(&wd, &config, &prompt).await;
+                match result {
+                    Ok(report) => {
+                        job.status = "completed".to_string();
+                        job.submission = Some(serde_json::json!({
+                            "result_summary": if report.overall_success() { "success" } else { "completed with failures" },
+                            "completed_at": chrono::Utc::now().to_rfc3339(),
+                        }));
+                        job.updated_at = chrono::Utc::now().to_rfc3339();
+                        std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+                        println!("Job '{id}' completed successfully.");
+                    }
+                    Err(e) => {
+                        job.status = "failed".to_string();
+                        job.updated_at = chrono::Utc::now().to_rfc3339();
+                        std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+                        eprintln!("Job '{id}' failed: {e}");
+                        return Ok(EXIT_AGENT_FAILURE);
+                    }
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Cancel { id, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let path = jobs_dir(&wd).join(format!("{id}.json"));
+            if !path.exists() {
+                bail!("job '{id}' not found at {}", path.display());
+            }
+            let data = std::fs::read_to_string(&path)?;
+            let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+            let effective_status = if !job.status.is_empty() {
+                &job.status
+            } else {
+                "unknown"
+            };
+            if matches!(
+                effective_status,
+                "completed" | "failed" | "cancelled"
+            ) {
+                bail!(
+                    "cannot cancel job '{id}': status '{effective_status}' is terminal"
+                );
+            }
+            job.status = "cancelled".to_string();
+            job.updated_at = chrono::Utc::now().to_rfc3339();
+            std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+            println!("Job '{id}' cancelled.");
+            Ok(EXIT_SUCCESS)
         }
     }
 }
