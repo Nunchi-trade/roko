@@ -405,7 +405,7 @@ pub fn compute_cfactor(
     let turn_taking_equality = compute_turn_taking_equality(&filtered);
     let social_perceptiveness = social_perceptiveness.clamp(0.0, 1.0);
 
-    let overall = (gate_pass_rate * 0.23
+    let raw_overall = (gate_pass_rate * 0.23
         + cost_efficiency * 0.15
         + speed * 0.10
         + information_flow_rate * 0.08
@@ -417,6 +417,7 @@ pub fn compute_cfactor(
         + convergence_velocity * 0.05
         + turn_taking_equality * 0.05
         + social_perceptiveness * 0.05;
+    let overall = outcome_bounded_overall(raw_overall, gate_pass_rate);
 
     let pathologies = detect_pathologies(
         &filtered
@@ -426,7 +427,7 @@ pub fn compute_cfactor(
     );
 
     let mut snapshot = CFactor {
-        overall: overall.clamp(0.0, 1.0),
+        overall,
         components: CFactorComponents {
             gate_pass_rate,
             cost_efficiency,
@@ -1289,7 +1290,7 @@ fn compute_cfactor_from_filtered(
     let turn_taking_equality = compute_turn_taking_equality(filtered);
     let social_perceptiveness = social_perceptiveness.clamp(0.0, 1.0);
 
-    let overall = (gate_pass_rate * 0.23
+    let raw_overall = (gate_pass_rate * 0.23
         + cost_efficiency * 0.15
         + speed * 0.10
         + information_flow_rate * 0.08
@@ -1301,9 +1302,10 @@ fn compute_cfactor_from_filtered(
         + convergence_velocity * 0.05
         + turn_taking_equality * 0.05
         + social_perceptiveness * 0.05;
+    let overall = outcome_bounded_overall(raw_overall, gate_pass_rate);
 
     CFactor {
-        overall: overall.clamp(0.0, 1.0),
+        overall,
         components: CFactorComponents {
             gate_pass_rate,
             cost_efficiency,
@@ -1347,6 +1349,12 @@ fn knowledge_entry_count(value: &Value) -> usize {
         Value::Object(map) => map.len().max(1),
         _ => 0,
     }
+}
+
+fn outcome_bounded_overall(raw_overall: f64, gate_pass_rate: f64) -> f64 {
+    raw_overall
+        .clamp(0.0, 1.0)
+        .min(gate_pass_rate.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -1430,6 +1438,47 @@ mod tests {
         assert!(cfactor.components.knowledge_growth > 0.0);
         assert!((cfactor.components.knowledge_integration_rate - 0.0).abs() < 1e-9);
         assert!((cfactor.components.social_perceptiveness - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failed_task_batches_cannot_raise_overall_above_success_rate() {
+        let successes = vec![
+            episode_at("task-a", 4, 0.0, 100, true),
+            episode_at("task-b", 3, 0.0, 100, true),
+        ];
+        let success_snapshot = compute_cfactor(
+            &successes,
+            Duration::from_secs(CFACTOR_REGRESSION_WINDOW_SECS),
+            0.0,
+            0.0,
+            0.0,
+        );
+
+        let mut mixed = successes.clone();
+        let mut failure_a = episode_at("task-c", 2, 0.0, 100, false);
+        failure_a.agent_id = "agent-b".to_string();
+        failure_a.agent_template = "different-template".to_string();
+        failure_a.usage.input_tokens = 10_000;
+        failure_a.usage.output_tokens = 10_000;
+        let mut failure_b = episode_at("task-d", 1, 0.0, 100, false);
+        failure_b.agent_id = "agent-c".to_string();
+        failure_b.agent_template = "third-template".to_string();
+        failure_b.usage.input_tokens = 10_000;
+        failure_b.usage.output_tokens = 10_000;
+        mixed.push(failure_a);
+        mixed.push(failure_b);
+
+        let mixed_snapshot = compute_cfactor(
+            &mixed,
+            Duration::from_secs(CFACTOR_REGRESSION_WINDOW_SECS),
+            0.0,
+            0.0,
+            0.0,
+        );
+
+        assert!((mixed_snapshot.components.gate_pass_rate - 0.5).abs() < 1e-9);
+        assert!(mixed_snapshot.overall <= mixed_snapshot.components.gate_pass_rate);
+        assert!(mixed_snapshot.overall < success_snapshot.overall);
     }
 
     #[test]

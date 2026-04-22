@@ -101,7 +101,7 @@ impl CliRuntime for RokoCliRuntime {
     fn dashboard_scaffold(&self, workdir: &Path) -> DashboardInfo {
         let scaffold = DashboardScaffold::new_in(workdir);
         DashboardInfo {
-            rendered: format!("{scaffold:?}"),
+            rendered: scaffold.render_overview_text(),
         }
     }
 

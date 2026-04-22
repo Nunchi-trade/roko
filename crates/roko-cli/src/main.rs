@@ -209,6 +209,7 @@ COMMAND GROUPS:
   Knowledge:         knowledge (query, dream, custody, archive)
   Learning:          learn (router, experiments, efficiency, tune)
   Jobs:              job
+  Benchmarks:        bench
   Configuration:     config (providers, models, subscriptions, plugins, secrets)
   Code intelligence: index
   Server:            up, serve, daemon, deploy, worker
@@ -385,6 +386,12 @@ Examples:
     Job {
         #[command(subcommand)]
         cmd: JobCmd,
+    },
+
+    /// Run benchmark evaluations and write learning telemetry.
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
     },
 
     // ── Configuration (providers, models, subscriptions, etc.) ──────
@@ -731,6 +738,51 @@ enum LearnCmd {
         #[arg(long)]
         dry_run: bool,
         /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchCmd {
+    /// Run a native SWE-bench-style proxy batch.
+    #[command(after_help = "\
+Examples:
+  roko bench swe --batch-size 2 --agent-mode gold
+  roko bench swe --dataset ./swe-smoke.jsonl --predictions ./predictions.jsonl --agent-mode prediction-file
+  roko bench swe --agent-mode command --agent-command './my-agent.sh'")]
+    Swe {
+        /// Local JSONL dataset. If omitted, a built-in two-task smoke dataset is generated.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Number of instances to run.
+        #[arg(long, default_value_t = 2)]
+        batch_size: usize,
+        /// Offset into the dataset.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Agent adapter to use.
+        #[arg(long, value_enum, default_value_t = roko_cli::bench::SweAgentMode::Gold)]
+        agent_mode: roko_cli::bench::SweAgentMode,
+        /// Predictions JSONL path for --agent-mode prediction-file.
+        #[arg(long)]
+        predictions: Option<PathBuf>,
+        /// Command for --agent-mode command. Receives instance JSON on stdin, prints a unified diff.
+        #[arg(long)]
+        agent_command: Option<String>,
+        /// Scores JSONL output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Write SWE-bench-style predictions JSONL.
+        #[arg(long)]
+        export_predictions: Option<PathBuf>,
+        /// Disable learning episode, efficiency, and C-factor writes.
+        #[arg(long)]
+        no_learning: bool,
+        /// Keep per-instance benchmark workdirs for debugging.
+        #[arg(long)]
+        keep_workdirs: bool,
+        /// Working directory (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
@@ -1729,6 +1781,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         // ── Jobs ────────────────────────────────────────────────────
         Command::Job { cmd } => cmd_job(cli, cmd).await,
 
+        // ── Benchmarks ──────────────────────────────────────────────
+        Command::Bench { cmd } => cmd_bench(cli, cmd).await,
+
         // ── Config ──────────────────────────────────────────────────
         Command::Config { cmd } => {
             // Some sub-commands need &Cli for resolve_workdir, intercept them.
@@ -2691,7 +2746,10 @@ async fn cmd_dashboard(
         } else {
             App::new_with_page(&workdir, initial_page)
         };
-        if app.run().is_ok() {
+        let tui_result = tokio::task::spawn_blocking(move || app.run())
+            .await
+            .context("dashboard TUI worker failed")?;
+        if tui_result.is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -6646,6 +6704,51 @@ async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
             job.updated_at = chrono::Utc::now().to_rfc3339();
             std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
             println!("Job '{id}' cancelled.");
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+async fn cmd_bench(cli: &Cli, cmd: BenchCmd) -> Result<i32> {
+    match cmd {
+        BenchCmd::Swe {
+            dataset,
+            batch_size,
+            offset,
+            agent_mode,
+            predictions,
+            agent_command,
+            report,
+            export_predictions,
+            no_learning,
+            keep_workdirs,
+            workdir,
+        } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let report = roko_cli::bench::run_swe_bench(roko_cli::bench::SweBenchOptions {
+                workdir,
+                dataset,
+                batch_size,
+                offset,
+                agent_mode,
+                predictions,
+                agent_command,
+                report,
+                export_predictions,
+                record_learning: !no_learning,
+                keep_workdirs,
+            })
+            .await?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.render_text());
+                println!();
+                println!(
+                    "note: this is fast proxy scoring, not official SWE-bench Docker scoring."
+                );
+            }
             Ok(EXIT_SUCCESS)
         }
     }

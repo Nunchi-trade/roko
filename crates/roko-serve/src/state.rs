@@ -475,75 +475,79 @@ impl AppState {
         registration: AgentRegistrationRecord,
     ) -> DiscoveredAgent {
         let now = now_unix_secs();
-        let mut agents = self.discovered_agents.write().await;
-        let entry = agents
-            .entry(registration.agent_id.clone())
-            .or_insert_with(|| DiscoveredAgent {
-                agent_id: registration.agent_id.clone(),
-                label: registration.label.clone(),
-                process_id: registration.process_id,
-                owner: registration.owner.clone(),
-                registered_at: now,
-                last_seen_at: now,
-                endpoints: registration.endpoints.clone(),
-                card_uri: registration.card_uri.clone(),
-                capabilities: registration.capabilities.clone(),
-                domain_tags: registration.domain_tags.clone(),
-                tier: registration.tier.clone(),
-                reputation: registration.reputation,
-                skills: registration.skills.clone(),
-                past_jobs_completed: registration.past_jobs_completed,
-                max_concurrent_jobs: registration.max_concurrent_jobs,
-                token_hash: None,
-                token_expires_at: None,
-                status: "registered".to_string(),
-                proxy_token: None,
-            });
+        let stored = {
+            let mut agents = self.discovered_agents.write().await;
+            let entry = agents
+                .entry(registration.agent_id.clone())
+                .or_insert_with(|| DiscoveredAgent {
+                    agent_id: registration.agent_id.clone(),
+                    label: registration.label.clone(),
+                    process_id: registration.process_id,
+                    owner: registration.owner.clone(),
+                    registered_at: now,
+                    last_seen_at: now,
+                    endpoints: registration.endpoints.clone(),
+                    card_uri: registration.card_uri.clone(),
+                    capabilities: registration.capabilities.clone(),
+                    domain_tags: registration.domain_tags.clone(),
+                    tier: registration.tier.clone(),
+                    reputation: registration.reputation,
+                    skills: registration.skills.clone(),
+                    past_jobs_completed: registration.past_jobs_completed,
+                    max_concurrent_jobs: registration.max_concurrent_jobs,
+                    token_hash: None,
+                    token_expires_at: None,
+                    status: "registered".to_string(),
+                    proxy_token: None,
+                });
 
-        entry.label = registration.label.or_else(|| entry.label.clone());
-        entry.process_id = registration.process_id.or(entry.process_id);
-        if !registration.owner.is_empty() {
-            entry.owner = registration.owner;
-        }
-        if registration.endpoints.rest.is_some() {
-            entry.endpoints.rest = registration.endpoints.rest;
-        }
-        if registration.endpoints.websocket.is_some() {
-            entry.endpoints.websocket = registration.endpoints.websocket;
-        }
-        if registration.endpoints.a2a.is_some() {
-            entry.endpoints.a2a = registration.endpoints.a2a;
-        }
-        if registration.endpoints.mcp.is_some() {
-            entry.endpoints.mcp = registration.endpoints.mcp;
-        }
-        if registration.card_uri.is_some() {
-            entry.card_uri = registration.card_uri;
-        }
-        if !registration.capabilities.is_empty() {
-            entry.capabilities = registration.capabilities;
-        }
-        if !registration.domain_tags.is_empty() {
-            entry.domain_tags = registration.domain_tags;
-        }
-        if registration.tier.is_some() {
-            entry.tier = registration.tier;
-        }
-        if registration.reputation > 0 {
-            entry.reputation = registration.reputation;
-        }
-        if !registration.skills.is_empty() {
-            entry.skills = registration.skills;
-        }
-        if registration.past_jobs_completed > 0 {
-            entry.past_jobs_completed = registration.past_jobs_completed;
-        }
-        if registration.max_concurrent_jobs > 0 {
-            entry.max_concurrent_jobs = registration.max_concurrent_jobs;
-        }
-        entry.last_seen_at = now;
-        entry.status = "registered".to_string();
-        entry.clone()
+            entry.label = registration.label.or_else(|| entry.label.clone());
+            entry.process_id = registration.process_id.or(entry.process_id);
+            if !registration.owner.is_empty() {
+                entry.owner = registration.owner;
+            }
+            if registration.endpoints.rest.is_some() {
+                entry.endpoints.rest = registration.endpoints.rest;
+            }
+            if registration.endpoints.websocket.is_some() {
+                entry.endpoints.websocket = registration.endpoints.websocket;
+            }
+            if registration.endpoints.a2a.is_some() {
+                entry.endpoints.a2a = registration.endpoints.a2a;
+            }
+            if registration.endpoints.mcp.is_some() {
+                entry.endpoints.mcp = registration.endpoints.mcp;
+            }
+            if registration.card_uri.is_some() {
+                entry.card_uri = registration.card_uri;
+            }
+            if !registration.capabilities.is_empty() {
+                entry.capabilities = registration.capabilities;
+            }
+            if !registration.domain_tags.is_empty() {
+                entry.domain_tags = registration.domain_tags;
+            }
+            if registration.tier.is_some() {
+                entry.tier = registration.tier;
+            }
+            if registration.reputation > 0 {
+                entry.reputation = registration.reputation;
+            }
+            if !registration.skills.is_empty() {
+                entry.skills = registration.skills;
+            }
+            if registration.past_jobs_completed > 0 {
+                entry.past_jobs_completed = registration.past_jobs_completed;
+            }
+            if registration.max_concurrent_jobs > 0 {
+                entry.max_concurrent_jobs = registration.max_concurrent_jobs;
+            }
+            entry.last_seen_at = now;
+            entry.status = "registered".to_string();
+            entry.clone()
+        };
+        self.invalidate_aggregator_cache().await;
+        stored
     }
 
     /// List all known discovery entries.
@@ -563,10 +567,13 @@ impl AppState {
 
     /// Store a refreshed discovery entry.
     pub async fn store_discovered_agent(&self, agent: DiscoveredAgent) {
-        self.discovered_agents
-            .write()
-            .await
-            .insert(agent.agent_id.clone(), agent);
+        {
+            self.discovered_agents
+                .write()
+                .await
+                .insert(agent.agent_id.clone(), agent);
+        }
+        self.invalidate_aggregator_cache().await;
     }
 
     /// Return a public token status snapshot for an agent.
@@ -628,6 +635,14 @@ impl AppState {
                 value,
             },
         );
+    }
+
+    /// Clear short-lived aggregator projections after discovery changes.
+    pub async fn invalidate_aggregator_cache(&self) {
+        self.aggregator_cache
+            .write()
+            .await
+            .retain(|key, _| !key.starts_with("aggregator:"));
     }
 }
 

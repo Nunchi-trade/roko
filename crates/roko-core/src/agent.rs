@@ -251,22 +251,16 @@ pub struct ResolvedModel {
 /// Resolve a model key against config, falling back to the legacy slug heuristic.
 #[must_use]
 pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
+    // 1. Direct lookup by config key (e.g. `--model llama3` matches `[models.llama3]`).
     if let Some(profile) = config.models.get(model_key) {
-        let provider_config = config.providers.get(&profile.provider).cloned();
-        let backend = AgentBackend::from_model(&profile.slug);
-        let provider_kind = provider_config
-            .as_ref()
-            .map(|provider| provider.kind)
-            .unwrap_or_else(|| provider_kind_from_backend(backend));
+        return resolved_from_profile(config, model_key, profile);
+    }
 
-        return ResolvedModel {
-            model_key: model_key.to_owned(),
-            slug: profile.slug.clone(),
-            provider_kind,
-            provider_config,
-            profile: Some(profile.clone()),
-            backend,
-        };
+    // 2. Fallback: search by slug (e.g. `--model llama3.2` matches slug in `[models.llama3]`).
+    for (key, profile) in &config.models {
+        if profile.slug == model_key {
+            return resolved_from_profile(config, key, profile);
+        }
     }
 
     let backend = AgentBackend::from_model(model_key);
@@ -276,6 +270,28 @@ pub fn resolve_model(config: &RokoConfig, model_key: &str) -> ResolvedModel {
         provider_kind: provider_kind_from_backend(backend),
         provider_config: None,
         profile: None,
+        backend,
+    }
+}
+
+fn resolved_from_profile(
+    config: &RokoConfig,
+    model_key: &str,
+    profile: &crate::config::schema::ModelProfile,
+) -> ResolvedModel {
+    let provider_config = config.providers.get(&profile.provider).cloned();
+    let backend = AgentBackend::from_model(&profile.slug);
+    let provider_kind = provider_config
+        .as_ref()
+        .map(|provider| provider.kind)
+        .unwrap_or_else(|| provider_kind_from_backend(backend));
+
+    ResolvedModel {
+        model_key: model_key.to_owned(),
+        slug: profile.slug.clone(),
+        provider_kind,
+        provider_config,
+        profile: Some(profile.clone()),
         backend,
     }
 }

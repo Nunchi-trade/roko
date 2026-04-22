@@ -24,7 +24,7 @@ Starts `roko serve` + one agent sidecar, sends a message through the serve proxy
 verifies the agent registered, and checks for event storm warnings.
 
 ```bash
-bash tmp/demo-resources/agent-workflows/01-single-agent.sh
+bash demo/demo-resources/bin/roko-demo run single-agent
 ```
 
 ### `02-multi-agent.sh`
@@ -32,7 +32,7 @@ Starts `roko serve` + 3 agents, each auto-picking a free port. Verifies all thre
 register with serve and are discoverable via the API.
 
 ```bash
-bash tmp/demo-resources/agent-workflows/02-multi-agent.sh
+bash demo/demo-resources/bin/roko-demo run multi-agent
 ```
 
 ### `03-chat-repl.sh`
@@ -40,7 +40,7 @@ Starts a single agent sidecar (no `roko serve` needed) and launches the interact
 chat REPL pointing directly at it. Good for quick local development.
 
 ```bash
-bash tmp/demo-resources/agent-workflows/03-chat-repl.sh [agent-id]
+bash demo/demo-resources/bin/roko-demo run chat [agent-id]
 ```
 
 ## Troubleshooting
