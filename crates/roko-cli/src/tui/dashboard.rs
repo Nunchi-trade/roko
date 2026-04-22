@@ -398,6 +398,10 @@ pub struct DashboardData {
     pub atelier_tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
     /// Knowledge entries from `.roko/neuro/knowledge.jsonl` for the Inspect tab.
     pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
+    /// Incremental tailer for `.roko/learn/efficiency.jsonl`.
+    efficiency_tailer: super::jsonl_tailer::IncrementalTailer<AgentEfficiencyEvent>,
+    /// Incremental tailer for `.roko/learn/c-factor.jsonl`.
+    cfactor_tailer: super::jsonl_tailer::IncrementalTailer<CFactor>,
 }
 
 /// Derived executor snapshot fields used by TUI orchestration chrome.
@@ -510,6 +514,15 @@ impl DashboardData {
         let (atelier_prds, atelier_tasks_by_slug) = scan_atelier_prds(&roko_dir);
         let knowledge_entries = load_knowledge_browse_entries(&root);
 
+        // Initialize incremental tailers and do the first tick so items are
+        // populated to match the full-read data already loaded above.
+        let mut efficiency_tailer =
+            super::jsonl_tailer::IncrementalTailer::<AgentEfficiencyEvent>::new(&efficiency_path);
+        let _ = efficiency_tailer.tick();
+        let mut cfactor_tailer =
+            super::jsonl_tailer::IncrementalTailer::<CFactor>::new(&cfactor_path);
+        let _ = cfactor_tailer.tick();
+
         Self {
             root,
             generation,
@@ -553,6 +566,8 @@ impl DashboardData {
             atelier_prds,
             atelier_tasks_by_slug,
             knowledge_entries,
+            efficiency_tailer,
+            cfactor_tailer,
         }
     }
 
@@ -609,12 +624,14 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&efficiency_path);
-        if stamp != self.efficiency_stamp {
-            self.efficiency_stamp = stamp;
-            self.efficiency_events = read_efficiency_events_sync(&efficiency_path);
-            self.efficiency = load_efficiency_summary(&efficiency_path);
+        // Incremental efficiency tailer: only deserialize newly appended lines.
+        if self.efficiency_tailer.tick().unwrap_or(0) > 0 {
+            self.efficiency_events = self.efficiency_tailer.items().to_vec();
+            self.efficiency = efficiency_summary_from_events(&self.efficiency_events);
+            // Trend still reads the file — only the O(N) deserialization of the
+            // raw event list is avoided here.
             self.efficiency_trend = load_efficiency_trend(&efficiency_path);
+            self.efficiency_stamp = file_stamp(&efficiency_path);
             generation_changed = true;
         }
 
@@ -650,11 +667,11 @@ impl DashboardData {
             generation_changed = true;
         }
 
-        let stamp = file_stamp(&cfactor_path);
-        if stamp != self.cfactor_stamp {
-            self.cfactor_stamp = stamp;
-            self.cfactor = load_latest_jsonl_value::<CFactor>(&cfactor_path);
+        // Incremental c-factor tailer: pick up the latest CFactor snapshot.
+        if self.cfactor_tailer.tick().unwrap_or(0) > 0 {
+            self.cfactor = self.cfactor_tailer.items().last().cloned();
             self.cfactor_trend = load_cfactor_trend(&cfactor_path);
+            self.cfactor_stamp = file_stamp(&cfactor_path);
             generation_changed = true;
         }
 
@@ -2769,6 +2786,28 @@ fn load_efficiency_summary(path: &Path) -> EfficiencySummary {
         .sum::<f64>()
         / count_to_f64(event_count);
 
+    EfficiencySummary {
+        event_count,
+        total_cost_usd,
+        total_input_tokens,
+        total_output_tokens,
+        passed_count,
+        average_wall_time_ms,
+    }
+}
+
+/// Compute [`EfficiencySummary`] from an already-loaded slice of events.
+fn efficiency_summary_from_events(events: &[AgentEfficiencyEvent]) -> EfficiencySummary {
+    if events.is_empty() {
+        return EfficiencySummary::default();
+    }
+    let event_count = events.len();
+    let total_cost_usd = events.iter().map(|e| e.cost_usd).sum();
+    let total_input_tokens = events.iter().map(|e| e.input_tokens).sum();
+    let total_output_tokens = events.iter().map(|e| e.output_tokens).sum();
+    let passed_count = events.iter().filter(|e| e.gate_passed).count();
+    let average_wall_time_ms = events.iter().map(|e| e.wall_time_ms as f64).sum::<f64>()
+        / count_to_f64(event_count);
     EfficiencySummary {
         event_count,
         total_cost_usd,

@@ -380,8 +380,16 @@ fn build_unified_log(tui_state: &TuiState) -> Vec<LogEntry> {
         seq += 1;
     }
 
-    // Collect and return sorted by time
-    entries.into_values().collect()
+    // Collect sorted by time, capped to the most recent entries.
+    const MAX_UNIFIED_LOG_ENTRIES: usize = 10_000;
+    let all: Vec<LogEntry> = entries.into_values().collect();
+    if all.len() > MAX_UNIFIED_LOG_ENTRIES {
+        // Keep the tail (most recent) entries.
+        let skip = all.len() - MAX_UNIFIED_LOG_ENTRIES;
+        all.into_iter().skip(skip).collect()
+    } else {
+        all
+    }
 }
 
 /// Color style for log levels.

@@ -40,6 +40,36 @@ pub struct IncrementalTailer<T> {
     pub parse_errors: usize,
 }
 
+impl<T: Clone> Clone for IncrementalTailer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            cursor: self.cursor.clone(),
+            items: self.items.clone(),
+            parse_errors: self.parse_errors,
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for IncrementalTailer<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncrementalTailer")
+            .field("cursor", &self.cursor)
+            .field("items_len", &self.items.len())
+            .field("parse_errors", &self.parse_errors)
+            .finish()
+    }
+}
+
+impl<T> Default for IncrementalTailer<T> {
+    fn default() -> Self {
+        Self {
+            cursor: JsonlCursor::default(),
+            items: Vec::new(),
+            parse_errors: 0,
+        }
+    }
+}
+
 impl<T: serde::de::DeserializeOwned> IncrementalTailer<T> {
     /// Create a new tailer for the given JSONL file.
     ///
