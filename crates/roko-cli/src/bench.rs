@@ -276,6 +276,8 @@ pub async fn run_swe_bench(options: SweBenchOptions) -> Result<SweBenchReport> {
             &instance_workdir,
         )
         .with_context(|| format!("prepare workdir for {}", instance.instance_id))?;
+        init_git_repo(&instance_workdir)
+            .with_context(|| format!("initialize isolated git repo for {}", instance.instance_id))?;
 
         let patch = produce_patch(&options, &instance, &predictions)?;
         let format_ok = format_valid(&patch);
@@ -318,7 +320,7 @@ pub async fn run_swe_bench(options: SweBenchOptions) -> Result<SweBenchReport> {
         };
 
         if let Some(runtime) = &runtime {
-            record_learning(runtime, &options, &instance, &row, &patch).await?;
+            record_learning(runtime, &options, &run_id, &instance, &row, &patch).await?;
         }
 
         prediction_exports.push(json!({
@@ -541,9 +543,12 @@ fn run_agent_command(command: &str, stdin_json: &str) -> Result<String> {
     {
         let stdin = child
             .stdin
-            .as_mut()
+            .take()
             .ok_or_else(|| anyhow!("agent command stdin unavailable"))?;
+        let mut stdin = stdin;
         stdin.write_all(stdin_json.as_bytes())?;
+        stdin.flush()?;
+        drop(stdin);
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
@@ -561,25 +566,20 @@ fn format_valid(patch: &str) -> bool {
 }
 
 fn git_apply(workdir: &Path, patch: &str, check_only: bool) -> Result<(bool, Option<String>)> {
+    let patch_path = workdir.join(".roko-bench.patch");
+    fs::write(&patch_path, patch).context("write temporary patch file")?;
+
     let mut cmd = Command::new("git");
     cmd.arg("apply");
     if check_only {
         cmd.arg("--check");
     }
-    cmd.arg("-");
+    cmd.arg(".roko-bench.patch");
     cmd.current_dir(workdir)
-        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().context("spawn git apply")?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("git apply stdin unavailable"))?;
-        stdin.write_all(patch.as_bytes())?;
-    }
-    let output = child.wait_with_output()?;
+    let output = cmd.output().context("run git apply")?;
+    let _ = fs::remove_file(&patch_path);
     if output.status.success() {
         Ok((true, None))
     } else {
@@ -612,16 +612,18 @@ fn run_shell(workdir: &Path, command: &str) -> Result<(bool, Option<String>)> {
 async fn record_learning(
     runtime: &LearningRuntime,
     options: &SweBenchOptions,
+    run_id: &str,
     instance: &SweBenchInstance,
     row: &SweBenchInstanceResult,
     patch: &str,
 ) -> Result<()> {
+    let task_id = format!("{run_id}/{}", instance.instance_id);
     let mut episode = Episode::new(
         format!("swe-bench-{}", options.agent_mode.label()),
-        instance.instance_id.clone(),
+        task_id.clone(),
     );
     episode.kind = "arena_task".to_string();
-    episode.episode_id = format!("bench-swe-{}", instance.instance_id);
+    episode.episode_id = format!("bench-swe-{run_id}-{}", instance.instance_id);
     episode.agent_template = format!("swe-bench/{}", options.agent_mode.label());
     episode.model = format!("roko-bench/{}", options.agent_mode.label());
     episode.backend = "roko-bench".to_string();
@@ -649,6 +651,10 @@ async fn record_learning(
     episode
         .extra
         .insert("arena".to_string(), json!("swe-bench-proxy"));
+    episode.extra.insert(
+        "instance_id".to_string(),
+        json!(instance.instance_id.clone()),
+    );
     episode
         .extra
         .insert("repo".to_string(), json!(instance.repo.clone()));
@@ -661,7 +667,7 @@ async fn record_learning(
         run_id: "roko-bench".to_string(),
         config_hash: ConfigHash("roko-bench".to_string()),
         plan_id: "swe-bench-proxy".to_string(),
-        task_id: instance.instance_id.clone(),
+        task_id: task_id.clone(),
         iteration: 1,
         role: "BenchAgent".to_string(),
         backend: "roko-bench".to_string(),
@@ -693,7 +699,7 @@ async fn record_learning(
     event.backend = "roko-bench".to_string();
     event.model = format!("roko-bench/{}", options.agent_mode.label());
     event.plan_id = "swe-bench-proxy".to_string();
-    event.task_id = instance.instance_id.clone();
+    event.task_id = task_id;
     event.input_tokens = estimate_tokens(&instance.problem_statement);
     event.output_tokens = estimate_tokens(patch);
     event.total_prompt_tokens = event.input_tokens;
@@ -774,6 +780,23 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+fn init_git_repo(workdir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(workdir)
+        .output()
+        .context("run git init")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+}
+
 fn first_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
@@ -805,10 +828,10 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 fn run_id() -> String {
-    let secs = SystemTime::now()
+    let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    format!("swe-{secs}")
+        .unwrap_or_default();
+    format!("swe-{}-{:09}", duration.as_secs(), duration.subsec_nanos())
 }
 
 #[cfg(test)]
