@@ -221,18 +221,21 @@ impl AgentServeRuntimeConfig {
                         );
                     }
                     if let Some(chain) = &startup.chain {
-                        info!(
-                            agent_id = %startup.agent_id,
-                            chain_rpc_url = ?chain.rpc_url,
-                            identity_registry = ?chain.identity_registry,
-                            passport_id = ?chain.passport_id,
-                            "chain registration config captured for later hook-up"
-                        );
-                        if chain.wallet_key.is_some() {
-                            warn!(
-                                agent_id = %startup.agent_id,
-                                "wallet-key was provided but signing hooks are not wired in this batch"
-                            );
+                        if let Some(url) = &chain.rpc_url {
+                            match roko_chain::alloy_impl::AlloyChainClient::http(url) {
+                                Ok(_client) => {
+                                    let has_wallet = chain.wallet_key.is_some();
+                                    info!(
+                                        agent_id = %startup.agent_id,
+                                        chain_rpc = url,
+                                        has_wallet,
+                                        "chain tools active for agent sidecar"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "chain rpc_url set but client failed");
+                                }
+                            }
                         }
                     }
                     Ok(())

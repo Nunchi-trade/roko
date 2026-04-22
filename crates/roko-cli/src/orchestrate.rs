@@ -138,6 +138,8 @@ use roko_orchestrator::{
     PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanState, PostMergeRunner,
     ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
 };
+use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
+use roko_chain::{ChainClient, ChainWallet};
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
     Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
@@ -157,6 +159,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::agent_config::{
     synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
@@ -3158,6 +3161,10 @@ pub struct PlanRunner {
     /// CLI override for maximum retry attempts per task. When set, overrides
     /// both per-task `max_retries` and config `escalation.max_retries`.
     max_retries_override: Option<u32>,
+    /// Read-only chain client. `None` if `[chain] rpc_url` is not configured.
+    chain_client: Option<Arc<dyn ChainClient>>,
+    /// Signing wallet. `None` if `wallet_key` is not configured.
+    chain_wallet: Option<Arc<dyn ChainWallet>>,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4629,6 +4636,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> =
+            match roko_config.chain.rpc_url.as_deref() {
+                Some(url) => match AlloyChainClient::http(url) {
+                    Ok(c) => {
+                        tracing::info!(rpc_url = url, "chain client initialized");
+                        Some(Arc::new(c))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                        None
+                    }
+                },
+                None => None,
+            };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -4722,6 +4759,8 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
         })
     }
 
@@ -4787,6 +4826,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> =
+            match roko_config.chain.rpc_url.as_deref() {
+                Some(url) => match AlloyChainClient::http(url) {
+                    Ok(c) => {
+                        tracing::info!(rpc_url = url, "chain client initialized");
+                        Some(Arc::new(c))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                        None
+                    }
+                },
+                None => None,
+            };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -4880,6 +4949,8 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
         })
     }
 
@@ -4947,6 +5018,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> =
+            match roko_config.chain.rpc_url.as_deref() {
+                Some(url) => match AlloyChainClient::http(url) {
+                    Ok(c) => {
+                        tracing::info!(rpc_url = url, "chain client initialized");
+                        Some(Arc::new(c))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                        None
+                    }
+                },
+                None => None,
+            };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -5040,6 +5141,8 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
         })
     }
 
@@ -5835,6 +5938,9 @@ impl PlanRunner {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                eprintln!(
+                    "  \x1b[33m\u{26a0} conductor [{watcher}]: restarting '{plan_id}' \u{2014} {reason}\x1b[0m"
+                );
                 self.record_conductor_negative_feedback(plan_id, &decision);
                 self.publish_conductor_decision_summary(plan_id, watcher, "restart", reason);
                 self.emit_execution_event(
@@ -5847,6 +5953,9 @@ impl PlanRunner {
             }
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                eprintln!(
+                    "  \x1b[31m\u{2717} conductor [{watcher}]: failing '{plan_id}' \u{2014} {reason}\x1b[0m"
+                );
                 self.record_conductor_negative_feedback(plan_id, &decision);
                 self.publish_conductor_decision_summary(plan_id, watcher, "fail", reason);
                 self.emit_execution_event(
@@ -6322,8 +6431,8 @@ impl PlanRunner {
             active_agents,
             expected_agents: if active_agents == 0 { 0 } else { active_agents },
             last_agent_heartbeat_ms: self.last_agent_progress_ms,
-            chain_connected: false,
-            chain_expected: false,
+            chain_connected: self.chain_client.is_some(),
+            chain_expected: self.chain_client.is_some(),
             spec_hash_at_start: String::new(),
             spec_hash_current: String::new(),
             coverage_history: Vec::new(),
@@ -6340,6 +6449,23 @@ impl PlanRunner {
                 HealthStatus::Critical => "critical",
             };
             let check_name = result.name.clone();
+
+            // Surface health alerts to stderr so the user sees them without tracing.
+            match result.status {
+                HealthStatus::Degraded => {
+                    eprintln!(
+                        "  \x1b[33m\u{26a0} health [{check_name}]: {}\x1b[0m",
+                        result.message
+                    );
+                }
+                HealthStatus::Critical => {
+                    eprintln!(
+                        "  \x1b[31m\u{2717} health [{check_name}]: {}\x1b[0m",
+                        result.message
+                    );
+                }
+                HealthStatus::Healthy => {}
+            }
 
             // INT-13: Conductor health signals → pheromone deposits.
             // Degraded/Critical health checks become Threat pheromones so that
@@ -6414,6 +6540,20 @@ impl PlanRunner {
                     }
                     _ => "warning",
                 };
+
+                // Surface stuck detection alerts to stderr for user visibility.
+                if severity == "critical" {
+                    eprintln!(
+                        "  \x1b[31m\u{2717} stuck [{:?}]: '{}' \u{2014} {}\x1b[0m",
+                        stuck.kind, plan_id, stuck.description
+                    );
+                } else {
+                    eprintln!(
+                        "  \x1b[33m\u{26a0} stuck [{:?}]: '{}' \u{2014} {}\x1b[0m",
+                        stuck.kind, plan_id, stuck.description
+                    );
+                }
+
                 let payload = serde_json::json!({
                     "plan_id": plan_id,
                     "kind": stuck.kind,
@@ -6584,6 +6724,52 @@ impl PlanRunner {
             signal.emotional_tag = Some(self.daimon.emotional_tag("conductor"));
         }
         self.conductor_signals.push(maybe_attest_engram(signal));
+    }
+
+    /// Flush accumulated conductor signals to `.roko/engrams.jsonl` so the
+    /// background `WatcherRunner` can detect anomalies in real time (not just
+    /// from stale data on disk).
+    async fn flush_conductor_signals_to_disk(&mut self) {
+        if self.conductor_signals.is_empty() {
+            return;
+        }
+        let engrams_path = self.workdir.join(".roko").join("engrams.jsonl");
+        // Serialize all pending signals as JSONL and append in one write.
+        let mut buf = String::new();
+        for signal in &self.conductor_signals {
+            if let Ok(line) = serde_json::to_string(signal) {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        if buf.is_empty() {
+            return;
+        }
+        if let Some(parent) = engrams_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&engrams_path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                if let Err(e) = file.write_all(buf.as_bytes()).await {
+                    tracing::warn!(
+                        "[orchestrate] failed to flush conductor signals to {}: {e}",
+                        engrams_path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[orchestrate] failed to open {} for conductor signal flush: {e}",
+                    engrams_path.display()
+                );
+            }
+        }
     }
 
     /// Take a snapshot of the current executor state.
@@ -7110,10 +7296,47 @@ impl PlanRunner {
         }
         self.emit_runtime_dag_surface();
 
+        // ── Progress header ──────────────────────────────────────────
+        {
+            let total_tasks: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let max_parallel: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.meta.max_parallel as usize)
+                .max()
+                .unwrap_or(1);
+            let waves: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.parallel_groups().len())
+                .sum();
+            for plan_id in &plan_ids {
+                if let Some(tracker) = self.task_trackers.get(plan_id) {
+                    let n = tracker.tasks_file.tasks.len();
+                    let w = tracker.tasks_file.parallel_groups().len();
+                    let mp = tracker.tasks_file.meta.max_parallel;
+                    eprintln!(
+                        "\x1b[1m\u{25b8} Running plan '{plan_id}': {n} tasks, {w} waves, max_parallel={mp}\x1b[0m"
+                    );
+                }
+            }
+            if plan_ids.len() > 1 {
+                eprintln!(
+                    "\x1b[1m\u{25b8} Fleet total: {total_tasks} tasks across {} plans, {waves} waves, max_parallel={max_parallel}\x1b[0m",
+                    plan_ids.len()
+                );
+            }
+        }
+
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
         let mut heartbeat_clock = HeartbeatClock::new();
+        let mut last_progress_print = std::time::Instant::now();
 
         loop {
             iteration += 1;
@@ -7173,6 +7396,22 @@ impl PlanRunner {
 
             self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
                 .await;
+
+            // ── Periodic progress summary (every 30s) ────────────────
+            if last_progress_print.elapsed() >= Duration::from_secs(30) {
+                let completed_plans_set = self.executor.completed_plans();
+                let counts = self.heartbeat_counts(&completed_plans_set);
+                let active_agents = self.supervisor.count().await;
+                let total_cost: f64 = self.efficiency_events.iter().map(|e| e.cost_usd).sum();
+                eprintln!(
+                    "  \u{25e6} {}/{} tasks done, {} agents active, ${:.2} spent",
+                    counts.completed_tasks,
+                    counts.completed_tasks + counts.active_tasks + counts.failed_tasks,
+                    active_agents,
+                    total_cost,
+                );
+                last_progress_print = std::time::Instant::now();
+            }
 
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
@@ -7361,6 +7600,15 @@ impl PlanRunner {
             tasks_failed = tasks_failed,
             "plan run complete"
         );
+
+        // ── Final summary line ───────────────────────────────────────
+        {
+            let status = if tasks_failed == 0 { "\u{2713}" } else { "\u{2717}" };
+            eprintln!();
+            eprintln!(
+                "\x1b[1m{status} Plan run complete: {tasks_completed} succeeded, {tasks_failed} failed, ${total_cost_usd:.2}, {duration_secs:.0}s\x1b[0m"
+            );
+        }
 
         if !self.cancel.is_cancelled() {
             // Auto-dream consolidation at plan completion (§5D.05).
@@ -10469,6 +10717,35 @@ impl PlanRunner {
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
 
+        // ── Structured progress line ─────────────────────────────────
+        {
+            let completed: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.completed.len())
+                .sum();
+            let total: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let elapsed_secs = wall_ms as f64 / 1000.0;
+            let cost = f64::from(result.usage.cost_usd);
+            let title = task_def
+                .as_ref()
+                .map(|td| td.title.as_str())
+                .unwrap_or("");
+            if title.is_empty() {
+                eprintln!(
+                    "  [{completed}/{total}] \u{2713} {task_id} ({elapsed_secs:.1}s, ${cost:.2})"
+                );
+            } else {
+                eprintln!(
+                    "  [{completed}/{total}] \u{2713} {task_id} \"{title}\" ({elapsed_secs:.1}s, ${cost:.2})"
+                );
+            }
+        }
+
         tracing::info!(
             plan_id = %plan_id,
             task_id = %task_id,
@@ -12122,6 +12399,47 @@ impl PlanRunner {
             task_strategy,
             somatic_episode_hash(plan_id, task_id, "failure", &error.to_string()),
         );
+
+        // ── Structured failure progress line ──────────────────────────
+        {
+            let completed: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.completed.len())
+                .sum();
+            let failed: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.failed.len())
+                .sum();
+            let total: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let done = completed + failed;
+            let title = task_def
+                .as_ref()
+                .map(|td| td.title.as_str())
+                .unwrap_or("");
+            let reason_brief: String = error
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("unknown error")
+                .chars()
+                .take(120)
+                .collect();
+            if title.is_empty() {
+                eprintln!(
+                    "  [{done}/{total}] \u{2717} {task_id} \u{2014} {reason_brief}"
+                );
+            } else {
+                eprintln!(
+                    "  [{done}/{total}] \u{2717} {task_id} \"{title}\" \u{2014} {reason_brief}"
+                );
+            }
+        }
 
         tracing::error!(
             plan_id = %plan_id,
@@ -14230,9 +14548,17 @@ impl PlanRunner {
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
             let resolver: Arc<dyn HandlerResolver> =
-                Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
-                    roko_std::tool::handlers::handler_for(name)
-                });
+                if self.chain_client.is_some() {
+                    let chain_map = chain_handler_map(
+                        Arc::clone(self.chain_client.as_ref().unwrap()),
+                        self.chain_wallet.clone(),
+                    );
+                    Arc::new(chain_aware_resolver(chain_map))
+                } else {
+                    Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
+                        roko_std::tool::handlers::handler_for(name)
+                    })
+                };
             let dispatcher = Arc::new(
                 ToolDispatcher::new(registry, resolver).with_safety(self.safety_layer.clone()),
             );

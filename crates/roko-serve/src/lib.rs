@@ -220,6 +220,26 @@ impl ServerBuilder {
         info!("roko server listening on http://{addr}");
         info!("workdir: {}", self.config.workdir.display());
 
+        // Spawn chain-watcher if chain.rpc_url is configured (best-effort).
+        if let Some(rpc_url) = self.config.roko_config.chain.rpc_url.as_deref() {
+            let rpc = rpc_url.to_string();
+            tokio::spawn(async move {
+                let watcher = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("roko-chain-watcher")))
+                    .unwrap_or_else(|| std::path::PathBuf::from("roko-chain-watcher"));
+                match tokio::process::Command::new(&watcher)
+                    .arg("--rpc-url")
+                    .arg(&rpc)
+                    .status()
+                    .await
+                {
+                    Ok(s) => tracing::info!(exit = %s, "chain-watcher exited"),
+                    Err(e) => tracing::debug!(error = %e, path = ?watcher, "chain-watcher not available"),
+                }
+            });
+        }
+
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal(state))
             .await

@@ -8837,8 +8837,37 @@ destination = "/data/.roko"
 // -----------------------------------------------------------------------
 
 /// Resolve the working directory from CLI flags.
+///
+/// Detects when the user is running from inside a `.roko/` directory, which
+/// would cause a nested `.roko/.roko/` and silent data loss.
 fn resolve_workdir(cli: &Cli) -> PathBuf {
-    cli.repo.clone().unwrap_or_else(|| PathBuf::from("."))
+    let dir = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    // Detect if we're running from inside a .roko/ directory.
+    if let Ok(abs) = dir.canonicalize() {
+        for ancestor in abs.ancestors() {
+            if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
+                eprintln!(
+                    "\x1b[33m\u{26a0} Warning: running from inside a .roko/ directory ({}).\x1b[0m",
+                    abs.display()
+                );
+                eprintln!(
+                    "  This will create a nested .roko/.roko/ which causes data loss."
+                );
+                eprintln!(
+                    "  Run from the project root instead: cd {}",
+                    ancestor
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "..".to_string())
+                );
+                eprintln!();
+                break;
+            }
+        }
+    }
+
+    dir
 }
 
 /// Resolve the config, applying CLI overrides for --role, --model, --effort.
