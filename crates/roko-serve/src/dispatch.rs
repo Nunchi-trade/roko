@@ -1390,6 +1390,7 @@ fn server_event_to_synthetic_signal(event: &ServerEvent) -> Option<Engram> {
             plan_id,
             task_id,
             gate,
+            rung,
             passed,
         } => (
             "gate_result",
@@ -1397,6 +1398,7 @@ fn server_event_to_synthetic_signal(event: &ServerEvent) -> Option<Engram> {
                 "plan_id": plan_id,
                 "task_id": task_id,
                 "gate": gate,
+                "rung": rung,
                 "passed": passed,
             }),
         ),
@@ -2643,6 +2645,7 @@ filter = { path = "src/*.rs" }
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             experiment: None,
+            provider: None,
         };
 
         let prompt = build_template_system_prompt(&template, None, None);
@@ -2664,6 +2667,7 @@ filter = { path = "src/*.rs" }
             allowed_tools: vec!["read_file".into(), "grep".into(), "bash".into()],
             denied_tools: vec!["grep".into()],
             experiment: None,
+            provider: None,
         };
 
         let tools_csv = build_allowed_tools_csv(&template);
@@ -2710,6 +2714,7 @@ filter = { path = "src/*.rs" }
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             experiment: None,
+            provider: None,
         };
 
         let generated = resolve_template_mcp_config(None, tmp.path(), &template).expect("resolve");

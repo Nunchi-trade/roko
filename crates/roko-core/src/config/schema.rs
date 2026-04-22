@@ -177,6 +177,10 @@ pub struct RokoConfig {
     /// EVM chain connection settings for chain-domain tools.
     #[serde(default)]
     pub chain: ChainConfig,
+
+    /// Agent definitions for multi-agent startup (`roko up`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentDefinition>,
 }
 
 const fn default_schema_version() -> u32 {
@@ -222,6 +226,7 @@ impl Default for RokoConfig {
             tools: ToolsConfig::default(),
             oneirography: OneirographyConfig::default(),
             chain: ChainConfig::default(),
+            agents: Vec::new(),
         }
     }
 }
@@ -3174,6 +3179,9 @@ impl Default for TuiConfig {
 /// API serving options.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServeConfig {
+    /// Port override for `roko serve`. Falls back to `server.port` (default 6677).
+    #[serde(default)]
+    pub port: Option<u16>,
     /// Automatically orchestrate follow-up work when publish events arrive.
     #[serde(default = "default_true")]
     pub auto_orchestrate: bool,
@@ -3188,6 +3196,7 @@ pub struct ServeConfig {
 impl Default for ServeConfig {
     fn default() -> Self {
         Self {
+            port: None,
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
@@ -3593,7 +3602,7 @@ fn default_bind() -> String {
 }
 
 const fn default_port() -> u16 {
-    9090
+    6677
 }
 
 impl Default for ServerConfig {
@@ -3605,6 +3614,31 @@ impl Default for ServerConfig {
             auth_token: None,
         }
     }
+}
+
+/// Agent definition for multi-agent startup via `roko up`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    /// Human-readable agent name.
+    pub name: String,
+    /// Agent domain: "coding", "research", "chain", "general".
+    pub domain: String,
+    /// Natural-language prompt describing what the agent should do.
+    #[serde(default)]
+    pub prompt: String,
+    /// Override model for this agent.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// RPC endpoint for chain agents.
+    #[serde(default)]
+    pub chain_rpc: Option<String>,
+    /// Whether this agent is enabled (default: true).
+    #[serde(default = "default_agent_enabled")]
+    pub enabled: bool,
+}
+
+const fn default_agent_enabled() -> bool {
+    true
 }
 
 // ---- deploy ---------------------------------------------------------------
@@ -3658,7 +3692,7 @@ impl Default for DeployConfig {
             railway_api_token: None,
             project_id: None,
             environment_id: None,
-            worker_image: None,
+            worker_image: Some("ghcr.io/nunchi-trade/roko-worker:latest".into()),
             default_region: None,
         }
     }

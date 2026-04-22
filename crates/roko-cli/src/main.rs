@@ -211,7 +211,7 @@ COMMAND GROUPS:
   Jobs:              job
   Configuration:     config (providers, models, subscriptions, plugins, secrets)
   Code intelligence: index
-  Server:            serve, daemon, deploy, worker
+  Server:            up, serve, daemon, deploy, worker
   Interactive:       dashboard
   Utilities:         replay, inject, completions, new, explain"
 )]
@@ -402,6 +402,16 @@ Examples:
     },
 
     // ── Server & deployment ─────────────────────────────────────────
+    /// Start roko serve + all configured [[agents]] in one command.
+    #[command(after_help = "\
+Examples:
+  roko up                           Start serve + all agents from roko.toml
+  roko up --workdir /path/to/proj   Start from a specific project directory")]
+    Up {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Start the HTTP API server.
     Serve {
         /// Address to bind to (default: 127.0.0.1).
@@ -1156,10 +1166,20 @@ enum DreamCmdLegacy {
 #[derive(Debug, Subcommand)]
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
+    ///
+    /// Creates a Railway project with roko-serve as the control plane.
+    /// Use --with-mirage to also deploy the chain relay, and --workers to
+    /// deploy agent workers from the template registry.
     Railway {
         /// Working directory / repository root (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Also deploy the mirage chain relay service.
+        #[arg(long)]
+        with_mirage: bool,
+        /// Deploy worker services for these template names (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        workers: Vec<String>,
     },
     /// Generate `fly.toml` and deploy the current workspace with Fly.io.
     Fly {
@@ -1734,6 +1754,10 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Index { cmd } => cmd_index(cli, cmd),
 
         // ── Server & deployment ─────────────────────────────────────
+        Command::Up { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_up(cli, wd).await
+        }
         Command::Serve {
             bind,
             port,
@@ -2136,6 +2160,126 @@ fn parse_duration_to_ms(s: &str) -> Option<i64> {
         "s" => Some(num * 1000),
         _ => None,
     }
+}
+
+async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
+    use agent_serve::{run_agent_create, run_agent_start, run_agent_stop};
+
+    prepare_runtime_hooks(&workdir, cli.quiet);
+
+    // Ensure .roko/ exists (like `roko init` would).
+    let _ = bootstrap_observability_dirs(&workdir);
+
+    // Load RokoConfig to get [[agents]] definitions.
+    let roko_toml_path = workdir.join("roko.toml");
+    let roko_config: RokoConfig = if roko_toml_path.exists() {
+        let text = std::fs::read_to_string(&roko_toml_path)
+            .with_context(|| format!("read {}", roko_toml_path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
+    } else {
+        RokoConfig::default()
+    };
+
+    let agents = roko_config.agents.clone();
+    let port = roko_config.server.port;
+    let bind = roko_config.server.bind.clone();
+
+    // Start serve in background.
+    let config = resolve_config_for_workdir(cli, &workdir)?;
+    let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
+    let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
+    let serve_wd = workdir.clone();
+    let serve_handle = tokio::spawn(async move {
+        if let Err(e) = roko_serve::run_server(serve_wd, runtime, None, None).await {
+            eprintln!("roko-serve error: {e}");
+        }
+    });
+
+    // Brief wait for serve to start listening.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    println!("  roko-serve     http://{}:{}  \u{2713}", bind, port);
+
+    // Create and start each configured agent.
+    let mut started_agents: Vec<String> = Vec::new();
+    for agent_def in &agents {
+        if !agent_def.enabled {
+            continue;
+        }
+        // Create manifest if it doesn't already exist.
+        let manifest_path = workdir
+            .join(".roko")
+            .join("agents")
+            .join(&agent_def.name)
+            .join("manifest.toml");
+        if !manifest_path.exists() {
+            let prompt = if agent_def.prompt.is_empty() {
+                None
+            } else {
+                Some(agent_def.prompt.as_str())
+            };
+            if let Err(e) =
+                run_agent_create(&agent_def.name, &agent_def.domain, None, prompt, Some(&workdir))
+                    .await
+            {
+                eprintln!(
+                    "  {:<14}  {}     {:10}  \u{2717} ({})",
+                    agent_def.name, agent_def.domain, ":auto", e
+                );
+                continue;
+            }
+        }
+
+        // Start the agent.
+        match run_agent_start(&agent_def.name, "127.0.0.1:0", Some(&workdir)) {
+            Ok(()) => {
+                println!(
+                    "  {:<14}  {:<10} {:10}  \u{2713}",
+                    agent_def.name, agent_def.domain, ":auto"
+                );
+                started_agents.push(agent_def.name.clone());
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {:<14}  {:<10} {:10}  \u{2717} ({})",
+                    agent_def.name, agent_def.domain, ":auto", e
+                );
+            }
+        }
+    }
+
+    println!();
+    if started_agents.is_empty() && agents.is_empty() {
+        println!("  No [[agents]] configured in roko.toml.");
+        println!("  Serve is running. Add [[agents]] blocks to start agents.");
+    } else {
+        println!(
+            "  {} agent(s) registered. Dashboard: roko dashboard",
+            started_agents.len()
+        );
+    }
+    println!("  Press Ctrl+C to stop all.");
+    println!();
+
+    // Wait for Ctrl+C.
+    tokio::signal::ctrl_c()
+        .await
+        .context("listen for ctrl+c")?;
+
+    println!("\nShutting down...");
+
+    // Stop all started agents.
+    for name in &started_agents {
+        if let Err(e) = run_agent_stop(name, false, Some(&workdir)) {
+            eprintln!("warning: failed to stop agent '{}': {}", name, e);
+        }
+    }
+
+    // Abort the serve task.
+    serve_handle.abort();
+    let _ = serve_handle.await;
+
+    println!("All services stopped.");
+    Ok(EXIT_SUCCESS)
 }
 
 async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
@@ -8507,7 +8651,11 @@ fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunner> {
 
 async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
-        DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
+        DeployCmd::Railway {
+            workdir,
+            with_mirage,
+            workers,
+        } => cmd_deploy_railway(cli, workdir, with_mirage, workers).await,
         DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
         DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
     }
@@ -9245,7 +9393,36 @@ async fn cmd_deploy_docker(
     Ok(EXIT_SUCCESS)
 }
 
-async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+/// Load persisted Railway project context from `.roko/state/railway.json`.
+fn load_railway_context(
+    workdir: &Path,
+) -> Option<roko_serve::deploy::railway_api::RailwayProjectContext> {
+    let path = workdir.join(".roko/state/railway.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Persist Railway project context to `.roko/state/railway.json` so that
+/// subsequent deploys (including worker deploys) reuse the same project.
+fn save_railway_context(
+    workdir: &Path,
+    ctx: &roko_serve::deploy::railway_api::RailwayProjectContext,
+) -> Result<()> {
+    let dir = workdir.join(".roko/state");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("railway.json");
+    let json = serde_json::to_string_pretty(ctx).context("serialize railway context")?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    info!(path = %path.display(), "persisted Railway project context");
+    Ok(())
+}
+
+async fn cmd_deploy_railway(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    with_mirage: bool,
+    workers: Vec<String>,
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     run_release_build(&workdir).await?;
 
@@ -9269,39 +9446,134 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
     let branch =
         git_current_branch(&workdir).unwrap_or_else(|_| config.project.fresh_base_branch.clone());
     let env_vars = collect_railway_env_vars();
+
+    // Load persisted project context as fallback for config-level IDs.
+    let saved_ctx = load_railway_context(&workdir);
+    let project_id = deploy_config
+        .project_id
+        .clone()
+        .or_else(|| saved_ctx.as_ref().map(|c| c.project_id.clone()));
+    let environment_id = deploy_config
+        .environment_id
+        .clone()
+        .or_else(|| saved_ctx.as_ref().map(|c| c.environment_id.clone()));
+
     let backend = roko_serve::deploy::railway_api::RailwayApiBackend::new(
         token.to_string(),
-        deploy_config.project_id.clone(),
-        deploy_config.environment_id.clone(),
+        project_id.clone(),
+        environment_id.clone(),
     );
 
-    let deployment = backend
+    // 1. Deploy roko-serve (control plane)
+    let (deployment, railway_ctx) = backend
         .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
             project_name: config.project.name.clone(),
-            project_id: deploy_config.project_id.clone(),
-            environment_id: deploy_config.environment_id.clone(),
+            project_id: project_id.clone(),
+            environment_id: environment_id.clone(),
             service_name: "roko".to_string(),
-            repo_slug,
-            branch,
+            repo_slug: repo_slug.clone(),
+            branch: branch.clone(),
             dockerfile_path: "docker/roko.Dockerfile".to_string(),
             root_directory: ".".to_string(),
             healthcheck_path: "/api/health".to_string(),
             volume_mount_path: "/workspace/.roko".to_string(),
             region: deploy_config.default_region.clone(),
-            env_vars,
+            env_vars: env_vars.clone(),
         })
         .await?;
 
-    let url = deployment
+    // Persist project context for subsequent deploys.
+    save_railway_context(&workdir, &railway_ctx)?;
+
+    let control_url = deployment
         .url
         .as_deref()
         .ok_or_else(|| anyhow!("Railway deployment finished without a public URL"))?;
 
-    register_deployment_github_webhooks(&deploy_webhooks, url, &config.webhooks.github.secret)
-        .await?;
+    println!("roko-serve: {control_url}");
 
-    println!("{url}");
+    // 2. Deploy mirage if requested
+    if with_mirage {
+        let (_mirage_dep, _) = backend
+            .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
+                project_name: config.project.name.clone(),
+                project_id: Some(railway_ctx.project_id.clone()),
+                environment_id: Some(railway_ctx.environment_id.clone()),
+                service_name: "mirage".to_string(),
+                repo_slug: repo_slug.clone(),
+                branch: branch.clone(),
+                dockerfile_path: "docker/mirage.Dockerfile".to_string(),
+                root_directory: ".".to_string(),
+                healthcheck_path: "/relay/health".to_string(),
+                volume_mount_path: "/workspace/.roko".to_string(),
+                region: deploy_config.default_region.clone(),
+                env_vars: env_vars.clone(),
+            })
+            .await?;
+
+        if let Some(url) = _mirage_dep.url.as_deref() {
+            println!("mirage: {url}");
+        }
+    }
+
+    // 3. Deploy worker services for each requested template
+    for template_name in &workers {
+        // Load the template to base64-encode as ROKO_TEMPLATE_JSON
+        let template_json = load_template_for_deploy(&workdir, template_name)?;
+        let template_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &template_json);
+
+        let mut worker_env = env_vars.clone();
+        worker_env.insert("ROKO_TEMPLATE_JSON".to_string(), template_b64);
+        worker_env.insert("ROKO_CONTROL_PLANE_URL".to_string(), control_url.to_string());
+
+        let service_name = format!("roko-worker-{template_name}");
+        let (_worker_dep, _) = backend
+            .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
+                project_name: config.project.name.clone(),
+                project_id: Some(railway_ctx.project_id.clone()),
+                environment_id: Some(railway_ctx.environment_id.clone()),
+                service_name: service_name.clone(),
+                repo_slug: repo_slug.clone(),
+                branch: branch.clone(),
+                dockerfile_path: "docker/worker.Dockerfile".to_string(),
+                root_directory: ".".to_string(),
+                healthcheck_path: "/health".to_string(),
+                volume_mount_path: "/home/roko/.roko".to_string(),
+                region: deploy_config.default_region.clone(),
+                env_vars: worker_env,
+            })
+            .await?;
+
+        if let Some(url) = _worker_dep.url.as_deref() {
+            println!("{service_name}: {url}");
+        }
+    }
+
+    register_deployment_github_webhooks(
+        &deploy_webhooks,
+        control_url,
+        &config.webhooks.github.secret,
+    )
+    .await?;
+
     Ok(EXIT_SUCCESS)
+}
+
+/// Load an agent template by name and serialize it to JSON bytes for worker env.
+fn load_template_for_deploy(workdir: &Path, name: &str) -> Result<Vec<u8>> {
+    use roko_serve::templates::TemplateRegistry;
+
+    // Try loading from the registry (disk + builtins)
+    let mut registry = TemplateRegistry::new(workdir.to_path_buf());
+    registry.scan_with_builtins();
+
+    let template = registry
+        .get(name)
+        .ok_or_else(|| anyhow!("template '{name}' not found in registry"))?
+        .clone();
+
+    serde_json::to_vec(&template).context("serialize template for worker env")
 }
 
 fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
@@ -9823,6 +10095,10 @@ fn prepare_runtime_hooks(workdir: &Path, quiet: bool) {
 }
 
 fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
+    // Only create .roko/ if the user has expressed intent (roko.toml exists or .roko/ already exists).
+    if !workdir.join("roko.toml").exists() && !workdir.join(".roko").exists() {
+        return Ok(());
+    }
     let layout = RokoLayout::for_project(workdir);
     std::fs::create_dir_all(layout.root())?;
     for dir in layout.top_level_dirs() {
@@ -11100,12 +11376,22 @@ mod tests {
     #[test]
     fn bootstrap_observability_dirs_creates_expected_paths() {
         let tmp = tempfile::tempdir().unwrap();
+        // The guard requires roko.toml or .roko/ to exist before creating dirs.
+        std::fs::write(tmp.path().join("roko.toml"), b"").unwrap();
         bootstrap_observability_dirs(tmp.path()).unwrap();
         let roko = tmp.path().join(".roko");
         assert!(roko.join("traces").is_dir());
         assert!(roko.join("metrics").is_dir());
         assert!(roko.join("runtime").is_dir());
         assert!(roko.join("runs").is_dir());
+    }
+
+    #[test]
+    fn bootstrap_observability_dirs_skips_without_intent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No roko.toml or .roko/ — guard should skip creation.
+        bootstrap_observability_dirs(tmp.path()).unwrap();
+        assert!(!tmp.path().join(".roko").exists());
     }
 
     #[test]

@@ -6,11 +6,14 @@ Container images and local-stack compose file for Roko (§42.a of the Mori parit
 
 | File | Purpose | Checklist |
 | --- | --- | --- |
-| `roko.Dockerfile` | Multi-stage build of the `roko` CLI on a distroless base | §42.1 |
+| `roko.Dockerfile` | Multi-stage build of the `roko` CLI (control plane) | §42.1 |
+| `worker.Dockerfile` | Agent worker image (Claude CLI, Python/OpenAI, curl/Ollama) | §42.1b |
 | `mirage.Dockerfile` | `mirage-rs` (EVM fork simulator) with `binary,chain` features | §42.2 |
 | `gateway.Dockerfile` | Placeholder `roko-gateway` image (TODO until the crate exists) | §42.3 |
 | `docker-compose.yml` | roko + gateway + mirage + prometheus + grafana topology | §42.4 |
 | `prometheus.yml` | Scrape config consumed by the Prometheus service | §42.4 |
+| `entrypoint.sh` | Root-to-user entrypoint: fixes volume perms then drops privileges via gosu | — |
+| `RAILWAY.md` | Railway multi-service deployment guide | — |
 
 Multi-arch build and GHCR publishing live in `.github/workflows/docker-publish.yml` (§42.5, §42.6).
 
@@ -81,10 +84,23 @@ they wait for it to come up.
 
 ## Publishing
 
-Images are published to GHCR by `.github/workflows/docker-publish.yml` on pushes
-to `main` and on `v*` tags, for `linux/amd64` and `linux/arm64`. See the workflow
-for tag conventions (`sha-<short>`, `<branch>`, semver from git tag, and `latest`
-on main).
+Three images are published to GHCR by `.github/workflows/docker-publish.yml` on pushes to `main` and on `v*` tags:
+
+| Image | Dockerfile |
+| --- | --- |
+| `ghcr.io/nunchi-trade/roko:latest` | `roko.Dockerfile` |
+| `ghcr.io/nunchi-trade/roko-worker:latest` | `worker.Dockerfile` |
+| `ghcr.io/nunchi-trade/mirage:latest` | `mirage.Dockerfile` |
+
+Tags: `latest` (main only), `sha-<short>`, `v<version>` (semver from git tag).
+
+## Railway deployment
+
+See [RAILWAY.md](RAILWAY.md) for the full multi-service deployment guide covering:
+- `roko deploy railway` CLI (control plane + mirage + workers)
+- Per-user Railway tokens via REST API
+- Multi-backend workers (Claude, OpenAI, Ollama)
+- Volume persistence and troubleshooting
 
 ## TODO
 

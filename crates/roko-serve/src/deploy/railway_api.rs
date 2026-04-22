@@ -44,10 +44,16 @@ pub struct RailwayDeploySpec {
     pub env_vars: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-struct RailwayProjectContext {
-    project_id: String,
-    environment_id: String,
+/// Resolved Railway project + environment identifiers.
+///
+/// Returned by [`RailwayApiBackend::deploy_roko_app`] so that callers can
+/// persist the IDs for subsequent deploys into the same project.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RailwayProjectContext {
+    /// Railway project ID.
+    pub project_id: String,
+    /// Railway environment ID.
+    pub environment_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -525,7 +531,10 @@ impl RailwayApiBackend {
     /// service instance cannot be configured, variables or volumes cannot be
     /// updated, deployment triggering fails, or the deployment never reaches a
     /// healthy ready state.
-    pub async fn deploy_roko_app(&self, spec: &RailwayDeploySpec) -> Result<Deployment> {
+    pub async fn deploy_roko_app(
+        &self,
+        spec: &RailwayDeploySpec,
+    ) -> Result<(Deployment, RailwayProjectContext)> {
         let project = self
             .ensure_project_context(
                 spec.project_id.as_deref(),
@@ -584,8 +593,10 @@ impl RailwayApiBackend {
             .trigger_deployment(&service_id, &project.environment_id)
             .await?;
 
-        self.wait_for_ready(&deployment_id, &spec.service_name)
-            .await
+        let deployment = self
+            .wait_for_ready(&deployment_id, &spec.service_name)
+            .await?;
+        Ok((deployment, project))
     }
 
     async fn wait_for_ready(&self, deployment_id: &str, service_name: &str) -> Result<Deployment> {

@@ -1,59 +1,215 @@
-# Railway Deployment
+# Railway Deployment Guide
 
-Deploy mirage-rs (with dashboard) to [Railway](https://railway.app).
+Deploy roko as a multi-service Railway project: control plane + optional mirage chain relay + N agent workers.
+
+## Architecture
+
+```
+Railway Project
+├── roko          (control plane — roko serve on :6677)
+├── mirage        (chain relay — optional, --with-mirage)
+└── roko-worker-* (agent workers — one per template, --workers)
+```
+
+All services are deployed from Dockerfiles in this repo via Railway's GitHub integration. The CLI calls Railway's GraphQL API directly (`RailwayApiBackend`, 831 LOC).
 
 ## Prerequisites
 
-```bash
-npm install -g @railway/cli
-railway login
-railway link   # link to your Railway project
-```
+1. A Railway account with a team token (Settings > Tokens > Team Token)
+2. `ANTHROPIC_API_KEY` (or other LLM provider keys) for agent workers
+3. Roko built locally: `cargo build --release -p roko-cli`
 
-## Deploy
+## Quick Start
 
 ```bash
-railway up
+# Set your Railway API token
+export RAILWAY_API_TOKEN="your-token-here"
+
+# Deploy just the control plane
+roko deploy railway
+
+# Deploy control plane + mirage + a code-implementer worker
+roko deploy railway --with-mirage --workers code-implementer
+
+# Deploy with multiple workers
+roko deploy railway --workers code-implementer,pr-review,gate-fixer
 ```
 
-This uses `docker/mirage-demo.Dockerfile` (configured in `railway.toml`).
+## Configuration
 
-## What you get
+### roko.toml
 
-| Endpoint | Description |
-|---|---|
-| `https://<service>.railway.app/dashboard` | Interactive dashboard UI |
-| `https://<service>.railway.app/` | JSON-RPC (eth_blockNumber, etc.) |
-| `https://<service>.railway.app/relay/health` | Relay health check |
-| `https://<service>.railway.app/api/*` | REST API |
+```toml
+[deploy]
+backend = "railway-api"
+railway_api_token = "..."          # or use RAILWAY_API_TOKEN env var
+worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
+# project_id = "..."              # optional: reuse existing project
+# environment_id = "..."          # optional: reuse existing environment
+# default_region = "us-west1"     # optional
+```
 
-The dashboard auto-connects to `window.location.origin` — no manual URL entry needed.
+### Project context persistence
 
-## Environment variables
+After the first deploy, roko writes `.roko/state/railway.json`:
 
-Set these in the Railway UI (Settings > Variables):
+```json
+{
+  "project_id": "abc-123",
+  "environment_id": "def-456"
+}
+```
 
-| Variable | Default | Description |
+Subsequent deploys (including `--workers`) reuse this project automatically. This is how multiple agents deploy into the same Railway project without manual ID passing.
+
+## Images
+
+Published to GHCR on every push to `main` by `.github/workflows/docker-publish.yml`:
+
+| Image | Dockerfile | Purpose |
 |---|---|---|
-| `ETH_RPC_URL` | *(none)* | Upstream Ethereum RPC URL for mainnet fork (required for live blocks) |
-| `PORT` | `8545` | Railway auto-injects this |
-| `RUST_LOG` | `info` | Log level |
-| `MIRAGE_SNAPSHOT_INTERVAL_SECS` | `15` | State snapshot frequency |
+| `ghcr.io/nunchi-trade/roko:latest` | `docker/roko.Dockerfile` | Control plane (`roko serve`) |
+| `ghcr.io/nunchi-trade/roko-worker:latest` | `docker/worker.Dockerfile` | Agent workers (Claude, OpenAI, Ollama) |
+| `ghcr.io/nunchi-trade/mirage:latest` | `docker/mirage.Dockerfile` | Chain relay (EVM fork + agent relay) |
 
-## Railway constraints
+Tags: `latest` (main only), `sha-<short>`, `v<version>` (on version tags).
 
-- **No `VOLUME` directive**: Railway ignores Docker `VOLUME` — use environment-configured paths instead
-- **`PORT` is auto-injected**: Railway sets `PORT` automatically; the image respects it
-- **Cache mount IDs**: Railway requires `--mount=type=cache,id=<name>` format — omit the `id` or use plain names (no service UUIDs)
-- **No persistent disk by default**: State is ephemeral unless you attach a Railway volume
+## Services
 
-## Demo agents
+### roko-serve (control plane)
 
-Open `/dashboard/demo-agents.html` in a browser to spawn 3 demo agents (Sentinel, Strategist, Archivist) that connect to the relay via WebSocket. They auto-respond to messages and stay connected as long as the tab is open.
+- **Dockerfile:** `docker/roko.Dockerfile`
+- **Healthcheck:** `/api/health`
+- **Port:** `6677` (Railway auto-maps via `PORT`)
+- **Volume:** `/workspace/.roko` (state, signals, episodes, learning data)
+- **Endpoints:** ~85 REST routes + SSE + WebSocket
 
-## Dockerfiles
+### mirage (chain relay)
 
-| File | Purpose |
+- **Dockerfile:** `docker/mirage.Dockerfile`
+- **Healthcheck:** `/relay/health`
+- **Port:** `8545`
+- **Volume:** `/workspace/.roko` (chain snapshots)
+- **Entrypoint:** `entrypoint.sh` — starts as root, fixes volume permissions via `gosu`, drops to `mirage` user
+
+### roko-worker-* (agent workers)
+
+- **Dockerfile:** `docker/worker.Dockerfile`
+- **Healthcheck:** `/health`
+- **Port:** `8080`
+- **Runtime:** Claude CLI, Python3 + openai (for OpenAI-compat backends), curl (for Ollama HTTP)
+
+Workers receive their configuration as a base64-encoded `ROKO_TEMPLATE_JSON` env var. The control plane URL is passed via `ROKO_CONTROL_PLANE_URL`.
+
+## Environment Variables
+
+### All services
+
+| Variable | Description |
 |---|---|
-| `docker/mirage.Dockerfile` | Production — no dashboard |
-| `docker/mirage-demo.Dockerfile` | Demo / Railway — includes dashboard |
+| `RUST_LOG` | Log level (default: `info`) |
+| `PORT` | Railway auto-injects this |
+
+### roko-serve
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | LLM provider key (passed through to agents) |
+| `GITHUB_TOKEN` | For GitHub integrations |
+| `ROKO_SERVER_AUTH_TOKEN` | API authentication token |
+
+### Workers
+
+| Variable | Description |
+|---|---|
+| `ROKO_TEMPLATE_JSON` | Base64-encoded agent template (set automatically by deploy) |
+| `ROKO_CONTROL_PLANE_URL` | Control plane URL for callbacks (set automatically) |
+| `ROKO_DEPLOYMENT_ID` | Deployment tracking ID |
+| `ANTHROPIC_API_KEY` | LLM provider key |
+| `OPENAI_API_KEY` | For OpenAI-compat backends |
+
+### mirage
+
+| Variable | Description |
+|---|---|
+| `MIRAGE_STATE_DIR` | Snapshot directory (default: `/workspace/.roko/state`) |
+| `MIRAGE_SNAPSHOT_INTERVAL_SECS` | Snapshot frequency (default: `15`) |
+| `ETH_RPC_URL` | Upstream Ethereum RPC for mainnet fork |
+
+## Per-User Railway Tokens (Dashboard API)
+
+The REST API at `POST /api/deployments` accepts per-request Railway tokens so dashboard users can bring their own:
+
+```bash
+# Via header (preferred)
+curl -X POST https://<roko-serve>/api/deployments \
+  -H 'X-Railway-Token: user-railway-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"template": "pr-review", "params": {"repo": "org/repo", "pr_number": "42"}}'
+
+# Via body field
+curl -X POST https://<roko-serve>/api/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"template": "pr-review", "railway_token": "user-token", "params": {}}'
+```
+
+Priority: `X-Railway-Token` header > `railway_token` body > server config token.
+
+## Available Worker Templates
+
+Built-in templates (always available):
+
+| Template | Role | Description |
+|---|---|---|
+| `code-implementer` | implementer | Writes code, runs tests, iterates until gates pass |
+| `pr-review` | reviewer | Reads diff, leaves inline comments (requires `github` MCP) |
+| `auto-plan` | planner | Generates implementation plans from PRDs |
+| `gate-fixer` | implementer | Diagnoses and fixes gate failures |
+| `doc-lifecycle` | scribe | Transforms notes into structured PRDs |
+| `slack-notify` | operator | Posts deployment notifications (requires `slack` MCP) |
+
+Custom templates: add TOML files to `.roko/templates/` or `templates/`.
+
+## Multi-Backend Workers
+
+Workers support multiple LLM providers via the `provider` field in templates:
+
+```toml
+# .roko/templates/openai-implementer.toml
+name = "openai-implementer"
+description = "Code implementation via OpenAI"
+model = "gpt-4o"
+role = "implementer"
+provider = "openai"
+system_prompt = "..."
+max_turns = 30
+```
+
+Available providers: `claude` (default), `openai`, `ollama`, `gemini`, `perplexity`.
+
+## Railway Constraints
+
+- **No `VOLUME` directive**: Railway ignores Docker `VOLUME` — attach volumes via the Railway UI or API
+- **`PORT` is auto-injected**: Railway sets `PORT` automatically
+- **Volume permissions**: `entrypoint.sh` handles this — starts as root, chowns the volume mount, drops to non-root via `gosu`
+- **Build caching**: Uses BuildKit cache mounts for Cargo registry and target directories
+
+## Troubleshooting
+
+### Snapshot permission denied
+
+If mirage logs show `periodic snapshot failed: Permission denied`, the volume mount permissions are wrong. The `entrypoint.sh` fix handles this automatically for new deploys. For existing deploys:
+
+1. Check `MIRAGE_STATE_DIR` matches the volume mount path
+2. Ensure the container starts as root (no `USER` directive before `ENTRYPOINT`)
+3. `entrypoint.sh` will chown the volume and drop to the `mirage` user
+
+### Workers not connecting
+
+1. Check `ROKO_CONTROL_PLANE_URL` is set and reachable
+2. Check `ROKO_TEMPLATE_JSON` is valid base64 (decode and parse as JSON)
+3. Check worker logs: `roko deploy railway` → Railway dashboard → service logs
+
+### Project ID not found
+
+If `roko deploy railway` fails with "project not found", delete `.roko/state/railway.json` to force a fresh project creation.

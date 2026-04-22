@@ -1,5 +1,8 @@
 # Roko project config — routes through the bardo gateway
 
+[server]
+port = 6677
+
 [agent]
 command = "claude"
 args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"]
@@ -105,6 +108,16 @@ signal_kind = "fswatcher:created"  # only emit on creation, not modification
 recursive = true
 debounce_ms = 500
 
-[webhooks.github]
-secret = "${GITHUB_WEBHOOK_SECRET}"
+[[agents]]
+name = "nunchi-intelligence"
+domain = "general"
+prompt = "You are the Nunchi Intelligence agent, grounded in the roko codebase at /Users/will/dev/nunchi/roko/roko/. You help with research, implementation, and codebase questions."
 enabled = true
+
+[deploy]
+backend = "railway-api"
+worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
+
+[webhooks.github]
+secret = "unused"
+enabled = false
