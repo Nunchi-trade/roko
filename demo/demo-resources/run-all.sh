@@ -29,5 +29,9 @@ run_suite "seed agents" bash "$DIR/bin/roko-demo" seed-agents "$BASE"
 run_suite "dashboard smoke" bash "$DIR/bin/roko-demo" dashboard-smoke "$BASE"
 run_suite "workflow registry" bash "$DIR/bin/roko-demo" list
 
+if [[ "${RUN_OLLAMA_BENCH:-0}" == "1" ]]; then
+    run_suite "ollama coding benchmark" bash "$DIR/coding-agent-benchmarks/run-ollama-bench.sh"
+fi
+
 printf '\n==> Result: %s passed, %s failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

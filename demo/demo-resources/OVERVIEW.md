@@ -35,6 +35,9 @@ coverage.
 | `agent-matchmaking/e2e-test.sh` | 40 automated checks (registration, match, lifecycle, edge cases) | ~15s | 0/1 |
 | `agent-matchmaking/seed-agents.sh` | Register 5 demo agents (rustsmith, ethdev, fullstack, researcher, auditor) | ~2s | 0/1 |
 | `benchmark-flow/demo-benchmark.sh` | SWE-bench proxy controls plus C-factor/learning telemetry proof | ~10s | 0/1 |
+| `coding-agent-benchmarks/run-controls.sh` | Gold/empty SWE-bench proxy controls in the repo or a supplied workdir | ~10s | 0/1 |
+| `coding-agent-benchmarks/run-ollama-bench.sh` | Ollama-backed coding-agent benchmark modes: minimal, context, neuro | varies | 0/1 |
+| `coding-agent-benchmarks/summarize-bench.sh` | Latest benchmark score rows plus learning/neuro artifact counts | ~1s | 0/1 |
 
 Reusable scripts accept an optional base URL argument, defaulting to
 `http://127.0.0.1:6677` or `ROKO_SERVE_URL`.
@@ -50,6 +53,7 @@ Reusable scripts accept an optional base URL argument, defaulting to
 | `research-workflow/` | Research dispatch, artifact listing, PRD enhancement | CLI + API |
 | `full-self-hosting/` | End-to-end: capture → jobs → match → observe | CLI + API |
 | `benchmark-flow/` | Native SWE-bench proxy scoring, prediction export, episodes, efficiency, C-factor | CLI |
+| `coding-agent-benchmarks/` | Ollama coding-agent loops, context injection comparisons, neuro knowledge reuse | CLI + Ollama |
 | `dashboard-quickstart/` | Setup guide for nunchi-dashboard + roko-serve | Docs only |
 | `bin/` | Shared helpers and reusable command wrappers | CLI + API |
 
@@ -67,6 +71,7 @@ These have `pause()` calls for live walkthroughs (press Enter between steps):
 | `full-self-hosting/demo-full-loop.sh` | All 4 acts: capture, jobs, match, system state |
 | `agent-setup/setup-fleet.sh` | Create 3 agents + register for matchmaking |
 | `benchmark-flow/demo-benchmark.sh` | Gold/empty/command benchmark controls and C-factor proof |
+| `coding-agent-benchmarks/run-ollama-bench.sh` | Minimal/context/neuro Ollama coding-agent comparison |
 
 ## Benchmark flow
 
@@ -84,6 +89,32 @@ prediction exports, learning episodes, efficiency events, and C-factor
 snapshots to a reusable workspace. See
 `benchmark-flow/README.md` for the dataset format and real-agent command
 adapter contract.
+
+## Coding-agent benchmark loop
+
+The Ollama coding-agent benchmark loop reuses `roko bench swe` command mode and
+a tracked command adapter:
+
+```bash
+bash demo/demo-resources/coding-agent-benchmarks/run-controls.sh
+bash demo/demo-resources/coding-agent-benchmarks/run-ollama-bench.sh \
+  --model gemma4:26b-moe-nothink
+bash demo/demo-resources/coding-agent-benchmarks/summarize-bench.sh
+```
+
+It compares `minimal`, `context`, and `neuro` prompt paths. Neuro mode queries
+the durable knowledge store and injects matching benchmark knowledge into the
+task prompt. Benchmark results land in `.roko/bench`, learning events in
+`.roko/learn`, and durable knowledge in `.roko/neuro`.
+
+The Ollama benchmark is opt-in for the aggregate runner:
+
+```bash
+RUN_OLLAMA_BENCH=1 bash demo/demo-resources/run-all.sh
+```
+
+See `coding-agent-benchmarks/README.md` for model flags, artifact paths,
+observed local smoke numbers, and troubleshooting.
 
 ## Ollama configuration
 

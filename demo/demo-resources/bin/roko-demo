@@ -38,6 +38,7 @@ Examples:
   demo/demo-resources/bin/roko-demo dashboard-smoke http://127.0.0.1:6677
   demo/demo-resources/bin/roko-demo bench /tmp/roko-bench-demo
   demo/demo-resources/bin/roko-demo run match
+  demo/demo-resources/bin/roko-demo run coding-bench --model gemma4:26b-moe-nothink
 EOF
 }
 
@@ -55,6 +56,9 @@ demo_script_path() {
         research) printf '%s\n' "research-workflow/demo-research.sh" ;;
         full-loop|full) printf '%s\n' "full-self-hosting/demo-full-loop.sh" ;;
         bench|benchmark) printf '%s\n' "benchmark-flow/demo-benchmark.sh" ;;
+        bench-controls|coding-bench-controls) printf '%s\n' "coding-agent-benchmarks/run-controls.sh" ;;
+        coding-bench|ollama-bench) printf '%s\n' "coding-agent-benchmarks/run-ollama-bench.sh" ;;
+        bench-summary|coding-bench-summary) printf '%s\n' "coding-agent-benchmarks/summarize-bench.sh" ;;
         smoke) printf '%s\n' "bin/roko-smoke.sh" ;;
         *) return 1 ;;
     esac
@@ -78,6 +82,10 @@ full-loop          full-self-hosting/demo-full-loop.sh
 full               full-self-hosting/demo-full-loop.sh
 bench              benchmark-flow/demo-benchmark.sh
 benchmark          benchmark-flow/demo-benchmark.sh
+bench-controls     coding-agent-benchmarks/run-controls.sh
+coding-bench       coding-agent-benchmarks/run-ollama-bench.sh
+ollama-bench       coding-agent-benchmarks/run-ollama-bench.sh
+bench-summary      coding-agent-benchmarks/summarize-bench.sh
 smoke              bin/roko-smoke.sh
 EOF
 }

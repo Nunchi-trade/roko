@@ -19,6 +19,7 @@ use roko_learn::cfactor::CFactor;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime, refresh_cfactor_snapshot};
+use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -276,8 +277,9 @@ pub async fn run_swe_bench(options: SweBenchOptions) -> Result<SweBenchReport> {
             &instance_workdir,
         )
         .with_context(|| format!("prepare workdir for {}", instance.instance_id))?;
-        init_git_repo(&instance_workdir)
-            .with_context(|| format!("initialize isolated git repo for {}", instance.instance_id))?;
+        init_git_repo(&instance_workdir).with_context(|| {
+            format!("initialize isolated git repo for {}", instance.instance_id)
+        })?;
 
         let patch = produce_patch(&options, &instance, &predictions)?;
         let format_ok = format_valid(&patch);
@@ -374,6 +376,9 @@ pub async fn run_swe_bench(options: SweBenchOptions) -> Result<SweBenchReport> {
     };
 
     write_report_artifacts(&report, &prediction_exports)?;
+    if options.record_learning {
+        write_neuro_benchmark_insights(&options, &report)?;
+    }
     if !options.keep_workdirs {
         let _ = fs::remove_dir_all(&run_root);
     }
@@ -758,6 +763,111 @@ fn write_report_artifacts(report: &SweBenchReport, predictions: &[Value]) -> Res
             writeln!(f, "{}", serde_json::to_string(prediction)?)?;
         }
     }
+
+    Ok(())
+}
+
+fn write_neuro_benchmark_insights(
+    options: &SweBenchOptions,
+    report: &SweBenchReport,
+) -> Result<()> {
+    let store = KnowledgeStore::for_workdir(&options.workdir);
+    let source_episodes = report
+        .instances
+        .iter()
+        .map(|row| format!("bench-swe-{}:{}", report.run_id, row.instance_id))
+        .collect::<Vec<_>>();
+    let command_label = options
+        .agent_command
+        .as_deref()
+        .unwrap_or_else(|| options.agent_mode.label());
+    let tags = vec![
+        "benchmark".to_string(),
+        "swe-bench-proxy".to_string(),
+        options.agent_mode.label().to_string(),
+    ];
+
+    let mut insight = KnowledgeEntry {
+        id: format!("bench:{}:summary", report.run_id),
+        kind: KnowledgeKind::Insight,
+        source: Some("roko-bench".to_string()),
+        content: format!(
+            "{} resolved {}/{} tasks ({:.1}%) in {} using {}.",
+            report.arena,
+            report.resolved,
+            report.total,
+            report.pass_rate * 100.0,
+            report.dataset,
+            command_label,
+        ),
+        confidence: 0.65 + (report.pass_rate * 0.3),
+        confidence_weight: if report.pass_rate > 0.0 { 1.0 } else { -0.4 },
+        source_episodes: source_episodes.clone(),
+        tags: tags.clone(),
+        source_model: Some(command_label.to_string()),
+        model_generality: 0.35,
+        created_at: Utc::now(),
+        half_life_days: KnowledgeKind::Insight.default_half_life_days(),
+        tier: if report.pass_rate >= 1.0 {
+            KnowledgeTier::Working
+        } else {
+            KnowledgeTier::Transient
+        },
+        confirmation_count: u32::try_from(report.resolved).unwrap_or(u32::MAX),
+        distinct_contexts: report
+            .instances
+            .iter()
+            .map(|row| row.instance_id.clone())
+            .collect(),
+        ..KnowledgeEntry::default()
+    };
+    insight
+        .tags
+        .extend(["pass-rate".to_string(), "scoring".to_string()]);
+    store.add(insight)?;
+
+    let kind = if report.pass_rate >= 1.0 {
+        KnowledgeKind::Heuristic
+    } else {
+        KnowledgeKind::AntiKnowledge
+    };
+    let content = if report.pass_rate >= 1.0 {
+        format!(
+            "For tiny code-repair tasks, {} is a viable local-agent strategy when patches are verified with git apply and task tests.",
+            command_label
+        )
+    } else {
+        format!(
+            "Do not trust {} for this benchmark shape without additional context or a stronger model; it resolved {}/{} tasks.",
+            command_label, report.resolved, report.total
+        )
+    };
+    store.add(KnowledgeEntry {
+        id: format!("bench:{}:{}", report.run_id, kind.as_str()),
+        kind,
+        source: Some("roko-bench".to_string()),
+        content,
+        confidence: if report.pass_rate >= 1.0 { 0.86 } else { 0.78 },
+        confidence_weight: if report.pass_rate >= 1.0 { 1.0 } else { -1.0 },
+        source_episodes,
+        tags,
+        source_model: Some(command_label.to_string()),
+        model_generality: 0.35,
+        created_at: Utc::now(),
+        half_life_days: kind.default_half_life_days(),
+        tier: if report.pass_rate >= 1.0 {
+            KnowledgeTier::Consolidated
+        } else {
+            KnowledgeTier::Working
+        },
+        confirmation_count: u32::try_from(report.resolved).unwrap_or(u32::MAX),
+        distinct_contexts: report
+            .instances
+            .iter()
+            .map(|row| row.instance_id.clone())
+            .collect(),
+        ..KnowledgeEntry::default()
+    })?;
 
     Ok(())
 }

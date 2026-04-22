@@ -58,8 +58,9 @@ when you want those writes confined to a disposable workspace.
 | `seed-agents [base-url]` | Register the reusable five-agent demo fleet. |
 | `dashboard-smoke [base-url]` | Verify dashboard-facing APIs on an already-running serve. |
 | `verify-local [port]` | Start disposable serve, seed agents, and run `dashboard-smoke`. |
+| `bench [workdir]` | Run the SWE-bench proxy gold/empty/command controls and C-factor proof. |
 | `run <name> [args...]` | Execute an existing demo script by short name. |
-| `all [base-url]` | Seed agents, then run the PRD, research, and full-loop demos. |
+| `all [base-url]` | Seed agents, then run the benchmark, PRD, research, and full-loop demos. |
 
 ## Wrapped Demo Names
 
@@ -76,6 +77,9 @@ demo/demo-resources/bin/roko-demo run fleet
 demo/demo-resources/bin/roko-demo run full
 demo/demo-resources/bin/roko-demo run smoke
 demo/demo-resources/bin/roko-demo run bench
+demo/demo-resources/bin/roko-demo run bench-controls --workdir /tmp/roko-bench-controls
+demo/demo-resources/bin/roko-demo run coding-bench --model gemma4:26b-moe-nothink
+demo/demo-resources/bin/roko-demo run bench-summary --workdir /tmp/roko-bench-controls
 ```
 
 Some wrapped scripts remain interactive or require extra service/API-key setup.
@@ -105,6 +109,27 @@ The script validates the latest score rows and C-factor movement, then prints a
 `roko status --cfactor` snapshot. Use `benchmark-flow/README.md` for the custom
 dataset JSONL schema, artifact paths, and official SWE-bench export notes.
 
+## Coding-Agent Benchmarks
+
+`coding-agent-benchmarks/` turns command mode into a local coding-agent loop.
+The adapter copies the benchmark repo, configures `roko run` for an Ollama
+model, and prints the resulting `git diff` for scoring.
+
+```bash
+demo/demo-resources/bin/roko-demo run bench-controls --workdir /tmp/roko-bench-controls
+demo/demo-resources/bin/roko-demo run coding-bench \
+  --model gemma4:26b-moe-nothink \
+  --workdir /tmp/roko-coding-bench \
+  --knowledge-workdir .
+demo/demo-resources/bin/roko-demo run bench-summary --workdir /tmp/roko-coding-bench
+```
+
+`bench-controls` validates gold `2/2` and empty `0/2` before model results are
+interpreted. `coding-bench` compares `minimal`, `context`, and `neuro` modes by
+default; pass `--mode minimal` or another mode to run only one slice. Set
+`RUN_OLLAMA_BENCH=1` when you want `run-all.sh` to include the Ollama-backed
+benchmark.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -113,6 +138,10 @@ dataset JSONL schema, artifact paths, and official SWE-bench export notes.
 | `PYTHON` | `python3` | Python executable for JSON parsing and HTTP calls. |
 | `ROKO_SERVE_URL` | `http://127.0.0.1:6677` | Base URL for HTTP commands. |
 | `HTTP_TIMEOUT_SECS` | `20` | Per-request timeout for HTTP helpers. |
+| `BENCH_MODEL` | `gemma4:26b-moe-nothink` | Ollama model used by `coding-bench`. |
+| `BENCH_BATCH_SIZE` | `2` | Number of SWE-bench proxy instances to score. |
+| `ROKO_OLLAMA_MODEL` | `llama3.2:latest` | Fallback model for direct adapter calls. |
+| `ROKO_KNOWLEDGE_WORKDIR` | repo root | Knowledge store queried by the adapter in neuro mode. |
 
 ## Dashboard Smoke Coverage
 
