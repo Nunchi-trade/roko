@@ -754,6 +754,16 @@ impl SmoothedValue {
 // TuiState
 // ---------------------------------------------------------------------------
 
+/// Which field has focus in the job creation form.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobFormField {
+    #[default]
+    Title,
+    Type,
+    Priority,
+    Description,
+}
+
 /// Complete TUI state, matching Mori's `RunState` field set.
 #[derive(Debug, Clone)]
 pub struct TuiState {
@@ -994,6 +1004,32 @@ pub struct TuiState {
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,
 
+    // -- marketplace / atelier --
+    /// Jobs loaded from .roko/jobs/ for the Marketplace tab.
+    pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
+    /// PRD summaries for the Atelier tab.
+    pub atelier_prds: Vec<roko_core::PrdSummary>,
+    /// Per-slug task lists for the Atelier tab.
+    pub atelier_tasks_by_slug: HashMap<String, Vec<roko_core::job::TaskSummary>>,
+    /// Whether the job creation form is in editing mode.
+    pub job_form_editing: bool,
+    /// Job form: title field.
+    pub job_form_title: String,
+    /// Job form: type field.
+    pub job_form_type: String,
+    /// Job form: priority field.
+    pub job_form_priority: String,
+    /// Job form: description field.
+    pub job_form_description: String,
+    /// Job form: currently focused field.
+    pub job_form_focus: JobFormField,
+    /// Whether the job assign inline prompt is active.
+    pub job_assign_editing: bool,
+    /// Text buffer for the assign-agent prompt.
+    pub job_assign_buffer: String,
+    /// Per-job progress entries (job_id → progress).
+    pub job_progress: HashMap<String, roko_core::JobProgressEntry>,
+
     cpu_pct_smoothed: SmoothedValue,
     token_rate_smoothed: SmoothedValue,
     cost_rate_smoothed: SmoothedValue,
@@ -1121,6 +1157,19 @@ impl Default for TuiState {
             active_task_summaries: Vec::new(),
             gate_result_summaries: Vec::new(),
             episodes_cache: Vec::new(),
+
+            marketplace_jobs: Vec::new(),
+            atelier_prds: Vec::new(),
+            atelier_tasks_by_slug: HashMap::new(),
+            job_form_editing: false,
+            job_form_title: String::new(),
+            job_form_type: String::new(),
+            job_form_priority: String::new(),
+            job_form_description: String::new(),
+            job_form_focus: JobFormField::default(),
+            job_assign_editing: false,
+            job_assign_buffer: String::new(),
+            job_progress: HashMap::new(),
 
             cpu_pct_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
             token_rate_smoothed: SmoothedValue::new(METRIC_EMA_ALPHA),
@@ -1547,6 +1596,11 @@ impl TuiState {
         self.active_task_summaries = data.active_tasks.clone();
         self.gate_result_summaries = data.gate_results.clone();
         self.episodes_cache = data.episodes().to_vec();
+
+        // -- marketplace / atelier --
+        self.marketplace_jobs = data.marketplace_jobs.clone();
+        self.atelier_prds = data.atelier_prds.clone();
+        self.atelier_tasks_by_slug = data.atelier_tasks_by_slug.clone();
     }
 
     /// Populate state from a connected-mode `DashboardSnapshot`.

@@ -71,10 +71,10 @@ pub(crate) fn render_parallel_pool(
             let ctx_ratio = (agent.input_tokens as f64 / ctx_limit as f64).clamp(0.0, 1.0);
 
             Row::new(vec![
-                Cell::from(truncate(&agent.id, 14)),
-                Cell::from(truncate(&agent.role, 12)),
-                Cell::from(truncate(&agent.model, 14)),
-                Cell::from(truncate(&current_task, 24)),
+                Cell::from(truncate(&agent.id, 12)),
+                Cell::from(truncate(&agent.role, 10)),
+                Cell::from(truncate(&agent.model, 12)),
+                Cell::from(truncate(&current_task, 18)),
                 Cell::from(render_status_label(status, theme)),
                 Cell::from(render_context_gauge(
                     agent.input_tokens,
@@ -90,12 +90,12 @@ pub(crate) fn render_parallel_pool(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
             Constraint::Length(12),
-            Constraint::Length(14),
-            Constraint::Min(18),
             Constraint::Length(10),
-            Constraint::Min(22),
+            Constraint::Length(12),
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Min(14),
         ],
     )
     .header(
@@ -146,7 +146,7 @@ fn render_context_gauge(
     ctx_ratio: f64,
     theme: &Theme,
 ) -> Line<'static> {
-    let gauge_width = 8usize;
+    let gauge_width = 6usize;
     let filled = (ctx_ratio * gauge_width as f64).round() as usize;
     let empty = gauge_width.saturating_sub(filled);
     let fill_color = if ctx_ratio >= 0.8 {

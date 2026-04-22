@@ -390,6 +390,12 @@ pub struct DashboardData {
     pub event_log: Vec<EventLogEntry>,
     /// Whole-file reload cursor over `.roko/state/events.json`.
     event_log_cursor: EventLogCursor,
+    /// Marketplace jobs from `.roko/jobs/`.
+    pub marketplace_jobs: Vec<roko_core::MarketplaceJob>,
+    /// PRD summaries from `.roko/prd/`.
+    pub atelier_prds: Vec<roko_core::PrdSummary>,
+    /// Per-slug task lists for Atelier.
+    pub atelier_tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
 }
 
 /// Derived executor snapshot fields used by TUI orchestration chrome.
@@ -499,6 +505,8 @@ impl DashboardData {
             },
         );
 
+        let (atelier_prds, atelier_tasks_by_slug) = scan_atelier_prds(&roko_dir);
+
         Self {
             root,
             generation,
@@ -538,6 +546,9 @@ impl DashboardData {
             git_diff_is_staged,
             event_log,
             event_log_cursor,
+            marketplace_jobs: scan_marketplace_jobs(&roko_dir),
+            atelier_prds,
+            atelier_tasks_by_slug,
         }
     }
 
@@ -675,6 +686,12 @@ impl DashboardData {
             );
         }
 
+        // Refresh marketplace jobs + PRDs each tick.
+        self.marketplace_jobs = scan_marketplace_jobs(&roko_dir);
+        let (prds, tasks_by_slug) = scan_atelier_prds(&roko_dir);
+        self.atelier_prds = prds;
+        self.atelier_tasks_by_slug = tasks_by_slug;
+
         if generation_changed {
             self.generation = self.generation.saturating_add(1);
         }
@@ -744,6 +761,164 @@ impl DashboardData {
             &self.episodes,
         )
     }
+}
+
+/// Scan `.roko/jobs/` for marketplace job JSON files.
+fn scan_marketplace_jobs(roko_dir: &Path) -> Vec<roko_core::MarketplaceJob> {
+    let dir = roko_dir.join("jobs");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut jobs: Vec<roko_core::MarketplaceJob> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "json")
+        })
+        .filter_map(|e| {
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data).ok()?;
+            if job.id.is_empty() {
+                job.id = e
+                    .path()
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            Some(job)
+        })
+        .collect();
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    jobs
+}
+
+/// Scan `.roko/prd/` for PRD markdown files, then correlate with plan task
+/// files to populate task counts and per-slug task lists.
+fn scan_atelier_prds(
+    roko_dir: &Path,
+) -> (
+    Vec<roko_core::PrdSummary>,
+    std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>>,
+) {
+    let dir = roko_dir.join("prd");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (Vec::new(), std::collections::HashMap::new());
+    };
+    let mut prds: Vec<roko_core::PrdSummary> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "md")
+        })
+        .filter_map(|e| {
+            let slug = e
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let data = std::fs::read_to_string(e.path()).ok()?;
+            // Extract title from first markdown heading.
+            let title = data
+                .lines()
+                .find(|l| l.starts_with("# "))
+                .map(|l| l.trim_start_matches("# ").trim().to_string())
+                .unwrap_or_else(|| slug.clone());
+            // Detect status from frontmatter or content.
+            let status = if data.contains("status: published") || data.contains("Status: Published")
+            {
+                "published"
+            } else if data.contains("status: planned") || data.contains("Status: Planned") {
+                "planned"
+            } else if data.contains("status: draft") || data.contains("Status: Draft") {
+                "draft"
+            } else {
+                "idea"
+            };
+            Some(roko_core::PrdSummary {
+                slug,
+                title,
+                status: status.to_string(),
+                ..Default::default()
+            })
+        })
+        .collect();
+    prds.sort_by(|a, b| a.slug.cmp(&b.slug));
+
+    // Scan plan directories for tasks.toml files and correlate with PRD slugs.
+    let mut tasks_by_slug: std::collections::HashMap<String, Vec<roko_core::job::TaskSummary>> =
+        std::collections::HashMap::new();
+
+    // Workspace root is one level up from .roko/
+    let workspace_root = roko_dir.parent().unwrap_or(roko_dir);
+    let plan_dirs: Vec<PathBuf> = [
+        workspace_root.join("plans"),
+        roko_dir.join("plans"),
+    ]
+    .into_iter()
+    .filter(|d| d.is_dir())
+    .collect();
+
+    for plan_dir in &plan_dirs {
+        let Ok(plan_entries) = std::fs::read_dir(plan_dir) else {
+            continue;
+        };
+        for entry in plan_entries.filter_map(|e| e.ok()) {
+            let tasks_path = entry.path().join("tasks.toml");
+            if !tasks_path.is_file() {
+                continue;
+            }
+            let Ok(tasks_file) = TasksFile::parse(&tasks_path) else {
+                continue;
+            };
+            let plan_name = entry
+                .path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // Match plan to PRD: check if any PRD slug is a substring of the plan name,
+            // or the plan name contains the slug.
+            for prd in &mut prds {
+                let slug_lower = prd.slug.to_lowercase();
+                let plan_lower = plan_name.to_lowercase();
+                if plan_lower.contains(&slug_lower) || slug_lower.contains(&plan_lower) {
+                    prd.plan_count += 1;
+                    prd.task_total += tasks_file.tasks.len();
+                    let mut done = 0usize;
+                    let mut failed = 0usize;
+                    let mut task_summaries = Vec::new();
+                    for task in &tasks_file.tasks {
+                        match task.status.as_str() {
+                            "done" | "completed" | "passed" => done += 1,
+                            "failed" | "error" => failed += 1,
+                            _ => {}
+                        }
+                        task_summaries.push(roko_core::job::TaskSummary {
+                            id: task.id.clone(),
+                            title: task.title.clone(),
+                            status: task.status.clone(),
+                            agent: String::new(),
+                        });
+                    }
+                    prd.task_done += done;
+                    prd.task_failed += failed;
+                    tasks_by_slug
+                        .entry(prd.slug.clone())
+                        .or_default()
+                        .extend(task_summaries);
+                }
+            }
+        }
+    }
+
+    (prds, tasks_by_slug)
 }
 
 fn load_dashboard_git_diff(root: &Path) -> (String, bool) {
