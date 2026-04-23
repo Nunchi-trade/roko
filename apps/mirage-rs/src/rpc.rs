@@ -1180,7 +1180,7 @@ fn build_rpc_module(
                 let n = state.fork.local_block_number;
                 let b = state.fork.blocks_by_number.get(&n).map(|blk| {
                     let txs = txs_at_block_number(&state.fork.receipts, n);
-                    block_json_with_txs(blk, &txs)
+                    block_json_with_txs(blk, &txs, full_transactions, Some(&state.fork))
                 });
                 (b, Some(n))
             } else {
@@ -1188,7 +1188,7 @@ fn build_rpc_module(
                 let b = n.and_then(|nn| {
                     state.fork.blocks_by_number.get(&nn).map(|blk| {
                         let txs = txs_at_block_number(&state.fork.receipts, nn);
-                        block_json_with_txs(blk, &txs)
+                        block_json_with_txs(blk, &txs, full_transactions, Some(&state.fork))
                     })
                 });
                 (b, n)
@@ -1212,7 +1212,15 @@ fn build_rpc_module(
                     keccak256((n - 1).to_be_bytes())
                 };
                 let txs = txs_at_block_number(&state.fork.receipts, n);
-                let synth = synthetic_block_json(hash, n, state.fork.timestamp, parent_hash, &txs);
+                let synth = synthetic_block_json(
+                    hash,
+                    n,
+                    state.fork.timestamp,
+                    parent_hash,
+                    &txs,
+                    full_transactions,
+                    Some(&state.fork),
+                );
                 return Ok::<_, ErrorObjectOwned>(Some(synth));
             }
         }
@@ -1247,7 +1255,7 @@ fn build_rpc_module(
             //     to_be or to_le variant depending on the seal path).
             if let Some(blk) = state.fork.blocks_by_hash.get(&hash) {
                 let txs = txs_at_block_number(&state.fork.receipts, blk.number);
-                Some(block_json_with_txs(blk, &txs))
+                Some(block_json_with_txs(blk, &txs, full, Some(&state.fork)))
             } else {
                 // (b) Scan blocks_by_number for a block whose number
                 //     produces the queried canonical hash.
@@ -1255,7 +1263,7 @@ fn build_rpc_module(
                 for (n, blk) in state.fork.blocks_by_number.iter() {
                     if keccak256(n.to_be_bytes()) == hash {
                         let txs = txs_at_block_number(&state.fork.receipts, *n);
-                        found = Some(block_json_with_txs(blk, &txs));
+                        found = Some(block_json_with_txs(blk, &txs, full, Some(&state.fork)));
                         break;
                     }
                 }
@@ -1283,6 +1291,8 @@ fn build_rpc_module(
                                 state.fork.timestamp,
                                 parent_hash,
                                 &txs,
+                                full,
+                                Some(&state.fork),
                             ));
                             break;
                         }
@@ -3215,7 +3225,7 @@ fn transaction_json(tx: &LocalTransaction) -> serde_json::Value {
 
 #[allow(dead_code)]
 fn block_json(block: &LocalBlock) -> serde_json::Value {
-    block_json_with_txs(block, &block.transactions)
+    block_json_with_txs(block, &block.transactions, false, None)
 }
 
 /// Collect all transaction hashes whose receipts say they landed in
@@ -3234,6 +3244,80 @@ fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::L
     out
 }
 
+/// Render the `transactions` field of a block response.
+///
+/// When the JSON-RPC caller passes `fullTransactions=false`, the field is an
+/// array of tx hash strings. When `true`, it must be an array of full tx
+/// objects. Earlier builds ignored the flag entirely and always returned
+/// hashes, which tripped Ponder's consistency check (`transaction.blockHash`
+/// read on a string gives `undefined`, so every tx looked like it belonged
+/// to a different block and sync aborted with
+/// "Detected inconsistent RPC responses").
+///
+/// Full-tx fields are reconstructed from `fork.transactions` (for user-land
+/// fields: from / to / value / gas / input / nonce) and the enclosing block
+/// (for blockHash / blockNumber / transactionIndex — which is what Ponder's
+/// assertion actually checks). Any hash we can't resolve falls back to a
+/// stub tx object with the assertion-critical fields populated and the rest
+/// defaulted, so downstream consumers still see a well-shaped object.
+fn render_transactions_json(
+    transactions: &[B256],
+    full: bool,
+    block_hash: B256,
+    block_number: u64,
+    fork: Option<&crate::fork::ForkState>,
+) -> serde_json::Value {
+    if !full {
+        return serde_json::to_value(transactions).unwrap_or(serde_json::Value::Array(vec![]));
+    }
+    let zero_addr = "0x0000000000000000000000000000000000000000";
+    let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    let block_hash_hex = format!("{block_hash}");
+    let block_number_hex = hex_u64(block_number);
+    let mut arr: Vec<serde_json::Value> = Vec::with_capacity(transactions.len());
+    for (idx, tx_hash) in transactions.iter().enumerate() {
+        let tx = fork.and_then(|f| f.transactions.get(tx_hash));
+        let from_hex = tx
+            .map(|t| format!("{}", t.from))
+            .unwrap_or_else(|| zero_addr.to_string());
+        let to_val = match tx.and_then(|t| t.to) {
+            Some(addr) => serde_json::Value::String(format!("{addr}")),
+            None => serde_json::Value::Null,
+        };
+        let value_hex = tx
+            .map(|t| format!("0x{:x}", t.value))
+            .unwrap_or_else(|| "0x0".to_string());
+        let gas_hex = tx
+            .map(|t| hex_u64(t.gas))
+            .unwrap_or_else(|| "0x0".to_string());
+        let nonce_hex = tx
+            .map(|t| hex_u64(t.nonce))
+            .unwrap_or_else(|| "0x0".to_string());
+        let input_hex = tx
+            .map(|t| format!("0x{}", hex::encode(&t.input)))
+            .unwrap_or_else(|| "0x".to_string());
+        arr.push(serde_json::json!({
+            "hash": format!("{tx_hash}"),
+            "blockHash": block_hash_hex,
+            "blockNumber": block_number_hex,
+            "transactionIndex": format!("0x{idx:x}"),
+            "from": from_hex,
+            "to": to_val,
+            "value": value_hex,
+            "gas": gas_hex,
+            "gasPrice": "0x1",
+            "nonce": nonce_hex,
+            "input": input_hex,
+            "type": "0x0",
+            "chainId": "0x1",
+            "v": "0x0",
+            "r": zero_hash,
+            "s": zero_hash,
+        }));
+    }
+    serde_json::Value::Array(arr)
+}
+
 /// Render a block with a caller-supplied transaction list.
 ///
 /// Used by the RPC handlers to substitute the authoritative tx list from
@@ -3241,7 +3325,12 @@ fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::L
 /// with an empty vec even when `execute_tx` previously populated it, and
 /// Ponder's sanity check (`'log.transactionHash' not found in 'block.transactions'`)
 /// triggers "Detected inconsistent RPC responses" and aborts sync.
-fn block_json_with_txs(block: &LocalBlock, transactions: &[B256]) -> serde_json::Value {
+fn block_json_with_txs(
+    block: &LocalBlock,
+    transactions: &[B256],
+    full: bool,
+    fork: Option<&crate::fork::ForkState>,
+) -> serde_json::Value {
     // Normalise hash output. Two code paths store block hashes with
     // DIFFERENT byte orders:
     //   - fork.rs::execute_tx       → keccak256(n.to_be_bytes())
@@ -3278,7 +3367,13 @@ fn block_json_with_txs(block: &LocalBlock, transactions: &[B256]) -> serde_json:
         "size": "0x3e8",
         "totalDifficulty": "0x0",
         "uncles": serde_json::Value::Array(vec![]),
-        "transactions": transactions,
+        "transactions": render_transactions_json(
+            transactions,
+            full,
+            canonical_hash,
+            block.number,
+            fork,
+        ),
     })
 }
 
@@ -3294,6 +3389,8 @@ fn synthetic_block_json(
     timestamp: u64,
     parent_hash: B256,
     transactions: &[B256],
+    full: bool,
+    fork: Option<&crate::fork::ForkState>,
 ) -> serde_json::Value {
     serde_json::json!({
         "hash": hash,
@@ -3315,7 +3412,7 @@ fn synthetic_block_json(
         "baseFeePerGas": "0x1",
         "size": "0x3e8",
         "totalDifficulty": "0x0",
-        "transactions": transactions,
+        "transactions": render_transactions_json(transactions, full, hash, number, fork),
         "uncles": serde_json::Value::Array(vec![]),
     })
 }
