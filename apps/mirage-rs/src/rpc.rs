@@ -3275,6 +3275,9 @@ fn block_json_with_txs(block: &LocalBlock, transactions: &[B256]) -> serde_json:
         "mixHash": format!("{}", block.prev_randao),
         "nonce": "0x0000000000000000",
         "baseFeePerGas": format!("0x{:x}", block.base_fee_per_gas),
+        "size": "0x3e8",
+        "totalDifficulty": "0x0",
+        "uncles": serde_json::Value::Array(vec![]),
         "transactions": transactions,
     })
 }
@@ -3310,6 +3313,8 @@ fn synthetic_block_json(
         "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "nonce": "0x0000000000000000",
         "baseFeePerGas": "0x1",
+        "size": "0x3e8",
+        "totalDifficulty": "0x0",
         "transactions": transactions,
         "uncles": serde_json::Value::Array(vec![]),
     })
