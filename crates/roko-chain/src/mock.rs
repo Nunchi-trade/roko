@@ -38,6 +38,8 @@ struct MockChainState {
     call_output: Vec<u8>,
     call_gas_used: u64,
     chain_id: u64,
+    /// Per-address native token balances.
+    balances: HashMap<String, u128>,
 }
 
 /// In-memory [`ChainClient`] backed by pre-seeded block/receipt/log data.
@@ -134,6 +136,14 @@ impl MockChainClient {
         self.state.write().logs.push(log);
     }
 
+    /// Set the native token balance for an address.
+    pub fn set_balance(&self, address: &str, amount: u128) {
+        self.state
+            .write()
+            .balances
+            .insert(address.to_string(), amount);
+    }
+
     /// Seed a storage slot. `block == None` = latest.
     pub fn insert_storage(
         &self,
@@ -222,6 +232,11 @@ impl ChainClient for MockChainClient {
             output: s.call_output.clone(),
             gas_used: s.call_gas_used,
         })
+    }
+
+    async fn get_balance(&self, address: &str, _block: Option<BlockNumber>) -> ChainResult<u128> {
+        let state = self.state.read();
+        Ok(*state.balances.get(address).unwrap_or(&0))
     }
 
     async fn chain_id(&self) -> ChainResult<u64> {
@@ -405,6 +420,9 @@ pub fn paired_mocks(balance: u128) -> (MockChainClient, MockChainWallet) {
     let client = MockChainClient::local();
     let wallet = MockChainWallet::funded(balance);
     wallet.pair_with(&client);
+    // Seed the wallet address balance on the client so `get_balance` works.
+    let addr = wallet.state.read().address.clone();
+    client.set_balance(&addr, balance);
     (client, wallet)
 }
 

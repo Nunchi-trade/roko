@@ -92,18 +92,33 @@ pub struct VerdictsAggregator {
 
 impl VerdictsAggregator {
     /// Open the workspace substrate and prepare a verdict reader.
+    ///
+    /// Safe to call from inside a tokio runtime — spawns a dedicated thread
+    /// for `block_on()` when `Handle::try_current()` detects a live runtime.
     pub fn open(workdir: impl AsRef<Path>) -> Result<Self> {
-        let runtime = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("build verdict reader runtime")?;
-        let substrate = runtime
-            .block_on(FileSubstrate::open(workdir.as_ref().join(".roko")))
-            .context("open verdict substrate")?;
+        let workdir = workdir.as_ref().to_path_buf();
+        let load = move || -> Result<(Runtime, Arc<FileSubstrate>)> {
+            let runtime = Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("build verdict reader runtime")?;
+            let substrate = runtime
+                .block_on(FileSubstrate::open(workdir.join(".roko")))
+                .context("open verdict substrate")?;
+            Ok((runtime, Arc::new(substrate)))
+        };
+
+        let (runtime, substrate) = if tokio::runtime::Handle::try_current().is_ok() {
+            std::thread::spawn(load)
+                .join()
+                .map_err(|_| anyhow::anyhow!("verdict loader thread panicked"))??
+        } else {
+            load()?
+        };
 
         Ok(Self {
             runtime,
-            substrate: Arc::new(substrate),
+            substrate,
             cursor: SubstrateCursor::default(),
             per_gate: HashMap::new(),
             recent_failures: VecDeque::new(),
@@ -111,13 +126,27 @@ impl VerdictsAggregator {
     }
 
     /// Advance the reader and fold any newly observed verdict signals.
+    ///
+    /// Safe to call from inside a tokio runtime — offloads `block_on()` to
+    /// a dedicated thread when necessary.
     pub fn tick(&mut self) -> Result<()> {
         let now = Utc::now();
         let ctx = Context::now();
-        let mut verdicts = self
-            .runtime
-            .block_on(self.substrate.query(&self.cursor.query(), &ctx))
-            .context("query verdict substrate")?;
+        let query = self.cursor.query();
+        let substrate = Arc::clone(&self.substrate);
+        let mut verdicts = if tokio::runtime::Handle::try_current().is_ok() {
+            // We're inside a tokio runtime — cannot call block_on on our
+            // current-thread runtime here, so offload to a thread.
+            let rt_handle = self.runtime.handle().clone();
+            std::thread::spawn(move || rt_handle.block_on(substrate.query(&query, &ctx)))
+                .join()
+                .map_err(|_| anyhow::anyhow!("verdict tick thread panicked"))?
+                .context("query verdict substrate")?
+        } else {
+            self.runtime
+                .block_on(substrate.query(&query, &ctx))
+                .context("query verdict substrate")?
+        };
         verdicts.sort_by(|lhs, rhs| {
             lhs.created_at_ms
                 .cmp(&rhs.created_at_ms)

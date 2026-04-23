@@ -406,15 +406,13 @@ impl UpstreamRpc {
             } else {
                 B256::ZERO
             };
-            return Ok(Some(json!({
-                "hash": hash,
-                "number": format!("0x{number:x}"),
-                "timestamp": format!("0x{:x}", mock.timestamp),
-                "parentHash": format!("{parent_hash}"),
-                "gasLimit": "0x1c9c380",
-                "gasUsed": "0x0",
-                "transactions": transactions,
-            })));
+            return Ok(Some(Self::mock_block_json(
+                hash,
+                number,
+                mock.timestamp,
+                parent_hash,
+                transactions,
+            )));
         }
 
         let response = self.call(
@@ -425,6 +423,75 @@ impl UpstreamRpc {
             None
         } else {
             Some(response)
+        })
+    }
+
+    /// Build an Ethereum-shaped block JSON for the mock RPC path.
+    ///
+    /// Foundry's `forge script` / Cannon's router-build path both call
+    /// `eth_getBlockByNumber` during gas estimation and fail closed when
+    /// standard fields like `sha3Uncles`, `stateRoot`, `receiptsRoot`,
+    /// `transactionsRoot`, `logsBloom`, `miner`, `difficulty`, `extraData`,
+    /// `size`, `mixHash`, `nonce`, `baseFeePerGas`, and `uncles` are missing
+    /// from the response. The previous implementation returned only seven
+    /// keys, which broke `forge script --broadcast` on mirage-devnet even
+    /// though the chain itself behaves like Anvil for every other method.
+    ///
+    /// The well-known constants used here match an empty Ethereum block:
+    /// - `sha3Uncles` is keccak256(rlp(empty uncles list))
+    /// - `transactionsRoot` / `receiptsRoot` are the empty Merkle-Patricia
+    ///   trie root
+    ///
+    /// These never change and don't depend on runtime state.
+    fn mock_block_json(
+        hash: B256,
+        number: u64,
+        timestamp: u64,
+        parent_hash: B256,
+        transactions: Vec<Value>,
+    ) -> Value {
+        // Empty-uncles keccak + empty-trie root — invariant across all Eth chains.
+        const EMPTY_UNCLES_HASH: &str =
+            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
+        const EMPTY_TRIE_ROOT: &str =
+            "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421";
+        // 256-byte zero logs bloom → exactly 512 hex chars + "0x" prefix.
+        // 8 chunks of 64 zeros = 512. Previous revision used 6x80+16 = 496,
+        // which triggered alloy's deserializer to reject the block shape.
+        const ZERO_LOGS_BLOOM: &str = concat!(
+            "0x",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+
+        json!({
+            "hash": hash,
+            "number": format!("0x{number:x}"),
+            "timestamp": format!("0x{:x}", timestamp),
+            "parentHash": format!("{parent_hash}"),
+            "sha3Uncles": EMPTY_UNCLES_HASH,
+            "logsBloom": ZERO_LOGS_BLOOM,
+            "transactionsRoot": EMPTY_TRIE_ROOT,
+            "stateRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "receiptsRoot": EMPTY_TRIE_ROOT,
+            "miner": "0x0000000000000000000000000000000000000000",
+            "difficulty": "0x0",
+            "totalDifficulty": "0x0",
+            "extraData": "0x",
+            "size": "0x3e8",
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x0",
+            "transactions": transactions,
+            "uncles": [],
+            "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "nonce": "0x0000000000000000",
+            "baseFeePerGas": "0x0",
         })
     }
 
@@ -459,6 +526,35 @@ impl UpstreamRpc {
     pub fn get_block_by_hash(&self, hash: B256, full: bool) -> Result<Option<Value>> {
         if self.http_url.is_none() {
             self.maybe_delay_mock();
+            // Look the hash up against the mock's block_hashes map. If the
+            // hash matches a known block, return the same shape as
+            // get_block_by_number so Foundry's hash-based fallbacks work.
+            // Returning None here previously broke `forge script` flows that
+            // re-query by hash after broadcasting.
+            let mock = self.mock.read();
+            if let Some(number) = mock
+                .block_hashes
+                .iter()
+                .find_map(|(n, h)| (*h == hash).then_some(*n))
+            {
+                let transactions = mock
+                    .block_transactions
+                    .get(&number)
+                    .cloned()
+                    .unwrap_or_default();
+                let parent_hash = if number > 0 {
+                    keccak256((number - 1).to_le_bytes())
+                } else {
+                    B256::ZERO
+                };
+                return Ok(Some(Self::mock_block_json(
+                    hash,
+                    number,
+                    mock.timestamp,
+                    parent_hash,
+                    transactions,
+                )));
+            }
             return Ok(None);
         }
 

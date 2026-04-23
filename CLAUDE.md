@@ -41,9 +41,9 @@ control plane, per-agent sidecar, and interactive TUI:
 | PRD auto-plan trigger | **Wired** | roko-serve `prd_publish_subscriber` |
 | HDC fingerprint per-episode | **Wired** | Episode `hdc_fingerprint` field, computed + stored |
 | Playbook store queries | **Wired** | Queried at dispatch time → system prompt |
-| VCG auction in composition | **Wired** | `vcg_allocate` called from prompt.rs |
+| VCG auction in composition | **Partial** | `vcg_allocate` built + exported but greedy path dominates at runtime |
 | Context bidders (Neuro/Task/Research) | **Wired** | `AttentionBidder` variants in orchestrate.rs |
-| Safety contracts enforcement | **Wired** | `AgentContract` in `SafetyLayer::authorize_call_with_taint` |
+| Safety contracts enforcement | **Partial** | `AgentContract` wired but falls back to permissive default when YAML missing |
 | TUI file watcher | **Wired** | `notify::RecommendedWatcher` in `tui/fs_watch.rs` |
 
 ### Known blockers
@@ -101,32 +101,101 @@ cargo run -p roko-cli -- status
 
 ## CLI commands reference
 
+### Core workflow
 | Command | What it does |
 |---|---|
 | `roko init` | Create `.roko/` directory and `roko.toml` |
 | `roko run "<prompt>"` | Single prompt -> universal loop (compose->agent->gate->persist) |
-| `roko plan list` | List discovered plans |
-| `roko plan show <id>` | Show plan details |
-| `roko plan create` | Create a new plan |
-| `roko plan run <dir>` | Execute plans (the main orchestration loop) |
-| `roko prd idea "<text>"` | Capture a work item idea |
-| `roko prd list` | List PRDs |
-| `roko prd status` | Coverage report (plans/tasks/done ratio) |
-| `roko prd draft new "<title>"` | Create PRD draft (agent refines) |
-| `roko prd draft promote` | Promote draft to published |
-| `roko prd plan <slug>` | Generate implementation plan from PRD |
-| `roko prd consolidate` | Consolidate PRDs |
-| `roko research topic "<topic>"` | Deep research with citations |
-| `roko research enhance-prd <slug>` | Enhance PRD with research |
-| `roko research enhance-plan <plan>` | Optimize plan with research |
-| `roko research enhance-tasks <plan>` | Split/optimize tasks |
-| `roko research analyze` | Analyze execution data |
 | `roko status` | Query signals, report counts and episodes |
-| `roko replay` | Walk signal DAG by hash |
-| `roko config init/show/path/edit/set` | Configuration management |
-| `roko dashboard` | Interactive ratatui TUI (F1–F7 tabs) |
+| `roko doctor` | Diagnose workspace bootstrap state |
+
+### Planning & PRDs
+| Command | What it does |
+|---|---|
+| `roko plan list/show/create` | Manage plans |
+| `roko plan run <dir>` | Execute plans (the main orchestration loop) |
+| `roko plan generate/regenerate` | Generate or regenerate plans from prompts/PRDs |
+| `roko plan validate <dir>` | Lint tasks.toml without executing |
+| `roko prd idea "<text>"` | Capture a work item idea |
+| `roko prd list/status` | List PRDs, coverage report |
+| `roko prd draft new/edit/promote/list` | Draft lifecycle |
+| `roko prd plan <slug>` | Generate implementation plan from PRD |
+| `roko prd consolidate` | Scan PRDs for gaps and duplicates |
+
+### Agents
+| Command | What it does |
+|---|---|
+| `roko agent create --name X --domain Y` | Create agent from manifest |
+| `roko agent start --name X` | Start a long-running agent |
+| `roko agent stop --name X` | Stop a running agent |
+| `roko agent list` | List agents with status |
+| `roko agent status --name X` | Detailed agent health |
+| `roko agent serve` | Start per-agent HTTP sidecar |
+| `roko agent chat --agent X` | Interactive chat REPL with an agent |
+
+### Research
+| Command | What it does |
+|---|---|
+| `roko research topic "<topic>"` | Deep research with citations |
+| `roko research search "<query>"` | Direct web search (Perplexity) |
+| `roko research enhance-prd/plan/tasks` | Enhance documents with research |
+| `roko research analyze` | Analyze execution data |
+
+### Knowledge (neuro + dreams + custody + archive)
+| Command | What it does |
+|---|---|
+| `roko knowledge query "<topic>"` | Search durable knowledge store |
+| `roko knowledge stats/gc` | Store statistics, garbage collection |
+| `roko knowledge backup/restore` | Backup with genomic bottleneck, restore with decay |
+| `roko knowledge sync <peer>` | Mesh knowledge sync |
+| `roko knowledge dream run/report/schedule` | Dream consolidation cycle |
+| `roko knowledge dream journal/archive` | Dream journal and archive entries |
+| `roko knowledge custody list/show/verify` | Custody audit chain |
+| `roko knowledge archive` | Cold storage archival |
+
+### Learning & feedback
+| Command | What it does |
+|---|---|
+| `roko learn all/router/experiments/efficiency/episodes` | Inspect learning state |
+| `roko learn tune gates/routing/budget` | Tune adaptive thresholds |
+
+### Jobs
+| Command | What it does |
+|---|---|
+| `roko job list/create/show/execute/cancel` | Manage marketplace jobs |
+
+### Configuration
+| Command | What it does |
+|---|---|
+| `roko config init/show/path/edit/set` | Core config management |
+| `roko config validate/migrate` | Schema validation, legacy migration |
+| `roko config set-secret/check-secrets` | Secret management |
+| `roko config providers list/health/test` | LLM provider inspection |
+| `roko config models list/route` | Model inspection and routing |
+| `roko config subscriptions list/add/remove` | Event subscriptions |
+| `roko config events` | Configured event sources |
+| `roko config experiments` | Model A/B experiments |
+| `roko config plugins list/install/remove/audit` | Plugin management |
+| `roko config secrets set/get/list/rotate` | Profile-aware secrets |
+
+### Server & deployment
+| Command | What it does |
+|---|---|
 | `roko serve` | Start HTTP control plane (~85 routes on :6677) |
-| `roko chat --agent <id>` | Chat with a running agent via the sidecar |
+| `roko daemon start/stop/status/logs/install` | Daemon lifecycle |
+| `roko deploy railway/fly/docker` | Cloud deployment |
+| `roko worker` | Run as deployed worker |
+
+### Utilities
+| Command | What it does |
+|---|---|
+| `roko dashboard` | Interactive ratatui TUI (F1–F7 tabs) |
+| `roko replay <hash>` | Walk signal DAG by hash |
+| `roko inject <session> <payload>` | Signal injection |
+| `roko index build/search/stats` | Code intelligence index |
+| `roko new <type> <name>` | Scaffold boilerplate |
+| `roko explain <topic>` | Concept explainer (3 depth levels) |
+| `roko completions <shell>` | Shell completion scripts |
 
 ## Key crates
 
@@ -151,8 +220,8 @@ cargo run -p roko-cli -- status
 | roko-mcp-github / slack / scripts / stdio | `crates/roko-mcp-*/` | Additional MCP integrations | Partial; see `tmp/ux-followup/05-partially-wired-subsystems.md` |
 | roko-index | `crates/roko-index/` | Parser + graph + HDC indexing | Built |
 | roko-lang-rust / typescript / go | `crates/roko-lang-*/` | Language support | Built |
-| roko-dreams | `crates/roko-dreams/` | Offline consolidation (hypnagogia, imagination, cycle) | Phase 2+ |
-| roko-daimon | `crates/roko-daimon/` | Behavior primitives | Phase 2+ |
+| roko-dreams | `crates/roko-dreams/` | Offline consolidation (hypnagogia, imagination, cycle) | Partial (used from orchestrate.rs but no runtime trigger/cron) |
+| roko-daimon | `crates/roko-daimon/` | Affect engine, somatic markers, dispatch modulation | Wired (DaimonState loaded + used per-task in orchestrate.rs) |
 | roko-chain | `crates/roko-chain/` | Chain witness primitives | Phase 2+ |
 
 ## Absolute paths

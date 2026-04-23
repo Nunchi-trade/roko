@@ -142,7 +142,11 @@ async fn run_task(
 
         // Build a Config from the template's agent settings
         let mut config = Config::default();
-        config.agent.command = "claude".to_string();
+        config.agent.command = state
+            .template
+            .provider
+            .clone()
+            .unwrap_or_else(|| "claude".to_string());
         config.agent.model = Some(state.template.model.clone());
         config.prompt.role = state.template.role.clone();
 

@@ -864,7 +864,7 @@ roko daemon start [--foreground] [--port <n>]
 | Flag | Description |
 |------|-------------|
 | `--foreground` | Run in foreground instead of daemonizing |
-| `--port` | Port for the daemon's HTTP API (default: 9090) |
+| `--port` | Port for the daemon's HTTP API (default: 6677) |
 
 The daemon watches for file changes, processes cron-scheduled tasks, ingests webhooks, and dispatches agents from event subscriptions.
 
@@ -994,7 +994,7 @@ roko serve [--bind <addr>] [--port <n>] [--workdir <path>]
 | Flag | Description |
 |------|-------------|
 | `--bind` | Address to bind to (default: 127.0.0.1) |
-| `--port` | Port number (default: 9090) |
+| `--port` | Port number (default: 6677) |
 | `--workdir` | Working directory (default: cwd) |
 
 Exposes REST endpoints for plans, PRDs, agents, config, learning data, templates, webhooks, research, deployments, provider health, and subscriptions. Includes SSE and WebSocket for real-time streaming.

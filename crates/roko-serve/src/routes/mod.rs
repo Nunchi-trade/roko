@@ -9,9 +9,13 @@ mod aggregator;
 pub(crate) mod config;
 mod deployments;
 mod diagnosis;
+mod dream;
+mod heartbeats;
 mod integrations;
+mod jobs;
 mod learning;
 mod middleware;
+mod neuro;
 mod plans;
 pub(crate) mod prds;
 mod projections;
@@ -47,6 +51,8 @@ pub fn build_router(
     let api = Router::new()
         .merge(crate::openapi::routes())
         .merge(status::routes())
+        .merge(jobs::routes())
+        .merge(heartbeats::routes())
         .merge(plans::routes())
         .merge(prds::routes())
         .merge(run::routes())
@@ -61,6 +67,8 @@ pub fn build_router(
         .merge(diagnosis::routes())
         .merge(integrations::routes())
         .merge(projections::routes())
+        .merge(neuro::routes())
+        .merge(dream::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

@@ -5,11 +5,11 @@
 //! - Async/deep-research models → [`PerplexityDeepResearchAgent`]
 //! - Standard chat models → [`PerplexityChatAgent`]
 
-use crate::agent::{Agent, AgentResult};
+use crate::agent::{Agent, AgentResult, derived_output};
 use crate::dispatcher::HandlerResolver;
-use crate::openai_agent::OpenAiAgent;
 use crate::perplexity::PerplexityDeepResearchAgent;
 use crate::perplexity::chat::PerplexityChatAgent;
+use crate::perplexity::embed;
 use crate::perplexity::tool_loop::{PerplexityToolLoopAgent, PerplexityToolLoopBackend};
 use crate::perplexity::types::SearchOptions;
 use crate::provider::openai_compat::tool_registry_for_options;
@@ -22,38 +22,70 @@ use crate::translate::{OpenAiTranslator, Translator};
 use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig};
-use roko_core::{Context, Engram};
+use roko_core::{Body, Context, Engram, Kind, Provenance};
 use serde_json::Value;
 use std::sync::Arc;
 
 /// Default Perplexity API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
 
-// ─── PerplexityEmbedAgent ────────────────────────────────────────────────────
+// ─── PerplexityEmbedAgentAdapter ─────────────────────────────────────────────
 
-/// Embedding-only Perplexity agent.
+/// `Agent` wrapper around the real Perplexity `/v1/embeddings` client.
 ///
-/// Stub implementation — a proper `/embeddings` endpoint will be wired in a
-/// follow-on task. For now this delegates to the chat completions surface so
-/// the adapter routing compiles and can be tested.
-pub struct PerplexityEmbedAgent {
-    inner: OpenAiAgent,
+/// Extracts text from the input `Engram`, calls `embed::PerplexityEmbedAgent`
+/// for real embeddings, and returns the float vectors as a JSON body.
+pub struct PerplexityEmbedAgentAdapter {
+    inner: embed::PerplexityEmbedAgent,
     name: String,
 }
 
-impl PerplexityEmbedAgent {
+impl PerplexityEmbedAgentAdapter {
     #[must_use]
     pub fn new(api_key: String, base_url: String, model_slug: String) -> Self {
         let name = format!("perplexity-embed:{model_slug}");
-        let inner = OpenAiAgent::new(api_key, &model_slug).with_base_url(base_url);
+        // The real embed client expects the base_url to include /v1 for the
+        // embeddings path construction (`{base_url}/embeddings`).
+        let embed_base_url = if base_url.ends_with("/v1") || base_url.ends_with("/v1/") {
+            base_url
+        } else {
+            format!("{}/v1", base_url.trim_end_matches('/'))
+        };
+        let inner = embed::PerplexityEmbedAgent::new(api_key, embed_base_url, model_slug);
         Self { inner, name }
     }
 }
 
 #[async_trait]
-impl Agent for PerplexityEmbedAgent {
-    async fn run(&self, input: &Engram, ctx: &Context) -> AgentResult {
-        self.inner.run(input, ctx).await
+impl Agent for PerplexityEmbedAgentAdapter {
+    async fn run(&self, input: &Engram, _ctx: &Context) -> AgentResult {
+        let text = input.body.as_text().unwrap_or_default();
+        match self.inner.embed(&[text]).await {
+            Ok(vectors) => {
+                let body_json = serde_json::to_string(&vectors).unwrap_or_default();
+                let output = derived_output(input, Kind::AgentOutput, Body::text(&body_json))
+                    .provenance(Provenance::agent(&self.name))
+                    .tag("agent", &self.name)
+                    .tag(
+                        "embedding_dims",
+                        vectors.first().map_or(0, |v| v.len()).to_string(),
+                    )
+                    .build();
+                AgentResult::ok(output)
+            }
+            Err(err) => {
+                let output = derived_output(
+                    input,
+                    Kind::AgentOutput,
+                    Body::text(&format!("embedding error: {err}")),
+                )
+                .provenance(Provenance::agent(&self.name))
+                .tag("agent", &self.name)
+                .tag("error", &err.to_string())
+                .build();
+                AgentResult::fail(output)
+            }
+        }
     }
 
     fn name(&self) -> &str {
@@ -195,7 +227,7 @@ impl ProviderAdapter for PerplexityAdapter {
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         if model.is_embedding_model {
-            return Ok(Box::new(PerplexityEmbedAgent::new(
+            return Ok(Box::new(PerplexityEmbedAgentAdapter::new(
                 api_key,
                 base_url,
                 model.slug.clone(),

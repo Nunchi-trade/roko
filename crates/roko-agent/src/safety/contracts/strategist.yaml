@@ -1,0 +1,13 @@
+{
+  "role": "strategist",
+  "invariants": [
+    { "MaxTokensPerTurn": 16000 }
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 12 },
+    { "ForbiddenTools": ["write_file", "edit_file", "multi_edit", "apply_patch"] }
+  ],
+  "recovery": [
+    { "trigger": "contract_violation", "action": "Alert" }
+  ]
+}

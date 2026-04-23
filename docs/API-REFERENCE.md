@@ -1,6 +1,6 @@
 # Roko HTTP API Reference
 
-The roko HTTP control plane is started with `roko serve` (default: `127.0.0.1:9090`). All REST endpoints are prefixed with `/api/` except webhooks (`/webhooks/`) and WebSocket (`/ws`).
+The roko HTTP control plane is started with `roko serve` (default: `127.0.0.1:6677`). All REST endpoints are prefixed with `/api/` except webhooks (`/webhooks/`) and WebSocket (`/ws`).
 
 ## Authentication
 
@@ -117,7 +117,7 @@ PRD-to-plan-to-task coverage ratios.
 Prometheus-compatible text exposition format.
 
 ```bash
-curl http://localhost:9090/api/metrics/prometheus
+curl http://localhost:6677/api/metrics/prometheus
 ```
 
 ---
@@ -259,7 +259,7 @@ Start background execution of a plan. Returns 409 if the plan is already executi
 ```
 
 ```bash
-curl -X POST http://localhost:9090/api/plans/my-plan/execute
+curl -X POST http://localhost:6677/api/plans/my-plan/execute
 ```
 
 ### `GET /api/plans/{id}/status`
@@ -349,7 +349,7 @@ Execute a single prompt through the universal loop (compose -> agent -> gate -> 
 ```
 
 ```bash
-curl -X POST http://localhost:9090/api/run \
+curl -X POST http://localhost:6677/api/run \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Add error handling to the parse function"}'
 ```
@@ -396,6 +396,11 @@ Register or update an agent in the discovery registry.
   "websocket_endpoint": "ws://localhost:8081/ws",
   "capabilities": ["code_review", "testing"],
   "domain_tags": ["rust", "backend"],
+  "tier": "Trusted",
+  "reputation": 84,
+  "skills": ["rust", "testing"],
+  "past_jobs_completed": 12,
+  "max_concurrent_jobs": 3,
   "issue_token": true
 }
 ```
@@ -473,6 +478,108 @@ Execution trace for an agent.
 |---|---|---|
 | `limit` | integer | Max trace entries (default: 50) |
 | `offset` | integer | Skip N entries |
+
+---
+
+## Jobs
+
+### `GET /api/jobs`
+
+List marketplace jobs stored under `.roko/jobs/*.json`.
+
+**Query parameters:**
+| Parameter | Type | Description |
+|---|---|---|
+| `state` | string | Filter by lifecycle state |
+| `job_type` | string | Filter by job type |
+| `assigned_to` | string | Filter by assigned agent |
+
+### `POST /api/jobs`
+
+Create a marketplace job.
+
+**Request body:**
+```json
+{
+  "title": "Implement HTTP retry backoff",
+  "description": "Add retry backoff to the provider client.",
+  "job_type": "coding_task",
+  "priority": "high",
+  "tags": ["rust", "networking"],
+  "reward": "2500 KORAI"
+}
+```
+
+### `POST /api/jobs/match`
+
+Rank registered agents for a proposed job. Candidates are filtered by minimum
+tier, required skills, and current in-flight job load, then ranked by reputation,
+tier, experience, skill overlap, and available capacity.
+
+**Request body:**
+```json
+{
+  "title": "Implement p2p transport",
+  "description": "Add a Rust transport layer with tests.",
+  "language": "rust",
+  "minTier": "Trusted",
+  "skills": ["networking"],
+  "reward": "2500 KORAI"
+}
+```
+
+**Response:**
+```json
+{
+  "candidates": [
+    {
+      "agentId": "rust-expert",
+      "label": "Rust Expert",
+      "tier": "Expert",
+      "reputation": 95,
+      "pastJobs": 20,
+      "inflightJobs": 1,
+      "maxConcurrentJobs": 4,
+      "matchedSkills": ["rust", "networking"],
+      "bidShare": "2500 KORAI"
+    }
+  ],
+  "totalFee": "2500 KORAI",
+  "etaHours": 25.2
+}
+```
+
+### `GET /api/jobs/{id}`
+
+Get one marketplace job.
+
+### `PATCH /api/jobs/{id}`
+
+Update job status or assignee.
+
+### `POST /api/jobs/{id}/assign`
+
+Assign an open job to an agent.
+
+### `POST /api/jobs/{id}/start`
+
+Move an assigned job to `in_progress`.
+
+### `POST /api/jobs/{id}/submit`
+
+Attach a job submission and move it to `submitted`.
+
+### `POST /api/jobs/{id}/evaluate`
+
+Accept or reject a submitted job.
+
+### `POST /api/jobs/{id}/execute`
+
+Start server-side execution for an open or assigned job.
+
+### `POST /api/jobs/{id}/cancel`
+
+Cancel a non-terminal job.
 
 ---
 
@@ -638,7 +745,7 @@ C-Factor trend over time.
 Return the current resolved `RokoConfig` as JSON (secrets masked).
 
 ```bash
-curl http://localhost:9090/api/config
+curl http://localhost:6677/api/config
 ```
 
 ### `PUT /api/config`
@@ -717,7 +824,7 @@ Delete a template.
 Deploy (spawn) an agent from a template.
 
 ```bash
-curl -X POST http://localhost:9090/api/templates/code-reviewer/deploy
+curl -X POST http://localhost:6677/api/templates/code-reviewer/deploy
 ```
 
 ---
@@ -816,7 +923,7 @@ Receive a callback from a deployed worker.
 List configured LLM providers with health status and model counts.
 
 ```bash
-curl http://localhost:9090/api/providers
+curl http://localhost:6677/api/providers
 ```
 
 ### `GET /api/providers/{id}/health`
@@ -828,7 +935,7 @@ Health check for a specific provider (circuit breaker state, latency).
 Send a test prompt to a provider to verify connectivity.
 
 ```bash
-curl -X POST http://localhost:9090/api/providers/anthropic/test
+curl -X POST http://localhost:6677/api/providers/anthropic/test
 ```
 
 ---
@@ -898,7 +1005,7 @@ SSE stream of projection updates. Reconnectable with `Last-Event-ID`.
 Server-Sent Events stream for dashboard updates. Supports reconnection via `Last-Event-ID` header.
 
 ```bash
-curl -N http://localhost:9090/api/events
+curl -N http://localhost:6677/api/events
 ```
 
 Events are JSON payloads with monotonic `id:` fields:
@@ -917,7 +1024,7 @@ Upgrade to WebSocket connection for bidirectional real-time events.
 
 **Connection:**
 ```javascript
-const ws = new WebSocket("ws://localhost:9090/ws");
+const ws = new WebSocket("ws://localhost:6677/ws");
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log(data.type, data);

@@ -1,11 +1,11 @@
 //! Tab identifiers for the Mori-style TUI navigation.
 //!
-//! These map directly to `F1`-`F7` function keys and represent the top-level
+//! These map directly to `F1`-`F9` function keys and represent the top-level
 //! tab bar in the interactive dashboard.
 
 use crossterm::event::KeyCode;
 
-/// Top-level TUI tabs, mapped to F1-F7.
+/// Top-level TUI tabs, mapped to F1-F9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     /// F1 - Overview dashboard with health gauges, plan progress, cost.
@@ -22,11 +22,15 @@ pub enum Tab {
     Config,
     /// F7 - Engram DAG inspector, episode replay.
     Inspect,
+    /// F8 - Marketplace: job browser, creation, assignment.
+    Marketplace,
+    /// F9 - Atelier: PRD workshop, plan progress.
+    Atelier,
 }
 
 impl Tab {
     /// All tabs in display order.
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 9] = [
         Tab::Dashboard,
         Tab::Plans,
         Tab::Agents,
@@ -34,6 +38,8 @@ impl Tab {
         Tab::Logs,
         Tab::Config,
         Tab::Inspect,
+        Tab::Marketplace,
+        Tab::Atelier,
     ];
 
     /// The function key that activates this tab.
@@ -47,6 +53,8 @@ impl Tab {
             Self::Logs => KeyCode::F(5),
             Self::Config => KeyCode::F(6),
             Self::Inspect => KeyCode::F(7),
+            Self::Marketplace => KeyCode::F(8),
+            Self::Atelier => KeyCode::F(9),
         }
     }
 
@@ -61,6 +69,8 @@ impl Tab {
             KeyCode::F(5) => Some(Self::Logs),
             KeyCode::F(6) => Some(Self::Config),
             KeyCode::F(7) => Some(Self::Inspect),
+            KeyCode::F(8) => Some(Self::Marketplace),
+            KeyCode::F(9) => Some(Self::Atelier),
             _ => None,
         }
     }
@@ -76,6 +86,8 @@ impl Tab {
             Self::Logs => "Logs",
             Self::Config => "Config",
             Self::Inspect => "Inspect",
+            Self::Marketplace => "Marketplace",
+            Self::Atelier => "Atelier",
         }
     }
 
@@ -90,6 +102,8 @@ impl Tab {
             Self::Logs => "F5 Logs",
             Self::Config => "F6 Config",
             Self::Inspect => "F7 Inspect",
+            Self::Marketplace => "F8 Marketplace",
+            Self::Atelier => "F9 Atelier",
         }
     }
 
@@ -104,6 +118,8 @@ impl Tab {
             Self::Logs => 4,
             Self::Config => 5,
             Self::Inspect => 6,
+            Self::Marketplace => 7,
+            Self::Atelier => 8,
         }
     }
 
@@ -117,7 +133,9 @@ impl Tab {
             Self::Git => Self::Logs,
             Self::Logs => Self::Config,
             Self::Config => Self::Inspect,
-            Self::Inspect => Self::Dashboard,
+            Self::Inspect => Self::Marketplace,
+            Self::Marketplace => Self::Atelier,
+            Self::Atelier => Self::Dashboard,
         }
     }
 
@@ -125,13 +143,15 @@ impl Tab {
     #[must_use]
     pub const fn prev(self) -> Self {
         match self {
-            Self::Dashboard => Self::Inspect,
+            Self::Dashboard => Self::Atelier,
             Self::Plans => Self::Dashboard,
             Self::Agents => Self::Plans,
             Self::Git => Self::Agents,
             Self::Logs => Self::Git,
             Self::Config => Self::Logs,
             Self::Inspect => Self::Config,
+            Self::Marketplace => Self::Inspect,
+            Self::Atelier => Self::Marketplace,
         }
     }
 }
@@ -162,12 +182,12 @@ mod tests {
     #[test]
     fn next_prev_cycle() {
         let mut t = Tab::Dashboard;
-        for _ in 0..7 {
+        for _ in 0..9 {
             t = t.next();
         }
         assert_eq!(t, Tab::Dashboard);
 
-        for _ in 0..7 {
+        for _ in 0..9 {
             t = t.prev();
         }
         assert_eq!(t, Tab::Dashboard);

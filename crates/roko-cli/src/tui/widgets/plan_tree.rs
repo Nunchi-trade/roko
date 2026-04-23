@@ -202,6 +202,40 @@ pub fn render_plan_tree(frame: &mut Frame<'_>, area: Rect, state: &TuiState, foc
 // Wave tree rendering
 // ---------------------------------------------------------------------------
 
+/// Compute a 3-char verify cell string for a plan based on gate results.
+///
+/// Returns a short summary like "3/4" (passed/total) when gate results exist
+/// for the plan, or the placeholder dot when none are available.
+fn plan_verify_cell(plan_id: &str, state: &TuiState) -> (String, Color) {
+    let results: Vec<_> = state
+        .gate_result_summaries
+        .iter()
+        .filter(|g| g.plan_id == plan_id)
+        .collect();
+    if results.is_empty() {
+        return (
+            format!("{:>width$}", "\u{00b7}", width = COL_VERIFY),
+            Theme::TEXT_PHANTOM,
+        );
+    }
+    let passed = results.iter().filter(|g| g.passed).count();
+    let total = results.len();
+    let color = if passed == total {
+        Theme::SAGE
+    } else if passed == 0 {
+        Theme::EMBER
+    } else {
+        Theme::WARNING
+    };
+    // Fit into COL_VERIFY (3 chars): e.g. "3/4", "ok", "0/2"
+    let text = if passed == total {
+        "\u{2713}".to_string() // ✓
+    } else {
+        format!("{passed}/{total}")
+    };
+    (format!("{:>width$}", text, width = COL_VERIFY), color)
+}
+
 fn render_wave_tree(
     lines: &mut Vec<Line<'static>>,
     state: &TuiState,
@@ -333,6 +367,7 @@ fn render_wave_tree(
             render_plan_line(
                 lines,
                 plan,
+                state,
                 focused,
                 area,
                 true,
@@ -357,7 +392,16 @@ fn render_flat_plans(
 ) {
     for plan in &state.plans {
         if matches_filter(plan, filter_lower) {
-            render_plan_line(lines, plan, focused, area, false, selected_plan_id, false);
+            render_plan_line(
+                lines,
+                plan,
+                state,
+                focused,
+                area,
+                false,
+                selected_plan_id,
+                false,
+            );
         }
     }
 }
@@ -369,6 +413,7 @@ fn render_flat_plans(
 fn render_plan_line(
     lines: &mut Vec<Line<'static>>,
     plan: &PlanEntry,
+    state: &TuiState,
     focused: bool,
     area: Rect,
     indented: bool,
@@ -498,11 +543,8 @@ fn render_plan_line(
         )
     };
 
-    // Verify cell (3 chars): placeholder
-    let verify_cell = (
-        format!("{:>width$}", "\u{00b7}", width = COL_VERIFY),
-        Theme::TEXT_PHANTOM,
-    );
+    // Verify cell (3 chars): gate verdict summary for this plan
+    let verify_cell = plan_verify_cell(&plan.id, state);
 
     // Age cell (6 chars): elapsed time
     let age_cell = if plan.elapsed_secs > 0.0 {

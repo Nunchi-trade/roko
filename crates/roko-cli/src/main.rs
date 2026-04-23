@@ -23,6 +23,8 @@ mod agent_serve;
 mod commands;
 mod plan_validate;
 
+use roko_cli::auth;
+
 use agent_serve::AgentCmd;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -124,6 +126,70 @@ impl std::fmt::Display for Effort {
 }
 
 // -----------------------------------------------------------------------
+// Color mode
+// -----------------------------------------------------------------------
+
+/// Controls ANSI color output.
+///
+/// Respects the `NO_COLOR` (https://no-color.org/), `CLICOLOR`, and
+/// `CLICOLOR_FORCE` conventions when set to `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorMode {
+    /// Detect from terminal and environment (default).
+    Auto,
+    /// Always emit ANSI colors.
+    Always,
+    /// Never emit ANSI colors.
+    Never,
+}
+
+impl ColorMode {
+    /// Resolve the effective color decision, consulting env vars when `Auto`.
+    ///
+    /// Precedence (highest first):
+    /// 1. `--color always|never` (not Auto)
+    /// 2. `NO_COLOR` set and non-empty  -> off
+    /// 3. `CLICOLOR_FORCE` set and != "0" -> on
+    /// 4. `CLICOLOR=0`                   -> off
+    /// 5. stdout is a TTY               -> on
+    /// 6. otherwise                      -> off
+    fn should_color(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                if env::var("NO_COLOR").map_or(false, |v| !v.is_empty()) {
+                    return false;
+                }
+                if env::var("CLICOLOR_FORCE").map_or(false, |v| v != "0") {
+                    return true;
+                }
+                if env::var("CLICOLOR").map_or(false, |v| v == "0") {
+                    return false;
+                }
+                std::io::stdout().is_terminal()
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Enhanced version string
+// -----------------------------------------------------------------------
+
+fn long_version() -> &'static str {
+    use std::sync::OnceLock;
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let git_hash = env!("ROKO_GIT_HASH");
+        let rustc = env!("ROKO_RUSTC_VERSION");
+        let target = env!("ROKO_TARGET");
+        format!("{version} ({rustc}, {target}, git {git_hash})")
+    })
+}
+
+// -----------------------------------------------------------------------
 // CLI structure
 // -----------------------------------------------------------------------
 
@@ -132,7 +198,23 @@ impl std::fmt::Display for Effort {
 #[command(
     name = "roko",
     version,
-    about = "Minimal CLI for the Roko universal loop"
+    long_version = long_version(),
+    about = "Minimal CLI for the Roko universal loop",
+    after_long_help = "\
+COMMAND GROUPS:
+  Core workflow:     init, run, status, doctor
+  Planning:          plan, prd
+  Agents:            agent (create, start, stop, chat, serve)
+  Research:          research
+  Knowledge:         knowledge (query, dream, custody, archive)
+  Learning:          learn (router, experiments, efficiency, tune)
+  Jobs:              job
+  Benchmarks:        bench
+  Configuration:     config (providers, models, subscriptions, plugins, secrets)
+  Code intelligence: index
+  Server:            up, serve, daemon, deploy, worker
+  Interactive:       dashboard
+  Utilities:         replay, inject, completions, new, explain"
 )]
 struct Cli {
     /// Override the config file (default: `./roko.toml`).
@@ -179,6 +261,18 @@ struct Cli {
     #[arg(long, global = true)]
     headless: bool,
 
+    /// Control color output: auto (default), always, never.
+    ///
+    /// Respects NO_COLOR, CLICOLOR, and CLICOLOR_FORCE env vars in auto mode.
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
+
+    /// Print elapsed time after command execution.
+    ///
+    /// Also enabled by setting ROKO_TIMING=1 in the environment.
+    #[arg(long, global = true)]
+    timing: bool,
+
     /// One-shot mode: execute this prompt and exit.
     #[arg(global = false)]
     prompt: Option<String>,
@@ -189,7 +283,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    // ── Core workflow ────────────────────────────────────────────────
     /// Create `.roko/` and a default `roko.toml` in `path` (default: cwd).
+    #[command(after_help = "\
+Examples:
+  roko init                         Initialize in the current directory
+  roko init /path/to/project        Initialize in a specific directory
+  roko init --cloud                 Initialize with cloud-ready defaults
+  roko init --profile rust          Initialize with Rust project profile")]
     Init {
         /// Directory to initialize (default: current dir).
         path: Option<PathBuf>,
@@ -201,7 +302,11 @@ enum Command {
         profile: Option<String>,
     },
     /// Seed a prompt and run the universal loop (compose -> agent -> gate -> persist).
-    #[command(visible_alias = "do")]
+    #[command(after_help = "\
+Examples:
+  roko run \"Fix the login bug\"      Single prompt through the universal loop
+  roko run \"Add tests for auth\"     Generate and execute a plan
+  roko run \"Refactor db layer\" --role architect   Run with a specific role")]
     Run {
         /// The user prompt text.
         prompt: String,
@@ -210,6 +315,11 @@ enum Command {
         workdir: Option<PathBuf>,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
+    #[command(after_help = "\
+Examples:
+  roko status                       Show workspace health summary
+  roko status --json                Output status as JSON for scripting
+  roko status --cfactor             Compute and show C-Factor metrics")]
     Status {
         /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
@@ -217,64 +327,22 @@ enum Command {
         /// Compute and persist the latest C-Factor snapshot.
         #[arg(long)]
         cfactor: bool,
+        /// Print the CLI/TUI/backend surface inventory instead of session status.
+        #[arg(long)]
+        surfaces: bool,
     },
-    /// Walk the lineage DAG rooted at a signal hash and print it.
-    #[command(visible_alias = "inspect")]
-    Replay {
-        /// Engram hash (64 hex chars) to walk.
-        hash: String,
-        /// Directory containing `.roko/` (default: cwd).
+    /// Diagnose self-hosted workspace bootstrap state.
+    Doctor {
+        /// Directory containing `roko.toml` and `.roko/` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
-        /// Show forensic detail: timestamps, full hashes, metadata.
+        /// roko-serve base URL or explicit health endpoint to probe.
         #[arg(long)]
-        forensic: bool,
+        serve_url: Option<String>,
     },
-    /// Manage dream replay, report, and scheduling.
-    Dream {
-        #[command(subcommand)]
-        cmd: DreamCmd,
-    },
-    /// Dream archive and journal inspection.
-    Dreams {
-        #[command(subcommand)]
-        cmd: DreamsCmd,
-    },
-    /// Manage global and project config (wizard, show, path, edit, set, set-secret).
-    Config {
-        #[command(subcommand)]
-        cmd: ConfigCmd,
-    },
-    /// Manage profile-aware secrets.
-    #[command(name = "secret", visible_alias = "secrets")]
-    Secret {
-        #[command(subcommand)]
-        cmd: roko_cli::SecretsCmd,
-    },
-    /// Inspect the custody audit chain (list, show, verify).
-    Custody {
-        #[command(subcommand)]
-        cmd: CustodyCmd,
-    },
-    /// Manage standalone agent runtimes.
-    Agent {
-        #[command(subcommand)]
-        cmd: AgentCmd,
-    },
-    /// Inject a signal into a running session.
-    Inject {
-        /// Target session ID.
-        session: String,
-        /// Kind of signal to inject (directive, abort, context).
-        #[arg(long, default_value = "directive")]
-        kind: String,
-        /// Payload text.
-        payload: String,
-        /// Working directory (to locate the daemon socket).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Manage plans (list, show, create, validate).
+
+    // ── Planning & PRDs ─────────────────────────────────────────────
+    /// Manage plans (list, show, create, validate, run, generate).
     Plan {
         #[command(subcommand)]
         cmd: PlanCmd,
@@ -284,74 +352,104 @@ enum Command {
         #[command(subcommand)]
         cmd: PrdCmd,
     },
+
+    // ── Agents ──────────────────────────────────────────────────────
+    /// Manage standalone agent runtimes and chat.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
+
+    // ── Research ────────────────────────────────────────────────────
     /// Research topics, enhance documents, analyze execution data.
     Research {
         #[command(subcommand)]
         cmd: ResearchCmd,
     },
-    /// Interactive chat REPL backed by roko-serve agent messaging.
-    Chat {
-        /// Agent ID to chat with.
-        #[arg(long, default_value = "nunchi-intelligence")]
-        agent: String,
-        /// roko-serve base URL.
-        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
-        serve_url: String,
-    },
-    /// Search durable knowledge and memory entries.
-    Neuro {
+
+    // ── Knowledge (neuro + dreams + custody + archive) ──────────────
+    /// Durable knowledge store, dream consolidation, custody chain, and archival.
+    Knowledge {
         #[command(subcommand)]
-        cmd: NeuroCmd,
+        cmd: KnowledgeCmd,
     },
-    /// Manage event subscriptions.
-    Subscription {
+
+    // ── Learning & feedback ─────────────────────────────────────────
+    /// Inspect learning state: cascade router, experiments, efficiency, episodes, tuning.
+    Learn {
         #[command(subcommand)]
-        cmd: SubscriptionCmd,
+        cmd: LearnCmd,
     },
-    /// Inspect configured event sources.
-    EventSources {
+
+    // ── Jobs ────────────────────────────────────────────────────────
+    /// Manage marketplace jobs (list, create, match, show, execute, cancel).
+    Job {
         #[command(subcommand)]
-        cmd: EventSourcesCmd,
+        cmd: JobCmd,
     },
-    /// Inspect configured LLM providers.
-    Provider {
+
+    /// Run benchmark evaluations and write learning telemetry.
+    Bench {
         #[command(subcommand)]
-        cmd: ProviderCmd,
+        cmd: BenchCmd,
     },
-    /// Inspect configured models and their capabilities.
-    Model {
+
+    // ── Configuration (providers, models, subscriptions, etc.) ──────
+    /// Manage global and project config, providers, models, subscriptions, plugins.
+    Config {
         #[command(subcommand)]
-        cmd: ModelCmd,
+        cmd: ConfigCmd,
     },
-    /// Manage model experiments.
-    Experiment {
+
+    // ── Code intelligence ───────────────────────────────────────────
+    /// Code intelligence: build, search, and inspect the workspace index.
+    Index {
         #[command(subcommand)]
-        cmd: ExperimentCmd,
+        cmd: IndexCmd,
     },
-    /// Manage cloud deployment targets.
-    Deploy {
-        #[command(subcommand)]
-        cmd: DeployCmd,
-    },
-    /// Update this binary when installed by a release installer.
-    Update {
-        /// Verify release artifacts with Sigstore/cosign after download.
+
+    // ── Server & deployment ─────────────────────────────────────────
+    /// Start roko serve + all configured [[agents]] in one command.
+    #[command(after_help = "\
+Examples:
+  roko up                           Start serve + all agents from roko.toml
+  roko up --workdir /path/to/proj   Start from a specific project directory")]
+    Up {
+        /// Working directory (default: cwd).
         #[arg(long)]
-        verify: bool,
+        workdir: Option<PathBuf>,
     },
-    /// Generate shell completion scripts.
-    Completions {
-        /// Shell to generate completions for.
-        #[arg(value_enum)]
-        shell: CompletionShell,
+    /// Start the HTTP API server.
+    Serve {
+        /// Address to bind to (default: 127.0.0.1).
+        #[arg(long)]
+        bind: Option<String>,
+        /// Port number (default: 6677).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
     },
-    /// Manage daemon mode.
+    /// Manage daemon mode (start, stop, status, logs, install).
     Daemon {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
-    /// Launch the dashboard TUI, with text fallback for non-interactive use.
-    #[command(visible_alias = "watch")]
+    /// Deploy to cloud targets (Railway, Fly.io, Docker).
+    Deploy {
+        #[command(subcommand)]
+        cmd: DeployCmd,
+    },
+    /// Run as a deployed worker (reads template from env, serves tasks).
+    Worker {
+        /// Port to listen on (default: 8080, overridden by PORT env).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+
+    // ── Interactive ─────────────────────────────────────────────────
+    /// Launch the dashboard TUI.
     Dashboard {
         /// Specific dashboard page slug to render.
         #[arg(long)]
@@ -372,58 +470,37 @@ enum Command {
         #[arg(long)]
         reduced_motion: bool,
     },
-    /// Start the HTTP API server.
-    Serve {
-        /// Address to bind to (default: 127.0.0.1).
+
+    // ── Utilities ───────────────────────────────────────────────────
+    /// Walk the lineage DAG rooted at a signal hash and print it.
+    Replay {
+        /// Engram hash (64 hex chars) to walk.
+        hash: String,
+        /// Directory containing `.roko/` (default: cwd).
         #[arg(long)]
-        bind: Option<String>,
-        /// Port number (default: 9090).
+        workdir: Option<PathBuf>,
+        /// Show forensic detail: timestamps, full hashes, metadata.
         #[arg(long)]
-        port: Option<u16>,
-        /// Working directory (default: cwd).
+        forensic: bool,
+    },
+    /// Inject a signal into a running session.
+    Inject {
+        /// Target session ID.
+        session: String,
+        /// Kind of signal to inject (directive, abort, context).
+        #[arg(long, default_value = "directive")]
+        kind: String,
+        /// Payload text.
+        payload: String,
+        /// Working directory (to locate the daemon socket).
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Run as a deployed worker (reads template from env, serves tasks).
-    Worker {
-        /// Port to listen on (default: 8080, overridden by PORT env).
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-    },
-    /// Code intelligence: build, search, and inspect the workspace index.
-    Index {
-        #[command(subcommand)]
-        cmd: IndexCmd,
-    },
-    /// Tune adaptive thresholds and model routing parameters.
-    Tune {
-        /// Subsystem to tune: gates, routing, budget.
-        #[arg(default_value = "gates")]
-        subsystem: String,
-        /// Display current values without modifying.
-        #[arg(long)]
-        dry_run: bool,
-        /// Working directory (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show learning subsystem state: cascade router, experiments, efficiency.
-    #[command(visible_alias = "ask")]
-    Learn {
-        /// What to show: router, experiments, efficiency, episodes, all.
-        #[arg(default_value = "all")]
-        what: String,
-        /// Working directory (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Explain a roko concept with progressive disclosure (3 depth levels).
-    Explain {
-        /// Topic to explain (e.g. gates, routing, cognitive, neuro, daimon, dreams, engram, cfactor).
-        topic: String,
-        /// Disclosure depth: 1 = summary, 2 = how it works, 3 = internals.
-        #[arg(long, default_value_t = 1)]
-        depth: u8,
+    /// Generate shell completion scripts.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: CompletionShell,
     },
     /// Generate boilerplate for a Synapse trait or domain profile.
     ///
@@ -438,10 +515,99 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Manage plugins (list, install, audit).
-    Plugin {
+    /// Explain a roko concept with progressive disclosure (3 depth levels).
+    Explain {
+        /// Topic to explain (e.g. gates, routing, cognitive, neuro, daimon, dreams, engram, cfactor).
+        topic: String,
+        /// Disclosure depth: 1 = summary, 2 = how it works, 3 = internals.
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
+    },
+}
+
+// -----------------------------------------------------------------------
+// Knowledge: neuro + dreams + custody + archive
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Subcommand)]
+enum KnowledgeCmd {
+    /// Query the durable knowledge store for a topic.
+    Query {
+        /// Topic to search for.
+        topic: Vec<String>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show aggregate statistics for the durable knowledge store.
+    Stats {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Run garbage collection on the durable knowledge store.
+    Gc {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Backup the knowledge store to a directory with optional genomic bottleneck.
+    Backup {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Directory to write the backup files into.
+        destination: PathBuf,
+        /// Overwrite existing backup files in the destination directory.
+        #[arg(long)]
+        force: bool,
+        /// Genomic bottleneck: export only the top N entries by confidence.
+        #[arg(long)]
+        top_n: Option<usize>,
+    },
+    /// Restore the knowledge store from a backup with confidence decay.
+    Restore {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Directory created by `roko knowledge backup`.
+        source: PathBuf,
+        /// Overwrite existing local neuro store files.
+        #[arg(long)]
+        force: bool,
+        /// Filter by knowledge types (comma-separated).
+        #[arg(long)]
+        types: Option<String>,
+        /// Only restore entries with confidence >= this threshold (0.0 to 1.0).
+        #[arg(long)]
+        min_confidence: Option<f64>,
+        /// Generation hop count for confidence decay (default: 1).
+        #[arg(long, default_value_t = 1)]
+        generation: u32,
+    },
+    /// Sync knowledge with a peer agent via the Mesh protocol.
+    Sync {
+        /// Peer agent identifier to sync with.
+        peer: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Direction: send, receive, or both (default: both).
+        #[arg(long, default_value = "both")]
+        direction: String,
+        /// Maximum engrams to send in this sync cycle.
+        #[arg(long, default_value_t = 100)]
+        max_send: usize,
+    },
+    /// Dream consolidation, reports, and journal.
+    Dream {
         #[command(subcommand)]
-        cmd: PluginCmd,
+        cmd: KnowledgeDreamCmd,
+    },
+    /// Custody audit chain (list, show, verify).
+    Custody {
+        #[command(subcommand)]
+        cmd: KnowledgeCustodyCmd,
     },
     /// Move old engrams to cold storage (compressed monthly archives).
     Archive {
@@ -459,6 +625,172 @@ enum Command {
         dry_run: bool,
     },
 }
+
+#[derive(Debug, Subcommand)]
+enum KnowledgeDreamCmd {
+    /// Run a dream consolidation cycle immediately.
+    Run {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show the latest dream report without running a new cycle.
+    Report {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show when the next dream should fire.
+    Schedule {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Display recent dream journal entries.
+    Journal {
+        /// Number of recent entries to display (default: 10).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Display recent dream archive entries.
+    Archive {
+        /// Number of recent entries to display (default: 10).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum KnowledgeCustodyCmd {
+    /// List recent custody records.
+    List {
+        /// Maximum number of records to display.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show full details of a custody record by index.
+    Show {
+        /// Record index (0-based).
+        index: usize,
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Verify integrity of the custody chain.
+    Verify {
+        /// Directory containing `.roko/` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+// -----------------------------------------------------------------------
+// Learn: learning state + tuning
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Subcommand)]
+enum LearnCmd {
+    /// Show all learning state (router, experiments, efficiency, episodes).
+    All {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show cascade router state.
+    Router {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show experiment state.
+    Experiments {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show efficiency metrics.
+    Efficiency {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show episode summary.
+    Episodes {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Tune adaptive thresholds and model routing parameters.
+    Tune {
+        /// Subsystem to tune: gates, routing, budget.
+        #[arg(default_value = "gates")]
+        subsystem: String,
+        /// Display current values without modifying.
+        #[arg(long)]
+        dry_run: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchCmd {
+    /// Run a native SWE-bench-style proxy batch.
+    #[command(after_help = "\
+Examples:
+  roko bench swe --batch-size 2 --agent-mode gold
+  roko bench swe --dataset ./swe-smoke.jsonl --predictions ./predictions.jsonl --agent-mode prediction-file
+  roko bench swe --agent-mode command --agent-command './my-agent.sh'")]
+    Swe {
+        /// Local JSONL dataset. If omitted, a built-in two-task smoke dataset is generated.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Number of instances to run.
+        #[arg(long, default_value_t = 2)]
+        batch_size: usize,
+        /// Offset into the dataset.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Agent adapter to use.
+        #[arg(long, value_enum, default_value_t = roko_cli::bench::SweAgentMode::Gold)]
+        agent_mode: roko_cli::bench::SweAgentMode,
+        /// Predictions JSONL path for --agent-mode prediction-file.
+        #[arg(long)]
+        predictions: Option<PathBuf>,
+        /// Command for --agent-mode command. Receives instance JSON on stdin, prints a unified diff.
+        #[arg(long)]
+        agent_command: Option<String>,
+        /// Scores JSONL output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Write SWE-bench-style predictions JSONL.
+        #[arg(long)]
+        export_predictions: Option<PathBuf>,
+        /// Disable learning episode, efficiency, and C-factor writes.
+        #[arg(long)]
+        no_learning: bool,
+        /// Keep per-instance benchmark workdirs for debugging.
+        #[arg(long)]
+        keep_workdirs: bool,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+// -----------------------------------------------------------------------
+// Plugins (now nested under config)
+// -----------------------------------------------------------------------
 
 #[derive(Debug, Subcommand)]
 enum PluginCmd {
@@ -565,76 +897,7 @@ enum CompletionShell {
     Fish,
 }
 
-#[derive(Debug, Subcommand)]
-enum CustodyCmd {
-    /// List recent custody records.
-    List {
-        /// Maximum number of records to display.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show full details of a custody record by index.
-    Show {
-        /// Record index (0-based).
-        index: usize,
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Verify integrity of the custody chain.
-    Verify {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum DreamCmd {
-    /// Run a dream consolidation cycle immediately.
-    Run {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show the latest dream report without running a new cycle.
-    Report {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show when the next dream should fire.
-    Schedule {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum DreamsCmd {
-    /// Display recent dream journal entries.
-    Journal {
-        /// Number of recent entries to display (default: 10).
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Display recent dream archive entries.
-    Archive {
-        /// Number of recent entries to display (default: 10).
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
+// (CustodyCmd, DreamCmd, DreamsCmd moved into KnowledgeCmd above)
 
 #[derive(Debug, Subcommand)]
 enum PlanCmd {
@@ -679,6 +942,13 @@ enum PlanCmd {
         json: bool,
     },
     /// Run a plan directory through the orchestration loop.
+    #[command(after_help = "\
+Examples:
+  roko plan run plans/              Run all plans in the plans/ directory
+  roko plan run plans/my-plan       Run a specific plan
+  roko plan run plans/ --approval   Run with interactive TUI approval
+  roko plan run plans/ --dry-run    Preview without executing
+  roko plan run plans/ --resume-plan .roko/state/executor.json   Resume from snapshot")]
     Run {
         /// Path to the plans directory.
         plans_dir: PathBuf,
@@ -694,6 +964,9 @@ enum PlanCmd {
         /// Maximum retry attempts per task (overrides per-task and config values).
         #[arg(long)]
         max_retries: Option<u32>,
+        /// Parse and display the plan without executing. Shows tasks, dependencies, and estimates.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -808,187 +1081,157 @@ enum ResearchCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum JobCmd {
+    /// List all marketplace jobs.
+    List {
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// Filter by status (open, assigned, in_progress, completed, failed, cancelled).
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Create a new marketplace job.
+    Create {
+        /// Job title.
+        title: String,
+        /// Job type: research, coding_task, chain_monitor, chain_analysis.
+        #[arg(long, default_value = "research")]
+        r#type: String,
+        /// Job description.
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Priority: low, medium, high, critical.
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        /// Auto-execute the job when the runner picks it up.
+        #[arg(long)]
+        auto_execute: bool,
+        /// Associated plan ID.
+        #[arg(long)]
+        plan_id: Option<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Match a proposed job against registered agents via roko-serve.
+    Match {
+        /// Job title.
+        title: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value = "http://localhost:6677")]
+        serve_url: String,
+        /// Job description.
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Primary implementation language, also treated as a required skill.
+        #[arg(long)]
+        language: Option<String>,
+        /// Minimum agent tier: Unverified, Verified, Trusted, Expert, Pioneer.
+        #[arg(long)]
+        min_tier: Option<String>,
+        /// Reward string, e.g. "2500 KORAI".
+        #[arg(long, default_value = "")]
+        reward: String,
+        /// Required skills, comma-separated.
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
+        /// Working directory (default: cwd / --repo), used for auth config.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show details for a specific job.
+    Show {
+        /// Job ID.
+        id: String,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Execute a job (locally or via roko-serve).
+    Execute {
+        /// Job ID.
+        id: String,
+        /// roko-serve base URL. If set, POST to /api/jobs/{id}/execute.
+        #[arg(long)]
+        serve_url: Option<String>,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Cancel a job.
+    Cancel {
+        /// Job ID.
+        id: String,
+        /// Working directory (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+// Internal enum used by cmd_neuro — mirrors the old top-level NeuroCmd.
+// KnowledgeCmd dispatches to this.
+#[derive(Debug)]
 enum NeuroCmd {
-    /// Query the durable knowledge store for a topic.
     Query {
-        /// Topic to search for.
         topic: Vec<String>,
-        /// Working directory (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Show aggregate statistics for the durable knowledge store.
     Stats {
-        /// Working directory (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Run garbage collection on the durable knowledge store.
     Gc {
-        /// Working directory (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
     },
-    /// Backup the knowledge store to a directory with optional genomic bottleneck.
-    ///
-    /// Copies the knowledge store JSONL files into the destination directory.
-    /// When --top-n is specified, only the N highest-confidence entries are
-    /// exported (genomic bottleneck compression), discarding low-confidence
-    /// knowledge. A manifest.json with entry count and metadata is included.
     Backup {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
-        /// Directory to write the backup files into.
         destination: PathBuf,
-        /// Overwrite existing backup files in the destination directory.
-        #[arg(long)]
         force: bool,
-        /// Genomic bottleneck: export only the top N entries by confidence.
-        #[arg(long)]
         top_n: Option<usize>,
     },
-    /// Restore the knowledge store from a backup with confidence decay.
-    ///
-    /// Imports entries from a backup directory into the local neuro store.
-    /// Applies 0.85^N confidence decay where N is the generation hop count
-    /// (default 1). Restored entries start at the Transient tier (quarantine).
-    /// Use --types and --min-confidence to filter what gets restored.
     Restore {
-        /// Directory containing `.roko/` (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
-        /// Directory created by `roko neuro backup`.
         source: PathBuf,
-        /// Overwrite existing local neuro store files.
-        #[arg(long)]
         force: bool,
-        /// Filter by knowledge types (comma-separated: insight,warning,heuristic,causal_link,strategy_fragment,anti_knowledge).
-        #[arg(long)]
         types: Option<String>,
-        /// Only restore entries with confidence >= this threshold (0.0 to 1.0).
-        #[arg(long)]
         min_confidence: Option<f64>,
-        /// Generation hop count for confidence decay (default: 1). Confidence
-        /// is multiplied by 0.85^N where N is this value.
-        #[arg(long, default_value_t = 1)]
         generation: u32,
     },
-    /// Sync knowledge with a peer agent via the Mesh protocol.
-    ///
-    /// Performs version-vector-based delta sync: computes which engrams the
-    /// peer has not seen and sends only those. Received engrams are discounted
-    /// by 0.7x confidence and rate-limited to 100/hour.
     Sync {
-        /// Peer agent identifier to sync with.
         peer: String,
-        /// Working directory (default: cwd).
-        #[arg(long)]
         workdir: Option<PathBuf>,
-        /// Direction: send, receive, or both (default: both).
-        #[arg(long, default_value = "both")]
         direction: String,
-        /// Maximum engrams to send in this sync cycle.
-        #[arg(long, default_value_t = 100)]
         max_send: usize,
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum SubscriptionCmd {
-    /// List all subscriptions.
-    List,
-    /// Create a new subscription.
-    Add {
-        /// Agent template name to invoke.
-        #[arg(long)]
-        template: String,
-        /// Engram trigger glob to match.
-        #[arg(long)]
-        trigger: String,
-    },
-    /// Delete a subscription.
-    Remove {
-        /// Subscription ID.
-        id: String,
-    },
-    /// Enable a subscription.
-    Enable {
-        /// Subscription ID.
-        id: String,
-    },
-    /// Disable a subscription.
-    Disable {
-        /// Subscription ID.
-        id: String,
-    },
+// Internal enum used by cmd_dream — mirrors the old top-level DreamCmd.
+#[derive(Debug)]
+enum DreamCmdLegacy {
+    Run { workdir: Option<PathBuf> },
+    Report { workdir: Option<PathBuf> },
+    Schedule { workdir: Option<PathBuf> },
 }
 
-#[derive(Debug, Subcommand)]
-enum EventSourcesCmd {
-    /// List configured cron schedules and file watchers.
-    List {
-        /// Directory containing `roko.toml` (default: cwd).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ProviderCmd {
-    /// List configured providers and their current connection status.
-    List {
-        /// Directory containing `roko.toml` (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show persisted provider circuit-breaker health and latency.
-    Health {
-        /// Directory containing `.roko/` (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Send a minimal request to verify provider connectivity.
-    Test {
-        /// Provider name from `[providers.*]`.
-        provider: String,
-        /// Directory containing `roko.toml` (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ModelCmd {
-    /// List configured models and their capabilities.
-    List {
-        /// Directory containing `roko.toml` (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-    /// Show the current routing decision and optionally explain why it won.
-    Route {
-        /// Model key or slug to explain.
-        model: String,
-        /// Show the full routing trace instead of only the final decision.
-        #[arg(long)]
-        explain: bool,
-        /// Complexity tier (`mechanical`, `focused`, `integrative`, `architectural`).
-        #[arg(long)]
-        complexity: Option<String>,
-        /// Directory containing `roko.toml` (default: cwd / --repo).
-        #[arg(long)]
-        workdir: Option<PathBuf>,
-    },
-}
+// EventSourcesCmdLegacy, ProviderCmdLegacy, ModelCmdLegacy removed — dispatch goes direct
 
 #[derive(Debug, Subcommand)]
 enum DeployCmd {
     /// Deploy the current workspace to Railway via the public GraphQL API.
+    ///
+    /// Creates a Railway project with roko-serve as the control plane.
+    /// Use --with-mirage to also deploy the chain relay, and --workers to
+    /// deploy agent workers from the template registry.
     Railway {
         /// Working directory / repository root (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Also deploy the mirage chain relay service.
+        #[arg(long)]
+        with_mirage: bool,
+        /// Deploy worker services for these template names (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        workers: Vec<String>,
     },
     /// Generate `fly.toml` and deploy the current workspace with Fly.io.
     Fly {
@@ -1009,8 +1252,9 @@ enum DeployCmd {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCmd {
+    // ── Core config management ──────────────────────────────────────
     /// Interactive wizard: detects installed LLM CLIs, writes global config.
-    #[command(visible_alias = "wizard")]
+    #[command(alias = "wizard")]
     Init {
         /// Skip all confirmation prompts.
         #[arg(long)]
@@ -1105,6 +1349,128 @@ enum ConfigCmd {
         #[arg(long)]
         dry_run: bool,
     },
+
+    // ── Providers ───────────────────────────────────────────────────
+    /// Inspect configured LLM providers.
+    Providers {
+        #[command(subcommand)]
+        cmd: ConfigProviderCmd,
+    },
+    // ── Models ──────────────────────────────────────────────────────
+    /// Inspect configured models and routing.
+    Models {
+        #[command(subcommand)]
+        cmd: ConfigModelCmd,
+    },
+    // ── Subscriptions ───────────────────────────────────────────────
+    /// Manage event subscriptions.
+    Subscriptions {
+        #[command(subcommand)]
+        cmd: ConfigSubscriptionCmd,
+    },
+    // ── Event sources ───────────────────────────────────────────────
+    /// Inspect configured event sources (cron, file watchers).
+    Events {
+        /// Directory containing `roko.toml` (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    // ── Experiments ─────────────────────────────────────────────────
+    /// Manage model A/B experiments.
+    Experiments {
+        #[command(subcommand)]
+        cmd: ExperimentCmd,
+    },
+    // ── Plugins ─────────────────────────────────────────────────────
+    /// Manage plugins (list, install, remove, audit).
+    Plugins {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
+    // ── Secrets ─────────────────────────────────────────────────────
+    /// Manage profile-aware secrets (set, get, list, rotate).
+    Secrets {
+        #[command(subcommand)]
+        cmd: roko_cli::SecretsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigProviderCmd {
+    /// List configured providers and their current connection status.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show persisted provider circuit-breaker health and latency.
+    Health {
+        /// Directory containing `.roko/` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Send a minimal request to verify provider connectivity.
+    Test {
+        /// Provider name from `[providers.*]`.
+        provider: String,
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigModelCmd {
+    /// List configured models and their capabilities.
+    List {
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show the current routing decision and optionally explain why it won.
+    Route {
+        /// Model key or slug to explain.
+        model: String,
+        /// Show the full routing trace instead of only the final decision.
+        #[arg(long)]
+        explain: bool,
+        /// Complexity tier (`mechanical`, `focused`, `integrative`, `architectural`).
+        #[arg(long)]
+        complexity: Option<String>,
+        /// Directory containing `roko.toml` (default: cwd / --repo).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigSubscriptionCmd {
+    /// List all subscriptions.
+    List,
+    /// Create a new subscription.
+    Add {
+        /// Agent template name to invoke.
+        #[arg(long)]
+        template: String,
+        /// Engram trigger glob to match.
+        #[arg(long)]
+        trigger: String,
+    },
+    /// Delete a subscription.
+    Remove {
+        /// Subscription ID.
+        id: String,
+    },
+    /// Enable a subscription.
+    Enable {
+        /// Subscription ID.
+        id: String,
+    },
+    /// Disable a subscription.
+    Disable {
+        /// Subscription ID.
+        id: String,
+    },
 }
 
 fn main() {
@@ -1116,7 +1482,19 @@ fn main() {
         }
     };
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    apply_env_overrides(&mut cli);
+
+    // ── Color mode ──────────────────────────────────────────────────
+    let use_color = cli.color.should_color();
+
+    // ── Timing mode ─────────────────────────────────────────────────
+    let timing_enabled = cli.timing
+        || env::var("ROKO_TIMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let started_at = Instant::now();
+
     let filter = tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"));
 
@@ -1125,11 +1503,13 @@ fn main() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    let ansi_logs = use_color;
     if raw_logs {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .json()
                     .with_env_filter(filter)
                     .init();
@@ -1137,6 +1517,7 @@ fn main() {
             LogFormat::Text => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .with_env_filter(filter)
                     .init();
             }
@@ -1147,6 +1528,7 @@ fn main() {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format().json(),
                         scrubber,
@@ -1157,6 +1539,7 @@ fn main() {
             LogFormat::Text => {
                 tracing_subscriber::fmt()
                     .with_target(false)
+                    .with_ansi(ansi_logs)
                     .event_format(RedactingFormat::new(
                         tracing_subscriber::fmt::format(),
                         scrubber,
@@ -1173,13 +1556,101 @@ fn main() {
         .expect("failed to build Tokio runtime");
 
     let code = match runtime.block_on(dispatch(cli)) {
-        Ok(code) => code,
+        Ok(code) => {
+            if timing_enabled {
+                print_timing(started_at);
+            }
+            code
+        }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            if timing_enabled {
+                print_timing(started_at);
+            }
+            let msg = format_error_with_hint(&e);
+            eprintln!("error: {msg}");
             EXIT_SYSTEM_ERROR
         }
     };
     std::process::exit(code);
+}
+
+// -----------------------------------------------------------------------
+// Timing helper
+// -----------------------------------------------------------------------
+
+fn print_timing(started_at: Instant) {
+    let elapsed = started_at.elapsed();
+    let secs = elapsed.as_secs_f64();
+    if secs < 60.0 {
+        eprintln!("Completed in {secs:.1}s");
+    } else {
+        let mins = (secs / 60.0).floor() as u64;
+        let rem = secs - (mins as f64 * 60.0);
+        eprintln!("Completed in {mins}m {rem:.1}s");
+    }
+}
+
+// -----------------------------------------------------------------------
+// Contextual error suggestions
+// -----------------------------------------------------------------------
+
+/// Format an error with a helpful hint when the message matches a known pattern.
+fn format_error_with_hint(err: &anyhow::Error) -> String {
+    let msg = format!("{err:#}");
+    match error_hint(&msg) {
+        Some(h) => format!("{msg}\n\nhint: {h}"),
+        None => msg,
+    }
+}
+
+/// Return an optional hint string based on common error patterns.
+fn error_hint(msg: &str) -> Option<&'static str> {
+    let lower = msg.to_lowercase();
+
+    if lower.contains("no .roko directory")
+        || lower.contains(".roko/")
+            && (lower.contains("not found") || lower.contains("no such file"))
+        || lower.contains("roko.toml")
+            && (lower.contains("not found") || lower.contains("no such file"))
+    {
+        return Some("run `roko init` to create a workspace in the current directory");
+    }
+
+    if lower.contains("agent not found") || lower.contains("unknown agent") {
+        return Some("run `roko agent list` to see available agents");
+    }
+
+    if lower.contains("plan not found")
+        || lower.contains("plans directory does not exist")
+        || lower.contains("no plans found")
+    {
+        return Some(
+            "run `roko plan list` to see available plans, or `roko plan create` to make one",
+        );
+    }
+
+    if lower.contains("connection refused")
+        || lower.contains("connect error")
+        || lower.contains("failed to connect")
+    {
+        return Some("is the server running? Start it with `roko serve`");
+    }
+
+    if lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.contains("auth")
+            && (lower.contains("failed") || lower.contains("invalid") || lower.contains("denied"))
+    {
+        return Some(
+            "check your API key: set ROKO_API_KEY or run `roko config set-secret ROKO_API_KEY <key>`",
+        );
+    }
+
+    if lower.contains("prd not found") || lower.contains("no prd") {
+        return Some("run `roko prd list` to see available PRDs, or `roko prd idea` to create one");
+    }
+
+    None
 }
 
 #[derive(Debug)]
@@ -1259,6 +1730,7 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
 async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     match command {
+        // ── Core workflow ────────────────────────────────────────────
         Command::Init {
             path,
             cloud,
@@ -1268,50 +1740,17 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Command::Run { prompt, workdir } => cmd_run(cli, workdir, prompt).await,
-        Command::Status { workdir, cfactor } => {
-            cmd_status(cli, workdir, cfactor).await?;
-            Ok(EXIT_SUCCESS)
-        }
-        Command::Replay {
-            hash,
+        Command::Status {
             workdir,
-            forensic,
-        } => cmd_replay(workdir, hash, forensic).await,
-        Command::Dream { cmd } => cmd_dream(cli, cmd).await,
-        Command::Dreams { cmd } => cmd_dreams(cli, cmd),
-        Command::Config { cmd } => {
-            dispatch_config(cmd).await?;
+            cfactor,
+            surfaces,
+        } => {
+            cmd_status(cli, workdir, cfactor, surfaces).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Secret { cmd } => {
-            let workdir = resolve_workdir(cli);
-            roko_cli::secrets::dispatch_secrets(&cmd, &workdir)?;
-            Ok(EXIT_SUCCESS)
-        }
-        Command::Custody { cmd } => {
-            match cmd {
-                CustodyCmd::List { limit, workdir } => {
-                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                    roko_cli::custody::cmd_custody_list(&wd, limit)?;
-                }
-                CustodyCmd::Show { index, workdir } => {
-                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                    roko_cli::custody::cmd_custody_show(&wd, index)?;
-                }
-                CustodyCmd::Verify { workdir } => {
-                    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                    roko_cli::custody::cmd_custody_verify(&wd)?;
-                }
-            }
-            Ok(EXIT_SUCCESS)
-        }
-        Command::Agent { cmd } => cmd_agent(cli, cmd).await,
-        Command::Inject {
-            session,
-            kind,
-            payload,
-            workdir,
-        } => cmd_inject(cli, session, &kind, payload, workdir),
+        Command::Doctor { workdir, serve_url } => cmd_doctor(cli, workdir, serve_url).await,
+
+        // ── Planning & PRDs ─────────────────────────────────────────
         Command::Plan { cmd } => {
             let result = cmd_plan(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
@@ -1322,56 +1761,58 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
+
+        // ── Agents ──────────────────────────────────────────────────
+        Command::Agent { cmd } => cmd_agent(cli, cmd).await,
+
+        // ── Research ────────────────────────────────────────────────
         Command::Research { cmd } => {
             let result = cmd_research(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
             result
         }
-        Command::Chat { agent, serve_url } => {
-            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+
+        // ── Knowledge ───────────────────────────────────────────────
+        Command::Knowledge { cmd } => dispatch_knowledge(cli, cmd).await,
+
+        // ── Learning ────────────────────────────────────────────────
+        Command::Learn { cmd } => dispatch_learn(cli, cmd).await,
+
+        // ── Jobs ────────────────────────────────────────────────────
+        Command::Job { cmd } => cmd_job(cli, cmd).await,
+
+        // ── Benchmarks ──────────────────────────────────────────────
+        Command::Bench { cmd } => cmd_bench(cli, cmd).await,
+
+        // ── Config ──────────────────────────────────────────────────
+        Command::Config { cmd } => {
+            // Some sub-commands need &Cli for resolve_workdir, intercept them.
+            match cmd {
+                ConfigCmd::Experiments { cmd: exp_cmd } => {
+                    return dispatch_experiment(cli, exp_cmd);
+                }
+                ConfigCmd::Plugins { cmd: plugin_cmd } => {
+                    return cmd_plugin(cli, plugin_cmd).await;
+                }
+                ConfigCmd::Secrets { cmd: secrets_cmd } => {
+                    let workdir = resolve_workdir(cli);
+                    roko_cli::secrets::dispatch_secrets(&secrets_cmd, &workdir)?;
+                    return Ok(EXIT_SUCCESS);
+                }
+                other => {
+                    dispatch_config(cli, other).await?;
+                }
+            }
             Ok(EXIT_SUCCESS)
         }
-        Command::Neuro { cmd } => cmd_neuro(cli, cmd).await,
-        Command::Subscription { cmd } => {
-            let result = cmd_subscription(cli, cmd).await;
-            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
-            result
-        }
-        Command::EventSources { cmd } => {
-            let result = cmd_event_sources(cli, cmd).await;
-            let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
-            result
-        }
-        Command::Provider { cmd } => cmd_provider(cli, cmd).await,
-        Command::Model { cmd } => cmd_model(cli, cmd).await,
-        Command::Experiment { cmd } => dispatch_experiment(cli, cmd),
-        Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
-        Command::Update { verify } => cmd_update(verify),
-        Command::Completions { shell } => {
-            print_completions(shell);
-            Ok(EXIT_SUCCESS)
-        }
-        Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
-        Command::Dashboard {
-            page,
-            list_pages,
-            text,
-            workdir,
-            high_contrast,
-            reduced_motion,
-        } => {
-            // Set env vars so theme and effects config pick them up.
-            // SAFETY: Single-threaded at startup before tokio runtime spawns;
-            // no concurrent reads of these variables.
-            #[allow(unsafe_code)]
-            if high_contrast {
-                unsafe { std::env::set_var("ROKO_HIGH_CONTRAST", "1") };
-            }
-            #[allow(unsafe_code)]
-            if reduced_motion {
-                unsafe { std::env::set_var("ROKO_REDUCED_MOTION", "1") };
-            }
-            cmd_dashboard(cli, workdir, page, list_pages, text, None).await
+
+        // ── Code intelligence ───────────────────────────────────────
+        Command::Index { cmd } => cmd_index(cli, cmd),
+
+        // ── Server & deployment ─────────────────────────────────────
+        Command::Up { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_up(cli, wd).await
         }
         Command::Serve {
             bind,
@@ -1385,25 +1826,47 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             roko_serve::run_server(wd, runtime, bind, port).await?;
             Ok(EXIT_SUCCESS)
         }
+        Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
+        Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
         Command::Worker { port } => {
             roko_cli::worker::run_worker(port).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Index { cmd } => cmd_index(cli, cmd),
-        Command::Tune {
-            subsystem,
-            dry_run,
+
+        // ── Interactive ─────────────────────────────────────────────
+        Command::Dashboard {
+            page,
+            list_pages,
+            text,
             workdir,
+            high_contrast,
+            reduced_motion,
         } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_tune(&wd, &subsystem, dry_run).await
+            #[allow(unsafe_code)]
+            if high_contrast {
+                unsafe { std::env::set_var("ROKO_HIGH_CONTRAST", "1") };
+            }
+            #[allow(unsafe_code)]
+            if reduced_motion {
+                unsafe { std::env::set_var("ROKO_REDUCED_MOTION", "1") };
+            }
+            cmd_dashboard(cli, workdir, page, list_pages, text, None).await
         }
-        Command::Learn { what, workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_learn(&wd, &what).await
-        }
-        Command::Explain { topic, depth } => {
-            cmd_explain(&topic, depth);
+
+        // ── Utilities ───────────────────────────────────────────────
+        Command::Replay {
+            hash,
+            workdir,
+            forensic,
+        } => cmd_replay(workdir, hash, forensic).await,
+        Command::Inject {
+            session,
+            kind,
+            payload,
+            workdir,
+        } => cmd_inject(cli, session, &kind, payload, workdir),
+        Command::Completions { shell } => {
+            print_completions(shell);
             Ok(EXIT_SUCCESS)
         }
         Command::New {
@@ -1430,14 +1893,238 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 }
             }
         }
-        Command::Plugin { cmd } => cmd_plugin(cli, cmd).await,
-        Command::Archive {
+        Command::Explain { topic, depth } => {
+            cmd_explain(&topic, depth);
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Knowledge dispatch (neuro + dreams + custody + archive)
+// -----------------------------------------------------------------------
+
+async fn dispatch_knowledge(cli: &Cli, cmd: KnowledgeCmd) -> Result<i32> {
+    match cmd {
+        KnowledgeCmd::Query { topic, workdir } => {
+            cmd_neuro(cli, NeuroCmd::Query { topic, workdir }).await
+        }
+        KnowledgeCmd::Stats { workdir } => cmd_neuro(cli, NeuroCmd::Stats { workdir }).await,
+        KnowledgeCmd::Gc { workdir } => cmd_neuro(cli, NeuroCmd::Gc { workdir }).await,
+        KnowledgeCmd::Backup {
+            workdir,
+            destination,
+            force,
+            top_n,
+        } => {
+            cmd_neuro(
+                cli,
+                NeuroCmd::Backup {
+                    workdir,
+                    destination,
+                    force,
+                    top_n,
+                },
+            )
+            .await
+        }
+        KnowledgeCmd::Restore {
+            workdir,
+            source,
+            force,
+            types,
+            min_confidence,
+            generation,
+        } => {
+            cmd_neuro(
+                cli,
+                NeuroCmd::Restore {
+                    workdir,
+                    source,
+                    force,
+                    types,
+                    min_confidence,
+                    generation,
+                },
+            )
+            .await
+        }
+        KnowledgeCmd::Sync {
+            peer,
+            workdir,
+            direction,
+            max_send,
+        } => {
+            cmd_neuro(
+                cli,
+                NeuroCmd::Sync {
+                    peer,
+                    workdir,
+                    direction,
+                    max_send,
+                },
+            )
+            .await
+        }
+        KnowledgeCmd::Dream { cmd } => dispatch_knowledge_dream(cli, cmd).await,
+        KnowledgeCmd::Custody { cmd } => {
+            dispatch_knowledge_custody(cli, cmd)?;
+            Ok(EXIT_SUCCESS)
+        }
+        KnowledgeCmd::Archive {
             older_than,
             batch_size,
             workdir,
             dry_run,
         } => cmd_archive(cli, workdir, &older_than, batch_size, dry_run).await,
     }
+}
+
+async fn dispatch_knowledge_dream(cli: &Cli, cmd: KnowledgeDreamCmd) -> Result<i32> {
+    match cmd {
+        KnowledgeDreamCmd::Run { workdir } => cmd_dream(cli, DreamCmdLegacy::Run { workdir }).await,
+        KnowledgeDreamCmd::Report { workdir } => {
+            cmd_dream(cli, DreamCmdLegacy::Report { workdir }).await
+        }
+        KnowledgeDreamCmd::Schedule { workdir } => {
+            cmd_dream(cli, DreamCmdLegacy::Schedule { workdir }).await
+        }
+        KnowledgeDreamCmd::Journal { limit, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let journal = roko_dreams::phase2::DreamJournal::standard(&wd);
+            match journal.read_recent(limit) {
+                Ok(entries) if entries.is_empty() => println!("no dream journal entries found"),
+                Ok(entries) => {
+                    for entry in &entries {
+                        println!(
+                            "[{}] cycle={} agent={} hypotheses={}/{}/{} tokens={} {}",
+                            entry.cycle_start.format("%Y-%m-%d %H:%M"),
+                            entry.cycle_id,
+                            entry.agent_id,
+                            entry.hypotheses_generated,
+                            entry.hypotheses_staged,
+                            entry.hypotheses_promoted,
+                            entry.total_tokens,
+                            if entry.early_termination {
+                                "(early termination)"
+                            } else {
+                                ""
+                            },
+                        );
+                    }
+                    println!("\n{} entries shown (of last {})", entries.len(), limit);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!(
+                        "no dream journal found at {}",
+                        journal.journal_path.display()
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        KnowledgeDreamCmd::Archive { limit, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let archive = roko_dreams::phase2::DreamArchive::standard(&wd);
+            match archive.read_recent(limit) {
+                Ok(entries) if entries.is_empty() => println!("no dream archive entries found"),
+                Ok(entries) => {
+                    for entry in &entries {
+                        println!(
+                            "[{}] {} ({:?}) quality={:.2} -- {}",
+                            entry.archived_at.format("%Y-%m-%d %H:%M"),
+                            entry.entry_id,
+                            entry.kind,
+                            entry.quality_score,
+                            entry.summary,
+                        );
+                    }
+                    println!("\n{} entries shown (of last {})", entries.len(), limit);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!(
+                        "no dream archive found at {}",
+                        archive.archive_path.display()
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+fn dispatch_knowledge_custody(cli: &Cli, cmd: KnowledgeCustodyCmd) -> Result<()> {
+    match cmd {
+        KnowledgeCustodyCmd::List { limit, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::custody::cmd_custody_list(&wd, limit)?;
+        }
+        KnowledgeCustodyCmd::Show { index, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::custody::cmd_custody_show(&wd, index)?;
+        }
+        KnowledgeCustodyCmd::Verify { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::custody::cmd_custody_verify(&wd)?;
+        }
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------
+// Learn dispatch (learning state + tuning)
+// -----------------------------------------------------------------------
+
+async fn dispatch_learn(cli: &Cli, cmd: LearnCmd) -> Result<i32> {
+    match cmd {
+        LearnCmd::All { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, "all").await
+        }
+        LearnCmd::Router { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, "router").await
+        }
+        LearnCmd::Experiments { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, "experiments").await
+        }
+        LearnCmd::Efficiency { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, "efficiency").await
+        }
+        LearnCmd::Episodes { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_learn(&wd, "episodes").await
+        }
+        LearnCmd::Tune {
+            subsystem,
+            dry_run,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            cmd_tune(&wd, &subsystem, dry_run).await
+        }
+    }
+}
+
+async fn cmd_doctor(cli: &Cli, workdir: Option<PathBuf>, serve_url: Option<String>) -> Result<i32> {
+    let report = roko_cli::doctor::run_doctor(&roko_cli::doctor::DoctorOptions {
+        workdir: workdir.unwrap_or_else(|| resolve_workdir(cli)),
+        config_override: cli.config.clone(),
+        serve_url,
+    })
+    .await?;
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.render_human());
+    }
+
+    Ok(report.exit_code())
 }
 
 async fn cmd_archive(
@@ -1487,6 +2174,16 @@ async fn cmd_archive(
         return Ok(EXIT_SUCCESS);
     }
 
+    // Confirm destructive operation (skipped in quiet / non-TTY mode).
+    let prompt_msg = format!(
+        "Archive {} engram(s) older than {older_than}?",
+        candidates.len()
+    );
+    if !confirm_destructive(&prompt_msg, cli.quiet) {
+        println!("aborted");
+        return Ok(EXIT_SUCCESS);
+    }
+
     // Open cold substrate and archive.
     let cold_dir = roko_dir.join("cold");
     let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
@@ -1519,6 +2216,129 @@ fn parse_duration_to_ms(s: &str) -> Option<i64> {
         "s" => Some(num * 1000),
         _ => None,
     }
+}
+
+async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
+    use agent_serve::{run_agent_create, run_agent_start, run_agent_stop};
+
+    prepare_runtime_hooks(&workdir, cli.quiet);
+
+    // Ensure .roko/ exists (like `roko init` would).
+    let _ = bootstrap_observability_dirs(&workdir);
+
+    // Load RokoConfig to get [[agents]] definitions.
+    let roko_toml_path = workdir.join("roko.toml");
+    let roko_config: RokoConfig = if roko_toml_path.exists() {
+        let text = std::fs::read_to_string(&roko_toml_path)
+            .with_context(|| format!("read {}", roko_toml_path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
+    } else {
+        RokoConfig::default()
+    };
+
+    let agents = roko_config.agents.clone();
+    let port = roko_config.server.port;
+    let bind = roko_config.server.bind.clone();
+
+    // Start serve in background.
+    let config = resolve_config_for_workdir(cli, &workdir)?;
+    let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
+    let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
+    let serve_wd = workdir.clone();
+    let serve_handle = tokio::spawn(async move {
+        if let Err(e) = roko_serve::run_server(serve_wd, runtime, None, None).await {
+            eprintln!("roko-serve error: {e}");
+        }
+    });
+
+    // Brief wait for serve to start listening.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    println!("  roko-serve     http://{}:{}  \u{2713}", bind, port);
+
+    // Create and start each configured agent.
+    let mut started_agents: Vec<String> = Vec::new();
+    for agent_def in &agents {
+        if !agent_def.enabled {
+            continue;
+        }
+        // Create manifest if it doesn't already exist.
+        let manifest_path = workdir
+            .join(".roko")
+            .join("agents")
+            .join(&agent_def.name)
+            .join("manifest.toml");
+        if !manifest_path.exists() {
+            let prompt = if agent_def.prompt.is_empty() {
+                None
+            } else {
+                Some(agent_def.prompt.as_str())
+            };
+            if let Err(e) = run_agent_create(
+                &agent_def.name,
+                &agent_def.domain,
+                None,
+                prompt,
+                Some(&workdir),
+            )
+            .await
+            {
+                eprintln!(
+                    "  {:<14}  {}     {:10}  \u{2717} ({})",
+                    agent_def.name, agent_def.domain, ":auto", e
+                );
+                continue;
+            }
+        }
+
+        // Start the agent.
+        match run_agent_start(&agent_def.name, "127.0.0.1:0", Some(&workdir)) {
+            Ok(()) => {
+                println!(
+                    "  {:<14}  {:<10} {:10}  \u{2713}",
+                    agent_def.name, agent_def.domain, ":auto"
+                );
+                started_agents.push(agent_def.name.clone());
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {:<14}  {:<10} {:10}  \u{2717} ({})",
+                    agent_def.name, agent_def.domain, ":auto", e
+                );
+            }
+        }
+    }
+
+    println!();
+    if started_agents.is_empty() && agents.is_empty() {
+        println!("  No [[agents]] configured in roko.toml.");
+        println!("  Serve is running. Add [[agents]] blocks to start agents.");
+    } else {
+        println!(
+            "  {} agent(s) registered. Dashboard: roko dashboard",
+            started_agents.len()
+        );
+    }
+    println!("  Press Ctrl+C to stop all.");
+    println!();
+
+    // Wait for Ctrl+C.
+    tokio::signal::ctrl_c().await.context("listen for ctrl+c")?;
+
+    println!("\nShutting down...");
+
+    // Stop all started agents.
+    for name in &started_agents {
+        if let Err(e) = run_agent_stop(name, false, Some(&workdir)) {
+            eprintln!("warning: failed to stop agent '{}': {}", name, e);
+        }
+    }
+
+    // Abort the serve task.
+    serve_handle.abort();
+    let _ = serve_handle.await;
+
+    println!("All services stopped.");
+    Ok(EXIT_SUCCESS)
 }
 
 async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
@@ -1889,15 +2709,7 @@ async fn cmd_pipe(cli: &Cli) -> Result<i32> {
     cmd_oneshot(cli, &input.text).await
 }
 
-async fn cmd_event_sources(cli: &Cli, cmd: EventSourcesCmd) -> Result<i32> {
-    match cmd {
-        EventSourcesCmd::List { workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            roko_cli::event_sources::cmd_list(&wd, cli.json)?;
-            Ok(EXIT_SUCCESS)
-        }
-    }
-}
+// cmd_event_sources removed — now dispatched inline from ConfigCmd::Events
 
 async fn cmd_headless(cli: &Cli) -> Result<i32> {
     let workdir = resolve_workdir(cli);
@@ -1934,7 +2746,10 @@ async fn cmd_dashboard(
         } else {
             App::new_with_page(&workdir, initial_page)
         };
-        if app.run().is_ok() {
+        let tui_result = tokio::task::spawn_blocking(move || app.run())
+            .await
+            .context("dashboard TUI worker failed")?;
+        if tui_result.is_ok() {
             return Ok(EXIT_SUCCESS);
         }
     }
@@ -2363,51 +3178,7 @@ impl ProviderLatencySummary {
     }
 }
 
-async fn cmd_provider(cli: &Cli, cmd: ProviderCmd) -> Result<i32> {
-    match cmd {
-        ProviderCmd::List { workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_provider_list(&wd).await?;
-            Ok(EXIT_SUCCESS)
-        }
-        ProviderCmd::Health { workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_provider_health(&wd)?;
-            Ok(EXIT_SUCCESS)
-        }
-        ProviderCmd::Test { provider, workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_provider_test(&wd, &provider).await?;
-            Ok(EXIT_SUCCESS)
-        }
-    }
-}
-
-async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<i32> {
-    match cmd {
-        ModelCmd::List { workdir } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_model_list(&wd)?;
-            Ok(EXIT_SUCCESS)
-        }
-        ModelCmd::Route {
-            model,
-            explain,
-            complexity,
-            workdir,
-        } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            cmd_model_route(
-                &wd,
-                cli.role.as_deref(),
-                &model,
-                explain,
-                complexity.as_deref(),
-            )?;
-            Ok(EXIT_SUCCESS)
-        }
-    }
-}
+// cmd_provider/cmd_model removed — dispatched inline from ConfigCmd::Providers/Models
 
 async fn cmd_provider_list(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
@@ -3702,7 +4473,7 @@ fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     }
 }
 
-async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
+async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
     match cmd {
         ConfigCmd::Init {
             yes,
@@ -3744,11 +4515,11 @@ async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             Ok(())
         }
         ConfigCmd::Show { workdir } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_show(&wd)
         }
         ConfigCmd::Path { workdir } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_path(&wd)
         }
         ConfigCmd::Edit {
@@ -3756,7 +4527,7 @@ async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             project,
             workdir,
         } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let target = edit_target(global, project);
             config_cmd::cmd_edit(&wd, target)
         }
@@ -3767,7 +4538,7 @@ async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
             project,
             workdir,
         } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let target = if project {
                 EditTarget::Project
             } else {
@@ -3777,19 +4548,105 @@ async fn dispatch_config(cmd: ConfigCmd) -> Result<()> {
         }
         ConfigCmd::SetSecret { name, value } => config_cmd::cmd_set_secret(&name, &value),
         ConfigCmd::CheckSecrets { workdir } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_check_secrets(&wd)
         }
         ConfigCmd::Validate { workdir } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_validate(&wd).await
         }
         ConfigCmd::Migrate { workdir, dry_run } => {
-            let wd = workdir.unwrap_or_else(|| PathBuf::from("."));
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             config_cmd::cmd_migrate(&wd, dry_run)
+        }
+        // ── Providers ───────────────────────────────────────────────
+        ConfigCmd::Providers { cmd } => match cmd {
+            ConfigProviderCmd::List { workdir } => {
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                cmd_provider_list(&wd).await?;
+                Ok(())
+            }
+            ConfigProviderCmd::Health { workdir } => {
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                cmd_provider_health(&wd)?;
+                Ok(())
+            }
+            ConfigProviderCmd::Test { provider, workdir } => {
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                cmd_provider_test(&wd, &provider).await?;
+                Ok(())
+            }
+        },
+        // ── Models ──────────────────────────────────────────────────
+        ConfigCmd::Models { cmd } => match cmd {
+            ConfigModelCmd::List { workdir } => {
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                cmd_model_list(&wd)?;
+                Ok(())
+            }
+            ConfigModelCmd::Route {
+                model,
+                explain,
+                complexity,
+                workdir,
+            } => {
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                cmd_model_route(
+                    &wd,
+                    cli.role.as_deref(),
+                    &model,
+                    explain,
+                    complexity.as_deref(),
+                )?;
+                Ok(())
+            }
+        },
+        // ── Subscriptions ───────────────────────────────────────────
+        ConfigCmd::Subscriptions { cmd } => {
+            let workdir = resolve_workdir(cli);
+            match cmd {
+                ConfigSubscriptionCmd::List => {
+                    roko_cli::subscriptions::cmd_list(&workdir, cli.json)?
+                }
+                ConfigSubscriptionCmd::Add { template, trigger } => {
+                    roko_cli::subscriptions::cmd_add(&workdir, &template, &trigger)?
+                }
+                ConfigSubscriptionCmd::Remove { id } => {
+                    roko_cli::subscriptions::cmd_remove(&workdir, &id)?
+                }
+                ConfigSubscriptionCmd::Enable { id } => {
+                    roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, true)?
+                }
+                ConfigSubscriptionCmd::Disable { id } => {
+                    roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, false)?
+                }
+            }
+            Ok(())
+        }
+        // ── Event sources ───────────────────────────────────────────
+        ConfigCmd::Events { workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::event_sources::cmd_list(&wd, cli.json)?;
+            Ok(())
+        }
+        // ── Experiments (intercepted in dispatch_subcommand) ────────
+        ConfigCmd::Experiments { .. } => {
+            unreachable!("experiments dispatched in dispatch_subcommand")
+        }
+        // ── Plugins (intercepted in dispatch_subcommand) ────────────
+        ConfigCmd::Plugins { .. } => {
+            unreachable!("plugins dispatched in dispatch_subcommand")
+        }
+        // ── Secrets (intercepted in dispatch_subcommand) ────────────
+        ConfigCmd::Secrets { .. } => {
+            unreachable!("secrets dispatched in dispatch_subcommand")
         }
     }
 }
+
+// Config subscriptions are handled inline so global --repo and --json are preserved.
+
+// dispatch_config_plugins delegates to cmd_plugin which is still used
 
 const fn edit_target(global: bool, project: bool) -> EditTarget {
     if global {
@@ -3961,7 +4818,13 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             resume_plan,
             approval,
             max_retries,
+            dry_run,
         } => {
+            // ── Dry-run mode: parse plans + show summary without executing ──
+            if dry_run {
+                return cmd_plan_dry_run(&plans_dir, cli).await;
+            }
+
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
@@ -4331,6 +5194,183 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
     }
+}
+
+// -----------------------------------------------------------------------
+// Dry-run for `plan run`
+// -----------------------------------------------------------------------
+
+/// Parse and display a plan directory without executing anything.
+async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
+    let plans = roko_orchestrator::discover_plans(plans_dir)
+        .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+
+    if plans.is_empty() {
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "dry_run": true,
+                    "plans": [],
+                    "total_plans": 0,
+                    "total_tasks": 0,
+                }))?
+            );
+        } else {
+            println!("No plans found in {}", plans_dir.display());
+        }
+        return Ok(EXIT_SUCCESS);
+    }
+
+    // For each plan, try to load and count tasks.
+    let mut plan_summaries: Vec<serde_json::Value> = Vec::new();
+    let mut total_tasks: usize = 0;
+    let mut total_estimated_minutes: u32 = 0;
+
+    for plan in &plans {
+        // Try loading the tasks.toml adjacent to the plan file.
+        let tasks_path = plan
+            .path
+            .parent()
+            .map(|p| p.join("tasks.toml"))
+            .filter(|p| p.exists());
+
+        let (task_count, task_details) = if let Some(ref tp) = tasks_path {
+            match roko_cli::task_parser::TasksFile::parse(tp) {
+                Ok(tf) => {
+                    let details: Vec<serde_json::Value> = tf
+                        .tasks
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "status": t.status,
+                                "tier": t.tier,
+                                "depends_on": t.depends_on,
+                                "files": t.files.len(),
+                            })
+                        })
+                        .collect();
+                    (tf.tasks.len(), details)
+                }
+                Err(_) => (0, vec![]),
+            }
+        } else {
+            // New-layout plans might have tasks.toml at plans_dir/plan_name/tasks.toml
+            let dir_tasks = plans_dir.join(&plan.base).join("tasks.toml");
+            if dir_tasks.exists() {
+                match roko_cli::task_parser::TasksFile::parse(&dir_tasks) {
+                    Ok(tf) => {
+                        let details: Vec<serde_json::Value> = tf
+                            .tasks
+                            .iter()
+                            .map(|t| {
+                                json!({
+                                    "id": t.id,
+                                    "title": t.title,
+                                    "status": t.status,
+                                    "tier": t.tier,
+                                    "depends_on": t.depends_on,
+                                    "files": t.files.len(),
+                                })
+                            })
+                            .collect();
+                        (tf.tasks.len(), details)
+                    }
+                    Err(_) => (0, vec![]),
+                }
+            } else {
+                (0, vec![])
+            }
+        };
+
+        total_tasks += task_count;
+        if let Some(ref fm) = plan.frontmatter {
+            if let Some(mins) = fm.estimated_minutes {
+                total_estimated_minutes += mins;
+            }
+        }
+
+        plan_summaries.push(json!({
+            "plan": plan.base,
+            "num": plan.num,
+            "task_count": task_count,
+            "estimated_minutes": plan.frontmatter.as_ref().and_then(|f| f.estimated_minutes),
+            "parallel_width": plan.frontmatter.as_ref().and_then(|f| f.estimated_parallel_width),
+            "priority": plan.frontmatter.as_ref().and_then(|f| f.priority),
+            "tags": plan.frontmatter.as_ref().map(|f| &f.tags),
+            "tasks": task_details,
+        }));
+    }
+
+    if cli.json {
+        let payload = json!({
+            "dry_run": true,
+            "plans_dir": plans_dir,
+            "total_plans": plans.len(),
+            "total_tasks": total_tasks,
+            "total_estimated_minutes": total_estimated_minutes,
+            "plans": plan_summaries,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "Dry run: {} plan(s), {} task(s) in {}\n",
+            plans.len(),
+            total_tasks,
+            plans_dir.display()
+        );
+
+        for (i, plan) in plans.iter().enumerate() {
+            let est = plan
+                .frontmatter
+                .as_ref()
+                .and_then(|f| f.estimated_minutes)
+                .map(|m| format!(" (~{m} min)"))
+                .unwrap_or_default();
+            let priority = plan
+                .frontmatter
+                .as_ref()
+                .and_then(|f| f.priority)
+                .map(|p| format!(" [priority={p}]"))
+                .unwrap_or_default();
+            println!("  {}. {}{}{}", i + 1, plan.base, est, priority);
+
+            // Print task list if available.
+            if let Some(tasks) = plan_summaries[i].get("tasks").and_then(|v| v.as_array()) {
+                for t in tasks {
+                    let tid = t.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = t
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("pending");
+                    let tier = t.get("tier").and_then(|v| v.as_str()).unwrap_or("?");
+                    let deps = t
+                        .get("depends_on")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            let ids: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                            if ids.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (after {})", ids.join(", "))
+                            }
+                        })
+                        .unwrap_or_default();
+                    println!("     {tid}: {title} [{tier}, {status}]{deps}");
+                }
+            }
+        }
+
+        if total_estimated_minutes > 0 {
+            println!("\nEstimated total: ~{total_estimated_minutes} min");
+        }
+        println!("\nNo tasks were executed. Remove --dry-run to run the plan.");
+    }
+
+    Ok(EXIT_SUCCESS)
 }
 
 fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
@@ -5237,6 +6277,483 @@ async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     }
 }
 
+/// Resolve a (possibly prefix-truncated) job ID to the full UUID by scanning
+/// `.roko/jobs/*.json`.  Exact matches are preferred; if no exact match is
+/// found the prefix is tried.  Ambiguous prefixes produce an error listing
+/// the candidates.
+fn resolve_job_path(jobs_dir: &Path, id: &str) -> Result<std::path::PathBuf> {
+    // 1. Try exact match first.
+    let exact = jobs_dir.join(format!("{id}.json"));
+    if exact.exists() {
+        return Ok(exact);
+    }
+    // 2. Prefix scan.
+    let lower = id.to_ascii_lowercase();
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(jobs_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = std::path::Path::new(&name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            else {
+                continue;
+            };
+            if stem.to_ascii_lowercase().starts_with(&lower) {
+                matches.push(entry.path());
+            }
+        }
+    }
+    match matches.len() {
+        0 => anyhow::bail!(
+            "job '{id}' not found — no files in {} match that prefix",
+            jobs_dir.display()
+        ),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        n => {
+            let ids: Vec<String> = matches
+                .iter()
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .collect();
+            anyhow::bail!(
+                "ambiguous job prefix '{id}' — {n} matches: {}",
+                ids.join(", ")
+            )
+        }
+    }
+}
+
+async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
+    let jobs_dir = |wd: &Path| wd.join(".roko").join("jobs");
+
+    match cmd {
+        JobCmd::List { workdir, status } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let dir = jobs_dir(&wd);
+            if !dir.is_dir() {
+                println!(
+                    "No jobs found (directory does not exist: {})",
+                    dir.display()
+                );
+                return Ok(EXIT_SUCCESS);
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext == "json")
+                })
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+
+            if cli.json {
+                let mut jobs: Vec<roko_core::MarketplaceJob> = Vec::new();
+                for entry in &entries {
+                    let data = std::fs::read_to_string(entry.path())?;
+                    if let Ok(job) = serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
+                        jobs.push(job);
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&jobs)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let mut count = 0usize;
+            for entry in &entries {
+                let data = std::fs::read_to_string(entry.path())?;
+                let job: roko_core::MarketplaceJob =
+                    serde_json::from_str(&data).unwrap_or_default();
+                let effective_status = job.effective_status();
+                if let Some(ref filter) = status {
+                    if !effective_status.eq_ignore_ascii_case(filter) {
+                        continue;
+                    }
+                }
+                let icon = match effective_status {
+                    "open" | "pending" => "\u{25cb}",
+                    "assigned" => "\u{25d4}",
+                    "in_progress" | "active" | "running" => "\u{25b6}",
+                    "submitted" => "\u{25d1}",
+                    "completed" | "done" => "\u{2713}",
+                    "failed" | "cancelled" => "\u{2717}",
+                    _ => "\u{00b7}",
+                };
+                println!(
+                    "{icon} [{:>12}] {:>10}  {}  {}",
+                    job.job_type,
+                    effective_status,
+                    &job.id[..job.id.len().min(8)],
+                    job.title
+                );
+                count += 1;
+            }
+            if count == 0 {
+                println!("No jobs found.");
+            } else {
+                println!("\n{count} job(s)");
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Create {
+            title,
+            r#type,
+            description,
+            priority,
+            auto_execute,
+            plan_id,
+            workdir,
+        } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let dir = jobs_dir(&wd);
+            std::fs::create_dir_all(&dir)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let job = roko_core::MarketplaceJob {
+                id: id.clone(),
+                title: title.trim().to_string(),
+                description: description.trim().to_string(),
+                job_type: r#type.trim().to_string(),
+                status: "open".to_string(),
+                priority: priority.trim().to_string(),
+                auto_execute,
+                plan_id: plan_id.unwrap_or_default(),
+                created_at: now.clone(),
+                updated_at: now,
+                ..Default::default()
+            };
+            let path = dir.join(format!("{id}.json"));
+            let rendered = serde_json::to_string_pretty(&job)?;
+            std::fs::write(&path, &rendered)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&job)?);
+            } else {
+                println!("Created job: {id}");
+                println!("  title:    {}", job.title);
+                println!("  type:     {}", job.job_type);
+                println!("  priority: {}", job.priority);
+                println!("  auto_execute: {}", job.auto_execute);
+                println!("  path:     {}", path.display());
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Match {
+            title,
+            serve_url,
+            description,
+            language,
+            min_tier,
+            reward,
+            skills,
+            workdir,
+        } => {
+            let default_wd = resolve_workdir(cli);
+            let wd = workdir.as_deref().unwrap_or(&default_wd);
+            let auth_cfg = load_layered(wd)
+                .map(|r| r.config.serve.auth)
+                .unwrap_or_default();
+            let headers = match auth::resolve_api_key(&auth_cfg, None) {
+                Some(resolved) => auth::auth_headers(&resolved.key),
+                None => reqwest::header::HeaderMap::new(),
+            };
+            let body = serde_json::json!({
+                "title": title,
+                "description": description,
+                "language": language,
+                "minTier": min_tier,
+                "reward": reward,
+                "skills": skills,
+            });
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(format!(
+                    "{}/api/jobs/match",
+                    serve_url.trim_end_matches('/')
+                ))
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await?;
+            let status = resp.status();
+            let payload: serde_json::Value = resp.json().await.unwrap_or_default();
+            if !status.is_success() {
+                eprintln!(
+                    "Failed to match job: {} {}",
+                    status,
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+                return Ok(EXIT_FAILURE);
+            }
+
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_default()
+                );
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let candidates = payload
+                .get("candidates")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if candidates.is_empty() {
+                println!("No matching agents found.");
+                return Ok(EXIT_SUCCESS);
+            }
+
+            println!(
+                "Matched {} candidate(s), total_fee={}, eta_hours={}",
+                candidates.len(),
+                payload
+                    .get("totalFee")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                payload
+                    .get("etaHours")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "?".to_string())
+            );
+            println!(
+                "{:<24} {:<11} {:>5} {:>9} {:>9} {:>14}",
+                "agent", "tier", "rep", "inflight", "jobs", "bid"
+            );
+            for candidate in candidates {
+                let agent = candidate
+                    .get("agentId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let tier = candidate
+                    .get("tier")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let reputation = candidate
+                    .get("reputation")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let inflight = candidate
+                    .get("inflightJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let max_concurrent = candidate
+                    .get("maxConcurrentJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let past_jobs = candidate
+                    .get("pastJobs")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let bid = candidate
+                    .get("bidShare")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                println!(
+                    "{:<24} {:<11} {:>5} {:>4}/{:<4} {:>9} {:>14}",
+                    agent, tier, reputation, inflight, max_concurrent, past_jobs, bid
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Show { id, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let path = resolve_job_path(&jobs_dir(&wd), &id)?;
+            let data = std::fs::read_to_string(&path)?;
+            let job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&job)?);
+                return Ok(EXIT_SUCCESS);
+            }
+
+            let effective_status = job.effective_status();
+            println!("id:           {}", job.id);
+            println!("title:        {}", job.title);
+            println!("type:         {}", job.job_type);
+            println!("status:       {effective_status}");
+            println!("priority:     {}", job.priority);
+            println!("posted_by:    {}", job.posted_by);
+            println!("assigned_to:  {}", job.assigned_to);
+            println!("auto_execute: {}", job.auto_execute);
+            println!("plan_id:      {}", job.plan_id);
+            println!("created_at:   {}", job.created_at);
+            println!("updated_at:   {}", job.updated_at);
+            if !job.tags.is_empty() {
+                println!("tags:         {}", job.tags.join(", "));
+            }
+            if !job.description.is_empty() {
+                println!("\n--- description ---\n{}", job.description);
+            }
+            if let Some(ref sub) = job.submission {
+                println!(
+                    "\n--- submission ---\n{}",
+                    serde_json::to_string_pretty(sub).unwrap_or_default()
+                );
+            }
+            if let Some(ref eval) = job.evaluation {
+                println!(
+                    "\n--- evaluation ---\n{}",
+                    serde_json::to_string_pretty(eval).unwrap_or_default()
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Execute {
+            id,
+            serve_url,
+            workdir,
+        } => {
+            if let Some(url) = serve_url {
+                // Delegate to roko-serve
+                let default_wd = resolve_workdir(cli);
+                let wd = workdir.as_deref().unwrap_or(&default_wd);
+                let auth_cfg = load_layered(wd)
+                    .map(|r| r.config.serve.auth)
+                    .unwrap_or_default();
+                let headers = match auth::resolve_api_key(&auth_cfg, None) {
+                    Some(resolved) => auth::auth_headers(&resolved.key),
+                    None => reqwest::header::HeaderMap::new(),
+                };
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(format!("{url}/api/jobs/{id}/execute"))
+                    .headers(headers)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                if status.is_success() {
+                    println!("Job '{id}' execution started via serve.");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                } else {
+                    eprintln!(
+                        "Failed to execute job '{id}': {} {}",
+                        status,
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                    return Ok(EXIT_FAILURE);
+                }
+            } else {
+                // Local inline execution — load config and use run_once
+                let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+                let path = resolve_job_path(&jobs_dir(&wd), &id)?;
+                let data = std::fs::read_to_string(&path)?;
+                let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+                println!("Executing job '{id}' locally...");
+
+                // Transition to in_progress
+                job.status = "in_progress".to_string();
+                job.updated_at = chrono::Utc::now().to_rfc3339();
+                std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+
+                // Build prompt based on job type
+                let prompt = match job.job_type.as_str() {
+                    "research" => format!(
+                        "Research the following topic and produce a detailed report with citations:\n\n{}",
+                        job.description
+                    ),
+                    "coding_task" | "coding" => {
+                        if !job.plan_id.is_empty() {
+                            format!("Execute plan '{}' in the current workspace", job.plan_id)
+                        } else {
+                            job.description.clone()
+                        }
+                    }
+                    _ => job.description.clone(),
+                };
+
+                let config = resolve_config_for_workdir(cli, &wd)?;
+                let result = run_once(&wd, &config, &prompt).await;
+                match result {
+                    Ok(report) => {
+                        job.status = "completed".to_string();
+                        job.submission = Some(serde_json::json!({
+                            "result_summary": if report.overall_success() { "success" } else { "completed with failures" },
+                            "completed_at": chrono::Utc::now().to_rfc3339(),
+                        }));
+                        job.updated_at = chrono::Utc::now().to_rfc3339();
+                        std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+                        println!("Job '{id}' completed successfully.");
+                    }
+                    Err(e) => {
+                        job.status = "failed".to_string();
+                        job.updated_at = chrono::Utc::now().to_rfc3339();
+                        std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+                        eprintln!("Job '{id}' failed: {e}");
+                        return Ok(EXIT_AGENT_FAILURE);
+                    }
+                }
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        JobCmd::Cancel { id, workdir } => {
+            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let path = resolve_job_path(&jobs_dir(&wd), &id)?;
+            let data = std::fs::read_to_string(&path)?;
+            let mut job: roko_core::MarketplaceJob = serde_json::from_str(&data)?;
+            let effective_status = job.effective_status();
+            if matches!(effective_status, "completed" | "failed" | "cancelled") {
+                bail!("cannot cancel job '{id}': status '{effective_status}' is terminal");
+            }
+            job.status = "cancelled".to_string();
+            job.updated_at = chrono::Utc::now().to_rfc3339();
+            std::fs::write(&path, serde_json::to_string_pretty(&job)?)?;
+            println!("Job '{id}' cancelled.");
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+async fn cmd_bench(cli: &Cli, cmd: BenchCmd) -> Result<i32> {
+    match cmd {
+        BenchCmd::Swe {
+            dataset,
+            batch_size,
+            offset,
+            agent_mode,
+            predictions,
+            agent_command,
+            report,
+            export_predictions,
+            no_learning,
+            keep_workdirs,
+            workdir,
+        } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let report = roko_cli::bench::run_swe_bench(roko_cli::bench::SweBenchOptions {
+                workdir,
+                dataset,
+                batch_size,
+                offset,
+                agent_mode,
+                predictions,
+                agent_command,
+                report,
+                export_predictions,
+                record_learning: !no_learning,
+                keep_workdirs,
+            })
+            .await?;
+
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.render_text());
+                println!();
+                println!(
+                    "note: this is fast proxy scoring, not official SWE-bench Docker scoring."
+                );
+            }
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
 async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
     match cmd {
         NeuroCmd::Query { topic, workdir } => {
@@ -5949,32 +7466,6 @@ fn sync_optional_neuro_file(
     Ok(false)
 }
 
-async fn cmd_subscription(cli: &Cli, cmd: SubscriptionCmd) -> Result<i32> {
-    let workdir = resolve_workdir(cli);
-    match cmd {
-        SubscriptionCmd::List => {
-            roko_cli::subscriptions::cmd_list(&workdir, cli.json)?;
-            Ok(EXIT_SUCCESS)
-        }
-        SubscriptionCmd::Add { template, trigger } => {
-            roko_cli::subscriptions::cmd_add(&workdir, &template, &trigger)?;
-            Ok(EXIT_SUCCESS)
-        }
-        SubscriptionCmd::Remove { id } => {
-            roko_cli::subscriptions::cmd_remove(&workdir, &id)?;
-            Ok(EXIT_SUCCESS)
-        }
-        SubscriptionCmd::Enable { id } => {
-            roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, true)?;
-            Ok(EXIT_SUCCESS)
-        }
-        SubscriptionCmd::Disable { id } => {
-            roko_cli::subscriptions::cmd_set_enabled(&workdir, &id, false)?;
-            Ok(EXIT_SUCCESS)
-        }
-    }
-}
-
 /// Find a PRD by slug in either published or drafts.
 fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
     if let Some(path) = roko_cli::workspace_paths::find_prd_path(workdir, slug) {
@@ -6625,6 +8116,31 @@ async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -
         .await
         .with_context(|| format!("create {}", roko_dir.display()))?;
 
+    // Create all top-level layout directories and VERSION file via RokoLayout.
+    // This ensures doctor checks pass and all subsystems have their dirs.
+    let layout = RokoLayout::for_project(&target);
+    layout
+        .ensure_dirs()
+        .await
+        .with_context(|| "create .roko layout directories")?;
+
+    // Create additional directories used by CLI subsystems but not in
+    // RokoLayout::top_level_dirs() (jobs, prd, task-outputs, etc.).
+    for extra in &[
+        roko_dir.join("jobs"),
+        roko_dir.join("prd"),
+        roko_dir.join("prd").join("published"),
+        roko_dir.join("prd").join("drafts"),
+        roko_dir.join("task-outputs"),
+        roko_dir.join("research"),
+        roko_dir.join("subscriptions"),
+        roko_dir.join("templates"),
+    ] {
+        tokio::fs::create_dir_all(extra)
+            .await
+            .with_context(|| format!("create {}", extra.display()))?;
+    }
+
     let engrams_path = roko_dir.join("engrams.jsonl");
     if !engrams_path.exists() {
         // Migrate from legacy name if present.
@@ -6737,8 +8253,19 @@ async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<
     }
 }
 
-async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Result<()> {
+async fn cmd_status(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    cfactor: bool,
+    surfaces: bool,
+) -> Result<()> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    if surfaces {
+        let inventory = roko_cli::surface_inventory::full_inventory();
+        roko_cli::surface_inventory::print_table(&inventory, cli.json);
+        return Ok(());
+    }
+
     if !cli.quiet {
         tracing::info!(
             workdir = %workdir.display(),
@@ -6793,18 +8320,87 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             *counts.entry(sig.kind.to_string()).or_default() += 1;
         }
         let episode_count = counts.get("episode").copied().unwrap_or(0);
+
+        // Gate verdicts from substrate.
+        let verdicts_json = substrate
+            .query(&Query::of_kind(Kind::GateVerdict), &ctx)
+            .await
+            .map_err(|e| anyhow!("query verdicts: {e}"))?;
+        let gate_pass = verdicts_json
+            .iter()
+            .filter(|v| v.tag("passed") == Some("true"))
+            .count();
+        let gate_fail = verdicts_json
+            .iter()
+            .filter(|v| v.tag("passed") == Some("false"))
+            .count();
+
+        // Running agents from runtime directory.
+        let runtime_dir_json = workdir.join(".roko").join("runtime");
+        let mut running_agents_json: usize = 0;
+        if let Ok(mut entries) = tokio::fs::read_dir(&runtime_dir_json).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".pid") {
+                    running_agents_json += 1;
+                }
+            }
+        }
+
+        // Active plans from executor snapshot.
+        let executor_path_json = workdir.join(".roko").join("state").join("executor.json");
+        let active_plans_json: usize = if executor_path_json.is_file() {
+            tokio::fs::read_to_string(&executor_path_json)
+                .await
+                .ok()
+                .and_then(|contents| {
+                    serde_json::from_str::<serde_json::Value>(&contents)
+                        .ok()?
+                        .get("plans")?
+                        .as_array()
+                        .map(|arr| arr.len())
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Most recent episode.
+        let mut episodes_json = substrate
+            .query(&Query::of_kind(Kind::Episode), &ctx)
+            .await
+            .map_err(|e| anyhow!("query episodes: {e}"))?;
+        episodes_json.sort_by_key(|s| std::cmp::Reverse(s.created_at_ms));
+        let last_passed = episodes_json
+            .first()
+            .and_then(|ep| ep.tag("passed").map(|v| v == "true"));
+
         let status = SessionStatus {
             session_id: cli.resume.clone(),
             workdir: workdir.clone(),
             daemon_running: false,
             signal_count: Some(all.len()),
             episode_count: Some(episode_count),
-            last_episode_passed: None,
+            last_episode_passed: last_passed,
             cfactor: cfactor_snapshot,
             total_cost_usd,
             today_cost_usd,
         };
-        println!("{}", status.display_json());
+
+        // Build enriched JSON with gate verdicts, workspace info, and signal counts.
+        let counts_json = serde_json::to_string(&counts).unwrap_or_else(|_| "{}".to_string());
+        let cost_by_model_json =
+            serde_json::to_string(&cost_by_model).unwrap_or_else(|_| "{}".to_string());
+        let cost_by_plan_json =
+            serde_json::to_string(&cost_by_plan).unwrap_or_else(|_| "{}".to_string());
+        let base = status.display_json();
+        // Splice additional fields before the closing brace.
+        let enriched = format!(
+            "{},\"gates\":{{\"pass\":{gate_pass},\"fail\":{gate_fail}}},\"workspace\":{{\"agents\":{running_agents_json},\"plans\":{active_plans_json}}},\"signal_counts\":{counts_json},\"cost_by_model\":{cost_by_model_json},\"cost_by_plan\":{cost_by_plan_json},\"health\":\"ready\"}}",
+            &base[..base.len() - 1],
+        );
+        println!("{enriched}");
         return Ok(());
     }
 
@@ -6821,6 +8417,44 @@ async fn cmd_status(cli: &Cli, workdir: Option<PathBuf>, cfactor: bool) -> Resul
             println!("  {kind:<24} {n}");
         }
     }
+
+    // Running agents from runtime directory.
+    let runtime_dir = workdir.join(".roko").join("runtime");
+    let mut running_agents: usize = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir(&runtime_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".pid") {
+                running_agents += 1;
+            }
+        }
+    }
+
+    // Active plans from executor snapshot.
+    let executor_path = workdir.join(".roko").join("state").join("executor.json");
+    let active_plans: usize = if executor_path.is_file() {
+        // Parse minimally: count plans with active=true.
+        match tokio::fs::read_to_string(&executor_path).await {
+            Ok(contents) => {
+                // Quick JSON parse: count occurrences of "active":true or
+                // plan entries. For a lightweight check, use serde_json::Value.
+                serde_json::from_str::<serde_json::Value>(&contents)
+                    .ok()
+                    .and_then(|val| val.get("plans")?.as_array().map(|arr| arr.len()))
+                    .unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+
+    println!();
+    println!(
+        "workspace: {} agent pid(s), {} plan(s) in executor snapshot",
+        running_agents, active_plans
+    );
 
     let mut episodes = substrate
         .query(&Query::of_kind(Kind::Episode), &ctx)
@@ -7054,9 +8688,9 @@ async fn cmd_replay(workdir: Option<PathBuf>, hash: String, forensic: bool) -> R
     Ok(EXIT_SUCCESS)
 }
 
-async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
+async fn cmd_dream(cli: &Cli, cmd: DreamCmdLegacy) -> Result<i32> {
     match cmd {
-        DreamCmd::Run { workdir } => {
+        DreamCmdLegacy::Run { workdir } => {
             let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
             prepare_runtime_hooks(&workdir, cli.quiet);
 
@@ -7101,7 +8735,7 @@ async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
 
             Ok(EXIT_SUCCESS)
         }
-        DreamCmd::Report { workdir } => {
+        DreamCmdLegacy::Report { workdir } => {
             let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let runner = build_dream_runner(cli, &workdir)?;
             let report = runner.latest_report()?.ok_or_else(|| {
@@ -7128,7 +8762,7 @@ async fn cmd_dream(cli: &Cli, cmd: DreamCmd) -> Result<i32> {
             }
             Ok(EXIT_SUCCESS)
         }
-        DreamCmd::Schedule { workdir } => {
+        DreamCmdLegacy::Schedule { workdir } => {
             let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
             let runner = build_dream_runner(cli, &workdir)?;
             let schedule = runner.schedule_next();
@@ -7171,92 +8805,21 @@ fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunner> {
     ))
 }
 
-fn cmd_dreams(cli: &Cli, cmd: DreamsCmd) -> Result<i32> {
-    match cmd {
-        DreamsCmd::Journal { limit, workdir } => {
-            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let journal = roko_dreams::phase2::DreamJournal::standard(&workdir);
-            match journal.read_recent(limit) {
-                Ok(entries) if entries.is_empty() => {
-                    println!("no dream journal entries found");
-                }
-                Ok(entries) => {
-                    for entry in &entries {
-                        println!(
-                            "[{}] cycle={} agent={} hypotheses={}/{}/{} tokens={} {}",
-                            entry.cycle_start.format("%Y-%m-%d %H:%M"),
-                            entry.cycle_id,
-                            entry.agent_id,
-                            entry.hypotheses_generated,
-                            entry.hypotheses_staged,
-                            entry.hypotheses_promoted,
-                            entry.total_tokens,
-                            if entry.early_termination {
-                                "(early termination)"
-                            } else {
-                                ""
-                            },
-                        );
-                    }
-                    println!("\n{} entries shown (of last {})", entries.len(), limit);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!(
-                        "no dream journal found at {}",
-                        journal.journal_path.display()
-                    );
-                }
-                Err(e) => return Err(e.into()),
-            }
-            Ok(EXIT_SUCCESS)
-        }
-        DreamsCmd::Archive { limit, workdir } => {
-            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
-            let archive = roko_dreams::phase2::DreamArchive::standard(&workdir);
-            match archive.read_recent(limit) {
-                Ok(entries) if entries.is_empty() => {
-                    println!("no dream archive entries found");
-                }
-                Ok(entries) => {
-                    for entry in &entries {
-                        println!(
-                            "[{}] {} ({:?}) quality={:.2} -- {}",
-                            entry.archived_at.format("%Y-%m-%d %H:%M"),
-                            entry.entry_id,
-                            entry.kind,
-                            entry.quality_score,
-                            entry.summary,
-                        );
-                    }
-                    println!("\n{} entries shown (of last {})", entries.len(), limit);
-                }
-                Err(e) => return Err(e.into()),
-            }
-            Ok(EXIT_SUCCESS)
-        }
-    }
-}
+// cmd_dreams removed — dream journal/archive now handled via dispatch_knowledge_dream
 
 async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
-        DeployCmd::Railway { workdir } => cmd_deploy_railway(cli, workdir).await,
+        DeployCmd::Railway {
+            workdir,
+            with_mirage,
+            workers,
+        } => cmd_deploy_railway(cli, workdir, with_mirage, workers).await,
         DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
         DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
     }
 }
 
-fn cmd_update(verify: bool) -> Result<i32> {
-    if verify {
-        println!(
-            "release verification uses Sigstore bundles with cosign; pass a downloaded artifact and bundle to the SigstoreVerifier API or verify with cosign verify-blob"
-        );
-    }
-
-    println!(
-        "self-update installer receipts are not wired in this source build; reinstall with cargo install roko-cli --locked or use the cargo-dist installer release"
-    );
-    Ok(EXIT_SUCCESS)
-}
+// cmd_update removed — was a stub ("not wired in this source build")
 
 // -----------------------------------------------------------------------
 // Index subcommands
@@ -7487,57 +9050,19 @@ async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i32> {
     let show_all = what == "all";
 
     if show_all || what == "router" {
-        let path = workdir.join(".roko/learn/cascade-router.json");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let val: serde_json::Value = serde_json::from_str(&content)?;
-            let models = val
-                .get("model_slugs")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            println!("Cascade router: {} models configured", models);
-        } else {
-            println!("Cascade router: not initialized");
-        }
+        print_learn_router(workdir);
     }
 
     if show_all || what == "experiments" {
-        let path = workdir.join(".roko/learn/experiments.json");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let val: serde_json::Value = serde_json::from_str(&content)?;
-            let exps = val
-                .get("experiments")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            println!("Prompt experiments: {} defined", exps);
-        } else {
-            println!("Prompt experiments: none");
-        }
+        print_learn_experiments(workdir);
     }
 
     if show_all || what == "efficiency" {
-        let path = workdir.join(".roko/learn/efficiency.jsonl");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            println!("Efficiency log: {} events", count);
-        } else {
-            println!("Efficiency log: empty");
-        }
+        print_learn_efficiency(workdir).await;
     }
 
     if show_all || what == "episodes" {
-        let path = workdir.join(".roko/episodes.jsonl");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            println!("Episodes: {} recorded", count);
-        } else {
-            println!("Episodes: none");
-        }
+        print_learn_episodes(workdir);
     }
 
     if !show_all && !["router", "experiments", "efficiency", "episodes"].contains(&what) {
@@ -7548,6 +9073,244 @@ async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i32> {
     }
 
     Ok(EXIT_SUCCESS)
+}
+
+fn print_learn_router(workdir: &std::path::Path) {
+    let path = workdir.join(".roko/learn/cascade-router.json");
+    if !path.exists() {
+        println!("Cascade router: not initialized");
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        println!("Cascade router: unreadable");
+        return;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+        println!("Cascade router: parse error");
+        return;
+    };
+
+    // Model slugs
+    let slugs: Vec<&str> = val
+        .get("model_slugs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let total_obs = val
+        .get("arms")
+        .and_then(|v| v.as_array())
+        .map(|arms| {
+            arms.iter()
+                .filter_map(|arm| arm.get("observations").and_then(|v| v.as_u64()))
+                .sum::<u64>()
+        })
+        .unwrap_or(0);
+
+    println!(
+        "Cascade router: {} models, {} total observations",
+        slugs.len(),
+        total_obs
+    );
+
+    // Per-arm summary
+    if let Some(arms) = val.get("arms").and_then(|v| v.as_array()) {
+        for arm in arms {
+            let slug = arm
+                .get("model_slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let obs = arm
+                .get("observations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let reward = arm
+                .get("mean_reward")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if obs > 0 {
+                println!("  {slug}: {obs} obs, mean_reward={reward:.3}");
+            }
+        }
+    }
+}
+
+fn print_learn_experiments(workdir: &std::path::Path) {
+    // Prompt experiments
+    let prompt_path = workdir.join(".roko/learn/experiments.json");
+    let prompt_store = ExperimentStore::load_or_new(&prompt_path);
+    let running = prompt_store.running_count();
+    let concluded = prompt_store.concluded_count();
+    if running > 0 || concluded > 0 {
+        println!(
+            "Prompt experiments: {} running, {} concluded",
+            running, concluded
+        );
+    } else {
+        println!("Prompt experiments: none");
+    }
+
+    // Model experiments
+    let model_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("model-experiments.json");
+    let model_store = roko_learn::model_experiment::ModelExperimentStore::load_or_new(&model_path);
+    let model_running = model_store.running_count();
+    let model_concluded = model_store.concluded_experiments().len();
+    if model_running > 0 || model_concluded > 0 {
+        println!(
+            "Model experiments: {} running, {} concluded",
+            model_running, model_concluded
+        );
+        for exp in model_store.iter() {
+            println!(
+                "  {} [{:?}] role={} variants={} winner={}",
+                exp.experiment_id,
+                exp.status,
+                exp.role.as_deref().unwrap_or("any"),
+                exp.variants.len(),
+                exp.winner_id.as_deref().unwrap_or("-"),
+            );
+        }
+    } else {
+        println!("Model experiments: none");
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+async fn print_learn_efficiency(workdir: &std::path::Path) {
+    let path = workdir.join(".roko/learn/efficiency.jsonl");
+    let events = match read_efficiency_events(&path).await {
+        Ok(events) => events,
+        Err(_) => {
+            println!("Efficiency log: empty");
+            return;
+        }
+    };
+    if events.is_empty() {
+        println!("Efficiency log: empty");
+        return;
+    }
+
+    let total_cost: f64 = events.iter().map(|e| e.cost_usd).sum();
+    let total_input: u64 = events.iter().map(|e| e.input_tokens).sum();
+    let total_output: u64 = events.iter().map(|e| e.output_tokens).sum();
+    let success_count = events.iter().filter(|e| e.gate_passed).count();
+    let pass_rate = if events.is_empty() {
+        0.0
+    } else {
+        success_count as f64 / events.len() as f64 * 100.0
+    };
+
+    println!(
+        "Efficiency: {} events, ${:.2} total, {:.0}% pass rate",
+        events.len(),
+        total_cost,
+        pass_rate
+    );
+    println!(
+        "  Tokens: {}K input, {}K output",
+        total_input / 1000,
+        total_output / 1000
+    );
+
+    // Per-model breakdown
+    let mut by_model: std::collections::HashMap<&str, (usize, f64, usize)> =
+        std::collections::HashMap::new();
+    for ev in &events {
+        let entry = by_model.entry(ev.model.as_str()).or_default();
+        entry.0 += 1;
+        entry.1 += ev.cost_usd;
+        if ev.gate_passed {
+            entry.2 += 1;
+        }
+    }
+    let mut model_summary: Vec<_> = by_model.into_iter().collect();
+    model_summary.sort_by(|a, b| {
+        b.1.1
+            .partial_cmp(&a.1.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (model, (count, cost, passed)) in &model_summary {
+        let model_pass = if *count == 0 {
+            0.0
+        } else {
+            *passed as f64 / *count as f64 * 100.0
+        };
+        println!("  {model}: {count} runs, ${cost:.2}, {model_pass:.0}% pass",);
+    }
+}
+
+fn print_learn_episodes(workdir: &std::path::Path) {
+    let path = workdir.join(".roko/episodes.jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        println!("Episodes: none");
+        return;
+    };
+
+    let episodes: Vec<Episode> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    if episodes.is_empty() {
+        println!("Episodes: none");
+        return;
+    }
+
+    let success_count = episodes.iter().filter(|e| e.success).count();
+    let total_cost: f64 = episodes.iter().map(|e| f64::from(e.usage.cost_usd)).sum();
+    let pass_rate = if episodes.is_empty() {
+        0.0
+    } else {
+        success_count as f64 / episodes.len() as f64 * 100.0
+    };
+
+    println!(
+        "Episodes: {} recorded, {:.0}% success, ${:.2} total cost",
+        episodes.len(),
+        pass_rate,
+        total_cost,
+    );
+
+    // Per-model summary
+    let mut by_model: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
+    for ep in &episodes {
+        let entry = by_model.entry(ep.model.as_str()).or_default();
+        entry.0 += 1;
+        if ep.success {
+            entry.1 += 1;
+        }
+    }
+    let mut model_summary: Vec<_> = by_model.into_iter().collect();
+    model_summary.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    for (model, (count, passed)) in &model_summary {
+        let model_pass = if *count == 0 {
+            0.0
+        } else {
+            *passed as f64 / *count as f64 * 100.0
+        };
+        println!("  {model}: {count} episodes, {model_pass:.0}% success");
+    }
+
+    // Last 5 episodes
+    let last_n = episodes.len().min(5);
+    if last_n > 0 {
+        println!("  Recent:");
+        for ep in episodes.iter().rev().take(last_n) {
+            let status = if ep.success { "pass" } else { "fail" };
+            println!(
+                "    {} {} {} [{}] ${:.4}",
+                ep.timestamp.format("%Y-%m-%d %H:%M"),
+                ep.model,
+                ep.task_id,
+                status,
+                ep.usage.cost_usd,
+            );
+        }
+    }
 }
 
 fn print_completions(shell: CompletionShell) {
@@ -7630,17 +9393,37 @@ fn dynamic_completion_words() -> Vec<(String, Vec<String>)> {
     result
 }
 
+/// Global flag names for flag completion (UX-1c).
+fn completion_flag_words() -> Vec<String> {
+    let mut command = Cli::command();
+    command.build();
+    let mut flags: Vec<String> = command
+        .get_arguments()
+        .filter_map(|arg| arg.get_long().map(|l| format!("--{l}")))
+        .collect();
+    flags.sort();
+    flags.dedup();
+    flags
+}
+
 fn print_bash_completions(
     words: &[String],
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
     let top_words = words.join(" ");
-    println!(r#"# roko bash completions (DEPLOY-06: dynamic + nested)"#);
+    let flag_words = completion_flag_words().join(" ");
+    println!(r#"# roko bash completions (DEPLOY-06: dynamic + nested + flags)"#);
     println!(r#"_roko()"#);
     println!(r#"{{"#);
     println!(r#"    local cur="${{COMP_WORDS[COMP_CWORD]}}""#);
     println!(r#"    local prev="${{COMP_WORDS[COMP_CWORD-1]}}""#);
+    println!();
+    // Flag completions when current word starts with -.
+    println!(r#"    if [[ "$cur" == -* ]]; then"#);
+    println!(r#"        COMPREPLY=( $(compgen -W "{flag_words}" -- "$cur") )"#);
+    println!(r#"        return 0"#);
+    println!(r#"    fi"#);
     println!();
     // Nested subcommand completions.
     println!(r#"    case "$prev" in"#);
@@ -7673,12 +9456,21 @@ fn print_zsh_completions(
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
+    let flags = completion_flag_words();
     println!(r#"#compdef roko"#);
-    println!(r#"# roko zsh completions (DEPLOY-06: dynamic + nested)"#);
+    println!(r#"# roko zsh completions (DEPLOY-06: dynamic + nested + flags)"#);
     println!(r#"_roko() {{"#);
-    println!(r#"  local -a commands"#);
+    println!(r#"  local -a commands flags"#);
     let top_words = words.join(" ");
+    let flag_words = flags.join(" ");
     println!(r#"  commands=({top_words})"#);
+    println!(r#"  flags=({flag_words})"#);
+    println!();
+    // Flag completion at any position when current word starts with -.
+    println!(r#"  if [[ "$words[CURRENT]" == -* ]]; then"#);
+    println!(r#"    _describe 'roko flag' flags"#);
+    println!(r#"    return"#);
+    println!(r#"  fi"#);
     println!();
     println!(r#"  if (( CURRENT == 2 )); then"#);
     println!(r#"    _describe 'roko command' commands"#);
@@ -7711,9 +9503,15 @@ fn print_fish_completions(
     subcommands: &[(String, Vec<String>)],
     dynamic: &[(String, Vec<String>)],
 ) {
-    println!("# roko fish completions (DEPLOY-06: dynamic + nested)");
+    let flags = completion_flag_words();
+    println!("# roko fish completions (DEPLOY-06: dynamic + nested + flags)");
     for word in words {
         println!("complete -c roko -f -n '__fish_use_subcommand' -a '{word}'");
+    }
+    // Global flag completions.
+    for flag in &flags {
+        let short = flag.trim_start_matches('-');
+        println!("complete -c roko -l '{short}'");
     }
     // Nested subcommand completions.
     for (parent, children) in subcommands {
@@ -7753,7 +9551,36 @@ async fn cmd_deploy_docker(
     Ok(EXIT_SUCCESS)
 }
 
-async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
+/// Load persisted Railway project context from `.roko/state/railway.json`.
+fn load_railway_context(
+    workdir: &Path,
+) -> Option<roko_serve::deploy::railway_api::RailwayProjectContext> {
+    let path = workdir.join(".roko/state/railway.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Persist Railway project context to `.roko/state/railway.json` so that
+/// subsequent deploys (including worker deploys) reuse the same project.
+fn save_railway_context(
+    workdir: &Path,
+    ctx: &roko_serve::deploy::railway_api::RailwayProjectContext,
+) -> Result<()> {
+    let dir = workdir.join(".roko/state");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("railway.json");
+    let json = serde_json::to_string_pretty(ctx).context("serialize railway context")?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    info!(path = %path.display(), "persisted Railway project context");
+    Ok(())
+}
+
+async fn cmd_deploy_railway(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    with_mirage: bool,
+    workers: Vec<String>,
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     run_release_build(&workdir).await?;
 
@@ -7777,39 +9604,143 @@ async fn cmd_deploy_railway(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> 
     let branch =
         git_current_branch(&workdir).unwrap_or_else(|_| config.project.fresh_base_branch.clone());
     let env_vars = collect_railway_env_vars();
+
+    // Load persisted project context as fallback for config-level IDs.
+    let saved_ctx = load_railway_context(&workdir);
+    let project_id = deploy_config
+        .project_id
+        .clone()
+        .or_else(|| saved_ctx.as_ref().map(|c| c.project_id.clone()));
+    let environment_id = deploy_config
+        .environment_id
+        .clone()
+        .or_else(|| saved_ctx.as_ref().map(|c| c.environment_id.clone()));
+
     let backend = roko_serve::deploy::railway_api::RailwayApiBackend::new(
         token.to_string(),
-        deploy_config.project_id.clone(),
-        deploy_config.environment_id.clone(),
+        project_id.clone(),
+        environment_id.clone(),
     );
 
-    let deployment = backend
+    // 1. Deploy roko-serve (control plane)
+    let (deployment, railway_ctx) = backend
         .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
             project_name: config.project.name.clone(),
-            project_id: deploy_config.project_id.clone(),
-            environment_id: deploy_config.environment_id.clone(),
+            project_id: project_id.clone(),
+            environment_id: environment_id.clone(),
             service_name: "roko".to_string(),
-            repo_slug,
-            branch,
+            repo_slug: repo_slug.clone(),
+            branch: branch.clone(),
             dockerfile_path: "docker/roko.Dockerfile".to_string(),
             root_directory: ".".to_string(),
             healthcheck_path: "/api/health".to_string(),
             volume_mount_path: "/workspace/.roko".to_string(),
             region: deploy_config.default_region.clone(),
-            env_vars,
+            env_vars: env_vars.clone(),
         })
         .await?;
 
-    let url = deployment
+    // Persist project context for subsequent deploys.
+    save_railway_context(&workdir, &railway_ctx)?;
+
+    let control_url = deployment
         .url
         .as_deref()
         .ok_or_else(|| anyhow!("Railway deployment finished without a public URL"))?;
 
-    register_deployment_github_webhooks(&deploy_webhooks, url, &config.webhooks.github.secret)
-        .await?;
+    println!("roko-serve: {control_url}");
 
-    println!("{url}");
+    // 2. Deploy mirage if requested
+    if with_mirage {
+        let mut mirage_env = env_vars.clone();
+        mirage_env.insert(
+            "MIRAGE_STATE_DIR".to_string(),
+            "/workspace/.roko/state".to_string(),
+        );
+
+        let (_mirage_dep, _) = backend
+            .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
+                project_name: config.project.name.clone(),
+                project_id: Some(railway_ctx.project_id.clone()),
+                environment_id: Some(railway_ctx.environment_id.clone()),
+                service_name: "mirage".to_string(),
+                repo_slug: repo_slug.clone(),
+                branch: branch.clone(),
+                dockerfile_path: "docker/mirage.Dockerfile".to_string(),
+                root_directory: ".".to_string(),
+                healthcheck_path: "/relay/health".to_string(),
+                volume_mount_path: "/workspace/.roko".to_string(),
+                region: deploy_config.default_region.clone(),
+                env_vars: mirage_env,
+            })
+            .await?;
+
+        if let Some(url) = _mirage_dep.url.as_deref() {
+            println!("mirage: {url}");
+        }
+    }
+
+    // 3. Deploy worker services for each requested template
+    for template_name in &workers {
+        // Load the template to base64-encode as ROKO_TEMPLATE_JSON
+        let template_json = load_template_for_deploy(&workdir, template_name)?;
+        let template_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &template_json);
+
+        let mut worker_env = env_vars.clone();
+        worker_env.insert("ROKO_TEMPLATE_JSON".to_string(), template_b64);
+        worker_env.insert(
+            "ROKO_CONTROL_PLANE_URL".to_string(),
+            control_url.to_string(),
+        );
+
+        let service_name = format!("roko-worker-{template_name}");
+        let (_worker_dep, _) = backend
+            .deploy_roko_app(&roko_serve::deploy::railway_api::RailwayDeploySpec {
+                project_name: config.project.name.clone(),
+                project_id: Some(railway_ctx.project_id.clone()),
+                environment_id: Some(railway_ctx.environment_id.clone()),
+                service_name: service_name.clone(),
+                repo_slug: repo_slug.clone(),
+                branch: branch.clone(),
+                dockerfile_path: "docker/worker.Dockerfile".to_string(),
+                root_directory: ".".to_string(),
+                healthcheck_path: "/health".to_string(),
+                volume_mount_path: "/home/roko/.roko".to_string(),
+                region: deploy_config.default_region.clone(),
+                env_vars: worker_env,
+            })
+            .await?;
+
+        if let Some(url) = _worker_dep.url.as_deref() {
+            println!("{service_name}: {url}");
+        }
+    }
+
+    register_deployment_github_webhooks(
+        &deploy_webhooks,
+        control_url,
+        &config.webhooks.github.secret,
+    )
+    .await?;
+
     Ok(EXIT_SUCCESS)
+}
+
+/// Load an agent template by name and serialize it to JSON bytes for worker env.
+fn load_template_for_deploy(workdir: &Path, name: &str) -> Result<Vec<u8>> {
+    use roko_serve::templates::TemplateRegistry;
+
+    // Try loading from the registry (disk + builtins)
+    let mut registry = TemplateRegistry::new(workdir.to_path_buf());
+    registry.scan_with_builtins();
+
+    let template = registry
+        .get(name)
+        .ok_or_else(|| anyhow!("template '{name}' not found in registry"))?
+        .clone();
+
+    serde_json::to_vec(&template).context("serialize template for worker env")
 }
 
 fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
@@ -8119,8 +10050,124 @@ destination = "/data/.roko"
 // -----------------------------------------------------------------------
 
 /// Resolve the working directory from CLI flags.
+///
+/// Detects when the user is running from inside a `.roko/` directory, which
+/// would cause a nested `.roko/.roko/` and silent data loss.
 fn resolve_workdir(cli: &Cli) -> PathBuf {
-    cli.repo.clone().unwrap_or_else(|| PathBuf::from("."))
+    let dir = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    // Detect if we're running from inside a .roko/ directory and auto-correct
+    // to the project root to avoid nested .roko/.roko/ data dirs.
+    if let Ok(abs) = dir.canonicalize() {
+        for ancestor in abs.ancestors() {
+            if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
+                let project_root = ancestor.parent().unwrap_or(ancestor).to_path_buf();
+                eprintln!(
+                    "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
+                    project_root.display()
+                );
+                return project_root;
+            }
+        }
+    }
+
+    dir
+}
+
+/// Apply environment variable fallbacks to CLI flags.
+///
+/// When a CLI flag was not explicitly provided, its corresponding `ROKO_*`
+/// environment variable is consulted. This runs once immediately after
+/// `Cli::parse()` so every downstream consumer sees the resolved value.
+///
+/// | Env var          | CLI flag       | Behaviour                                  |
+/// |------------------|----------------|---------------------------------------------|
+/// | `ROKO_MODEL`     | `--model`      | Override when `--model` not given            |
+/// | `ROKO_EFFORT`    | `--effort`     | Override when `--effort` not given            |
+/// | `ROKO_ROLE`      | `--role`       | Override when `--role` not given              |
+/// | `ROKO_QUIET`     | `--quiet`      | Enable quiet if "1" or "true"                |
+/// | `ROKO_LOG_FORMAT` | `--log-format` | Override when default "text" is in effect     |
+fn apply_env_overrides(cli: &mut Cli) {
+    if cli.model.is_none() {
+        if let Ok(val) = env::var("ROKO_MODEL") {
+            if !val.is_empty() {
+                cli.model = Some(val);
+            }
+        }
+    }
+
+    if cli.effort.is_none() {
+        if let Ok(val) = env::var("ROKO_EFFORT") {
+            match val.to_ascii_lowercase().as_str() {
+                "low" => cli.effort = Some(Effort::Low),
+                "medium" => cli.effort = Some(Effort::Medium),
+                "high" => cli.effort = Some(Effort::High),
+                "max" => cli.effort = Some(Effort::Max),
+                _ => {
+                    eprintln!(
+                        "warning: ROKO_EFFORT={val:?} is not valid (expected low/medium/high/max), ignoring"
+                    );
+                }
+            }
+        }
+    }
+
+    if cli.role.is_none() {
+        if let Ok(val) = env::var("ROKO_ROLE") {
+            if !val.is_empty() {
+                cli.role = Some(val);
+            }
+        }
+    }
+
+    if !cli.quiet {
+        if let Ok(val) = env::var("ROKO_QUIET") {
+            if val == "1" || val.eq_ignore_ascii_case("true") {
+                cli.quiet = true;
+            }
+        }
+    }
+
+    // log_format has a clap default of Text; override only when the user
+    // did not pass `--log-format` explicitly (we detect this by checking if
+    // the env var is set — the clap default means we can't distinguish
+    // "user typed --log-format text" from "default", but the env var path
+    // is still useful when the default is in effect).
+    if cli.log_format == LogFormat::Text {
+        if let Ok(val) = env::var("ROKO_LOG_FORMAT") {
+            match val.to_ascii_lowercase().as_str() {
+                "json" => cli.log_format = LogFormat::Json,
+                "text" => {} // already the default
+                _ => {
+                    eprintln!(
+                        "warning: ROKO_LOG_FORMAT={val:?} is not valid (expected text/json), ignoring"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Ask the user to confirm a destructive operation.
+///
+/// Returns `true` (proceed) immediately when:
+/// - `quiet` mode is active,
+/// - stdin is not a TTY (CI / pipes), or
+/// - the user types `y` or `Y`.
+///
+/// Returns `false` otherwise, meaning the operation should be skipped.
+fn confirm_destructive(message: &str, quiet: bool) -> bool {
+    if quiet || !std::io::stdin().is_terminal() {
+        return true;
+    }
+    eprint!("{message} [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_ok() {
+        input.trim().eq_ignore_ascii_case("y")
+    } else {
+        false
+    }
 }
 
 /// Resolve the config, applying CLI overrides for --role, --model, --effort.
@@ -8212,6 +10259,10 @@ fn prepare_runtime_hooks(workdir: &Path, quiet: bool) {
 }
 
 fn bootstrap_observability_dirs(workdir: &Path) -> std::io::Result<()> {
+    // Only create .roko/ if the user has expressed intent (roko.toml exists or .roko/ already exists).
+    if !workdir.join("roko.toml").exists() && !workdir.join(".roko").exists() {
+        return Ok(());
+    }
     let layout = RokoLayout::for_project(workdir);
     std::fs::create_dir_all(layout.root())?;
     for dir in layout.top_level_dirs() {
@@ -8429,6 +10480,26 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_doctor_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "doctor",
+            "--workdir",
+            "/tmp/project",
+            "--serve-url",
+            "http://localhost:9090",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                workdir: Some(_),
+                serve_url: Some(_),
+            })
+        ));
+    }
+
+    #[test]
     fn cli_parses_agent_serve_subcommand() {
         let cli = Cli::try_parse_from([
             "roko",
@@ -8461,6 +10532,7 @@ mod tests {
                     identity_registry: Some(_),
                     passport_id: Some(_),
                     wallet_key: Some(_),
+                    ..
                 }),
             }) if agent_id == "demo-1" && bind == "127.0.0.1:7777"
         ));
@@ -8718,13 +10790,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_top_level_secret_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "secret", "get", "anthropic.api_key"]).unwrap();
+    fn cli_parses_config_secrets_subcommand() {
+        let cli =
+            Cli::try_parse_from(["roko", "config", "secrets", "get", "anthropic.api_key"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Secret {
-                cmd: roko_cli::SecretsCmd::Get { namespace, key }
-            }) if namespace == "anthropic.api_key" && key.is_none()
+            Some(Command::Config {
+                cmd: ConfigCmd::Secrets { .. }
+            })
         ));
     }
 
@@ -8732,15 +10805,6 @@ mod tests {
     fn cli_parses_replay_subcommand() {
         let cli = Cli::try_parse_from(["roko", "replay", "abcd1234"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Replay { .. })));
-    }
-
-    #[test]
-    fn cli_parses_update_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "update", "--verify"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Update { verify: true })
-        ));
     }
 
     #[test]
@@ -8788,66 +10852,74 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_neuro_query_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "neuro", "query", "rust async"]).unwrap();
+    fn cli_parses_knowledge_query_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "knowledge", "query", "rust async"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Neuro {
-                cmd: NeuroCmd::Query { .. }
+            Some(Command::Knowledge {
+                cmd: KnowledgeCmd::Query { .. }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_neuro_stats_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "neuro", "stats"]).unwrap();
+    fn cli_parses_knowledge_stats_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "knowledge", "stats"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Neuro {
-                cmd: NeuroCmd::Stats { .. }
+            Some(Command::Knowledge {
+                cmd: KnowledgeCmd::Stats { .. }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_neuro_gc_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "neuro", "gc"]).unwrap();
+    fn cli_parses_knowledge_gc_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "knowledge", "gc"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Neuro {
-                cmd: NeuroCmd::Gc { .. }
+            Some(Command::Knowledge {
+                cmd: KnowledgeCmd::Gc { .. }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_neuro_backup_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "neuro", "backup", "/tmp/neuro-backup"]).unwrap();
+    fn cli_parses_knowledge_backup_subcommand() {
+        let cli =
+            Cli::try_parse_from(["roko", "knowledge", "backup", "/tmp/neuro-backup"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Neuro {
-                cmd: NeuroCmd::Backup { destination, force, .. }
+            Some(Command::Knowledge {
+                cmd: KnowledgeCmd::Backup { destination, force, .. }
             }) if destination == PathBuf::from("/tmp/neuro-backup") && !force
         ));
     }
 
     #[test]
-    fn cli_parses_neuro_restore_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "neuro", "restore", "/tmp/neuro-backup", "--force"])
-            .unwrap();
+    fn cli_parses_knowledge_restore_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "knowledge",
+            "restore",
+            "/tmp/neuro-backup",
+            "--force",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Neuro {
-                cmd: NeuroCmd::Restore { source, force, .. }
+            Some(Command::Knowledge {
+                cmd: KnowledgeCmd::Restore { source, force, .. }
             }) if source == PathBuf::from("/tmp/neuro-backup") && force
         ));
     }
 
     #[test]
-    fn cli_parses_experiment_model_create_subcommand() {
+    fn cli_parses_config_experiments_subcommand() {
         let cli = Cli::try_parse_from([
             "roko",
-            "experiment",
+            "config",
+            "experiments",
             "model",
             "create",
             "--id",
@@ -8862,91 +10934,87 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Experiment {
-                cmd: ExperimentCmd::Model { .. }
+            Some(Command::Config {
+                cmd: ConfigCmd::Experiments { .. }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_provider_list_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "provider", "list"]).unwrap();
+    fn cli_parses_config_providers_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "providers", "list"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider {
-                cmd: ProviderCmd::List { .. }
+            Some(Command::Config {
+                cmd: ConfigCmd::Providers {
+                    cmd: ConfigProviderCmd::List { .. }
+                }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_provider_health_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "provider", "health"]).unwrap();
+    fn cli_parses_config_providers_health_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "providers", "health"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider {
-                cmd: ProviderCmd::Health { .. }
+            Some(Command::Config {
+                cmd: ConfigCmd::Providers {
+                    cmd: ConfigProviderCmd::Health { .. }
+                }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_provider_test_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "provider", "test", "zai"]).unwrap();
+    fn cli_parses_config_providers_test_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "providers", "test", "zai"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Provider {
-                cmd: ProviderCmd::Test { provider, .. }
+            Some(Command::Config {
+                cmd: ConfigCmd::Providers { cmd: ConfigProviderCmd::Test { provider, .. } }
             }) if provider == "zai"
         ));
     }
 
     #[test]
-    fn cli_parses_model_list_subcommand() {
-        let cli = Cli::try_parse_from(["roko", "model", "list"]).unwrap();
+    fn cli_parses_config_models_list_subcommand() {
+        let cli = Cli::try_parse_from(["roko", "config", "models", "list"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Model {
-                cmd: ModelCmd::List { .. }
+            Some(Command::Config {
+                cmd: ConfigCmd::Models {
+                    cmd: ConfigModelCmd::List { .. }
+                }
             })
         ));
     }
 
     #[test]
-    fn cli_parses_model_route_subcommand() {
+    fn cli_parses_config_models_route_subcommand() {
         let cli = Cli::try_parse_from([
             "roko",
-            "model",
+            "config",
+            "models",
             "route",
             "glm-5-1",
             "--explain",
-            "--role",
-            "implementer",
             "--complexity",
             "integrative",
         ])
         .unwrap();
-        assert_eq!(cli.role.as_deref(), Some("implementer"));
         assert!(matches!(
             cli.command,
-            Some(Command::Model {
-                cmd: ModelCmd::Route {
-                    model,
-                    explain: true,
-                    complexity: Some(complexity),
-                    ..
-                }
+            Some(Command::Config {
+                cmd: ConfigCmd::Models { cmd: ConfigModelCmd::Route { model, explain: true, complexity: Some(complexity), .. } }
             }) if model == "glm-5-1" && complexity == "integrative"
         ));
     }
 
     #[test]
-    fn cli_chat_defaults_to_canonical_serve_url() {
-        let cli = Cli::try_parse_from(["roko", "chat"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Chat { serve_url, .. }) if serve_url == roko_cli::DEFAULT_SERVE_URL
-        ));
+    fn cli_agent_chat_defaults_to_canonical_serve_url() {
+        let cli = Cli::try_parse_from(["roko", "agent", "chat"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Agent { .. })));
     }
 
     #[test]
@@ -9472,12 +11540,22 @@ mod tests {
     #[test]
     fn bootstrap_observability_dirs_creates_expected_paths() {
         let tmp = tempfile::tempdir().unwrap();
+        // The guard requires roko.toml or .roko/ to exist before creating dirs.
+        std::fs::write(tmp.path().join("roko.toml"), b"").unwrap();
         bootstrap_observability_dirs(tmp.path()).unwrap();
         let roko = tmp.path().join(".roko");
         assert!(roko.join("traces").is_dir());
         assert!(roko.join("metrics").is_dir());
         assert!(roko.join("runtime").is_dir());
         assert!(roko.join("runs").is_dir());
+    }
+
+    #[test]
+    fn bootstrap_observability_dirs_skips_without_intent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No roko.toml or .roko/ — guard should skip creation.
+        bootstrap_observability_dirs(tmp.path()).unwrap();
+        assert!(!tmp.path().join(".roko").exists());
     }
 
     #[test]

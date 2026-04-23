@@ -6,10 +6,10 @@
 //! as read-only sections at the bottom.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
 use super::ViewState;
 use crate::tui::config_meta::{
@@ -26,9 +26,20 @@ pub fn render(
     area: Rect,
     _data: &DashboardData,
     tui_state: &TuiState,
-    _view_state: &ViewState,
+    view_state: &ViewState,
     theme: &Theme,
 ) {
+    match view_state.sub_tab {
+        1 => {
+            render_provider_health(frame, area, tui_state, theme);
+            return;
+        }
+        2 => {
+            render_model_comparison(frame, area, tui_state, theme);
+            return;
+        }
+        _ => {}
+    }
     let focused = matches!(tui_state.focus, FocusZone::RightPanel);
     let border_style = if focused {
         Theme::focused_border_style()
@@ -40,8 +51,7 @@ pub fn render(
     } else {
         theme.accent()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
+    let block = Block::bordered()
         .title(Span::styled(" Config ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
@@ -494,5 +504,218 @@ fn append_runtime_sections(items: &mut Vec<ConfigItem>, tui_state: &TuiState) {
                 },
             });
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Provider Health (sub_tab == 1)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::cast_precision_loss)]
+fn render_provider_health(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let block = Block::bordered().title(Span::styled(" Provider Health ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Aggregate provider metrics from efficiency events.
+    let mut providers: std::collections::BTreeMap<String, (u64, u64, u64)> =
+        std::collections::BTreeMap::new();
+    for event in &tui_state.efficiency_events {
+        let entry = providers.entry(infer_provider(&event.model)).or_default();
+        entry.0 += 1; // total calls
+        if event.output_tokens > 0 {
+            entry.1 += 1; // successes
+        }
+        entry.2 += event.wall_time_ms; // total latency
+    }
+
+    if providers.is_empty() {
+        let empty = Paragraph::new("no provider data — run agents to populate")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let rows: Vec<Row<'_>> = providers
+        .iter()
+        .map(|(name, (total, successes, latency))| {
+            let rate = if *total > 0 {
+                *successes as f64 / *total as f64 * 100.0
+            } else {
+                0.0
+            };
+            let avg_latency = if *total > 0 {
+                *latency as f64 / *total as f64
+            } else {
+                0.0
+            };
+            let (status, status_style) = provider_health_status(rate, *total, theme);
+            Row::new(vec![
+                Cell::from(truncate(name, 20)),
+                Cell::from(Span::styled(status.to_string(), status_style)),
+                Cell::from(format!("{avg_latency:.0}ms")),
+                Cell::from(format!("{rate:.0}%")),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Min(14),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Length(8),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["provider", "status", "latency", "success"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
+// Sub-view: Model Comparison (sub_tab == 2)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::cast_precision_loss)]
+fn render_model_comparison(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
+    let block = Block::bordered().title(Span::styled(" Model Comparison ", theme.accent()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if tui_state.cascade_router.model_slugs.is_empty() {
+        let empty = Paragraph::new("no model data — run agents to populate cascade router")
+            .style(theme.muted())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let model_rows = tui_state
+        .cascade_router
+        .model_slugs
+        .iter()
+        .map(|slug| {
+            let stats = tui_state.cascade_router.confidence_stats.get(slug);
+            let trials = stats.map_or(0, |s| s.trials);
+            let successes = stats.map_or(0, |s| s.successes);
+            let gate_rate = if trials > 0 {
+                successes as f64 / trials as f64 * 100.0
+            } else {
+                0.0
+            };
+
+            // Compute cost from efficiency events for this model.
+            let cost: f64 = tui_state
+                .efficiency_events
+                .iter()
+                .filter(|e| e.model == *slug)
+                .map(|e| e.cost_usd)
+                .sum();
+            (slug, infer_tier(slug), cost, gate_rate, trials)
+        })
+        .collect::<Vec<_>>();
+
+    let best_cost = model_rows
+        .iter()
+        .map(|(_, _, cost, _, _)| *cost)
+        .filter(|cost| *cost > 0.0)
+        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let best_gate = model_rows
+        .iter()
+        .map(|(_, _, _, gate_rate, _)| *gate_rate)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let rows: Vec<Row<'_>> = model_rows
+        .iter()
+        .map(|(slug, tier, cost, gate_rate, trials)| {
+            let rate_style = if *gate_rate >= 80.0 {
+                theme.success()
+            } else if *gate_rate >= 50.0 {
+                theme.warning()
+            } else if *trials > 0 {
+                theme.danger()
+            } else {
+                theme.muted()
+            };
+            let rate_style =
+                if best_gate.is_some_and(|best| (*gate_rate - best).abs() < f64::EPSILON) {
+                    rate_style.add_modifier(Modifier::BOLD)
+                } else {
+                    rate_style
+                };
+            let cost_style = if best_cost.is_some_and(|best| (*cost - best).abs() < f64::EPSILON) {
+                theme.success().add_modifier(Modifier::BOLD)
+            } else {
+                theme.text()
+            };
+
+            Row::new(vec![
+                Cell::from(truncate(slug, 24)),
+                Cell::from(tier.clone()),
+                Cell::from(Span::styled(format!("${cost:.4}"), cost_style)),
+                Cell::from(Span::styled(format!("{gate_rate:.0}%"), rate_style)),
+                Cell::from(trials.to_string()),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Min(16),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(6),
+    ];
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(["model", "tier", "cost", "gate %", "tries"])
+                .style(theme.accent().add_modifier(Modifier::BOLD)),
+        )
+        .column_spacing(1);
+    frame.render_widget(table, inner);
+}
+
+fn infer_provider(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        "anthropic".to_string()
+    } else if lower.contains("gpt") || lower.contains("openai") {
+        "openai".to_string()
+    } else if lower.contains("gemini") || lower.contains("google") {
+        "google".to_string()
+    } else if lower.contains("ollama") || lower.contains("llama") {
+        "ollama".to_string()
+    } else {
+        trimmed.split('/').next().unwrap_or(trimmed).to_string()
+    }
+}
+
+fn infer_tier(model: &str) -> String {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("haiku") || lower.contains("mini") || lower.contains("small") {
+        "fast".to_string()
+    } else if lower.contains("opus") || lower.contains("pro") || lower.contains("large") {
+        "deep".to_string()
+    } else {
+        "std".to_string()
+    }
+}
+
+fn provider_health_status(rate: f64, total: u64, theme: &Theme) -> (&'static str, Style) {
+    if total == 0 {
+        ("no data", theme.muted())
+    } else if rate >= 90.0 {
+        ("healthy", theme.success())
+    } else if rate >= 70.0 {
+        ("degraded", theme.warning())
+    } else {
+        ("unhealthy", theme.danger())
     }
 }

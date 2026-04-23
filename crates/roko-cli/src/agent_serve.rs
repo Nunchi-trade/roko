@@ -4,6 +4,7 @@
 //! for lifecycle management (LIFE-01, LIFE-06).
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
@@ -17,6 +18,7 @@ use roko_agent::{
         CodingConfig, DeploymentMode, DomainPlugin, ResearchConfig, resolve_manifest,
         validate_manifest,
     },
+    process::registry::{register_spawned_pid, unregister_pid},
 };
 use roko_agent_server::{
     AgentRegistration, AgentServer, DispatchError, DispatchLike, RelayClientConfig,
@@ -24,6 +26,7 @@ use roko_agent_server::{
 use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_core::config::schema::RokoConfig;
 use roko_core::{Body, Context, Engram, Kind, MessageContent};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Agent-focused CLI subtree.
@@ -50,6 +53,22 @@ pub enum AgentCmd {
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Comma-separated skill tags (e.g. "rust,p2p,networking").
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
+        /// Agent tier: Unverified, Verified, Trusted, Expert, Pioneer.
+        #[arg(long)]
+        tier: Option<String>,
+        /// Reputation score (0–100).
+        #[arg(long, default_value_t = 0)]
+        reputation: u32,
+        /// Maximum concurrent jobs.
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_jobs: u32,
+        /// Auto-register with roko-serve at this URL after creation.
+        /// Uses the default http://localhost:6677 when set to empty string.
+        #[arg(long)]
+        serve_url: Option<String>,
     },
     /// Delete an agent and clean up its state.
     ///
@@ -68,8 +87,56 @@ pub enum AgentCmd {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+    /// List all agents with their status.
+    List {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Start a previously created agent.
+    Start {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Socket address to bind (default: 127.0.0.1:0 for auto-port).
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Stop a running agent.
+    Stop {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Force kill (SIGKILL instead of SIGTERM).
+        #[arg(long)]
+        force: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Show detailed status for one agent.
+    Status {
+        /// Agent name.
+        #[arg(long)]
+        name: String,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Start a per-agent HTTP runtime.
     Serve(AgentServeArgs),
+    /// Interactive chat REPL with an agent.
+    Chat {
+        /// Agent ID to chat with.
+        #[arg(long, default_value = "nunchi-intelligence")]
+        agent: String,
+        /// roko-serve base URL.
+        #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
+        serve_url: String,
+    },
 }
 
 /// Arguments for `roko agent serve`.
@@ -78,8 +145,8 @@ pub struct AgentServeArgs {
     /// Unique agent identifier advertised by the runtime.
     #[arg(long)]
     pub agent_id: String,
-    /// Socket address to bind, for example `127.0.0.1:8081`.
-    #[arg(long, default_value = "0.0.0.0:8081")]
+    /// Socket address to bind (default: auto-pick a free port on localhost).
+    #[arg(long, default_value = "127.0.0.1:0")]
     pub bind: String,
     /// Relay base URL reserved for a future relay bridge hook.
     #[arg(long)]
@@ -96,6 +163,9 @@ pub struct AgentServeArgs {
     /// Wallet private key reserved for future signing hooks.
     #[arg(long)]
     pub wallet_key: Option<String>,
+    /// roko-serve control plane URL for heartbeat reporting.
+    #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
+    pub serve_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +174,7 @@ struct AgentServeRuntimeConfig {
     bind: String,
     relay: Option<RelayConfig>,
     chain: Option<ChainConfig>,
+    serve_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +199,7 @@ impl AgentServeRuntimeConfig {
             bind: args.bind,
             relay,
             chain,
+            serve_url: args.serve_url,
         }
     }
 
@@ -139,17 +211,22 @@ impl AgentServeRuntimeConfig {
             bind = %startup.bind,
             "starting roko agent server"
         );
-        server.serve().await
+        let result = server.serve().await;
+
+        // Cleanup: remove our entry from agents.json on shutdown.
+        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        remove_agent_entry(&workdir, &startup.agent_id);
+
+        result
     }
 
     fn build_server(&self) -> Result<AgentServer> {
         let mut builder = AgentServer::builder()
             .agent_id(self.agent_id.clone())
             .bind(self.bind.clone())
+            .serve_url(self.serve_url.clone())
             .messaging()
-            .predictions()
-            .research()
-            .tasks();
+            .predictions();
 
         if let Some(dispatcher) = self.try_build_dispatcher()? {
             builder = builder.with_message_dispatcher(dispatcher);
@@ -160,9 +237,11 @@ impl AgentServeRuntimeConfig {
         }
 
         let startup = self.startup_snapshot();
+        let workdir_for_start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         builder
             .on_start(move |addr, card| {
                 let startup = startup.clone();
+                let workdir = workdir_for_start.clone();
                 async move {
                     info!(
                         agent_id = %startup.agent_id,
@@ -171,6 +250,79 @@ impl AgentServeRuntimeConfig {
                         rest_endpoint = ?card.endpoints.rest,
                         "agent server is ready"
                     );
+                    // Register with roko-serve so the control plane and
+                    // dashboard can discover this agent.  Retry up to 3
+                    // times with 2 s gaps — when `roko up` starts serve and
+                    // agents near-simultaneously the first attempt may fail
+                    // because serve isn't listening yet.
+                    let rest_endpoint = card
+                        .endpoints
+                        .rest
+                        .clone()
+                        .unwrap_or_else(|| format!("http://127.0.0.1:{}", addr.port()));
+                    let register_url = format!(
+                        "{}/api/agents/register",
+                        startup.serve_url.trim_end_matches('/')
+                    );
+                    let body = serde_json::json!({
+                        "agent_id": startup.agent_id,
+                        "label": startup.agent_id,
+                        "rest_endpoint": rest_endpoint,
+                        "process_id": std::process::id(),
+                    });
+                    let client = reqwest::Client::new();
+                    let mut registered = false;
+                    for attempt in 1..=3u32 {
+                        match client
+                            .post(&register_url)
+                            .json(&body)
+                            .timeout(std::time::Duration::from_secs(3))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                info!(
+                                    agent_id = %startup.agent_id,
+                                    serve_url = %startup.serve_url,
+                                    attempt,
+                                    "registered with roko-serve"
+                                );
+                                registered = true;
+                                break;
+                            }
+                            Ok(resp) => {
+                                warn!(
+                                    agent_id = %startup.agent_id,
+                                    status = %resp.status(),
+                                    attempt,
+                                    "roko-serve registration returned non-success"
+                                );
+                            }
+                            Err(err) => {
+                                warn!(
+                                    agent_id = %startup.agent_id,
+                                    error = %err,
+                                    attempt,
+                                    "could not register with roko-serve (is it running?)"
+                                );
+                            }
+                        }
+                        if attempt < 3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                    if !registered {
+                        warn!(
+                            agent_id = %startup.agent_id,
+                            "failed to register with roko-serve after 3 attempts"
+                        );
+                    }
+
+                    // Write to agents.json so `roko agent list`, `roko agent chat`,
+                    // and the dashboard can discover this sidecar.
+                    let actual_bind = format!("http://127.0.0.1:{}", addr.port());
+                    upsert_agent_entry(&workdir, &startup.agent_id, &actual_bind);
+
                     if let Some(relay) = &startup.relay {
                         info!(
                             agent_id = %startup.agent_id,
@@ -179,18 +331,21 @@ impl AgentServeRuntimeConfig {
                         );
                     }
                     if let Some(chain) = &startup.chain {
-                        info!(
-                            agent_id = %startup.agent_id,
-                            chain_rpc_url = ?chain.rpc_url,
-                            identity_registry = ?chain.identity_registry,
-                            passport_id = ?chain.passport_id,
-                            "chain registration config captured for later hook-up"
-                        );
-                        if chain.wallet_key.is_some() {
-                            warn!(
-                                agent_id = %startup.agent_id,
-                                "wallet-key was provided but signing hooks are not wired in this batch"
-                            );
+                        if let Some(url) = &chain.rpc_url {
+                            match roko_chain::alloy_impl::AlloyChainClient::http(url) {
+                                Ok(_client) => {
+                                    let has_wallet = chain.wallet_key.is_some();
+                                    info!(
+                                        agent_id = %startup.agent_id,
+                                        chain_rpc = url,
+                                        has_wallet,
+                                        "chain tools active for agent sidecar"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "chain rpc_url set but client failed");
+                                }
+                            }
                         }
                     }
                     Ok(())
@@ -201,30 +356,62 @@ impl AgentServeRuntimeConfig {
 
     fn try_build_dispatcher(&self) -> Result<Option<Arc<dyn DispatchLike>>> {
         let workdir = std::env::current_dir().context("read current working directory")?;
-        let config = load_roko_config(&workdir)?;
+        let mut config = load_roko_config(&workdir)?;
 
-        let model = config.agent.default_model.trim();
+        let model = config.agent.default_model.trim().to_string();
         if model.is_empty() {
             return Ok(None);
         }
 
-        // A dispatcher can be built if either:
-        //   (a) the default model resolves in the provider registry
-        //       (e.g. `[providers.lmstudio] kind = "openai_compat"` +
-        //       `[models.qwen] provider = "lmstudio"`), or
-        //   (b) a legacy subprocess command is configured (e.g. `command = "claude"`).
-        // Without either, there is no backend to call.
-        let has_provider_backing = config.effective_models().contains_key(model);
+        // When ANTHROPIC_API_KEY is set, prefer the direct HTTP API over the
+        // CLI subprocess for serving.  The API returns clean text; the CLI
+        // subprocess emits raw streaming-protocol JSON that leaks through to
+        // callers (dashboard, chat REPL).
+        //
+        // Override the model profile so `create_agent_for_model` resolves
+        // through the AnthropicApi adapter (ClaudeAgent with Messages API)
+        // instead of ClaudeCli (subprocess).
+        let has_anthropic_env = std::env::var_os("ANTHROPIC_API_KEY").is_some();
+        let use_anthropic_api = has_anthropic_env && !config.models.contains_key(&model);
+        if use_anthropic_api {
+            let mut profile = config
+                .effective_models()
+                .get(&model)
+                .cloned()
+                .unwrap_or_default();
+            if profile.provider == "claude_cli" {
+                profile.provider = "anthropic".to_string();
+                config.models.insert(model.clone(), profile);
+                info!(
+                    model = %model,
+                    "ANTHROPIC_API_KEY set — overriding provider to anthropic (direct HTTP)"
+                );
+            }
+        }
+
+        // A dispatcher can be built if any of:
+        //   (a) the default model resolves in the provider registry, or
+        //   (b) a legacy subprocess command is configured, or
+        //   (c) ANTHROPIC_API_KEY is set (model override above ensures resolution).
+        let has_provider_backing = config.effective_models().contains_key(&model);
         let has_legacy_command = config.agent.command.is_some();
-        if !has_provider_backing && !has_legacy_command {
+        if !has_provider_backing && !has_legacy_command && !has_anthropic_env {
             return Ok(None);
         }
+
+        // When using the API, don't pass the legacy CLI command — it would
+        // cause the provider layer to spawn a subprocess instead.
+        let command = if use_anthropic_api {
+            None
+        } else {
+            config.agent.command.clone()
+        };
 
         let agent = spawn_agent_scoped(
             &config,
             SpawnAgentSpec {
                 model: model.to_string(),
-                command: config.agent.command.clone(),
+                command,
                 timeout_ms: config.agent.timeout_ms,
                 system_prompt: None,
                 cached_content: None,
@@ -269,6 +456,7 @@ impl AgentServeRuntimeConfig {
             bind: self.bind.clone(),
             relay: self.relay.clone(),
             chain: self.chain.clone(),
+            serve_url: self.serve_url.clone(),
         }
     }
 }
@@ -279,6 +467,8 @@ struct StartupSnapshot {
     bind: String,
     relay: Option<RelayConfig>,
     chain: Option<ChainConfig>,
+    #[allow(dead_code)]
+    serve_url: String,
 }
 
 impl ChainConfig {
@@ -312,8 +502,15 @@ impl DispatchLike for ServingAgentDispatcher {
             .run(&input, &Context::now().with_goal(prompt))
             .await;
 
+        // Clean up raw JSON from the agent output (e.g. Claude CLI streaming
+        // protocol).  The `extract_clean_text` parser handles plain text
+        // (no-op), JSONL with result/assistant events, content block arrays,
+        // and nested `result`/`content` fields.
+        let raw = result.output.body.as_text().unwrap_or_default();
+        let content = roko_cli::chat::extract_clean_text(raw);
+
         Ok(ChatResponse {
-            content: result.output.body.as_text().unwrap_or_default().to_string(),
+            content,
             usage: result.usage,
             finish_reason: if result.success {
                 roko_agent::chat_types::FinishReason::Stop
@@ -377,6 +574,11 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
             template,
             prompt,
             workdir,
+            skills,
+            tier,
+            reputation,
+            max_concurrent_jobs,
+            serve_url,
         } => {
             run_agent_create(
                 &name,
@@ -385,15 +587,481 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
                 prompt.as_deref(),
                 workdir.as_deref(),
             )
-            .await
+            .await?;
+
+            // Auto-register with roko-serve if --serve-url is given.
+            let url = serve_url.as_deref().map(|u| {
+                if u.is_empty() {
+                    "http://localhost:6677"
+                } else {
+                    u
+                }
+            });
+            if let Some(base) = url {
+                let capabilities = match domain.as_str() {
+                    "research" => vec!["messaging".to_string(), "research".to_string()],
+                    _ => vec!["messaging".to_string(), "tasks".to_string()],
+                };
+                let body = serde_json::json!({
+                    "agent_id": name,
+                    "label": name,
+                    "capabilities": capabilities,
+                    "domain_tags": [domain],
+                    "skills": skills,
+                    "tier": tier,
+                    "reputation": reputation,
+                    "max_concurrent_jobs": max_concurrent_jobs,
+                });
+                let register_url = format!("{}/api/agents/register", base.trim_end_matches('/'));
+                match reqwest::Client::new()
+                    .post(&register_url)
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("Registered with serve at {base}");
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        eprintln!("warning: serve registration failed ({status}): {text}");
+                    }
+                    Err(err) => {
+                        eprintln!("warning: could not reach serve at {register_url}: {err}");
+                        eprintln!("  (the agent was created locally; register manually later)");
+                    }
+                }
+            }
+            Ok(())
         }
         AgentCmd::Delete {
             name,
             force,
             workdir,
         } => run_agent_delete(&name, force, workdir.as_deref()).await,
+        AgentCmd::List { workdir } => run_agent_list(workdir.as_deref()),
+        AgentCmd::Start {
+            name,
+            bind,
+            workdir,
+        } => run_agent_start(&name, &bind, workdir.as_deref()),
+        AgentCmd::Stop {
+            name,
+            force,
+            workdir,
+        } => run_agent_stop(&name, force, workdir.as_deref()),
+        AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
+        AgentCmd::Chat { agent, serve_url } => {
+            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+            Ok(())
+        }
     }
+}
+
+// ─── Structured agent tracking ──────────────────────────────────────────
+
+/// Runtime state for a single agent, persisted to `.roko/runtime/agents.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentEntry {
+    name: String,
+    pid: u32,
+    bind: String,
+    domain: String,
+    started_at: String, // RFC 3339
+}
+
+/// Path to the structured agent tracking file.
+fn agents_file_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("runtime").join("agents.json")
+}
+
+/// Load all agent entries from disk. Returns empty vec if file is missing or corrupt.
+fn load_agent_entries(workdir: &Path) -> Vec<AgentEntry> {
+    let path = agents_file_path(workdir);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// Persist agent entries to disk.
+fn save_agent_entries(workdir: &Path, entries: &[AgentEntry]) -> Result<()> {
+    let path = agents_file_path(workdir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create runtime directory at {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(entries).context("serialize agent entries")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("write agent entries to {}", path.display()))?;
+    Ok(())
+}
+
+/// Insert or update an agent entry in agents.json.
+fn upsert_agent_entry(workdir: &Path, agent_id: &str, bind: &str) {
+    let mut entries = load_agent_entries(workdir);
+    entries.retain(|e| e.name != agent_id);
+    entries.push(AgentEntry {
+        name: agent_id.to_string(),
+        pid: std::process::id(),
+        bind: bind.to_string(),
+        domain: "general".to_string(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+    });
+    if let Err(e) = save_agent_entries(workdir, &entries) {
+        warn!(error = %e, "failed to write agent entry to agents.json");
+    }
+}
+
+/// Remove an agent entry from agents.json.
+fn remove_agent_entry(workdir: &Path, agent_id: &str) {
+    let mut entries = load_agent_entries(workdir);
+    let before = entries.len();
+    entries.retain(|e| e.name != agent_id);
+    if entries.len() < before {
+        if let Err(e) = save_agent_entries(workdir, &entries) {
+            warn!(error = %e, "failed to clean agent entry from agents.json");
+        } else {
+            info!(agent_id, "removed agent entry from agents.json");
+        }
+    }
+}
+
+/// Check whether a process with the given PID is alive.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn is_process_alive(pid: u32) -> bool {
+    // SAFETY: signal 0 is an existence check — no signal is delivered.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Send a signal to a process.
+#[cfg(unix)]
+#[allow(unsafe_code, clippy::cast_possible_wrap)]
+fn send_signal(pid: u32, sig: i32) {
+    unsafe {
+        libc::kill(pid as i32, sig);
+    }
+}
+
+#[cfg(not(unix))]
+fn send_signal(_pid: u32, _sig: i32) {}
+
+/// Extract the domain string from a manifest TOML on disk.
+fn read_domain_from_manifest(manifest_path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(manifest_path) else {
+        return "unknown".to_string();
+    };
+    let Ok(manifest) = toml::from_str::<AgentExtendedManifest>(&text) else {
+        return "unknown".to_string();
+    };
+    match &manifest.core.domain {
+        Some(DomainPlugin::Coding(_)) => "coding".to_string(),
+        Some(DomainPlugin::Research(_)) => "research".to_string(),
+        Some(DomainPlugin::Chain(_)) => "chain".to_string(),
+        Some(DomainPlugin::Custom(c)) => c.id.clone(),
+        None => "general".to_string(),
+    }
+}
+
+/// Format a duration in a human-readable way.
+fn format_duration(dur: chrono::Duration) -> String {
+    let secs = dur.num_seconds();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+// ─── Agent list ─────────────────────────────────────────────────────────
+
+fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agents_dir = wd.join(".roko").join("agents");
+    if !agents_dir.exists() {
+        println!("No agents found.");
+        return Ok(());
+    }
+
+    // Scan manifests.
+    let mut agents: Vec<(String, String)> = Vec::new(); // (name, domain)
+    let entries = std::fs::read_dir(&agents_dir)
+        .with_context(|| format!("read agents directory at {}", agents_dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let agent_path = entry.path();
+
+        // Skip deleted agents.
+        if agent_path.join("DELETED").exists() {
+            continue;
+        }
+        let manifest_path = agent_path.join("manifest.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let domain = read_domain_from_manifest(&manifest_path);
+        agents.push((name, domain));
+    }
+
+    if agents.is_empty() {
+        println!("No agents found.");
+        return Ok(());
+    }
+
+    agents.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Load runtime state.
+    let runtime_entries = load_agent_entries(&wd);
+
+    // Print table header.
+    println!(
+        "{:<20} {:<10} {:<8} {:<22} {}",
+        "NAME", "STATUS", "PID", "BIND", "DOMAIN"
+    );
+
+    for (name, domain) in &agents {
+        let rt = runtime_entries.iter().find(|e| e.name == *name);
+        let (status, pid_str, bind_str) = match rt {
+            Some(entry) if is_process_alive(entry.pid) => (
+                "running".to_string(),
+                entry.pid.to_string(),
+                entry.bind.clone(),
+            ),
+            Some(entry) => {
+                // Stale entry — process is dead. We'll clean up later.
+                let _ = entry; // suppress unused warning
+                ("stopped".to_string(), "-".to_string(), "-".to_string())
+            }
+            None => ("created".to_string(), "-".to_string(), "-".to_string()),
+        };
+        println!(
+            "{:<20} {:<10} {:<8} {:<22} {}",
+            name, status, pid_str, bind_str, domain
+        );
+    }
+
+    // Clean up stale entries.
+    let live: Vec<AgentEntry> = runtime_entries
+        .into_iter()
+        .filter(|e| is_process_alive(e.pid))
+        .collect();
+    let _ = save_agent_entries(&wd, &live);
+
+    Ok(())
+}
+
+// ─── Agent start ────────────────────────────────────────────────────────
+
+pub(crate) fn run_agent_start(name: &str, bind: &str, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agent_dir = wd.join(".roko").join("agents").join(name);
+    let manifest_path = agent_dir.join("manifest.toml");
+
+    if !manifest_path.exists() {
+        bail!(
+            "agent '{}' not found (no manifest at {})",
+            name,
+            manifest_path.display()
+        );
+    }
+    if agent_dir.join("DELETED").exists() {
+        bail!("agent '{}' has been deleted", name);
+    }
+
+    // Check if already running.
+    let mut entries = load_agent_entries(&wd);
+    if let Some(existing) = entries.iter().find(|e| e.name == name) {
+        if is_process_alive(existing.pid) {
+            bail!(
+                "agent '{}' is already running (pid {}, bind {})",
+                name,
+                existing.pid,
+                existing.bind
+            );
+        }
+        // Stale entry — remove it.
+        entries.retain(|e| e.name != name);
+    }
+
+    let domain = read_domain_from_manifest(&manifest_path);
+
+    // Spawn `roko agent serve --agent-id <name> --bind <bind>` as detached child.
+    let roko_bin = std::env::current_exe().context("determine roko binary path")?;
+    let child = std::process::Command::new(&roko_bin)
+        .arg("agent")
+        .arg("serve")
+        .arg("--agent-id")
+        .arg(name)
+        .arg("--bind")
+        .arg(bind)
+        .current_dir(&wd)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn agent serve for '{}'", name))?;
+
+    let pid = child.id();
+    register_spawned_pid(pid);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    entries.push(AgentEntry {
+        name: name.to_string(),
+        pid,
+        bind: bind.to_string(),
+        domain,
+        started_at: now,
+    });
+    save_agent_entries(&wd, &entries)?;
+
+    println!("Agent '{}' started (pid {}, bind {}).", name, pid, bind);
+    Ok(())
+}
+
+// ─── Agent stop ─────────────────────────────────────────────────────────
+
+pub(crate) fn run_agent_stop(name: &str, force: bool, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut entries = load_agent_entries(&wd);
+    let entry_idx = entries.iter().position(|e| e.name == name);
+
+    let Some(idx) = entry_idx else {
+        println!("Agent '{}' is not running.", name);
+        return Ok(());
+    };
+
+    let entry = entries[idx].clone();
+    if !is_process_alive(entry.pid) {
+        println!("Agent '{}' is not running (stale entry cleaned up).", name);
+        entries.remove(idx);
+        save_agent_entries(&wd, &entries)?;
+        unregister_pid(entry.pid);
+        return Ok(());
+    }
+
+    // Send initial signal.
+    if force {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGKILL);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 9);
+    } else {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGTERM);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 15);
+    }
+
+    // Wait up to 5 seconds for exit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !is_process_alive(entry.pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // If still alive after timeout and not force, escalate to SIGKILL.
+    if is_process_alive(entry.pid) && !force {
+        #[cfg(unix)]
+        send_signal(entry.pid, libc::SIGKILL);
+        #[cfg(not(unix))]
+        send_signal(entry.pid, 9);
+
+        // Brief wait for SIGKILL to take effect.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // Compute run duration.
+    let duration_str = chrono::DateTime::parse_from_rfc3339(&entry.started_at)
+        .ok()
+        .map(|started| {
+            let dur = chrono::Utc::now().signed_duration_since(started);
+            format_duration(dur)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    entries.remove(idx);
+    save_agent_entries(&wd, &entries)?;
+    unregister_pid(entry.pid);
+
+    println!(
+        "Agent '{}' stopped (pid {}, ran for {}).",
+        name, entry.pid, duration_str
+    );
+    Ok(())
+}
+
+// ─── Agent status ───────────────────────────────────────────────────────
+
+fn run_agent_status(name: &str, workdir: Option<&Path>) -> Result<()> {
+    let wd = workdir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let agent_dir = wd.join(".roko").join("agents").join(name);
+    let manifest_path = agent_dir.join("manifest.toml");
+
+    if !manifest_path.exists() {
+        bail!(
+            "agent '{}' not found (no manifest at {})",
+            name,
+            manifest_path.display()
+        );
+    }
+    if agent_dir.join("DELETED").exists() {
+        bail!("agent '{}' has been deleted", name);
+    }
+
+    let domain = read_domain_from_manifest(&manifest_path);
+    let entries = load_agent_entries(&wd);
+    let rt = entries.iter().find(|e| e.name == name);
+
+    let (status, pid_str, bind_str, started_str) = match rt {
+        Some(entry) if is_process_alive(entry.pid) => {
+            let ago = chrono::DateTime::parse_from_rfc3339(&entry.started_at)
+                .ok()
+                .map(|started| {
+                    let dur = chrono::Utc::now().signed_duration_since(started);
+                    format!("{} ({} ago)", entry.started_at, format_duration(dur))
+                })
+                .unwrap_or_else(|| entry.started_at.clone());
+            ("running", entry.pid.to_string(), entry.bind.clone(), ago)
+        }
+        Some(_) => ("stopped", "-".to_string(), "-".to_string(), "-".to_string()),
+        None => ("created", "-".to_string(), "-".to_string(), "-".to_string()),
+    };
+
+    println!("Agent:    {}", name);
+    println!("Status:   {}", status);
+    println!("Domain:   {}", domain);
+    println!("PID:      {}", pid_str);
+    println!("Bind:     {}", bind_str);
+    println!("Started:  {}", started_str);
+    println!("Manifest: {}", manifest_path.display());
+
+    Ok(())
 }
 
 // ─── LIFE-01: Agent creation ────────────────────────────────────────────
@@ -403,7 +1071,7 @@ const DEFAULT_AGENT_PROMPT: &str =
     "You are a helpful agent. Describe your task in the strategy document.";
 
 /// Three-step agent creation: build manifest, validate, write to disk.
-async fn run_agent_create(
+pub(crate) async fn run_agent_create(
     name: &str,
     domain: &str,
     template: Option<&str>,

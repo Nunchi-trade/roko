@@ -49,11 +49,13 @@ async fn list_plans(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
             continue;
         }
         let plan = load_plan_file(&path).await?;
+        let completed_count = plan.tasks.iter().filter(|t| t.completed).count();
         summaries.push(json!({
             "id": plan.id,
             "title": plan.title,
             "task_count": plan.tasks.len(),
             "completed": plan.tasks.iter().all(|t| t.completed),
+            "completed_task_count": completed_count,
         }));
     }
 
@@ -173,6 +175,7 @@ async fn execute_plan(
         )));
     }
 
+    let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn({
         let plan_id = plan_id.clone();
         async move {
@@ -180,8 +183,12 @@ async fn execute_plan(
                 plan_id: plan_id.clone(),
             });
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success }) => success,
+                Ok(RunResult { success, .. }) => {
+                    state_for_task.provider_health.record_success("default");
+                    success
+                }
                 Err(err) => {
+                    state_for_task.provider_health.record_failure("default");
                     bus.publish(ServerEvent::Error {
                         message: format!("plan execution failed for {plan_id}: {err}"),
                     });
@@ -258,12 +265,17 @@ async fn generate_plan(
     let kind = format!("plan_generate:{slug}");
     let slug_for_task = slug.clone();
 
+    let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn({
         let op_id = op_id.clone();
         async move {
             let success = match runtime.run_once(&workdir, &prompt).await {
-                Ok(RunResult { success }) => success,
+                Ok(RunResult { success, .. }) => {
+                    state_for_task.provider_health.record_success("default");
+                    success
+                }
                 Err(err) => {
+                    state_for_task.provider_health.record_failure("default");
                     bus.publish(ServerEvent::Error {
                         message: format!("plan generation failed for {slug_for_task}: {err}"),
                     });
@@ -362,6 +374,15 @@ async fn load_plan_file(path: &std::path::Path) -> Result<Plan, ApiError> {
     Ok(plan)
 }
 
+/// Derive a status string from a task's completion state.
+fn task_status(task: &PlanTask) -> &'static str {
+    if task.completed {
+        "completed"
+    } else {
+        "pending"
+    }
+}
+
 /// Serialize a `Plan` into a `serde_json::Value`.
 fn plan_to_json(plan: &Plan) -> Value {
     json!({
@@ -374,6 +395,7 @@ fn plan_to_json(plan: &Plan) -> Value {
             "depends_on": t.depends_on,
             "files": t.files,
             "completed": t.completed,
+            "status": task_status(t),
         })).collect::<Vec<_>>(),
     })
 }
@@ -483,6 +505,7 @@ mod tests {
             self.notify.notify_waiters();
             Ok(RunResult {
                 success: self.success,
+                output_text: None,
             })
         }
 

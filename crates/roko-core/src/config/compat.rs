@@ -10,11 +10,11 @@ use serde::Deserialize;
 
 use super::schema::{
     AgentConfig, AgentRoleToggles, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION,
-    ConductorConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig, GeminiConfig,
-    GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig,
-    PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig, RoleOverride,
-    RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TemporalConfig, ToolsConfig,
-    TuiConfig, WatcherConfig, WebhooksConfig,
+    ChainConfig, ConductorConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig,
+    GeminiConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig,
+    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig,
+    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TemporalConfig,
+    ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -126,12 +126,14 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         perplexity: PerplexityConfig::default(),
         gemini: GeminiConfig::default(),
         attention: AttentionConfig::default(),
+        chain: ChainConfig::default(),
         immune: ImmuneConfig::default(),
         temporal: TemporalConfig::default(),
         goals: GoalsConfig::default(),
         energy: EnergyConfig::default(),
         tools: ToolsConfig::default(),
         oneirography: OneirographyConfig::default(),
+        agents: Vec::new(),
     }
 }
 
@@ -263,6 +265,8 @@ fn convert_learning(m: &MoriConfig) -> LearningConfig {
         replan_on_gate_failure: d.replan_on_gate_failure,
         replan_max_per_plan: d.replan_max_per_plan,
         replan_gate_attempts: d.replan_gate_attempts,
+        use_lookahead_router: d.use_lookahead_router,
+        lookahead_threshold: d.lookahead_threshold,
     }
 }
 

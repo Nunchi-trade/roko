@@ -572,7 +572,10 @@ mod tests {
                 .lock()
                 .expect("lock prompt recorder for template deployment") = Some(prompt.to_owned());
             self.notified.notify_one();
-            Ok(RunResult { success: true })
+            Ok(RunResult {
+                success: true,
+                output_text: None,
+            })
         }
 
         fn session_status(&self, workdir: std::path::PathBuf) -> SessionStatusInfo {

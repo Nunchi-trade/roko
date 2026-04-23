@@ -1,109 +1,105 @@
-# Roko project config — routes through the bardo gateway
+# REQUIRED_ENV
+# Required environment variables (set in .env or shell):
+# GITHUB_TOKEN       — GitHub personal access token (for MCP GitHub server)
+# GITHUB_WEBHOOK_SECRET — GitHub webhook secret for deploy registration
+# SLACK_BOT_TOKEN    — Slack bot token (for MCP Slack server)
+# SLACK_SIGNING_SECRET — Slack webhook signing secret
+ANTHROPIC_API_KEY='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'
+
+auto_plan = false
 
 [agent]
 command = "claude"
-args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"]
-model = "claude-sonnet-4-6"
-effort = "high"
+args = []
+effort = "medium"
 bare_mode = true
-fallback_model = "claude-haiku-4-5"
-timeout_ms = 300000
-env = [
-  ["ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"],
-  ["ANTHROPIC_API_KEY", "mori-local-gateway"],
-]
+timeout_ms = 120000
+env = []
+clean_output = true
 
-[providers.claude_cli]
-kind = "claude_cli"
-command = "claude"
-
-[models.claude-sonnet-4-6]
-provider = "claude_cli"
-slug = "claude-sonnet-4-6"
-
-# Per-tier model mapping (matches mori's band→model system)
-# Overrides the global model when tasks.toml specifies a tier.
-# mechanical = cheapest model for imports/renames (≤20 LOC)
-# focused = mid-tier for single functions/tests (≤50 LOC)
-# integrative = mid/high for multi-module wiring (≤150 LOC)
-# architectural = highest for API design (≤300 LOC)
 [agent.tier_models]
-mechanical = "claude-haiku-4-5"
-focused = "claude-sonnet-4-6"
-integrative = "claude-sonnet-4-6"
-architectural = "claude-opus-4-6"
+fast = "ollama/llama3.2:latest"
+standard = "ollama/gemma4:26b-a4b-it-q8_0"
 
-# Per-role runtime overrides.
-# [agent.roles.implementer]
-# role = "code_implementer"
-# model = "claude-opus-4-6"
-# tools = ["read_file", "edit_file", "git-*"]
-# budget = { max_tokens_per_turn = 12000, max_cost_usd_cents_per_turn = 500 }
-# thresholds = { gate_pass_rate_floor = 0.70 }
-# routing_overrides = { force_backend = "claude", force_tier = "focused" }
-# legacy: turn_budget_usd = 5.0
-
-# Retry escalation: on failure, escalate to next tier's model
-# mechanical → focused → integrative → architectural → human
 [agent.escalation]
 max_retries = 3
 escalate_model = true
 
+[dreams]
+auto_dream = true
+idle_threshold_mins = 15
+min_episodes_for_dream = 5
+
+[daimon.strategy_space]
+domain = "coding"
+dimensions = [
+    "complexity",
+    "risk",
+    "novelty",
+    "confidence",
+    "time_pressure",
+    "scope",
+    "reversibility",
+    "dependency_depth",
+]
+
+[tools]
+prefer_mcp = false
+global_denied = []
+mcp_timeout_secs = 30
+
 [prompt]
-token_budget = 50000
-role = "You are a Roko agent working on the roko codebase at /Users/will/dev/nunchi/roko/roko/."
+token_budget = 10000
+role = "implementer"
+files = []
 
-# Per-role prompt budgets (chars, matching mori's PromptBudget)
-[prompt.budgets.implementer]
-plan = 50000
-prd = 12000
-brief = 8000
-file_context = 20000
-skills = 4000
+[prompt.budgets]
 
-[prompt.budgets.reviewer]
-plan = 30000
-prd = 8000
-brief = 6000
-file_context = 8000
-skills = 2000
+[prompt.context_budgets]
+surgical = 4000
+focused = 12000
+full = 24000
 
-[prompt.budgets.architect]
-plan = 50000
-prd = 15000
-brief = 8000
-file_context = 25000
-skills = 4000
+[[gate]]
+kind = "shell"
+program = "true"
+args = []
+timeout_ms = 60000
 
-# Cost budgets
+[executor]
+max_concurrent_plans = 4
+max_concurrent_tasks = 8
+max_auto_fix_iterations = 5
+max_merge_attempts = 3
+task_timeout_secs = 600
+speculative_threshold_multiplier = 2.0
+auto_replan = false
+use_worktrees = false
+
+[executor.resource_budget]
+max_concurrent = 8
+
 [budget]
 max_plan_usd = 10.0
 max_task_usd = 1.0
+max_session_usd = 50.0
 warn_at_percent = 80
 
-[[gate]]
-kind = "compile"
+[serve]
+auto_orchestrate = true
 
-[[gate]]
-kind = "test"
+[serve.auth]
+enabled = false
+api_key = ""
 
-[scheduler]
-
-[[scheduler.cron]]
-name = "weekly-digest"
-expression = "0 9 * * MON"
-signal_kind = "scheduler:cron:weekly-digest"
-
-[watcher]
-
-[[watcher.paths]]
-name = "call-notes"
-directory = "call-notes/"
-include = ["*.md", "*.txt"]
-exclude = ["*.tmp", ".DS_Store"]
-signal_kind = "fswatcher:created"  # only emit on creation, not modification
-recursive = true
-debounce_ms = 500
+[serve.deploy]
+provider = "railway"
+environment = [
+    "GITHUB_TOKEN",
+    "GITHUB_WEBHOOK_SECRET",
+    "SLACK_BOT_TOKEN",
+    "SLACK_SIGNING_SECRET",
+]
 
 [webhooks.github]
 secret = "${GITHUB_WEBHOOK_SECRET}"
@@ -116,3 +112,25 @@ enabled = true
 [deploy]
 worker_image = "ghcr.io/nunchi-trade/roko-worker:latest"
 default_region = "us-west1"
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434/v1"
+timeout_ms = 180000
+
+[models.llama32]
+provider = "ollama"
+slug = "llama3.2:latest"
+context_window = 8192
+supports_tools = true
+tool_format = "openai_json"
+
+[models.gemma4]
+provider = "ollama"
+slug = "gemma4:26b-a4b-it-q8_0"
+context_window = 8192
+supports_tools = true
+tool_format = "openai_json"
+
+# PRD settings (parsed by `RokoConfig`)
+[prd]
+auto_plan = false

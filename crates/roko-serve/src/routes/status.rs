@@ -44,22 +44,55 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/episodes", get(episodes))
         .route("/signals", get(signals))
         .route("/operations/{id}", get(operation_status))
+        .route("/relay/health", get(relay_health))
+        .route("/truth_map", get(truth_map_handler))
+        .route("/retention", get(retention_handler))
+        .route("/parity", get(parity_handler))
 }
 
-/// `GET /api/health` — liveness check.
+/// `GET /api/health` — liveness check with live telemetry.
 async fn health(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<Value>) {
     let uptime_secs = state.started_at.elapsed().as_secs();
     let active_plans = state.active_plans.read().await.len();
-    let active_agents = state.supervisor.count().await;
+    // Use discovered agents count (includes both local and remote agents).
+    let supervised = state.supervisor.count().await;
+    let discovered = state.discovered_agents.read().await.len();
+    let active_agents = supervised.max(discovered);
+    let active_runs = state.active_runs.read().await.len();
+
+    // Build a compact provider health summary from the tracker.
+    let provider_snapshot = state.provider_health.snapshot();
+    let providers_total = provider_snapshot.len();
+    let providers_healthy = provider_snapshot
+        .iter()
+        .filter(|ps| ps.consecutive_failures == 0)
+        .count();
+    let providers_unhealthy = providers_total.saturating_sub(providers_healthy);
+    let provider_summary = json!({
+        "total": providers_total,
+        "healthy": providers_healthy,
+        "unhealthy": providers_unhealthy,
+    });
+
+    // Determine status: "ok" / "degraded" / "down"
+    let status = if providers_total > 0 && providers_healthy == 0 {
+        "down"
+    } else if providers_unhealthy > 0 {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     (
         axum::http::StatusCode::OK,
         Json(json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "uptime_secs": uptime_secs,
-        "active_plans": active_plans,
-        "active_agents": active_agents,
+            "status": status,
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": uptime_secs,
+            "active_plans": active_plans,
+            "active_agents": active_agents,
+            "active_runs": active_runs,
+            "providers": provider_summary,
         })),
     )
 }
@@ -1799,6 +1832,42 @@ fn dispatch_bias_label(bias: AgentDispatchBias) -> String {
     }
 }
 
+// ── Relay health ─────────────────────────────────────────────────────
+
+/// `GET /api/relay/health` — return relay connection diagnostics.
+async fn relay_health() -> Json<Value> {
+    let health = crate::relay::RelayHealth::default();
+    Json(serde_json::to_value(&health).unwrap_or_default())
+}
+
+// ── Truth map ────────────────────────────────────────────────────────
+
+/// `GET /api/truth_map` — return the entity truth-source registry.
+async fn truth_map_handler() -> Json<Value> {
+    Json(serde_json::to_value(crate::truth_map::truth_map()).unwrap_or_default())
+}
+
+// ── Retention ────────────────────────────────────────────────────────
+
+/// `GET /api/retention` — return retention policies and any current violations.
+async fn retention_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let policies = crate::retention::default_retention_policies();
+    let violations = crate::retention::check_retention(&state.workdir);
+    let status = crate::retention::RetentionStatus {
+        policies,
+        violations,
+    };
+    Json(serde_json::to_value(&status).unwrap_or_default())
+}
+
+// ── Parity ───────────────────────────────────────────────────────────
+
+/// `GET /api/parity` — return cross-surface parity matrix.
+async fn parity_handler() -> Json<Value> {
+    let matrix = crate::parity::build_parity_matrix();
+    Json(serde_json::to_value(&matrix).unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2084,6 +2153,11 @@ mod tests {
         assert!(body["uptime_secs"].as_u64().is_some());
         assert_eq!(body["active_plans"], 0);
         assert_eq!(body["active_agents"], 0);
+        assert_eq!(body["active_runs"], 0);
+        assert!(body["providers"].is_object());
+        assert_eq!(body["providers"]["total"], 0);
+        assert_eq!(body["providers"]["healthy"], 0);
+        assert_eq!(body["providers"]["unhealthy"], 0);
     }
 
     #[tokio::test]

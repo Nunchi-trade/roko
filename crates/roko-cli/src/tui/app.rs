@@ -798,7 +798,12 @@ impl App {
                 self.tui_state.focus = match tab {
                     Tab::Dashboard | Tab::Plans => FocusZone::PlanTree,
                     Tab::Agents => FocusZone::AgentOutput,
-                    Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => FocusZone::RightPanel,
+                    Tab::Git
+                    | Tab::Logs
+                    | Tab::Config
+                    | Tab::Inspect
+                    | Tab::Marketplace
+                    | Tab::Atelier => FocusZone::RightPanel,
                 };
                 // Sync legacy page
                 if let Some(page_id) = tab_to_page(tab) {
@@ -1382,7 +1387,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         (self.tui_state.git_branch_cursor + 1).min(max);
                 }
-                Tab::Inspect => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::DrillOut => match self.tui_state.active_tab {
@@ -1399,7 +1404,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         self.tui_state.git_branch_cursor.saturating_sub(1);
                 }
-                Tab::Inspect => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::WaveNext => {
@@ -1643,20 +1648,14 @@ impl App {
                 // Map the sub-view index to the appropriate TuiState field
                 // based on which tab is active. The sub_tab in ViewState
                 // is derived from these fields via current_view_state().
-                let max = views::SubView::for_tab(self.tui_state.active_tab).len();
+                let tab = self.tui_state.active_tab;
+                let max = views::SubView::for_tab(tab).len();
                 if idx < max {
-                    match self.tui_state.active_tab {
-                        Tab::Plans => self.tui_state.plan_detail_tab = idx,
-                        Tab::Agents => self.tui_state.selected_agent_tab = idx,
-                        _ => {
-                            // For tabs without a dedicated sub-tab field,
-                            // we store the selection in plan_detail_tab as
-                            // a generic sub-view index (it will be picked up
-                            // by current_view_state).
-                            self.tui_state.plan_detail_tab = idx;
-                        }
-                    }
+                    self.tui_state.set_sub_tab_for(tab, idx);
                 }
+            }
+            TuiAction::SubmitJob => {
+                self.submit_marketplace_job();
             }
             TuiAction::None => {}
         }
@@ -1808,6 +1807,22 @@ impl App {
                 self.tui_state.selected_agent = next as usize;
             }
             (Tab::Agents, FocusZone::AgentOutput) => self.scroll_agent_output_by(delta),
+            (Tab::Marketplace, _) => {
+                if !self.tui_state.marketplace_jobs.is_empty() {
+                    let max = self.tui_state.marketplace_jobs.len().saturating_sub(1);
+                    let next = (self.tui_state.marketplace_selected_job as i32 + delta)
+                        .clamp(0, max as i32);
+                    self.tui_state.marketplace_selected_job = next as usize;
+                }
+            }
+            (Tab::Atelier, _) => {
+                if !self.tui_state.atelier_prds.is_empty() {
+                    let max = self.tui_state.atelier_prds.len().saturating_sub(1);
+                    let next =
+                        (self.tui_state.atelier_selected_prd as i32 + delta).clamp(0, max as i32);
+                    self.tui_state.atelier_selected_prd = next as usize;
+                }
+            }
             (_, FocusZone::PlanTree) => {
                 let current = self.tui_state.plan_scroll_offset as i32;
                 self.tui_state.plan_scroll_offset = (current + delta).max(0) as usize;
@@ -1837,6 +1852,26 @@ impl App {
                 } else {
                     offset.min(max)
                 };
+            }
+            (Tab::Marketplace, _) => {
+                if !self.tui_state.marketplace_jobs.is_empty() {
+                    let max = self.tui_state.marketplace_jobs.len().saturating_sub(1);
+                    self.tui_state.marketplace_selected_job = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                }
+            }
+            (Tab::Atelier, _) => {
+                if !self.tui_state.atelier_prds.is_empty() {
+                    let max = self.tui_state.atelier_prds.len().saturating_sub(1);
+                    self.tui_state.atelier_selected_prd = if offset == usize::MAX {
+                        max
+                    } else {
+                        offset.min(max)
+                    };
+                }
             }
             (Tab::Agents, FocusZone::AgentOutput) => {
                 if self.tui_state.agent_topology_visible {
@@ -2074,7 +2109,7 @@ impl App {
                 self.tui_state
                     .clamp_log_scroll(self.current_log_max_scroll());
             }
-            Tab::Plans | Tab::Config | Tab::Inspect => {}
+            Tab::Plans | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
         }
     }
 
@@ -2361,6 +2396,109 @@ impl App {
         }
     }
 
+    /// Submit the CreateJob form: write a JSON file to `.roko/jobs/` so the
+    /// file-watcher and job_runner pick it up automatically.
+    fn submit_marketplace_job(&mut self) {
+        let title = self.tui_state.job_form_title.trim().to_string();
+        if title.is_empty() {
+            self.notifications
+                .push(super::modals::Notification::warn("Job title is required"));
+            return;
+        }
+
+        let job_type = {
+            let t = self.tui_state.job_form_type.trim().to_string();
+            if t.is_empty() {
+                "coding_task".to_string()
+            } else {
+                t
+            }
+        };
+        let priority = {
+            let p = self.tui_state.job_form_priority.trim().to_string();
+            if p.is_empty() {
+                "medium".to_string()
+            } else {
+                p
+            }
+        };
+        let description = self.tui_state.job_form_description.trim().to_string();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let id = format!(
+            "job-{}-{:04x}",
+            now.replace([':', '-', 'T', '+'], "")
+                .get(..14)
+                .unwrap_or("0"),
+            nanos & 0xFFFF
+        );
+
+        let job = roko_core::MarketplaceJob {
+            id: id.clone(),
+            title: title.clone(),
+            description,
+            job_type,
+            status: "pending".to_string(),
+            priority,
+            posted_by: "tui".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            ..Default::default()
+        };
+
+        let jobs_dir = self.workdir.join(".roko").join("jobs");
+        if let Err(e) = std::fs::create_dir_all(&jobs_dir) {
+            self.notifications
+                .push(super::modals::Notification::error(&format!(
+                    "Failed to create jobs directory: {e}"
+                )));
+            return;
+        }
+
+        let path = jobs_dir.join(format!("{id}.json"));
+        match serde_json::to_string_pretty(&job) {
+            Ok(json) => match std::fs::write(&path, json) {
+                Ok(()) => {
+                    self.tui_state
+                        .command_results
+                        .push(super::state::CommandResult {
+                            ok: true,
+                            label: "create-job".to_string(),
+                            message: format!("Created job '{title}' ({id})"),
+                        });
+                    // Reset form fields.
+                    self.tui_state.job_form_title.clear();
+                    self.tui_state.job_form_type.clear();
+                    self.tui_state.job_form_priority.clear();
+                    self.tui_state.job_form_description.clear();
+                    self.tui_state.job_form_editing = false;
+
+                    self.refresh_snapshot();
+                    self.notifications
+                        .push(super::modals::Notification::info(format!(
+                            "Job '{title}' created"
+                        )));
+                }
+                Err(e) => {
+                    self.notifications
+                        .push(super::modals::Notification::error(&format!(
+                            "Failed to write job file: {e}"
+                        )));
+                }
+            },
+            Err(e) => {
+                self.notifications
+                    .push(super::modals::Notification::error(&format!(
+                        "Failed to serialize job: {e}"
+                    )));
+            }
+        }
+    }
+
     fn current_view_state(&self) -> ViewState {
         match self.tui_state.active_tab {
             Tab::Dashboard => ViewState {
@@ -2369,6 +2507,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.agent_scroll.is_none(),
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Plans => ViewState {
                 scroll: self.tui_state.plan_scroll_offset as u16,
@@ -2376,6 +2515,7 @@ impl App {
                 sub_tab: self.tui_state.plan_detail_tab,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Agents => ViewState {
                 scroll: self.tui_state.agent_scroll.unwrap_or(0) as u16,
@@ -2383,6 +2523,7 @@ impl App {
                 sub_tab: self.tui_state.selected_agent_tab,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.agent_scroll.is_none(),
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Git => ViewState {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
@@ -2390,6 +2531,7 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Logs => ViewState {
                 scroll: self.tui_state.log_scroll.min(u16::MAX as usize) as u16,
@@ -2397,20 +2539,39 @@ impl App {
                 sub_tab: 0,
                 secondary_selected: 0,
                 auto_tail: self.tui_state.log_auto_tail,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Config => ViewState {
                 scroll: self.tui_state.config_scroll_offset.min(u16::MAX as usize) as u16,
                 selected: self.tui_state.config_cursor,
-                sub_tab: 0,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Config),
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
             Tab::Inspect => ViewState {
                 scroll: self.tui_state.diff_scroll.min(u16::MAX as usize) as u16,
                 selected: 0,
-                sub_tab: 0,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Inspect),
                 secondary_selected: 0,
                 auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
+            },
+            Tab::Marketplace => ViewState {
+                scroll: 0,
+                selected: self.tui_state.marketplace_selected_job,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Marketplace),
+                secondary_selected: 0,
+                auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
+            },
+            Tab::Atelier => ViewState {
+                scroll: 0,
+                selected: self.tui_state.atelier_selected_prd,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Atelier),
+                secondary_selected: 0,
+                auto_tail: false,
+                search_query: self.tui_state.filter.clone(),
             },
         }
     }
@@ -2858,7 +3019,12 @@ fn collect_process_metrics(
         return Vec::new();
     };
 
-    let active_pids = futures::executor::block_on(process_supervisor.active_pids());
+    // `active_pids()` is async (parking_lot::Mutex only), safe to call via
+    // a current-thread runtime on this dedicated background thread.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("mini-rt for process metrics");
+    let active_pids = rt.block_on(process_supervisor.active_pids());
     if active_pids.is_empty() {
         return Vec::new();
     }
@@ -2936,7 +3102,7 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
         Tab::Agents => Some(PageId::AgentStatus),
         Tab::Logs => Some(PageId::LogView),
         Tab::Config => Some(PageId::ConfigView),
-        Tab::Git | Tab::Inspect => None,
+        Tab::Git | Tab::Inspect | Tab::Marketplace | Tab::Atelier => None,
     }
 }
 
@@ -3345,6 +3511,12 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE));
         assert_eq!(app.tui_state.active_tab, Tab::Inspect);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Marketplace);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE));
+        assert_eq!(app.tui_state.active_tab, Tab::Atelier);
 
         app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert_eq!(app.tui_state.active_tab, Tab::Dashboard);
@@ -3766,6 +3938,37 @@ mod tests {
         assert_eq!(view.scroll, 11);
         assert_eq!(view.selected, app.tui_state.git_branch_cursor);
         assert!(!view.auto_tail);
+
+        app.tui_state.active_tab = Tab::Config;
+        app.tui_state.config_sub_tab = 2;
+        let view = app.current_view_state();
+        assert_eq!(view.sub_tab, 2);
+
+        app.tui_state.active_tab = Tab::Inspect;
+        app.tui_state.inspect_sub_tab = 3;
+        let view = app.current_view_state();
+        assert_eq!(view.sub_tab, 3);
+    }
+
+    #[test]
+    fn switch_subview_updates_active_tab_slot_only() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path());
+
+        app.tui_state.active_tab = Tab::Config;
+        app.dispatch_action(TuiAction::SwitchSubView(2));
+        assert_eq!(app.tui_state.config_sub_tab, 2);
+        assert_eq!(app.tui_state.plan_detail_tab, 0);
+
+        app.tui_state.active_tab = Tab::Inspect;
+        app.dispatch_action(TuiAction::SwitchSubView(3));
+        assert_eq!(app.tui_state.inspect_sub_tab, 3);
+        assert_eq!(app.tui_state.config_sub_tab, 2);
+
+        app.tui_state.active_tab = Tab::Marketplace;
+        app.dispatch_action(TuiAction::SwitchSubView(1));
+        assert_eq!(app.tui_state.marketplace_sub_tab, 1);
+        assert_eq!(app.tui_state.inspect_sub_tab, 3);
     }
 
     #[test]

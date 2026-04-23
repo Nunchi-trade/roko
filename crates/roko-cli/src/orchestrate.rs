@@ -21,6 +21,7 @@ use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
 use roko_agent::provider::is_known_protocol_command;
+use roko_agent::safety::provenance::{Custody, CustodyLogger};
 use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
@@ -29,6 +30,8 @@ use roko_agent::task_runner::{
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
+use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
+use roko_chain::{ChainClient, ChainWallet};
 use roko_compose::enrichment::{
     ALL_ORDERED, EnrichStep, EnrichmentConfig, EnrichmentPipeline,
     LlmBackend as EnrichmentLlmBackend, LlmClient as EnrichmentLlmClient, PlanInfo, SkipReason,
@@ -161,6 +164,7 @@ use crate::agent_config::{
     synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
+use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::config::Config;
 use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
@@ -248,6 +252,10 @@ fn routing_log_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("routing.jsonl")
+}
+
+fn custody_logger_for(workdir: &Path) -> CustodyLogger {
+    CustodyLogger::new(RokoLayout::for_project(workdir).custody_log())
 }
 
 fn cfactor_history_path(workdir: &Path) -> PathBuf {
@@ -853,6 +861,28 @@ fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &P
     let distillation_workdir = workdir.to_path_buf();
     learning.set_episode_completion_hook(move |episode| {
         roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+    });
+}
+
+/// Log a one-time warning if `ANTHROPIC_API_KEY` is not set, which means
+/// episode distillation into the neuro knowledge store will be silently
+/// skipped.  Called at the start of each `PlanRunner::run_task_plans_inner`
+/// invocation but only emits the warning once per process.
+fn warn_if_distillation_disabled() {
+    use std::sync::Once;
+    static WARN: Once = Once::new();
+    WARN.call_once(|| {
+        let key_set = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_owned())
+            .is_some_and(|k| !k.is_empty());
+        if !key_set {
+            tracing::warn!(
+                "ANTHROPIC_API_KEY is not set; episode distillation into the neuro \
+                 knowledge store is disabled. Set it to enable automatic learning \
+                 from completed episodes."
+            );
+        }
     });
 }
 
@@ -3121,6 +3151,8 @@ pub struct PlanRunner {
     verdict_publisher: Option<VerdictPublisher>,
     /// Rolling latency registry for routed model/provider pairs.
     latency_registry: LatencyRegistry,
+    /// Calibration state for the lookahead router tier-downgrade decisions.
+    router_calibration: roko_learn::routing_extras::RouterCalibration,
     /// Event bus used to publish post-turn learning signals.
     learning_event_bus: LearningEventBus,
     /// Runtime-wide event bus for cross-crate orchestration fan-out.
@@ -3158,6 +3190,16 @@ pub struct PlanRunner {
     /// CLI override for maximum retry attempts per task. When set, overrides
     /// both per-task `max_retries` and config `escalation.max_retries`.
     max_retries_override: Option<u32>,
+    /// Read-only chain client. `None` if `[chain] rpc_url` is not configured.
+    chain_client: Option<Arc<dyn ChainClient>>,
+    /// Signing wallet. `None` if `wallet_key` is not configured.
+    chain_wallet: Option<Arc<dyn ChainWallet>>,
+    /// Cached workspace code index for code-intelligence context injection.
+    /// The `Instant` records when the index was built so we can invalidate
+    /// after a configurable staleness window (default: 60 s).
+    code_index_cache: Option<(std::time::Instant, roko_index::WorkspaceIndex)>,
+    /// Append-only custody logger for audit chain records.
+    custody_logger: CustodyLogger,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4629,6 +4671,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -4702,6 +4774,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -4722,6 +4795,10 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
+            code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -4787,6 +4864,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -4860,6 +4967,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -4880,6 +4988,10 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
+            code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -4947,6 +5059,36 @@ impl PlanRunner {
             );
             RokoConfig::default()
         });
+        let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
+        {
+            Some(url) => match AlloyChainClient::http(url) {
+                Ok(c) => {
+                    tracing::info!(rpc_url = url, "chain client initialized");
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chain rpc_url set but client failed; chain tools disabled");
+                    None
+                }
+            },
+            None => None,
+        };
+        let chain_wallet: Option<Arc<dyn ChainWallet>> = match (
+            roko_config.chain.rpc_url.as_deref(),
+            roko_config.chain.wallet_key.as_deref(),
+        ) {
+            (Some(url), Some(key)) => {
+                let chain_id = roko_config.chain.chain_id.unwrap_or(1);
+                match AlloyChainWallet::from_hex_key(url, key, chain_id) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "wallet_key invalid; chain signing disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let safety_layer = SafetyLayer::from_config(&roko_config);
         let max_concurrent = config.executor.max_concurrent_tasks;
         Ok(Self {
@@ -5020,6 +5162,7 @@ impl PlanRunner {
             gate_ratchet: GateRatchet::load_or_new(&gate_ratchet_path(workdir)),
             verdict_publisher: None,
             latency_registry: LatencyRegistry::load_or_new(&latency_registry_path(workdir)),
+            router_calibration: roko_learn::routing_extras::RouterCalibration::new(),
             learning_event_bus: LearningEventBus::new(256),
             runtime_event_bus,
             runtime_event_rx,
@@ -5040,6 +5183,10 @@ impl PlanRunner {
             curriculum_scheduler: CurriculumScheduler::new(CurriculumMode::EasyFirst),
             agent_pool: MultiAgentPool::new().with_default_concurrency(max_concurrent),
             max_retries_override: None,
+            chain_client,
+            chain_wallet,
+            code_index_cache: None,
+            custody_logger: custody_logger_for(workdir),
         })
     }
 
@@ -5722,6 +5869,29 @@ impl PlanRunner {
         Arc::clone(&self.supervisor)
     }
 
+    /// Return a reference to a cached `WorkspaceIndex`, rebuilding it if the
+    /// cache is absent or older than 60 seconds.
+    fn cached_code_index(&mut self) -> Option<&roko_index::WorkspaceIndex> {
+        const STALENESS: std::time::Duration = std::time::Duration::from_secs(60);
+        let stale = self
+            .code_index_cache
+            .as_ref()
+            .is_none_or(|(built_at, _)| built_at.elapsed() > STALENESS);
+        if stale {
+            match roko_index::WorkspaceIndex::load(&self.workdir) {
+                Ok(idx) => {
+                    tracing::debug!("code-index cache refreshed");
+                    self.code_index_cache = Some((std::time::Instant::now(), idx));
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "code-index rebuild failed; clearing cache");
+                    self.code_index_cache = None;
+                }
+            }
+        }
+        self.code_index_cache.as_ref().map(|(_, idx)| idx)
+    }
+
     /// The filesystem-backed observability sinks — exposed for status queries.
     #[must_use]
     pub fn obs_sinks(&self) -> &FsObservabilitySinks {
@@ -5835,6 +6005,9 @@ impl PlanRunner {
             ConductorDecision::Continue => {}
             ConductorDecision::Restart { watcher, reason } => {
                 tracing::info!("[conductor] {plan_id}: RESTART ({watcher}) — {reason}");
+                eprintln!(
+                    "  \x1b[33m\u{26a0} conductor [{watcher}]: restarting '{plan_id}' \u{2014} {reason}\x1b[0m"
+                );
                 self.record_conductor_negative_feedback(plan_id, &decision);
                 self.publish_conductor_decision_summary(plan_id, watcher, "restart", reason);
                 self.emit_execution_event(
@@ -5847,6 +6020,9 @@ impl PlanRunner {
             }
             ConductorDecision::Fail { watcher, reason } => {
                 tracing::error!("[conductor] {plan_id}: FAIL ({watcher}) — {reason}");
+                eprintln!(
+                    "  \x1b[31m\u{2717} conductor [{watcher}]: failing '{plan_id}' \u{2014} {reason}\x1b[0m"
+                );
                 self.record_conductor_negative_feedback(plan_id, &decision);
                 self.publish_conductor_decision_summary(plan_id, watcher, "fail", reason);
                 self.emit_execution_event(
@@ -6322,8 +6498,8 @@ impl PlanRunner {
             active_agents,
             expected_agents: if active_agents == 0 { 0 } else { active_agents },
             last_agent_heartbeat_ms: self.last_agent_progress_ms,
-            chain_connected: false,
-            chain_expected: false,
+            chain_connected: self.chain_client.is_some(),
+            chain_expected: self.chain_client.is_some(),
             spec_hash_at_start: String::new(),
             spec_hash_current: String::new(),
             coverage_history: Vec::new(),
@@ -6340,6 +6516,23 @@ impl PlanRunner {
                 HealthStatus::Critical => "critical",
             };
             let check_name = result.name.clone();
+
+            // Surface health alerts to stderr so the user sees them without tracing.
+            match result.status {
+                HealthStatus::Degraded => {
+                    eprintln!(
+                        "  \x1b[33m\u{26a0} health [{check_name}]: {}\x1b[0m",
+                        result.message
+                    );
+                }
+                HealthStatus::Critical => {
+                    eprintln!(
+                        "  \x1b[31m\u{2717} health [{check_name}]: {}\x1b[0m",
+                        result.message
+                    );
+                }
+                HealthStatus::Healthy => {}
+            }
 
             // INT-13: Conductor health signals → pheromone deposits.
             // Degraded/Critical health checks become Threat pheromones so that
@@ -6414,6 +6607,20 @@ impl PlanRunner {
                     }
                     _ => "warning",
                 };
+
+                // Surface stuck detection alerts to stderr for user visibility.
+                if severity == "critical" {
+                    eprintln!(
+                        "  \x1b[31m\u{2717} stuck [{:?}]: '{}' \u{2014} {}\x1b[0m",
+                        stuck.kind, plan_id, stuck.description
+                    );
+                } else {
+                    eprintln!(
+                        "  \x1b[33m\u{26a0} stuck [{:?}]: '{}' \u{2014} {}\x1b[0m",
+                        stuck.kind, plan_id, stuck.description
+                    );
+                }
+
                 let payload = serde_json::json!({
                     "plan_id": plan_id,
                     "kind": stuck.kind,
@@ -6584,6 +6791,59 @@ impl PlanRunner {
             signal.emotional_tag = Some(self.daimon.emotional_tag("conductor"));
         }
         self.conductor_signals.push(maybe_attest_engram(signal));
+    }
+
+    /// Flush accumulated conductor signals to `.roko/engrams.jsonl` so the
+    /// background `WatcherRunner` can detect anomalies in real time (not just
+    /// from stale data on disk).
+    ///
+    /// Drains the in-memory buffer after a successful write so signals are
+    /// not re-flushed on subsequent calls.
+    async fn flush_conductor_signals_to_disk(&mut self) {
+        if self.conductor_signals.is_empty() {
+            return;
+        }
+        let engrams_path = self.workdir.join(".roko").join("engrams.jsonl");
+        // Serialize all pending signals as JSONL and append in one write.
+        let mut buf = String::new();
+        for signal in &self.conductor_signals {
+            if let Ok(line) = serde_json::to_string(signal) {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        if buf.is_empty() {
+            return;
+        }
+        if let Some(parent) = engrams_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&engrams_path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt;
+                if let Err(e) = file.write_all(buf.as_bytes()).await {
+                    tracing::warn!(
+                        "[orchestrate] failed to flush conductor signals to {}: {e}",
+                        engrams_path.display()
+                    );
+                } else {
+                    // Drain only after a successful write so we don't lose
+                    // signals on transient I/O failures.
+                    self.conductor_signals.clear();
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[orchestrate] failed to open {} for conductor signal flush: {e}",
+                    engrams_path.display()
+                );
+            }
+        }
     }
 
     /// Take a snapshot of the current executor state.
@@ -7110,10 +7370,47 @@ impl PlanRunner {
         }
         self.emit_runtime_dag_surface();
 
+        // ── Progress header ──────────────────────────────────────────
+        {
+            let total_tasks: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let max_parallel: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.meta.max_parallel as usize)
+                .max()
+                .unwrap_or(1);
+            let waves: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.parallel_groups().len())
+                .sum();
+            for plan_id in &plan_ids {
+                if let Some(tracker) = self.task_trackers.get(plan_id) {
+                    let n = tracker.tasks_file.tasks.len();
+                    let w = tracker.tasks_file.parallel_groups().len();
+                    let mp = tracker.tasks_file.meta.max_parallel;
+                    eprintln!(
+                        "\x1b[1m\u{25b8} Running plan '{plan_id}': {n} tasks, {w} waves, max_parallel={mp}\x1b[0m"
+                    );
+                }
+            }
+            if plan_ids.len() > 1 {
+                eprintln!(
+                    "\x1b[1m\u{25b8} Fleet total: {total_tasks} tasks across {} plans, {waves} waves, max_parallel={max_parallel}\x1b[0m",
+                    plan_ids.len()
+                );
+            }
+        }
+
         // Maximum iterations to prevent infinite loops.
         let max_iterations = 1000;
         let mut iteration = 0;
         let mut heartbeat_clock = HeartbeatClock::new();
+        let mut last_progress_print = std::time::Instant::now();
 
         loop {
             iteration += 1;
@@ -7174,6 +7471,22 @@ impl PlanRunner {
             self.maybe_run_heartbeat(&mut heartbeat_clock, watcher_cancel)
                 .await;
 
+            // ── Periodic progress summary (every 30s) ────────────────
+            if last_progress_print.elapsed() >= Duration::from_secs(30) {
+                let completed_plans_set = self.executor.completed_plans();
+                let counts = self.heartbeat_counts(&completed_plans_set);
+                let active_agents = self.supervisor.count().await;
+                let total_cost: f64 = self.efficiency_events.iter().map(|e| e.cost_usd).sum();
+                eprintln!(
+                    "  \u{25e6} {}/{} tasks done, {} agents active, ${:.2} spent",
+                    counts.completed_tasks,
+                    counts.completed_tasks + counts.active_tasks + counts.failed_tasks,
+                    active_agents,
+                    total_cost,
+                );
+                last_progress_print = std::time::Instant::now();
+            }
+
             // Auto-save periodically.
             if self.actions_since_save >= AUTOSAVE_INTERVAL {
                 if let Err(e) = self.save_state() {
@@ -7181,7 +7494,15 @@ impl PlanRunner {
                 }
                 self.actions_since_save = 0;
             }
+
+            // Flush conductor signals to disk so the background WatcherRunner
+            // can detect anomalies from fresh data rather than stale snapshots.
+            self.flush_conductor_signals_to_disk().await;
         }
+
+        // Final flush of any conductor signals accumulated in the last
+        // iteration or after the loop exited.
+        self.flush_conductor_signals_to_disk().await;
 
         if self.cancel.is_cancelled() || watcher_cancel.is_cancelled() {
             self.cleanup_tracked_plan_worktrees().await;
@@ -7361,6 +7682,19 @@ impl PlanRunner {
             tasks_failed = tasks_failed,
             "plan run complete"
         );
+
+        // ── Final summary line ───────────────────────────────────────
+        {
+            let status = if tasks_failed == 0 {
+                "\u{2713}"
+            } else {
+                "\u{2717}"
+            };
+            eprintln!();
+            eprintln!(
+                "\x1b[1m{status} Plan run complete: {tasks_completed} succeeded, {tasks_failed} failed, ${total_cost_usd:.2}, {duration_secs:.0}s\x1b[0m"
+            );
+        }
 
         if !self.cancel.is_cancelled() {
             // Auto-dream consolidation at plan completion (§5D.05).
@@ -7659,6 +7993,7 @@ impl PlanRunner {
 
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        warn_if_distillation_disabled();
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
             conductor: Arc::clone(&self.conductor),
@@ -7800,6 +8135,20 @@ impl PlanRunner {
                             EventKind::GateResult,
                             serde_json::json!({"plan_id": plan_id, "rung": effective_rung, "passed": passed}),
                         );
+                        // ── Custody audit record: gate result ─────────
+                        let custody_gates: Vec<String> = self
+                            .task_trackers
+                            .get(&plan_id)
+                            .map(|tracker| {
+                                tracker
+                                    .last_gate_verdicts
+                                    .iter()
+                                    .filter(|v| v.passed)
+                                    .map(|v| v.gate.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        self.record_custody_gate(&plan_id, effective_rung, passed, &custody_gates);
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -7854,6 +8203,7 @@ impl PlanRunner {
                             plan_id: plan_id.clone(),
                             task_id: format!("rung-{effective_rung}"),
                             gate: format!("rung-{effective_rung}"),
+                            rung: effective_rung,
                             passed,
                         });
                         self.emit_execution_event(
@@ -8243,6 +8593,7 @@ impl PlanRunner {
                     &ExecutorEvent::Fatal(reason),
                     "failed",
                 );
+                self.cleanup_plan_pool_agents(&plan_id);
                 self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::CompletePlan { plan_id } => {
@@ -8265,6 +8616,7 @@ impl PlanRunner {
                         }),
                     },
                 );
+                self.cleanup_plan_pool_agents(&plan_id);
                 self.cleanup_plan_worktree(&plan_id).await;
             }
             ExecutorAction::Reorder {
@@ -9711,6 +10063,35 @@ impl PlanRunner {
             .unwrap_or_else(|| "claude-sonnet-4-6".into())
     }
 
+    /// Record a custody chain entry for an agent dispatch.
+    fn record_custody_dispatch(&self, plan_id: &str, task: &str, model: &str, role: &str) {
+        let record = Custody::new(
+            format!("agent_dispatch:{role}"),
+            format!("{plan_id}/{task}"),
+            now_unix_ms_i64(),
+            Vec::new(),
+        )
+        .with_heuristics(vec![format!("model={model}")]);
+        if let Err(e) = self.custody_logger.log(&record) {
+            tracing::warn!(error = %e, "failed to write custody record for agent dispatch");
+        }
+    }
+
+    /// Record a custody chain entry for a gate result.
+    fn record_custody_gate(&self, plan_id: &str, rung: u32, passed: bool, gates: &[String]) {
+        let record = Custody::new(
+            format!("gate_result:rung-{rung}"),
+            plan_id.to_string(),
+            now_unix_ms_i64(),
+            Vec::new(),
+        )
+        .with_result(if passed { "pass" } else { "fail" })
+        .with_gates_passed(gates.to_vec());
+        if let Err(e) = self.custody_logger.log(&record) {
+            tracing::warn!(error = %e, "failed to write custody record for gate result");
+        }
+    }
+
     fn task_retry_model(&self, plan_id: &str, task_id: &str) -> String {
         self.task_trackers
             .get(plan_id)
@@ -10292,6 +10673,24 @@ impl PlanRunner {
             }
         }
 
+        // ── Feed outcome into lookahead router calibration ────────
+        {
+            let model = self.effective_model();
+            // Use 1.0 as the predicted probability for the selected model
+            // (it was chosen because the router believed it would succeed).
+            let predicted = if result.success { 0.85 } else { 0.5 };
+            self.router_calibration
+                .record_prediction(&model, predicted, result.success);
+            tracing::debug!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model = %model,
+                success = result.success,
+                brier_score = self.router_calibration.brier_score,
+                "recorded lookahead router calibration observation"
+            );
+        }
+
         // UX34: when a force_backend override was used, feed the outcome into
         // the cascade router so it learns which backend works for this role.
         {
@@ -10468,6 +10867,28 @@ impl PlanRunner {
 
         // Emit observability trace event for the successful agent dispatch.
         self.emit_agent_trace(plan_id, task_id, true, wall_ms);
+
+        // ── Structured progress line ─────────────────────────────────
+        {
+            let completed: usize = self.task_trackers.values().map(|t| t.completed.len()).sum();
+            let total: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let elapsed_secs = wall_ms as f64 / 1000.0;
+            let cost = f64::from(result.usage.cost_usd);
+            let title = task_def.as_ref().map(|td| td.title.as_str()).unwrap_or("");
+            if title.is_empty() {
+                eprintln!(
+                    "  [{completed}/{total}] \u{2713} {task_id} ({elapsed_secs:.1}s, ${cost:.2})"
+                );
+            } else {
+                eprintln!(
+                    "  [{completed}/{total}] \u{2713} {task_id} \"{title}\" ({elapsed_secs:.1}s, ${cost:.2})"
+                );
+            }
+        }
 
         tracing::info!(
             plan_id = %plan_id,
@@ -12123,6 +12544,34 @@ impl PlanRunner {
             somatic_episode_hash(plan_id, task_id, "failure", &error.to_string()),
         );
 
+        // ── Structured failure progress line ──────────────────────────
+        {
+            let completed: usize = self.task_trackers.values().map(|t| t.completed.len()).sum();
+            let failed: usize = self.task_trackers.values().map(|t| t.failed.len()).sum();
+            let total: usize = self
+                .task_trackers
+                .values()
+                .map(|t| t.tasks_file.tasks.len())
+                .sum();
+            let done = completed + failed;
+            let title = task_def.as_ref().map(|td| td.title.as_str()).unwrap_or("");
+            let reason_brief: String = error
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("unknown error")
+                .chars()
+                .take(120)
+                .collect();
+            if title.is_empty() {
+                eprintln!("  [{done}/{total}] \u{2717} {task_id} \u{2014} {reason_brief}");
+            } else {
+                eprintln!(
+                    "  [{done}/{total}] \u{2717} {task_id} \"{title}\" \u{2014} {reason_brief}"
+                );
+            }
+        }
+
         tracing::error!(
             plan_id = %plan_id,
             task_id = %task_id,
@@ -13386,6 +13835,47 @@ impl PlanRunner {
             }
         }
 
+        // ── Lookahead router post-filter (optional tier downgrade) ───
+        //
+        // When enabled and calibration data exists, check if a cheaper model
+        // has a high enough estimated success probability to justify a
+        // tier downgrade. This is the inline equivalent of
+        // `LookaheadRouter::route_with_lookahead()`.
+        if self.learning_config.use_lookahead_router
+            && !self.router_calibration.is_empty()
+            && task_def.is_some()
+        {
+            use roko_learn::routing_extras;
+
+            let baseline_tier = routing_extras::tier_rank(&selected_model);
+            // Only attempt downgrade from Standard (1) or Premium (2) tiers.
+            if baseline_tier > 0 {
+                let threshold = self.learning_config.lookahead_threshold;
+                let model_slugs = self.learning.cascade_router().model_slugs().to_vec();
+                for candidate_slug in &model_slugs {
+                    let candidate_tier = routing_extras::tier_rank(candidate_slug);
+                    if candidate_tier >= baseline_tier {
+                        continue;
+                    }
+                    if let Some(cal) = self.router_calibration.calibration(candidate_slug) {
+                        let success_prob = routing_extras::estimate_model_success(cal);
+                        if success_prob > threshold {
+                            tracing::info!(
+                                original_model = %selected_model,
+                                downgraded_model = %candidate_slug,
+                                success_prob = success_prob,
+                                threshold = threshold,
+                                "[orchestrate] lookahead router downgraded model tier"
+                            );
+                            selected_model = candidate_slug.clone();
+                            routing_reason = "lookahead_downgrade".to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Budget guardrail before dispatch ───────────────────────
         let mut budget = BudgetGuardrail::new(
             self.config.budget.max_task_usd,
@@ -13736,7 +14226,9 @@ impl PlanRunner {
 
         let role_key = format!("{role:?}");
         let section_effectiveness = self.learning.section_effectiveness_snapshot();
-        let code_ctx = code_context_for_task(&self.workdir, task);
+        let workdir = self.workdir.clone();
+        let cached_idx = self.cached_code_index();
+        let code_ctx = code_context_for_task(&workdir, task, cached_idx);
         let role_instruction = if let Some(system_prompt) = system_prompt_override {
             system_prompt
         } else {
@@ -14229,10 +14721,17 @@ impl PlanRunner {
                 };
             let registry =
                 Arc::new(VecToolRegistry::from_tools(tools.clone())) as Arc<dyn ToolRegistry>;
-            let resolver: Arc<dyn HandlerResolver> =
+            let resolver: Arc<dyn HandlerResolver> = if self.chain_client.is_some() {
+                let chain_map = chain_handler_map(
+                    Arc::clone(self.chain_client.as_ref().unwrap()),
+                    self.chain_wallet.clone(),
+                );
+                Arc::new(chain_aware_resolver(chain_map))
+            } else {
                 Arc::new(|name: &str| -> Option<Arc<dyn ToolHandler>> {
                     roko_std::tool::handlers::handler_for(name)
-                });
+                })
+            };
             let dispatcher = Arc::new(
                 ToolDispatcher::new(registry, resolver).with_safety(self.safety_layer.clone()),
             );
@@ -14759,6 +15258,9 @@ impl PlanRunner {
                     "success": result.success,
                 }),
             );
+
+            // ── Custody audit record: agent dispatch ────────────────────
+            self.record_custody_dispatch(plan_id, task, &selected_model, &format!("{role:?}"));
 
             self.finish_task_post_processing(
                 plan_id,
@@ -15697,9 +16199,11 @@ impl PlanRunner {
             let task_id = t.last_impl_task_id.as_deref()?;
             t.tasks_file.tasks.iter().find(|task| task.id == task_id)
         });
+        // Gate runs are less frequent than dispatches; pass None to avoid
+        // requiring &mut self here.  The dispatch path uses the cached index.
         let code_intel_hints = task_def
             .and_then(|td| td.description.as_deref())
-            .map(|desc| code_context_for_task(&self.workdir, desc))
+            .map(|desc| code_context_for_task(&self.workdir, desc, None))
             .unwrap_or_default();
 
         // GATE-06: Build SymbolManifest from task context symbols for rung 3.
@@ -16456,6 +16960,9 @@ impl PlanRunner {
 
         let mut unexpected = Vec::new();
         for path in &changed {
+            if is_plan_enrichment_artifact(plan_id, path) || is_build_artifact_path(path) {
+                continue;
+            }
             let permitted = allowed.iter().any(|declared| {
                 path == declared
                     || path.starts_with(&format!("{declared}/"))
@@ -16878,6 +17385,27 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed
 }
 
+fn is_plan_enrichment_artifact(plan_id: &str, path: &str) -> bool {
+    let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !ALL_ORDERED
+        .iter()
+        .any(|step| step.output_filename() == file_name)
+    {
+        return false;
+    }
+    let expected_roots = [
+        format!("plans/{plan_id}/"),
+        format!(".roko/plans/{plan_id}/"),
+    ];
+    expected_roots.iter().any(|root| path.starts_with(root))
+}
+
+fn is_build_artifact_path(path: &str) -> bool {
+    matches!(path, "target" | "target/") || path.starts_with("target/")
+}
+
 async fn git_commit_all_if_needed(
     workspace: &Path,
     message: &str,
@@ -17052,6 +17580,7 @@ fn server_event_to_dashboard(
             plan_id,
             task_id,
             gate,
+            rung: _,
             passed,
         } => Some(DashboardEvent::GateResult {
             plan_id: plan_id.clone(),
@@ -17459,20 +17988,35 @@ fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<St
 
 /// Extract code-intelligence context chunks for a task description.
 ///
-/// Builds a `WorkspaceIndex` from the workspace root, extracts keywords from
-/// the task description, runs a hybrid search, and formats results as context
-/// strings suitable for domain-context injection. Returns an empty vec if the
-/// index cannot be built or yields no results.
-fn code_context_for_task(workdir: &Path, task_description: &str) -> Vec<String> {
+/// When `cached_index` is `Some`, uses the pre-built index instead of loading
+/// from disk. This avoids a full workspace scan on every dispatch when the
+/// caller maintains a `code_index_cache` (see `PlanRunner::cached_code_index`).
+///
+/// Falls back to loading from `workdir` when no cached index is available.
+/// Returns an empty vec if the index cannot be built or yields no results.
+fn code_context_for_task(
+    workdir: &Path,
+    task_description: &str,
+    cached_index: Option<&roko_index::WorkspaceIndex>,
+) -> Vec<String> {
     const MAX_RESULTS: usize = 15;
     const MAX_TOKENS: usize = 3000;
     const TOKENS_PER_RESULT: usize = 200;
 
-    let index = match roko_index::WorkspaceIndex::load(workdir) {
-        Ok(idx) => idx,
-        Err(err) => {
-            tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
-            return Vec::new();
+    // Use the cached index if provided, otherwise load fresh.
+    let owned_index;
+    let index: &roko_index::WorkspaceIndex = if let Some(idx) = cached_index {
+        idx
+    } else {
+        match roko_index::WorkspaceIndex::load(workdir) {
+            Ok(idx) => {
+                owned_index = idx;
+                &owned_index
+            }
+            Err(err) => {
+                tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
+                return Vec::new();
+            }
         }
     };
 
@@ -17759,7 +18303,6 @@ impl PlanRunner {
     }
 
     /// Clean up pool agents associated with a completed/failed plan.
-    #[allow(dead_code)]
     fn cleanup_plan_pool_agents(&mut self, plan_id: &str) {
         let killed = self.agent_pool.kill_plan_agents(plan_id);
         if killed > 0 {
@@ -18673,7 +19216,10 @@ mod tests {
             _workdir: &std::path::Path,
             _prompt: &str,
         ) -> anyhow::Result<roko_serve::runtime::RunResult> {
-            Ok(roko_serve::runtime::RunResult { success: true })
+            Ok(roko_serve::runtime::RunResult {
+                success: true,
+                output_text: None,
+            })
         }
 
         fn session_status(&self, workdir: PathBuf) -> roko_serve::runtime::SessionStatusInfo {
@@ -18926,6 +19472,35 @@ acceptance = []
         assert!(selected.contains(&EnrichStep::Verify));
         assert!(!selected.contains(&EnrichStep::Research));
         assert!(!selected.contains(&EnrichStep::Invariants));
+    }
+
+    #[test]
+    fn enrichment_artifact_filter_matches_plan_scoped_outputs_only() {
+        assert!(is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/plan-1/brief.md"
+        ));
+        assert!(is_plan_enrichment_artifact(
+            "plan-1",
+            ".roko/plans/plan-1/decomposition.md"
+        ));
+        assert!(!is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/other/brief.md"
+        ));
+        assert!(!is_plan_enrichment_artifact("plan-1", "src/brief.md"));
+        assert!(!is_plan_enrichment_artifact(
+            "plan-1",
+            "plans/plan-1/custom.md"
+        ));
+    }
+
+    #[test]
+    fn build_artifact_filter_matches_target_directory_only() {
+        assert!(is_build_artifact_path("target/"));
+        assert!(is_build_artifact_path("target/debug/roko"));
+        assert!(!is_build_artifact_path("src/target.rs"));
+        assert!(!is_build_artifact_path("plans/target/brief.md"));
     }
 
     #[test]

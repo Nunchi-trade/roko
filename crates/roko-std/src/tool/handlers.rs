@@ -117,30 +117,32 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_tool_has_a_handler() {
+    fn every_std_builtin_tool_has_a_handler() {
         let reg = HandlerRegistry::new();
-        for name in BUILTIN_TOOL_NAMES {
+        // Only the 16 std handlers ship in HandlerRegistry; chain tool
+        // handlers ship from roko-cli.
+        for name in reg.shipped_names() {
             assert!(
                 reg.get(name).is_some(),
-                "no handler registered for built-in tool `{name}`"
+                "no handler registered for shipped tool `{name}`"
             );
         }
     }
 
     #[test]
-    fn shipped_names_and_builtin_names_agree() {
+    fn shipped_names_are_subset_of_builtin_names() {
         use std::collections::HashSet;
         let reg = HandlerRegistry::new();
         let shipped: HashSet<&str> = reg.shipped_names().iter().copied().collect();
         let builtin: HashSet<&str> = BUILTIN_TOOL_NAMES.iter().copied().collect();
-        assert_eq!(
-            shipped, builtin,
-            "shipped_names must match BUILTIN_TOOL_NAMES"
+        assert!(
+            shipped.is_subset(&builtin),
+            "shipped_names must be a subset of BUILTIN_TOOL_NAMES"
         );
     }
 
     #[test]
-    fn all_16_builtins_ship_handlers() {
+    fn all_16_std_builtins_ship_handlers() {
         assert_eq!(HandlerRegistry::new().shipped_names().len(), 16);
     }
 }

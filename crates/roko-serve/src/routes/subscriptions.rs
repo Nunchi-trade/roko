@@ -18,6 +18,7 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/subscriptions/catalog", get(subscriptions_catalog))
         .route(
             "/subscriptions",
             get(list_subscriptions).post(create_subscription),
@@ -28,6 +29,28 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/subscriptions/{id}/enable", post(enable_subscription))
         .route("/subscriptions/{id}/disable", post(disable_subscription))
+}
+
+/// `GET /api/subscriptions/catalog` — describe available trigger types and filter fields.
+async fn subscriptions_catalog() -> Json<serde_json::Value> {
+    Json(json!({
+        "trigger_types": [
+            { "name": "webhook", "description": "Fires on incoming GitHub/GitLab webhooks" },
+            { "name": "plan_completed", "description": "Fires when a plan execution finishes" },
+            { "name": "gate_result", "description": "Fires on gate pass/fail verdicts" },
+            { "name": "episode_recorded", "description": "Fires when an episode is persisted" },
+            { "name": "job_transitioned", "description": "Fires on marketplace job state changes" },
+            { "name": "cron", "description": "Fires on a cron schedule (via trigger_config)" },
+            { "name": "file_watch", "description": "Fires when watched files change (via trigger_config)" },
+        ],
+        "filter_fields": [
+            { "name": "repo", "type": "glob[]", "description": "Repository name glob patterns" },
+            { "name": "branch", "type": "regex[]", "description": "Branch name regex patterns" },
+            { "name": "path", "type": "glob[]", "description": "File path glob patterns" },
+            { "name": "label", "type": "exact[]", "description": "Exact label matches" },
+            { "name": "author", "type": "exact[]", "description": "Exact author matches" },
+        ],
+    }))
 }
 
 #[derive(Clone, Debug, Serialize)]

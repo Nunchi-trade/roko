@@ -105,6 +105,8 @@ fn minimal() -> RokoConfig {
             replan_on_gate_failure: false,
             replan_max_per_plan: 1,
             replan_gate_attempts: 3,
+            use_lookahead_router: false,
+            lookahead_threshold: 0.7,
         },
         ..RokoConfig::default()
     }
@@ -167,6 +169,8 @@ fn thorough() -> RokoConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: 2,
             replan_gate_attempts: 3,
+            use_lookahead_router: true,
+            lookahead_threshold: 0.7,
         },
         ..RokoConfig::default()
     }

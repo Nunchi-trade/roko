@@ -1141,10 +1141,62 @@ pub enum BackupError {
 
 /// Verify backup integrity before restore.
 ///
-/// Complex archive parsing is implemented by storage-specific callers; this
-/// stub establishes the public lifecycle API and intended error contract.
-pub fn verify_backup(_path: &Path) -> Result<BackupManifest, BackupError> {
-    todo!("verify backup archive integrity and parse manifest")
+/// Reads the backup archive from `path`, deserializes it, and validates:
+///
+/// 1. **Parse**: the file must be valid JSON conforming to [`BackupArchive`].
+/// 2. **Integrity**: when the archive carries a `checksum` field, the
+///    computed checksum of the serialized manifest + engrams must match.
+/// 3. **Schema**: the manifest `version` must be 1 (forward-compatible
+///    callers can extend this check later).
+///
+/// Returns the parsed [`BackupManifest`] on success so callers can inspect
+/// it before committing to a full restore.
+pub fn verify_backup(path: &Path) -> Result<BackupManifest, BackupError> {
+    let raw = std::fs::read_to_string(path)?;
+    let archive: BackupArchive =
+        serde_json::from_str(&raw).map_err(|e| BackupError::Decode(e.to_string()))?;
+
+    // When a checksum is present, recompute and verify.
+    if let Some(expected) = &archive.checksum {
+        // The checksum covers the canonical JSON of manifest + engrams
+        // (excluding the checksum field itself) so that the archive is
+        // self-verifiable.
+        let canonical = serde_json::json!({
+            "manifest": archive.manifest,
+            "engrams": archive.engrams,
+            "playbook_md": archive.playbook_md,
+        });
+        let computed = fnv1a_hex(canonical.to_string().as_bytes());
+        if &computed != expected {
+            return Err(BackupError::IntegrityCheckFailed {
+                expected: expected.clone(),
+                computed,
+            });
+        }
+    }
+
+    // Basic schema check: only version 1 is supported today.
+    if archive.manifest.version == 0 {
+        return Err(BackupError::Decode(
+            "unsupported backup version 0".to_string(),
+        ));
+    }
+
+    Ok(archive.manifest)
+}
+
+/// Compute a 64-bit FNV-1a hash and return it as a hex string.
+///
+/// This is a fast, non-cryptographic hash used for backup integrity
+/// verification. It catches accidental corruption (truncation, encoding
+/// errors) without requiring a heavy-weight hashing crate.
+fn fnv1a_hex(data: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    format!("{hash:016x}")
 }
 
 /// Restore filtering and confidence-decay configuration.

@@ -194,6 +194,14 @@ impl ChainClient for AlloyChainClient {
         })
     }
 
+    async fn get_balance(&self, address: &str, _block: Option<BlockNumber>) -> ChainResult<u128> {
+        let addr: Address = address
+            .parse()
+            .map_err(|_| ChainError::InvalidAddress(address.to_string()))?;
+        let balance = self.provider.get_balance(addr).await.map_err(to_rpc_err)?;
+        Ok(balance.to::<u128>())
+    }
+
     async fn chain_id(&self) -> ChainResult<u64> {
         self.provider.get_chain_id().await.map_err(to_rpc_err)
     }

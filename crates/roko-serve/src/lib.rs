@@ -62,17 +62,23 @@ pub mod extract;
 pub mod feedback;
 pub mod fswatcher;
 pub mod integrations;
+pub mod job_runner;
 pub mod openapi;
+pub mod parity;
 pub mod plan_types;
+pub mod projection_contract;
+pub mod relay;
+pub mod retention;
 pub mod routes;
 pub mod runtime;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
+pub mod truth_map;
 
 pub use crate::routes::reload_config_from_disk;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -80,10 +86,11 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
+use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::{ExecutionEvent, ServerEvent};
@@ -127,7 +134,17 @@ impl ServerBuildConfig {
             .bind
             .as_deref()
             .unwrap_or(&self.roko_config.server.bind);
-        let port = self.port.unwrap_or(self.roko_config.server.port);
+        let port = self.port.unwrap_or_else(|| {
+            // Prefer [serve].port when [server].port is still the default.
+            if self.roko_config.server.port == 6677 {
+                self.roko_config
+                    .serve
+                    .port
+                    .unwrap_or(self.roko_config.server.port)
+            } else {
+                self.roko_config.server.port
+            }
+        });
         format!("{bind}:{port}")
     }
 }
@@ -189,6 +206,9 @@ impl ServerBuilder {
             self.state
                 .get_or_insert_with(|| Arc::new(build_app_state(workdir, runtime, roko_config))),
         );
+        if let Err(err) = state.restore_snapshot().await {
+            warn!(error = %err, "failed to restore server state snapshot; starting fresh");
+        }
         let dispatcher_roko_config = state.load_roko_config().as_ref().clone();
         let dispatcher = Arc::new(dispatch::TemplateAgentDispatcher::new(
             state.workdir.clone(),
@@ -201,6 +221,11 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+        // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
+        // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
+        // The orchestrator publishes directly to the StateHub when running in-process.
+        let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
+        let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
@@ -213,6 +238,28 @@ impl ServerBuilder {
 
         info!("roko server listening on http://{addr}");
         info!("workdir: {}", self.config.workdir.display());
+
+        // Spawn chain-watcher if chain.rpc_url is configured (best-effort).
+        if let Some(rpc_url) = self.config.roko_config.chain.rpc_url.as_deref() {
+            let rpc = rpc_url.to_string();
+            tokio::spawn(async move {
+                let watcher = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("roko-chain-watcher")))
+                    .unwrap_or_else(|| std::path::PathBuf::from("roko-chain-watcher"));
+                match tokio::process::Command::new(&watcher)
+                    .arg("--rpc-url")
+                    .arg(&rpc)
+                    .status()
+                    .await
+                {
+                    Ok(s) => tracing::info!(exit = %s, "chain-watcher exited"),
+                    Err(e) => {
+                        tracing::debug!(error = %e, path = ?watcher, "chain-watcher not available")
+                    }
+                }
+            });
+        }
 
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal(state))
@@ -271,10 +318,17 @@ pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
 /// Returns an error if the listener cannot bind to `bind:port` or if the
 /// Axum server exits with an error.
 pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) -> Result<()> {
+    if let Err(err) = state.restore_snapshot().await {
+        warn!(error = %err, "failed to restore server state snapshot; starting fresh");
+    }
     let roko_config = state.load_roko_config().as_ref().clone();
     let _config_watcher = config_watcher::start_config_watcher(Arc::clone(&state));
     let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
     let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
+    // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
+    // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
+    let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
+    let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
     let router = routes::build_router(
         Arc::clone(&state),
         &roko_config.server.cors_origins,
@@ -305,7 +359,90 @@ fn build_app_state(
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
     let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
+    // Seed StateHub with persisted marketplace jobs so the TUI sees them on connect.
+    let jobs = scan_marketplace_jobs(&state.workdir);
+    if !jobs.is_empty() {
+        info!(
+            count = jobs.len(),
+            "loaded existing marketplace jobs from disk"
+        );
+        state
+            .state_hub
+            .publish(DashboardEvent::MarketplaceJobsUpdated { jobs });
+    }
+    // Seed StateHub with persisted PRDs so the Atelier tab is populated on connect.
+    let prds = scan_prd_summaries(&state.workdir);
+    if !prds.is_empty() {
+        info!(count = prds.len(), "loaded existing PRDs from disk");
+        state.state_hub.publish(DashboardEvent::AtelierPrdsUpdated {
+            prds,
+            tasks: std::collections::HashMap::new(),
+        });
+    }
     state
+}
+
+/// Scan `.roko/jobs/*.json` and return a vec of `MarketplaceJob`.
+fn scan_marketplace_jobs(workdir: &Path) -> Vec<roko_core::MarketplaceJob> {
+    let dir = workdir.join(".roko").join("jobs");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut jobs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
+            Ok(job) => jobs.push(job),
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping malformed job file during startup scan"
+                );
+            }
+        }
+    }
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    jobs
+}
+
+/// Scan `.roko/prd/{drafts,published}/*.md` and return a vec of `PrdSummary`.
+fn scan_prd_summaries(workdir: &Path) -> Vec<roko_core::PrdSummary> {
+    let prd_dir = workdir.join(".roko").join("prd");
+    let mut prds = Vec::new();
+    for (status, subdir) in [("draft", "drafts"), ("published", "published")] {
+        let dir = prd_dir.join(subdir);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let slug = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            prds.push(roko_core::PrdSummary {
+                slug: slug.clone(),
+                title: slug,
+                status: status.to_string(),
+                ..Default::default()
+            });
+        }
+    }
+    prds
 }
 
 fn start_state_hub_bridge(state: Arc<AppState>) -> JoinHandle<()> {
@@ -353,6 +490,7 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             plan_id,
             task_id,
             gate,
+            rung: _,
             passed,
         } => Some(DashboardEvent::GateResult {
             plan_id: plan_id.clone(),
@@ -414,9 +552,169 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             metric: metric.clone(),
             value: *value,
         }),
+        ServerEvent::JobExecutionStarted {
+            job_id,
+            job_type,
+            agent_id,
+        } => Some(DashboardEvent::JobExecutionStarted {
+            job_id: job_id.clone(),
+            job_type: job_type.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        ServerEvent::JobProgress {
+            job_id,
+            percent,
+            message,
+        } => Some(DashboardEvent::JobProgress {
+            job_id: job_id.clone(),
+            percent: *percent,
+            message: message.clone(),
+        }),
         ServerEvent::Error { message } => Some(DashboardEvent::Error {
             message: message.clone(),
         }),
+        _ => None,
+    }
+}
+
+/// Bridge orchestrator events (`StateHub` → `EventBus`) so SSE/WS clients
+/// see gate results, task completions, and other events from `roko plan run`.
+///
+/// This is the reverse direction of [`start_state_hub_bridge`] which pushes
+/// REST-triggered `ServerEvent`s into the `StateHub` for the TUI.
+pub fn start_orchestrator_event_bridge(state: Arc<AppState>) -> JoinHandle<()> {
+    let mut rx = state.state_hub.subscribe_events();
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(envelope) => {
+                    if let Some(server_event) = dashboard_event_to_server(&envelope.payload) {
+                        bus.publish(server_event);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(n, "orchestrator bridge lagged behind state hub");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Convert a [`DashboardEvent`] to a [`ServerEvent`] for SSE/WS delivery.
+/// Inverse of [`server_event_to_dashboard`].
+fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<ServerEvent> {
+    use roko_core::DashboardEvent;
+    match event {
+        DashboardEvent::PlanStarted { plan_id } => Some(ServerEvent::PlanStarted {
+            plan_id: plan_id.clone(),
+        }),
+        DashboardEvent::PlanCompleted { plan_id, success } => Some(ServerEvent::PlanCompleted {
+            plan_id: plan_id.clone(),
+            success: *success,
+        }),
+        DashboardEvent::TaskStarted {
+            plan_id,
+            task_id,
+            phase,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskStarted {
+                task_id: task_id.clone(),
+                phase: phase.clone(),
+            },
+        }),
+        DashboardEvent::TaskCompleted {
+            plan_id,
+            task_id,
+            outcome,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskCompleted {
+                task_id: task_id.clone(),
+                outcome: outcome.clone(),
+            },
+        }),
+        DashboardEvent::TaskPhaseChanged {
+            plan_id,
+            task_id,
+            old_phase,
+            new_phase,
+        } => Some(ServerEvent::Execution {
+            plan_id: plan_id.clone(),
+            event: ExecutionEvent::TaskPhaseChanged {
+                task_id: task_id.clone(),
+                old_phase: old_phase.clone(),
+                new_phase: new_phase.clone(),
+            },
+        }),
+        DashboardEvent::AgentSpawned { agent_id, role } => Some(ServerEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: role.clone(),
+        }),
+        DashboardEvent::AgentOutput { agent_id, content } => Some(ServerEvent::AgentOutput {
+            agent_id: agent_id.clone(),
+            run_id: None,
+            content: content.clone(),
+            done: false,
+            metadata: None,
+        }),
+        DashboardEvent::GateResult {
+            plan_id,
+            task_id,
+            gate,
+            passed,
+        } => Some(ServerEvent::GateResult {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            gate: gate.clone(),
+            rung: 0,
+            passed: *passed,
+        }),
+        DashboardEvent::PhaseTransition { plan_id, from, to } => {
+            Some(ServerEvent::PhaseTransition {
+                plan_id: plan_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+            })
+        }
+        DashboardEvent::EfficiencyEvent {
+            plan_id,
+            task_id,
+            metric,
+            value,
+        } => Some(ServerEvent::EfficiencyEvent {
+            plan_id: plan_id.clone(),
+            task_id: task_id.clone(),
+            metric: metric.clone(),
+            value: *value,
+        }),
+        DashboardEvent::JobExecutionStarted {
+            job_id,
+            job_type,
+            agent_id,
+        } => Some(ServerEvent::JobExecutionStarted {
+            job_id: job_id.clone(),
+            job_type: job_type.clone(),
+            agent_id: agent_id.clone(),
+        }),
+        DashboardEvent::JobProgress {
+            job_id,
+            percent,
+            message,
+        } => Some(ServerEvent::JobProgress {
+            job_id: job_id.clone(),
+            percent: *percent,
+            message: message.clone(),
+        }),
+        DashboardEvent::Error { message } => Some(ServerEvent::Error {
+            message: message.clone(),
+        }),
+        // Unmapped variants (Diagnosis, ExperimentWinnersUpdated, CFactorTrendUpdated,
+        // CascadeRouterUpdated, GateThresholdsUpdated, etc.) are dropped.
+        // FIXME: bridge loop — REST-originated events appear twice on EventBus
+        // (once from REST, once via StateHub→EventBus). Accepted for now.
         _ => None,
     }
 }
@@ -465,13 +763,30 @@ pub(crate) fn start_event_source_group(
     tokio::spawn(async {})
 }
 
+fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            if let Err(err) = state.save_snapshot().await {
+                warn!(error = %err, "periodic server state snapshot save failed");
+            }
+        }
+    })
+}
+
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {
     let mut sources: Vec<Box<dyn EventSource>> = Vec::new();
 
-    if !roko_config.scheduler.is_empty() {
+    if !roko_config.scheduler.is_empty() && scheduler::claim_scheduler_guard() {
         sources.push(Box::new(CronEventSource::from_config(
             roko_config.scheduler.clone(),
         )));
+    } else if !roko_config.scheduler.is_empty() {
+        debug!("scheduler already started elsewhere; skipping cron in event sources");
     }
 
     if !roko_config.watcher.is_empty() {

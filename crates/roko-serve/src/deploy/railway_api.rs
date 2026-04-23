@@ -44,10 +44,16 @@ pub struct RailwayDeploySpec {
     pub env_vars: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-struct RailwayProjectContext {
-    project_id: String,
-    environment_id: String,
+/// Resolved Railway project + environment identifiers.
+///
+/// Returned by [`RailwayApiBackend::deploy_roko_app`] so that callers can
+/// persist the IDs for subsequent deploys into the same project.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RailwayProjectContext {
+    /// Railway project ID.
+    pub project_id: String,
+    /// Railway environment ID.
+    pub environment_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +61,7 @@ struct RailwayProjectSnapshot {
     services: Vec<RailwayServiceSummary>,
     environments: Vec<RailwayEnvironmentSummary>,
     volumes: Vec<RailwayVolumeSummary>,
+    volume_instances: Vec<RailwayVolumeInstanceSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +80,15 @@ struct RailwayEnvironmentSummary {
 struct RailwayVolumeSummary {
     id: String,
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct RailwayVolumeInstanceSummary {
+    service_id: String,
+    environment_id: String,
+    mount_path: String,
+    volume_id: String,
+    volume_name: String,
 }
 
 /// Deploy backend that calls Railway's GraphQL API directly.
@@ -116,6 +132,19 @@ impl RailwayApiBackend {
                             node {
                                 id
                                 name
+                                volumeInstances {
+                                    edges {
+                                        node {
+                                            serviceId
+                                            environmentId
+                                            mountPath
+                                            volume {
+                                                id
+                                                name
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -182,10 +211,37 @@ impl RailwayApiBackend {
             })
             .unwrap_or_default();
 
+        let volume_instances = project["environments"]["edges"]
+            .as_array()
+            .map(|environment_edges| {
+                environment_edges
+                    .iter()
+                    .flat_map(|environment_edge| {
+                        environment_edge["node"]["volumeInstances"]["edges"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                    })
+                    .filter_map(|edge| {
+                        let node = edge.get("node")?;
+                        let volume = node.get("volume")?;
+                        Some(RailwayVolumeInstanceSummary {
+                            service_id: node["serviceId"].as_str()?.to_string(),
+                            environment_id: node["environmentId"].as_str()?.to_string(),
+                            mount_path: node["mountPath"].as_str()?.to_string(),
+                            volume_id: volume["id"].as_str()?.to_string(),
+                            volume_name: volume["name"].as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(RailwayProjectSnapshot {
             services,
             environments,
             volumes,
+            volume_instances,
         })
     }
 
@@ -525,7 +581,10 @@ impl RailwayApiBackend {
     /// service instance cannot be configured, variables or volumes cannot be
     /// updated, deployment triggering fails, or the deployment never reaches a
     /// healthy ready state.
-    pub async fn deploy_roko_app(&self, spec: &RailwayDeploySpec) -> Result<Deployment> {
+    pub async fn deploy_roko_app(
+        &self,
+        spec: &RailwayDeploySpec,
+    ) -> Result<(Deployment, RailwayProjectContext)> {
         let project = self
             .ensure_project_context(
                 spec.project_id.as_deref(),
@@ -562,7 +621,35 @@ impl RailwayApiBackend {
         .await?;
 
         let snapshot = self.project_snapshot(&project.project_id).await?;
-        if snapshot.volumes.is_empty() {
+        if let Some(volume) = snapshot.volume_instances.iter().find(|volume| {
+            volume.service_id == service_id
+                && volume.environment_id == project.environment_id
+                && volume.mount_path == spec.volume_mount_path
+        }) {
+            info!(
+                project_id = %project.project_id,
+                service_id = %service_id,
+                volume_id = %volume.volume_id,
+                volume_name = %volume.volume_name,
+                mount_path = %volume.mount_path,
+                "reusing existing Railway service volume"
+            );
+        } else {
+            let service_volume = snapshot.volume_instances.iter().find(|volume| {
+                volume.service_id == service_id && volume.environment_id == project.environment_id
+            });
+
+            if let Some(volume) = service_volume {
+                info!(
+                    project_id = %project.project_id,
+                    service_id = %service_id,
+                    existing_volume_id = %volume.volume_id,
+                    existing_mount_path = %volume.mount_path,
+                    requested_mount_path = %spec.volume_mount_path,
+                    "Railway service volume mount differs from requested path; creating requested volume"
+                );
+            }
+
             self.create_volume(
                 &project.project_id,
                 &project.environment_id,
@@ -571,12 +658,15 @@ impl RailwayApiBackend {
                 spec.region.as_deref(),
             )
             .await?;
-        } else if let Some(volume) = snapshot.volumes.first() {
+        }
+
+        if snapshot.volume_instances.is_empty() && !snapshot.volumes.is_empty() {
+            let volume = &snapshot.volumes[0];
             info!(
                 project_id = %project.project_id,
                 volume_id = %volume.id,
                 volume_name = %volume.name,
-                "reusing existing Railway volume"
+                "found Railway project volume without service mount metadata"
             );
         }
 
@@ -584,8 +674,10 @@ impl RailwayApiBackend {
             .trigger_deployment(&service_id, &project.environment_id)
             .await?;
 
-        self.wait_for_ready(&deployment_id, &spec.service_name)
-            .await
+        let deployment = self
+            .wait_for_ready(&deployment_id, &spec.service_name)
+            .await?;
+        Ok((deployment, project))
     }
 
     async fn wait_for_ready(&self, deployment_id: &str, service_name: &str) -> Result<Deployment> {

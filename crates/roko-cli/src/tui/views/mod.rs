@@ -1,6 +1,6 @@
 //! Tab content views for the Mori-style TUI.
 //!
-//! Each view corresponds to one top-level tab (F1-F7) and renders
+//! Each view corresponds to one top-level tab (F1-F9) and renders
 //! the full content area for that tab. Views accept the shared
 //! dashboard data, theme, and per-view state parameters.
 //!
@@ -20,13 +20,17 @@
 //! | F5 Logs | Logs | Filtered Log, Signal Stream |
 //! | F6 Config | System | Config View, Provider Health, Model Comparison |
 //! | F7 Inspect | Knowledge | Engram DAG, Episode Replay, Knowledge Browse |
+//! | F8 Marketplace | Jobs | Job List, Job Detail, Create Job |
+//! | F9 Atelier | Workshop | PRD Workshop, Plan Explorer |
 
 pub mod agents_view;
+pub mod atelier_view;
 pub mod config_view;
 pub mod context_view;
 pub mod dashboard_view;
 pub mod git_view;
 pub mod logs_view;
+pub mod marketplace_view;
 pub mod plans_view;
 
 use ratatui::Frame;
@@ -81,7 +85,7 @@ pub enum SubView {
     /// Signal stream viewer.
     SignalStream,
 
-    // ���─ Region 6: Config / System (F6) ──
+    // ── Region 6: Config / System (F6) ──
     /// Effective configuration view.
     ConfigEditor,
     /// Provider health monitoring.
@@ -90,12 +94,28 @@ pub enum SubView {
     ModelComparison,
 
     // ── Region 7: Inspect / Knowledge (F7) ──
+    /// Context overview.
+    InspectOverview,
     /// Engram DAG inspector.
     EngramDag,
     /// Episode replay viewer.
     EpisodeReplay,
     /// Knowledge browser (Neuro store).
     KnowledgeBrowse,
+
+    // ── Region 8: Marketplace (F8) ──
+    /// Job list browser.
+    JobList,
+    /// Job detail view.
+    JobDetail,
+    /// Job creation form.
+    CreateJob,
+
+    // ── Region 9: Atelier (F9) ──
+    /// PRD workshop.
+    PrdWorkshop,
+    /// Plan explorer.
+    PlanExplorer,
 }
 
 impl SubView {
@@ -130,10 +150,13 @@ impl SubView {
                 SubView::ModelComparison,
             ],
             Tab::Inspect => &[
+                SubView::InspectOverview,
                 SubView::EngramDag,
                 SubView::EpisodeReplay,
                 SubView::KnowledgeBrowse,
             ],
+            Tab::Marketplace => &[SubView::JobList, SubView::JobDetail, SubView::CreateJob],
+            Tab::Atelier => &[SubView::PrdWorkshop, SubView::PlanExplorer],
         }
     }
 
@@ -158,9 +181,15 @@ impl SubView {
             Self::ConfigEditor => "Config",
             Self::ProviderHealth => "Providers",
             Self::ModelComparison => "Models",
+            Self::InspectOverview => "Overview",
             Self::EngramDag => "Engrams",
             Self::EpisodeReplay => "Episodes",
             Self::KnowledgeBrowse => "Knowledge",
+            Self::JobList => "Jobs",
+            Self::JobDetail => "Detail",
+            Self::CreateJob => "New Job",
+            Self::PrdWorkshop => "PRDs",
+            Self::PlanExplorer => "Plans",
         }
     }
 
@@ -209,6 +238,8 @@ pub struct ViewState {
     pub secondary_selected: usize,
     /// Whether auto-scroll / tail mode is active.
     pub auto_tail: bool,
+    /// Free-text query used by searchable sub-views.
+    pub search_query: String,
 }
 
 impl ViewState {
@@ -238,5 +269,9 @@ pub fn render_tab_content(
         Tab::Logs => logs_view::render(frame, area, data, tui_state, view_state, theme),
         Tab::Config => config_view::render(frame, area, data, tui_state, view_state, theme),
         Tab::Inspect => context_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Marketplace => {
+            marketplace_view::render(frame, area, data, tui_state, view_state, theme);
+        }
+        Tab::Atelier => atelier_view::render(frame, area, data, tui_state, view_state, theme),
     }
 }

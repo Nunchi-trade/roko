@@ -1,9 +1,15 @@
-//! Agent template registry.
+//! Agent template registry ("agent blueprints").
 //!
-//! Templates are TOML files stored under `.roko/templates/` that define
-//! reusable agent configurations. The [`TemplateRegistry`] scans the
-//! directory on startup and supports CRUD operations plus simple
-//! `{{key}}` interpolation.
+//! These templates define reusable agent deployment configurations for cloud
+//! workers — model selection, tool restrictions, system prompts, and MCP
+//! server requirements. Stored as TOML files under `.roko/templates/`.
+//!
+//! **Not to be confused with** role prompt templates in
+//! `roko-compose/src/templates/`, which are internal 9-layer system prompt
+//! assembly fragments used by the [`SystemPromptBuilder`].
+//!
+//! The [`TemplateRegistry`] scans the directory on startup and supports
+//! CRUD operations plus simple `{{key}}` interpolation.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,7 +42,10 @@ impl Default for TemplateOutputFormat {
     }
 }
 
-/// A reusable agent configuration template.
+/// A reusable agent configuration template (an "agent blueprint").
+///
+/// Used for cloud worker deployment: defines what model, tools, prompt, and
+/// provider a deployed worker should use. Persisted as TOML in `.roko/templates/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTemplate {
     /// Unique template name (also the TOML filename stem).
@@ -68,6 +77,10 @@ pub struct AgentTemplate {
     /// Optional prompt experiment hook for variant selection.
     #[serde(default)]
     pub experiment: Option<TemplateExperiment>,
+    /// LLM provider backend for this template (e.g. "claude", "openai", "ollama").
+    /// If `None`, the worker falls back to the global agent.command config.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Optional prompt experiment attached to a template.
@@ -537,6 +550,7 @@ pub fn pr_review_template() -> AgentTemplate {
         allowed_tools: vec![],
         denied_tools: vec!["write_file".into(), "edit_file".into(), "bash".into()],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -560,6 +574,7 @@ pub fn code_implementer_template() -> AgentTemplate {
         allowed_tools: vec![],
         denied_tools: vec![],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -583,6 +598,7 @@ pub fn auto_plan_template() -> AgentTemplate {
         allowed_tools: vec![],
         denied_tools: vec!["write_file".into(), "edit_file".into(), "bash".into()],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -605,6 +621,7 @@ pub fn gate_fixer_template() -> AgentTemplate {
         allowed_tools: vec![],
         denied_tools: vec![],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -629,6 +646,7 @@ pub fn doc_lifecycle_template() -> AgentTemplate {
         allowed_tools: vec![],
         denied_tools: vec!["bash".into(), "run_tests".into()],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -657,6 +675,7 @@ pub fn slack_notify_template() -> AgentTemplate {
             "run_tests".into(),
         ],
         experiment: None,
+        provider: None,
     }
 }
 
@@ -929,6 +948,7 @@ mcp_servers = ["github", "missing-server"]
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             experiment: None,
+            provider: None,
         };
 
         let signal = roko_core::Engram::builder(roko_core::Kind::Task)
@@ -966,6 +986,7 @@ mcp_servers = ["github", "missing-server"]
             allowed_tools: Vec::new(),
             denied_tools: Vec::new(),
             experiment: None,
+            provider: None,
         };
 
         let concise = TemplateRegistry::render_prompt(
@@ -1046,6 +1067,7 @@ mcp_servers = ["github", "missing-server"]
             allowed_tools: vec![],
             denied_tools: vec![],
             experiment: None,
+            provider: None,
         };
         registry.templates.insert("pr-review".into(), user_template);
 

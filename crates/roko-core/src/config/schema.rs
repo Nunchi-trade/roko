@@ -173,6 +173,14 @@ pub struct RokoConfig {
     /// ```
     #[serde(default)]
     pub oneirography: OneirographyConfig,
+
+    /// EVM chain connection settings for chain-domain tools.
+    #[serde(default)]
+    pub chain: ChainConfig,
+
+    /// Agent definitions for multi-agent startup (`roko up`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentDefinition>,
 }
 
 const fn default_schema_version() -> u32 {
@@ -217,6 +225,8 @@ impl Default for RokoConfig {
             gemini: GeminiConfig::default(),
             tools: ToolsConfig::default(),
             oneirography: OneirographyConfig::default(),
+            chain: ChainConfig::default(),
+            agents: Vec::new(),
         }
     }
 }
@@ -591,9 +601,13 @@ impl RokoConfig {
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         let config: Self = toml::from_str(s)?;
         if config.config_version == 1 {
-            tracing::warn!(
-                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
-            );
+            use std::sync::Once;
+            static WARN_ONCE: Once = Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+                );
+            });
         }
         Ok(config)
     }
@@ -622,7 +636,30 @@ impl RokoConfig {
     #[must_use]
     pub fn effective_providers(&self) -> HashMap<String, ProviderConfig> {
         if !self.providers.is_empty() {
-            return self.providers.clone();
+            let mut providers = self.providers.clone();
+            // If `ANTHROPIC_API_KEY` is set in the environment but no
+            // explicit `[providers.anthropic]` section exists, synthesize one
+            // so the anthropic_api backend is usable out of the box.
+            if !providers.contains_key("anthropic")
+                && std::env::var_os("ANTHROPIC_API_KEY").is_some()
+            {
+                providers.insert(
+                    "anthropic".into(),
+                    ProviderConfig {
+                        kind: ProviderKind::AnthropicApi,
+                        base_url: Some("https://api.anthropic.com".to_string()),
+                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        command: None,
+                        args: None,
+                        timeout_ms: default_provider_timeout_ms(),
+                        ttft_timeout_ms: default_provider_ttft_timeout_ms(),
+                        connect_timeout_ms: default_provider_connect_timeout_ms(),
+                        extra_headers: None,
+                        max_concurrent: None,
+                    },
+                );
+            }
+            return providers;
         }
 
         let mut providers = HashMap::new();
@@ -649,15 +686,30 @@ impl RokoConfig {
             },
         );
 
-        if let Some(base_url) = self.agent_env_value("ANTHROPIC_BASE_URL") {
+        // Synthesize an anthropic provider from env vars or agent config.
+        let has_env_key = std::env::var_os("ANTHROPIC_API_KEY").is_some();
+        let has_config_key = self.agent_env_value("ANTHROPIC_API_KEY").is_some();
+        let base_url = self
+            .agent_env_value("ANTHROPIC_BASE_URL")
+            .map(|s| s.to_owned())
+            .or_else(|| {
+                if has_env_key {
+                    Some("https://api.anthropic.com".to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(base_url) = base_url {
             providers.insert(
                 "anthropic".into(),
                 ProviderConfig {
                     kind: ProviderKind::AnthropicApi,
-                    base_url: Some(base_url.to_owned()),
-                    api_key_env: self
-                        .agent_env_value("ANTHROPIC_API_KEY")
-                        .map(|_| "ANTHROPIC_API_KEY".to_string()),
+                    base_url: Some(base_url),
+                    api_key_env: if has_env_key || has_config_key {
+                        Some("ANTHROPIC_API_KEY".to_string())
+                    } else {
+                        None
+                    },
                     command: None,
                     args: None,
                     timeout_ms: self.agent.timeout_ms.or(default_provider_timeout_ms()),
@@ -1338,6 +1390,32 @@ impl Default for OneirographyConfig {
     }
 }
 
+/// Chain connection settings used by the `chain.*` tool domain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ChainConfig {
+    /// HTTP JSON-RPC endpoint (e.g. `https://mirage-devnet.up.railway.app`).
+    #[serde(default)]
+    pub rpc_url: Option<String>,
+    /// Chain ID. Must match the endpoint. Mirage uses 1.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    /// Hex-encoded private key (0x-prefixed or bare). Used to sign txs.
+    #[serde(default)]
+    pub wallet_key: Option<String>,
+    /// ERC-8004 IdentityRegistry contract address.
+    #[serde(default)]
+    pub identity_registry: Option<String>,
+    /// ERC-8004 ReputationRegistry contract address.
+    #[serde(default)]
+    pub reputation_registry: Option<String>,
+    /// ERC-8004 ValidationRegistry contract address.
+    #[serde(default)]
+    pub validation_registry: Option<String>,
+    /// Deployer / funder address.
+    #[serde(default)]
+    pub deployer: Option<String>,
+}
+
 /// A single named tool profile with extra/excluded tool lists.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1855,7 +1933,11 @@ fn default_model() -> String {
 }
 
 fn default_backend() -> String {
-    "claude".into()
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
+        "anthropic_api".into()
+    } else {
+        "claude".into()
+    }
 }
 
 fn default_effort() -> String {
@@ -2723,7 +2805,7 @@ impl Default for AgentRoleToggles {
 
 /// Learning subsystem configuration.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LearningConfig {
     /// Auto-refresh playbook rules after successful tasks.
     #[serde(default = "default_true")]
@@ -2758,6 +2840,22 @@ pub struct LearningConfig {
     /// Consecutive gate failures required before emitting a plan revision.
     #[serde(default = "default_replan_gate_attempts")]
     pub replan_gate_attempts: u32,
+    /// Enable the lookahead router for cost-saving tier downgrades.
+    /// When true, the cascade router selection is post-filtered through
+    /// `LookaheadRouter::route_with_lookahead()` which may downgrade to a
+    /// cheaper model when calibration data indicates sufficient success
+    /// probability.
+    #[serde(default)]
+    pub use_lookahead_router: bool,
+    /// Success probability threshold for the lookahead router to accept a
+    /// cheaper tier (0.0--1.0). Only used when `use_lookahead_router` is true.
+    /// Defaults to 0.7.
+    #[serde(default = "default_lookahead_threshold")]
+    pub lookahead_threshold: f64,
+}
+
+fn default_lookahead_threshold() -> f64 {
+    0.7
 }
 
 const fn default_learning_min_occ() -> usize {
@@ -2794,6 +2892,8 @@ impl Default for LearningConfig {
             replan_on_gate_failure: true,
             replan_max_per_plan: default_replan_max_per_plan(),
             replan_gate_attempts: default_replan_gate_attempts(),
+            use_lookahead_router: false,
+            lookahead_threshold: default_lookahead_threshold(),
         }
     }
 }
@@ -3121,6 +3221,9 @@ impl Default for TuiConfig {
 /// API serving options.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServeConfig {
+    /// Port override for `roko serve`. Falls back to `server.port` (default 6677).
+    #[serde(default)]
+    pub port: Option<u16>,
     /// Automatically orchestrate follow-up work when publish events arrive.
     #[serde(default = "default_true")]
     pub auto_orchestrate: bool,
@@ -3135,6 +3238,7 @@ pub struct ServeConfig {
 impl Default for ServeConfig {
     fn default() -> Self {
         Self {
+            port: None,
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),
@@ -3540,7 +3644,7 @@ fn default_bind() -> String {
 }
 
 const fn default_port() -> u16 {
-    9090
+    6677
 }
 
 impl Default for ServerConfig {
@@ -3552,6 +3656,31 @@ impl Default for ServerConfig {
             auth_token: None,
         }
     }
+}
+
+/// Agent definition for multi-agent startup via `roko up`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    /// Human-readable agent name.
+    pub name: String,
+    /// Agent domain: "coding", "research", "chain", "general".
+    pub domain: String,
+    /// Natural-language prompt describing what the agent should do.
+    #[serde(default)]
+    pub prompt: String,
+    /// Override model for this agent.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// RPC endpoint for chain agents.
+    #[serde(default)]
+    pub chain_rpc: Option<String>,
+    /// Whether this agent is enabled (default: true).
+    #[serde(default = "default_agent_enabled")]
+    pub enabled: bool,
+}
+
+const fn default_agent_enabled() -> bool {
+    true
 }
 
 // ---- deploy ---------------------------------------------------------------
@@ -3605,7 +3734,7 @@ impl Default for DeployConfig {
             railway_api_token: None,
             project_id: None,
             environment_id: None,
-            worker_image: None,
+            worker_image: Some("ghcr.io/nunchi-trade/roko-worker:latest".into()),
             default_region: None,
         }
     }

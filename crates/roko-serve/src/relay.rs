@@ -1,0 +1,264 @@
+//! Nexus relay boundary definitions.
+//!
+//! Nexus is a WebSocket relay that sits between roko-serve and remote
+//! surfaces (dashboard, remote TUI). It forwards events and aggregates
+//! heartbeats but does NOT serve as a second backend.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Connection state
+// ---------------------------------------------------------------------------
+
+/// Connection state for a relay-connected surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum RelayConnectionState {
+    /// Connected directly to roko-serve (no relay).
+    Direct,
+    /// Connected via Nexus relay.
+    Relayed {
+        /// WebSocket URL of the relay.
+        relay_url: String,
+    },
+    /// Relay was configured but is currently unreachable.
+    Degraded {
+        /// WebSocket URL of the relay.
+        relay_url: String,
+        /// ISO-8601 timestamp when degradation was first observed.
+        since: String,
+        /// Human-readable reason for the degradation.
+        reason: String,
+    },
+    /// No relay configured; surface is local only.
+    Local,
+}
+
+impl Default for RelayConnectionState {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data freshness
+// ---------------------------------------------------------------------------
+
+/// Freshness indicator for relay-sourced data.
+///
+/// Surfaces use this to decide whether to show stale-state warnings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataFreshness {
+    /// When the data was last confirmed from the source (Unix epoch seconds).
+    pub last_confirmed_at: u64,
+    /// Whether the data may be stale.
+    pub stale: bool,
+    /// How many seconds since last confirmation.
+    pub age_secs: u64,
+    /// Maximum age before data is considered stale (configurable).
+    pub stale_threshold_secs: u64,
+}
+
+impl DataFreshness {
+    /// Create a new freshness indicator in the "confirmed" state.
+    #[must_use]
+    pub fn new(stale_threshold_secs: u64) -> Self {
+        let now = now_epoch_secs();
+        Self {
+            last_confirmed_at: now,
+            stale: false,
+            age_secs: 0,
+            stale_threshold_secs,
+        }
+    }
+
+    /// Mark the data as freshly confirmed from the source.
+    pub fn mark_confirmed(&mut self) {
+        self.last_confirmed_at = now_epoch_secs();
+        self.age_secs = 0;
+        self.stale = false;
+    }
+
+    /// Recompute age and staleness against the current time.
+    pub fn check(&mut self) {
+        let now = now_epoch_secs();
+        self.age_secs = now.saturating_sub(self.last_confirmed_at);
+        self.stale = self.age_secs > self.stale_threshold_secs;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relay heartbeat
+// ---------------------------------------------------------------------------
+
+/// Aggregate heartbeat metrics from the relay connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayHeartbeat {
+    /// Most recent round-trip ping time in milliseconds.
+    pub last_ping_ms: u64,
+    /// Rolling average round-trip ping time in milliseconds.
+    pub avg_ping_ms: u64,
+    /// Number of consecutive missed heartbeats.
+    pub missed_heartbeats: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Relay health (top-level diagnostic)
+// ---------------------------------------------------------------------------
+
+/// Relay health status for operator diagnostics.
+///
+/// Exposed via `GET /api/relay/health` and consumed by the TUI status bar
+/// and dashboard connection indicator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayHealth {
+    /// Current connection state.
+    pub connection: RelayConnectionState,
+    /// Freshness of relay-sourced data.
+    pub freshness: DataFreshness,
+    /// Aggregate heartbeat stats (present only when relay is connected).
+    pub heartbeat: Option<RelayHeartbeat>,
+}
+
+impl Default for RelayHealth {
+    fn default() -> Self {
+        Self {
+            connection: RelayConnectionState::Local,
+            freshness: DataFreshness::new(DEFAULT_STALE_THRESHOLD_SECS),
+            heartbeat: None,
+        }
+    }
+}
+
+impl RelayHealth {
+    /// Returns `true` if the relay connection is healthy.
+    ///
+    /// Healthy means the connection is `Direct`, `Relayed`, or `Local`
+    /// **and** the data is not stale. `Degraded` is never healthy.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        let connected = matches!(
+            self.connection,
+            RelayConnectionState::Direct
+                | RelayConnectionState::Relayed { .. }
+                | RelayConnectionState::Local
+        );
+        connected && !self.freshness.stale
+    }
+}
+
+/// Default staleness threshold in seconds (30s).
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 30;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_data_is_not_stale() {
+        let freshness = DataFreshness::new(30);
+        assert!(!freshness.stale);
+        assert_eq!(freshness.age_secs, 0);
+    }
+
+    #[test]
+    fn mark_confirmed_resets_staleness() {
+        let mut freshness = DataFreshness {
+            last_confirmed_at: 0,
+            stale: true,
+            age_secs: 999,
+            stale_threshold_secs: 30,
+        };
+        freshness.mark_confirmed();
+        assert!(!freshness.stale);
+        assert_eq!(freshness.age_secs, 0);
+    }
+
+    #[test]
+    fn check_detects_stale_data() {
+        let mut freshness = DataFreshness {
+            last_confirmed_at: now_epoch_secs().saturating_sub(60),
+            stale: false,
+            age_secs: 0,
+            stale_threshold_secs: 30,
+        };
+        freshness.check();
+        assert!(freshness.stale);
+        assert!(freshness.age_secs >= 59);
+    }
+
+    #[test]
+    fn relay_health_direct_and_fresh_is_healthy() {
+        let health = RelayHealth {
+            connection: RelayConnectionState::Direct,
+            freshness: DataFreshness::new(30),
+            heartbeat: None,
+        };
+        assert!(health.is_healthy());
+    }
+
+    #[test]
+    fn relay_health_degraded_is_not_healthy() {
+        let health = RelayHealth {
+            connection: RelayConnectionState::Degraded {
+                relay_url: "wss://relay.example.com".into(),
+                since: "2026-04-21T00:00:00Z".into(),
+                reason: "connection refused".into(),
+            },
+            freshness: DataFreshness::new(30),
+            heartbeat: None,
+        };
+        assert!(!health.is_healthy());
+    }
+
+    #[test]
+    fn relay_health_stale_data_is_not_healthy() {
+        let mut freshness = DataFreshness::new(30);
+        freshness.last_confirmed_at = now_epoch_secs().saturating_sub(60);
+        freshness.check();
+
+        let health = RelayHealth {
+            connection: RelayConnectionState::Direct,
+            freshness,
+            heartbeat: None,
+        };
+        assert!(!health.is_healthy());
+    }
+
+    #[test]
+    fn default_relay_health_is_local() {
+        let health = RelayHealth::default();
+        assert_eq!(health.connection, RelayConnectionState::Local);
+        assert!(health.is_healthy()); // local + fresh = healthy
+    }
+
+    #[test]
+    fn relay_connection_state_serializes() {
+        let state = RelayConnectionState::Relayed {
+            relay_url: "wss://relay.example.com".into(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("relayed"));
+        assert!(json.contains("relay.example.com"));
+
+        let roundtrip: RelayConnectionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, roundtrip);
+    }
+}

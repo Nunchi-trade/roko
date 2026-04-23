@@ -107,7 +107,11 @@ pub enum ServerEvent {
     GateResult {
         plan_id: String,
         task_id: String,
+        /// Gate name (also exposed as `rung` for dashboard compat).
         gate: String,
+        /// Numeric rung index for dashboard display.
+        #[serde(default)]
+        rung: u32,
         passed: bool,
     },
 
@@ -152,7 +156,11 @@ pub enum ServerEvent {
     },
 
     /// A one-shot run was started.
-    RunStarted { run_id: String, prompt: String },
+    RunStarted {
+        run_id: String,
+        #[serde(rename = "prompt_preview")]
+        prompt: String,
+    },
 
     /// A one-shot run completed.
     RunCompleted { run_id: String, success: bool },
@@ -179,6 +187,27 @@ pub enum ServerEvent {
     /// A cloud deployment was torn down.
     DeploymentTornDown { id: String },
 
+    /// A marketplace job was created.
+    JobCreated { job: Value },
+
+    /// A marketplace job was posted to a committed candidate.
+    JobPostedToCandidate {
+        job_id: String,
+        agent_id: String,
+        reward: String,
+    },
+
+    /// A marketplace job was updated.
+    JobUpdated { job: Value },
+
+    /// A marketplace job transitioned between lifecycle states.
+    JobTransitioned {
+        job_id: String,
+        from: String,
+        to: String,
+        assigned_to: Option<String>,
+    },
+
     /// A worker started executing a task.
     WorkerTaskStarted {
         deployment_id: String,
@@ -190,6 +219,93 @@ pub enum ServerEvent {
         deployment_id: String,
         task_id: String,
         success: bool,
+    },
+
+    /// A job execution started (from job runner).
+    JobExecutionStarted {
+        job_id: String,
+        job_type: String,
+        agent_id: String,
+    },
+
+    /// Job execution progress update.
+    JobProgress {
+        job_id: String,
+        percent: u8,
+        message: String,
+    },
+
+    /// Agent output for a specific job.
+    JobAgentOutput {
+        job_id: String,
+        agent_id: String,
+        content: String,
+        done: bool,
+    },
+
+    /// Chain triage results for a job.
+    ChainTriageResult {
+        job_id: String,
+        event_count: usize,
+        anomaly_count: usize,
+        summary: String,
+    },
+
+    /// A heartbeat was received from a client or agent.
+    HeartbeatReceived {
+        sender_id: String,
+        active_tasks: usize,
+        active_agents: usize,
+    },
+
+    /// A top-level task started event (dashboard-facing).
+    TaskStarted {
+        plan_id: String,
+        task_id: String,
+        description: String,
+    },
+
+    /// A top-level task completed event (dashboard-facing).
+    TaskCompleted {
+        plan_id: String,
+        task_id: String,
+        success: bool,
+    },
+
+    /// A top-level task failed event (dashboard-facing).
+    TaskFailed {
+        plan_id: String,
+        task_id: String,
+        error: String,
+    },
+
+    /// An agent process was started.
+    AgentStarted { agent_id: String },
+
+    /// An agent process was stopped.
+    AgentStopped { agent_id: String, reason: String },
+
+    /// A job submission was received.
+    JobSubmitted { job_id: String, agent_id: String },
+
+    /// A job evaluation completed.
+    JobEvaluated {
+        job_id: String,
+        accepted: bool,
+        feedback: String,
+    },
+
+    /// A job state changed (aliases job_transitioned for dashboard compat).
+    JobStateChanged {
+        job_id: String,
+        from: String,
+        to: String,
+    },
+
+    /// A periodic heartbeat.
+    Heartbeat {
+        agent_id: String,
+        block_number: Option<u64>,
     },
 
     /// The server is shutting down.
@@ -237,6 +353,101 @@ mod tests {
         assert_eq!(json["gate"], "compile");
         assert_eq!(json["passed"], false);
         assert_eq!(json["message"], "compile failed");
+    }
+
+    #[test]
+    fn all_dashboard_event_types_serialize_as_snake_case() {
+        let events: Vec<ServerEvent> = vec![
+            ServerEvent::PlanStarted {
+                plan_id: "p1".into(),
+            },
+            ServerEvent::PlanCompleted {
+                plan_id: "p1".into(),
+                success: true,
+            },
+            ServerEvent::TaskStarted {
+                plan_id: "p1".into(),
+                task_id: "t1".into(),
+                description: "desc".into(),
+            },
+            ServerEvent::TaskCompleted {
+                plan_id: "p1".into(),
+                task_id: "t1".into(),
+                success: true,
+            },
+            ServerEvent::TaskFailed {
+                plan_id: "p1".into(),
+                task_id: "t1".into(),
+                error: "err".into(),
+            },
+            ServerEvent::GateResult {
+                plan_id: "p1".into(),
+                task_id: "t1".into(),
+                gate: "compile".into(),
+                rung: 1,
+                passed: true,
+            },
+            ServerEvent::RunStarted {
+                run_id: "r1".into(),
+                prompt: "p".into(),
+            },
+            ServerEvent::RunCompleted {
+                run_id: "r1".into(),
+                success: true,
+            },
+            ServerEvent::HeartbeatReceived {
+                sender_id: "s".into(),
+                active_tasks: 1,
+                active_agents: 2,
+            },
+            ServerEvent::Heartbeat {
+                agent_id: "a".into(),
+                block_number: Some(42),
+            },
+            ServerEvent::JobCreated {
+                job: serde_json::json!({}),
+            },
+            ServerEvent::JobStateChanged {
+                job_id: "j1".into(),
+                from: "open".into(),
+                to: "assigned".into(),
+            },
+            ServerEvent::JobSubmitted {
+                job_id: "j1".into(),
+                agent_id: "a".into(),
+            },
+            ServerEvent::JobEvaluated {
+                job_id: "j1".into(),
+                accepted: true,
+                feedback: "ok".into(),
+            },
+            ServerEvent::AgentStarted {
+                agent_id: "a".into(),
+            },
+            ServerEvent::AgentStopped {
+                agent_id: "a".into(),
+                reason: "done".into(),
+            },
+            ServerEvent::OperationCompleted {
+                op_id: "o".into(),
+                kind: "k".into(),
+                success: true,
+            },
+            ServerEvent::Error {
+                message: "err".into(),
+            },
+            ServerEvent::ServerShutdown,
+        ];
+
+        for event in &events {
+            let json = serde_json::to_value(event).expect("serialize event");
+            let event_type = json["type"].as_str().expect("type field");
+            // All type tags must be snake_case (no uppercase letters)
+            assert!(
+                !event_type.chars().any(|c| c.is_ascii_uppercase()),
+                "event type '{event_type}' is not snake_case"
+            );
+        }
     }
 
     #[test]

@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::daemon::DaemonInfo;
 use roko_learn::cfactor::CFactor;
+use roko_learn::episode_logger::Episode;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 /// Information about a session's current state.
 #[derive(Debug, Clone)]
@@ -165,6 +168,67 @@ pub fn daemon_socket_exists(workdir: &Path, session_id: &str) -> bool {
     socket_path.exists()
 }
 
+/// Collect a lightweight status snapshot from on-disk workspace state.
+#[must_use]
+pub fn collect_session_status(workdir: &Path) -> SessionStatus {
+    let daemon_info = read_daemon_info(workdir);
+    let signal_count = Some(count_non_empty_lines(
+        &workdir.join(".roko").join("engrams.jsonl"),
+    ));
+    let (episode_count, last_episode_passed) = read_episode_summary(workdir);
+
+    SessionStatus {
+        session_id: daemon_info.as_ref().map(|info| info.session_id.clone()),
+        workdir: workdir.to_path_buf(),
+        daemon_running: daemon_info
+            .as_ref()
+            .is_some_and(|info| process_is_alive(info.pid)),
+        signal_count,
+        episode_count: Some(episode_count),
+        last_episode_passed,
+        cfactor: None,
+        total_cost_usd: None,
+        today_cost_usd: None,
+    }
+}
+
+fn read_daemon_info(workdir: &Path) -> Option<DaemonInfo> {
+    let path = workdir.join(".roko").join("daemon.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.process(Pid::from_u32(pid)).is_some()
+}
+
+fn count_non_empty_lines(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+fn read_episode_summary(workdir: &Path) -> (usize, Option<bool>) {
+    let primary = workdir.join(".roko").join("memory").join("episodes.jsonl");
+    let fallback = workdir.join(".roko").join("episodes.jsonl");
+    let path = if primary.exists() { primary } else { fallback };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (0, None);
+    };
+
+    let mut count = 0;
+    let mut last_episode = None;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        count += 1;
+        last_episode = serde_json::from_str::<Episode>(line).ok().or(last_episode);
+    }
+
+    (count, last_episode.map(|episode| episode.success))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +307,25 @@ mod tests {
     fn daemon_socket_exists_returns_false_for_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!daemon_socket_exists(tmp.path(), "nonexistent"));
+    }
+
+    #[test]
+    fn collect_session_status_reads_signal_and_episode_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roko = tmp.path().join(".roko");
+        let memory = roko.join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(roko.join("engrams.jsonl"), "a\nb\n").unwrap();
+        std::fs::write(
+            memory.join("episodes.jsonl"),
+            "{\"success\":false}\n{\"success\":true}\n",
+        )
+        .unwrap();
+
+        let status = collect_session_status(tmp.path());
+        assert_eq!(status.signal_count, Some(2));
+        assert_eq!(status.episode_count, Some(2));
+        assert_eq!(status.last_episode_passed, Some(true));
+        assert!(!status.daemon_running);
     }
 }

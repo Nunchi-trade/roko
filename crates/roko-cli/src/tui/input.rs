@@ -73,7 +73,9 @@ impl FocusZone {
                 }
                 Self::AgentOutput => Self::RightPanel,
             },
-            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {
+                self
+            }
         }
     }
 
@@ -100,7 +102,9 @@ impl FocusZone {
                 }
                 Self::AgentOutput => Self::RightPanel,
             },
-            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect => self,
+            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {
+                self
+            }
         }
     }
 }
@@ -349,6 +353,9 @@ pub enum TuiAction {
     // -- refresh --
     Refresh,
 
+    // -- marketplace job form --
+    SubmitJob,
+
     // -- no-op --
     None,
 }
@@ -420,6 +427,8 @@ pub fn handle_key(
         Tab::Logs => handle_logs_key(key, focus),
         Tab::Config => handle_config_key(key),
         Tab::Inspect => handle_inspect_key(key, focus),
+        Tab::Marketplace => handle_marketplace_key(key, focus),
+        Tab::Atelier => handle_atelier_key(key, focus),
     }
 }
 
@@ -823,6 +832,35 @@ fn handle_inspect_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::Left | KeyCode::Char('h') => TuiAction::DrillOut,
         KeyCode::Right | KeyCode::Char('l') => TuiAction::DrillIn,
         KeyCode::Enter => TuiAction::ExpandCollapse,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_marketplace_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
+    // Ctrl-S submits the job creation form.
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return TuiAction::SubmitJob;
+    }
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => TuiAction::ScrollFocusedDown,
+        KeyCode::Char('k') | KeyCode::Up => TuiAction::ScrollFocusedUp,
+        KeyCode::Enter => TuiAction::ExpandCollapse,
+        KeyCode::Char('n') => TuiAction::SwitchSubView(2), // CreateJob sub-view
+        KeyCode::Char('r') => TuiAction::Refresh,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_atelier_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => TuiAction::ScrollFocusedDown,
+        KeyCode::Char('k') | KeyCode::Up => TuiAction::ScrollFocusedUp,
+        KeyCode::Enter => TuiAction::ExpandCollapse,
+        KeyCode::Char('r') => TuiAction::Refresh,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
         _ => TuiAction::None,
     }
 }
