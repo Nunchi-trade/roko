@@ -180,14 +180,13 @@ impl ServerBuilder {
         self
     }
 
-    /// Bind and run the HTTP server until shutdown.
+    /// Start the server in the background and return the live state handle.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the `PORT` environment variable is not a valid
-    /// `u16`, the listener cannot bind, or the Axum server exits with an
-    /// error.
-    pub async fn run(mut self) -> Result<()> {
+    /// The returned [`Arc<AppState>`] carries the [`SharedStateHub`] that the
+    /// TUI or other in-process consumers can subscribe to.  The
+    /// [`JoinHandle`] resolves when the server shuts down (e.g. because
+    /// `state.cancel.cancel()` was called).
+    pub async fn start_background(mut self) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
         // -- PORT env var override (Railway / cloud platforms) -------------
         let addr = if let Ok(env_port) = std::env::var("PORT") {
             let p: u16 = env_port
@@ -221,9 +220,6 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
-        // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
-        // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
-        // The orchestrator publishes directly to the StateHub when running in-process.
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
         let router = routes::build_router(
@@ -261,12 +257,38 @@ impl ServerBuilder {
             });
         }
 
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal(state))
-            .await
-            .context("axum server error")?;
+        let serve_state = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown_on_cancel(serve_state))
+                .await
+                .context("axum server error")?;
+            info!("server stopped");
+            Ok(())
+        });
 
-        info!("server stopped");
+        Ok((state, handle))
+    }
+
+    /// Bind and run the HTTP server until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `PORT` environment variable is not a valid
+    /// `u16`, the listener cannot bind, or the Axum server exits with an
+    /// error.
+    pub async fn run(self) -> Result<()> {
+        let (state, handle) = self.start_background().await?;
+        // Block on Ctrl-C to shut down.
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received ctrl-c, shutting down");
+        state.shutdown().await;
+        // Wait for the server task to finish.
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(anyhow::anyhow!("server task panicked: {e}")),
+        }
         Ok(())
     }
 }
@@ -299,6 +321,38 @@ pub async fn run_server(
 
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await
+}
+
+/// Start the HTTP server in the background and return the live app state.
+///
+/// The returned [`Arc<AppState>`] carries the [`SharedStateHub`] that an
+/// in-process TUI or other consumer can subscribe to.  The
+/// [`JoinHandle`] resolves when the server shuts down.
+///
+/// Call `state.cancel.cancel()` or `state.shutdown().await` to stop the
+/// server.
+pub async fn start_server_background(
+    workdir: PathBuf,
+    runtime: Arc<dyn CliRuntime>,
+    bind: Option<String>,
+    port: Option<u16>,
+) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
+    let roko_toml_path = workdir.join("roko.toml");
+
+    let roko_config: RokoConfig = if roko_toml_path.exists() {
+        let text = std::fs::read_to_string(&roko_toml_path)
+            .with_context(|| format!("read {}", roko_toml_path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
+    } else {
+        warn!(
+            "no roko.toml found at {}; using defaults",
+            roko_toml_path.display()
+        );
+        RokoConfig::default()
+    };
+
+    let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
+    ServerBuilder::new(config).start_background().await
 }
 
 /// Start the PRD-publish auto-orchestration background tasks for an existing state.

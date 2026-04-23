@@ -430,6 +430,11 @@ Examples:
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Run the interactive TUI dashboard embedded in the server process.
+        /// The TUI reads live state directly from the server's StateHub
+        /// (zero-copy, no file polling).
+        #[arg(long)]
+        tui: bool,
     },
     /// Manage daemon mode (start, stop, status, logs, install).
     Daemon {
@@ -1818,13 +1823,33 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             bind,
             port,
             workdir,
+            tui,
         } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let wd = workdir.clone().unwrap_or_else(|| resolve_workdir(cli));
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
             let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
-            roko_serve::run_server(wd, runtime, bind, port).await?;
-            Ok(EXIT_SUCCESS)
+            if tui {
+                // Start the HTTP server in the background, then run the TUI
+                // with the live SharedStateHub. When the user quits the TUI
+                // (press 'q'), the server shuts down.
+                let (state, server_handle) =
+                    roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
+                let hub = state.state_hub.clone();
+                let tui_result =
+                    cmd_dashboard(cli, Some(wd), None, false, false, Some(hub)).await;
+                // TUI exited — shut down the server gracefully.
+                state.cancel.cancel();
+                match server_handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("server error on shutdown: {e}"),
+                    Err(e) => eprintln!("server task panicked: {e}"),
+                }
+                tui_result
+            } else {
+                roko_serve::run_server(wd, runtime, bind, port).await?;
+                Ok(EXIT_SUCCESS)
+            }
         }
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
