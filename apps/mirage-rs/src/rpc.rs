@@ -1100,65 +1100,118 @@ fn build_rpc_module(
             },
             _ => Vec::new(),
         };
+        // Iterate receipts directly — the earlier implementation looped over
+        // blocks_by_number[N].transactions, but the anvil-style mine_block
+        // path overwrites block entries with an empty transactions vec,
+        // hiding every log even though the receipt itself is intact.
+        // Scanning receipts is O(receipts) — no worse than the previous
+        // O(blocks * txs-per-block) in practice, and it stays correct
+        // regardless of the block-index bookkeeping.
         let mut out: Vec<serde_json::Value> = Vec::new();
-        for (num, block) in state.fork.blocks_by_number.range(from..=to) {
-            for tx_hash in &block.transactions {
-                let Some(receipt) = state.fork.receipts.get(tx_hash) else {
+        for (tx_hash, receipt) in state.fork.receipts.iter() {
+            let block_num = receipt.block_number;
+            if block_num < from || block_num > to {
+                continue;
+            }
+            for log in &receipt.logs {
+                let log_addr = format!("{:#x}", log.address).to_ascii_lowercase();
+                if !addresses.is_empty() && !addresses.contains(&log_addr) {
                     continue;
-                };
-                let addr_lower = format!("{:#x}", receipt.from).to_ascii_lowercase();
-                let _ = addr_lower;
-                for log in &receipt.logs {
-                    let log_addr = format!("{:#x}", log.address).to_ascii_lowercase();
-                    if !addresses.is_empty() && !addresses.contains(&log_addr) {
+                }
+                if !topic0_filter.is_empty() {
+                    let Some(t0) = log.topics.first() else {
+                        continue;
+                    };
+                    let t0_lower = format!("{:#x}", t0).to_ascii_lowercase();
+                    if !topic0_filter.contains(&t0_lower) {
                         continue;
                     }
-                    if !topic0_filter.is_empty() {
-                        let Some(t0) = log.topics.first() else {
-                            continue;
-                        };
-                        let t0_lower = format!("{:#x}", t0).to_ascii_lowercase();
-                        if !topic0_filter.contains(&t0_lower) {
-                            continue;
-                        }
-                    }
-                    out.push(serde_json::json!({
-                        "address": log.address,
-                        "topics": log.topics,
-                        "data": format!("0x{}", hex::encode(log.data.as_ref())),
-                        "blockNumber": hex_u64(*num),
-                        "blockHash": block.hash,
-                        "transactionHash": tx_hash,
-                        "transactionIndex": "0x0",
-                        "logIndex": hex_u64(log.log_index as u64),
-                        "removed": false,
-                    }));
                 }
+                out.push(serde_json::json!({
+                    "address": log.address,
+                    "topics": log.topics,
+                    "data": format!("0x{}", hex::encode(log.data.as_ref())),
+                    "blockNumber": hex_u64(block_num),
+                    "blockHash": receipt.block_hash,
+                    "transactionHash": tx_hash,
+                    "transactionIndex": "0x0",
+                    "logIndex": hex_u64(log.log_index as u64),
+                    "removed": false,
+                }));
             }
         }
+        // Stable order: block_number asc, then log_index asc. Ponder and
+        // most indexers assume monotonic ordering even though eth_getLogs
+        // doesn't formally guarantee it.
+        out.sort_by(|a, b| {
+            let an = u64::from_str_radix(
+                a.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let bn = u64::from_str_radix(
+                b.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let al = u64::from_str_radix(
+                a.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let bl = u64::from_str_radix(
+                b.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            an.cmp(&bn).then(al.cmp(&bl))
+        });
         Ok::<_, ErrorObjectOwned>(out)
     })?;
 
     module.register_async_method("eth_getBlockByNumber", |params, ctx, _| async move {
         let (number, _full): (String, bool) = params.parse().map_err(invalid_params)?;
         let full_transactions = _full;
-        let local_block = {
+        // For `latest`, always resolve against the current local_block_number
+        // tip. If the block entry is missing (e.g. mine_block advanced the
+        // counter without inserting), synthesize a stable block instead of
+        // falling back to upstream — the upstream mock returns block 0 with
+        // a different hash, which Ponder interprets as a chain reorg and
+        // panics ("Encountered unrecoverable reorg beyond finalized block 0").
+        let (local_block, resolved_number) = {
             let state = ctx.state.read();
             if number == "latest" {
-                state
+                let n = state.fork.local_block_number;
+                let b = state
                     .fork
                     .blocks_by_number
-                    .get(&state.fork.local_block_number)
-                    .map(block_json)
+                    .get(&n)
+                    .map(block_json);
+                (b, Some(n))
             } else {
-                parse_hex_quantity(&number)
-                    .ok()
-                    .and_then(|number| state.fork.blocks_by_number.get(&number))
-                    .map(block_json)
+                let n = parse_hex_quantity(&number).ok();
+                let b = n
+                    .and_then(|nn| state.fork.blocks_by_number.get(&nn))
+                    .map(block_json);
+                (b, n)
             }
         };
         if let Some(block) = local_block {
             return Ok::<_, ErrorObjectOwned>(Some(block));
+        }
+
+        // No local block found. For numeric queries within our local range,
+        // OR for `latest` at any time, synthesize a stable empty block so
+        // downstream indexers (Ponder, ethers, viem) see a consistent chain
+        // tip every time they poll.
+        if let Some(n) = resolved_number {
+            let state = ctx.state.read();
+            if n <= state.fork.local_block_number {
+                let hash = keccak256(n.to_be_bytes());
+                let parent_hash = if n == 0 {
+                    B256::ZERO
+                } else {
+                    keccak256((n - 1).to_be_bytes())
+                };
+                let synth = synthetic_block_json(hash, n, state.fork.timestamp, parent_hash);
+                return Ok::<_, ErrorObjectOwned>(Some(synth));
+            }
         }
 
         let block_tag = if number == "latest" {
@@ -3105,8 +3158,12 @@ fn transaction_json(tx: &LocalTransaction) -> serde_json::Value {
 }
 
 fn block_json(block: &LocalBlock) -> serde_json::Value {
+    // Parent hash must derive from the same byte-order used to seal blocks
+    // in `fork.rs::execute_tx` (to_be_bytes). Previously used to_le_bytes
+    // here, producing a parent_hash that didn't match the actual block's
+    // stored hash — Ponder sees a broken parent chain and panics as a reorg.
     let parent_hash = if block.number > 0 {
-        keccak256((block.number - 1).to_le_bytes())
+        keccak256((block.number - 1).to_be_bytes())
     } else {
         B256::ZERO
     };
@@ -3129,6 +3186,41 @@ fn block_json(block: &LocalBlock) -> serde_json::Value {
         "nonce": "0x0000000000000000",
         "baseFeePerGas": format!("0x{:x}", block.base_fee_per_gas),
         "transactions": block.transactions,
+    })
+}
+
+/// Build an Ethereum-shaped block JSON for synthesized blocks — i.e. blocks
+/// whose counter was advanced (via auto-miner or Anvil-style evm_mine)
+/// without a corresponding LocalBlock insert. Keeping the same shape as
+/// block_json + using deterministic keccak256(number.to_be_bytes()) for the
+/// hash ensures indexers see a stable chain even when the counter races
+/// ahead of the block index.
+fn synthetic_block_json(
+    hash: B256,
+    number: u64,
+    timestamp: u64,
+    parent_hash: B256,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hash": hash,
+        "parentHash": format!("{parent_hash}"),
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "miner": "0x0000000000000000000000000000000000000000",
+        "stateRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "receiptsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "difficulty": "0x0",
+        "number": hex_u64(number),
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x0",
+        "timestamp": hex_u64(timestamp),
+        "extraData": "0x",
+        "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce": "0x0000000000000000",
+        "baseFeePerGas": "0x1",
+        "transactions": serde_json::Value::Array(vec![]),
+        "uncles": serde_json::Value::Array(vec![]),
     })
 }
 
