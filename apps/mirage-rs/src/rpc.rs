@@ -1104,40 +1104,82 @@ fn build_rpc_module(
         // blocks_by_number[N].transactions, but the anvil-style mine_block
         // path overwrites block entries with an empty transactions vec,
         // hiding every log even though the receipt itself is intact.
-        // Scanning receipts is O(receipts) — no worse than the previous
-        // O(blocks * txs-per-block) in practice, and it stays correct
-        // regardless of the block-index bookkeeping.
-        let mut out: Vec<serde_json::Value> = Vec::new();
+        //
+        // We collect receipts per-block so we can assign globally-correct
+        // `transactionIndex` and `logIndex`: both are defined by the
+        // Ethereum JSON-RPC spec as per-BLOCK positions, not per-tx. Earlier
+        // builds emitted `"transactionIndex": "0x0"` for every log and
+        // reused each receipt's intra-tx `log_index` — which collided when
+        // a block had multiple txs, so Ponder's batch insert failed with
+        // "ON CONFLICT DO UPDATE command cannot affect row a second time"
+        // (the (chainId, blockNumber, logIndex) primary key had duplicates).
+        //
+        // Ordering per block: prefer the block's stored `transactions` list
+        // because it reflects the canonical tx order; fall back to a stable
+        // sort-by-hash derivation via txs_at_block_number when the block
+        // index was lost.
+        use std::collections::BTreeMap;
+        let mut by_block: BTreeMap<u64, Vec<(&alloy_primitives::B256, &crate::fork::LocalReceipt)>> = BTreeMap::new();
         for (tx_hash, receipt) in state.fork.receipts.iter() {
-            let block_num = receipt.block_number;
-            if block_num < from || block_num > to {
+            if receipt.block_number < from || receipt.block_number > to {
                 continue;
             }
-            for log in &receipt.logs {
-                let log_addr = format!("{:#x}", log.address).to_ascii_lowercase();
-                if !addresses.is_empty() && !addresses.contains(&log_addr) {
-                    continue;
-                }
-                if !topic0_filter.is_empty() {
-                    let Some(t0) = log.topics.first() else {
-                        continue;
-                    };
-                    let t0_lower = format!("{:#x}", t0).to_ascii_lowercase();
-                    if !topic0_filter.contains(&t0_lower) {
+            by_block.entry(receipt.block_number).or_default().push((tx_hash, receipt));
+        }
+
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for (block_num, mut receipts) in by_block {
+            let tx_order: Vec<alloy_primitives::B256> = state
+                .fork
+                .blocks_by_number
+                .get(&block_num)
+                .map(|b| {
+                    if b.transactions.is_empty() {
+                        txs_at_block_number(&state.fork.receipts, block_num)
+                    } else {
+                        b.transactions.clone()
+                    }
+                })
+                .unwrap_or_else(|| txs_at_block_number(&state.fork.receipts, block_num));
+            let position = |h: &alloy_primitives::B256| -> usize {
+                tx_order.iter().position(|t| t == h).unwrap_or(usize::MAX)
+            };
+            receipts.sort_by_key(|(h, _)| position(h));
+
+            let mut global_log_idx: u64 = 0;
+            for (tx_idx, (tx_hash, receipt)) in receipts.iter().enumerate() {
+                for log in &receipt.logs {
+                    // Assign the block-scoped index BEFORE filtering so
+                    // dropped logs still advance the counter; otherwise the
+                    // reported indices wouldn't match on-chain positions.
+                    let this_log_idx = global_log_idx;
+                    global_log_idx += 1;
+
+                    let log_addr = format!("{:#x}", log.address).to_ascii_lowercase();
+                    if !addresses.is_empty() && !addresses.contains(&log_addr) {
                         continue;
                     }
+                    if !topic0_filter.is_empty() {
+                        let Some(t0) = log.topics.first() else {
+                            continue;
+                        };
+                        let t0_lower = format!("{:#x}", t0).to_ascii_lowercase();
+                        if !topic0_filter.contains(&t0_lower) {
+                            continue;
+                        }
+                    }
+                    out.push(serde_json::json!({
+                        "address": log.address,
+                        "topics": log.topics,
+                        "data": format!("0x{}", hex::encode(log.data.as_ref())),
+                        "blockNumber": hex_u64(block_num),
+                        "blockHash": receipt.block_hash,
+                        "transactionHash": tx_hash,
+                        "transactionIndex": format!("0x{:x}", tx_idx),
+                        "logIndex": format!("0x{:x}", this_log_idx),
+                        "removed": false,
+                    }));
                 }
-                out.push(serde_json::json!({
-                    "address": log.address,
-                    "topics": log.topics,
-                    "data": format!("0x{}", hex::encode(log.data.as_ref())),
-                    "blockNumber": hex_u64(block_num),
-                    "blockHash": receipt.block_hash,
-                    "transactionHash": tx_hash,
-                    "transactionIndex": "0x0",
-                    "logIndex": hex_u64(log.log_index as u64),
-                    "removed": false,
-                }));
             }
         }
         // Stable order: block_number asc, then log_index asc. Ponder and
