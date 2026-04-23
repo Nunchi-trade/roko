@@ -3740,43 +3740,6 @@ impl Default for DeployConfig {
     }
 }
 
-impl DeployConfig {
-    /// Merge `ROKO_DEPLOY_*` environment variables into this config.
-    ///
-    /// Env vars take precedence over TOML-declared values. Recognized:
-    /// - `ROKO_DEPLOY_BACKEND`
-    /// - `ROKO_DEPLOY_RAILWAY_API_TOKEN`
-    /// - `ROKO_DEPLOY_PROJECT_ID`
-    /// - `ROKO_DEPLOY_ENVIRONMENT_ID`
-    /// - `ROKO_DEPLOY_WORKER_IMAGE`
-    /// - `ROKO_DEPLOY_DEFAULT_REGION`
-    pub fn apply_env(&mut self, env_fn: &dyn Fn(&str) -> Option<String>) {
-        if let Some(v) = env_fn("ROKO_DEPLOY_BACKEND") {
-            self.backend = v;
-        }
-        if let Some(v) = env_fn("ROKO_DEPLOY_RAILWAY_API_TOKEN") {
-            self.railway_api_token = Some(v);
-        }
-        if let Some(v) = env_fn("ROKO_DEPLOY_PROJECT_ID") {
-            self.project_id = Some(v);
-        }
-        if let Some(v) = env_fn("ROKO_DEPLOY_ENVIRONMENT_ID") {
-            self.environment_id = Some(v);
-        }
-        if let Some(v) = env_fn("ROKO_DEPLOY_WORKER_IMAGE") {
-            self.worker_image = Some(v);
-        }
-        if let Some(v) = env_fn("ROKO_DEPLOY_DEFAULT_REGION") {
-            self.default_region = Some(v);
-        }
-    }
-
-    /// Convenience: apply overrides from the real process environment.
-    pub fn apply_process_env(&mut self) {
-        self.apply_env(&|key| std::env::var(key).ok());
-    }
-}
-
 // ---- Gemini config -------------------------------------------------------
 
 fn default_thinking_medium() -> String {
@@ -5960,57 +5923,5 @@ threshold = "BLOCK_LOW_AND_ABOVE"
         let config: SubscriptionConfig = toml::from_str(toml_str).unwrap();
         assert!(config.trigger_config.is_none());
         assert_eq!(config.debounce_ms, 0);
-    }
-
-    #[test]
-    fn deploy_config_apply_env_overrides_all_fields() {
-        let mut config = DeployConfig::default();
-        let env: std::collections::HashMap<&str, &str> = [
-            ("ROKO_DEPLOY_BACKEND", "railway-api"),
-            ("ROKO_DEPLOY_RAILWAY_API_TOKEN", "rw-secret-123"),
-            ("ROKO_DEPLOY_PROJECT_ID", "proj-abc"),
-            ("ROKO_DEPLOY_ENVIRONMENT_ID", "env-xyz"),
-            ("ROKO_DEPLOY_WORKER_IMAGE", "ghcr.io/acme/worker:v1"),
-            ("ROKO_DEPLOY_DEFAULT_REGION", "eu-west1"),
-        ]
-        .into_iter()
-        .collect();
-
-        config.apply_env(&|key| env.get(key).map(|s| (*s).to_string()));
-
-        assert_eq!(config.backend, "railway-api");
-        assert_eq!(config.railway_api_token.as_deref(), Some("rw-secret-123"));
-        assert_eq!(config.project_id.as_deref(), Some("proj-abc"));
-        assert_eq!(config.environment_id.as_deref(), Some("env-xyz"));
-        assert_eq!(
-            config.worker_image.as_deref(),
-            Some("ghcr.io/acme/worker:v1")
-        );
-        assert_eq!(config.default_region.as_deref(), Some("eu-west1"));
-    }
-
-    #[test]
-    fn deploy_config_apply_env_preserves_toml_values_when_env_unset() {
-        let mut config = DeployConfig {
-            backend: "railway-api".into(),
-            railway_api_token: Some("toml-token".into()),
-            project_id: Some("toml-proj".into()),
-            environment_id: None,
-            worker_image: Some("ghcr.io/nunchi-trade/roko-worker:latest".into()),
-            default_region: Some("us-west1".into()),
-        };
-
-        // No env vars provided -> config is unchanged.
-        config.apply_env(&|_| None);
-
-        assert_eq!(config.backend, "railway-api");
-        assert_eq!(config.railway_api_token.as_deref(), Some("toml-token"));
-        assert_eq!(config.project_id.as_deref(), Some("toml-proj"));
-        assert!(config.environment_id.is_none());
-        assert_eq!(
-            config.worker_image.as_deref(),
-            Some("ghcr.io/nunchi-trade/roko-worker:latest")
-        );
-        assert_eq!(config.default_region.as_deref(), Some("us-west1"));
     }
 }
