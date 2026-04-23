@@ -623,6 +623,22 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::Error { message } => Some(DashboardEvent::Error {
             message: message.clone(),
         }),
+        // Map one-shot runs as ephemeral plans so the TUI's plan/task views show them.
+        ServerEvent::RunStarted { run_id, .. } => Some(DashboardEvent::PlanStarted {
+            plan_id: format!("run-{run_id}"),
+        }),
+        ServerEvent::RunCompleted { run_id, success } => Some(DashboardEvent::PlanCompleted {
+            plan_id: format!("run-{run_id}"),
+            success: *success,
+        }),
+        // Map agent lifecycle events from the supervisor.
+        ServerEvent::AgentStarted { agent_id, .. } => Some(DashboardEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: String::new(),
+        }),
+        ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
+            agent_id: agent_id.clone(),
+        }),
         _ => None,
     }
 }

@@ -799,6 +799,8 @@ fn publish_job_event(
             .event_bus
             .publish(ServerEvent::JobUpdated { job: payload }),
     }
+    // Push refreshed job list to StateHub so TUI sees the change immediately.
+    state.refresh_jobs_in_state_hub();
     Ok(())
 }
 

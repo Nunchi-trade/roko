@@ -405,6 +405,14 @@ impl AppState {
         self.roko_config.store(Arc::new(roko_config));
     }
 
+    /// Publish the current job list to the StateHub so dashboard consumers
+    /// (TUI, REST, SSE) see an up-to-date marketplace view after any mutation.
+    pub fn refresh_jobs_in_state_hub(&self) {
+        let jobs = crate::scan_marketplace_jobs(&self.workdir);
+        self.state_hub
+            .publish(roko_core::DashboardEvent::MarketplaceJobsUpdated { jobs });
+    }
+
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
     pub async fn shutdown(&self) {
         tracing::info!("server shutdown initiated");
@@ -547,6 +555,15 @@ impl AppState {
             entry.clone()
         };
         self.invalidate_aggregator_cache().await;
+        // Publish agent registration to StateHub so the TUI sees it immediately.
+        self.state_hub
+            .publish(roko_core::DashboardEvent::AgentSpawned {
+                agent_id: stored.agent_id.clone(),
+                role: stored
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| stored.agent_id.clone()),
+            });
         stored
     }
 
