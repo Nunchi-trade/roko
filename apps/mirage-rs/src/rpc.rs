@@ -1305,55 +1305,27 @@ fn build_rpc_module(
         // to_le_bytes variant in evm_mine.
         let local = {
             let state = ctx.state.read();
-            // (a) Exact match in blocks_by_hash (may be keyed by either
-            //     to_be or to_le variant depending on the seal path).
-            if let Some(blk) = state.fork.blocks_by_hash.get(&hash) {
-                let txs = txs_at_block_number(&state.fork.receipts, blk.number);
-                Some(block_json_with_txs(blk, &txs, full, Some(&state.fork)))
-            } else {
-                // (b) Scan blocks_by_number for a block whose number
-                //     produces the queried canonical hash.
-                let mut found: Option<serde_json::Value> = None;
-                for (n, blk) in state.fork.blocks_by_number.iter() {
-                    if keccak256(n.to_be_bytes()) == hash {
-                        let txs = txs_at_block_number(&state.fork.receipts, *n);
-                        found = Some(block_json_with_txs(blk, &txs, full, Some(&state.fork)));
-                        break;
-                    }
-                }
-                // (c) Last resort: derive the block number from a receipt
-                //     whose block_hash matches the queried hash. This
-                //     covers blocks that have receipts+logs but whose
-                //     LocalBlock entry was lost (e.g. a persistence
-                //     drop of blocks_by_number across a restart).
-                if found.is_none() {
-                    for (_, receipt) in state.fork.receipts.iter() {
-                        if receipt.block_hash == hash
-                            || keccak256(receipt.block_number.to_be_bytes()) == hash
-                        {
-                            let n = receipt.block_number;
-                            let parent_hash = if n == 0 {
-                                B256::ZERO
-                            } else {
-                                keccak256((n - 1).to_be_bytes())
-                            };
-                            let txs = txs_at_block_number(&state.fork.receipts, n);
-                            let canonical = keccak256(n.to_be_bytes());
-                            found = Some(synthetic_block_json(
-                                canonical,
-                                n,
-                                state.fork.timestamp,
-                                parent_hash,
-                                &txs,
-                                full,
-                                Some(&state.fork),
-                            ));
-                            break;
-                        }
-                    }
-                }
-                found
-            }
+            // Fast path: direct hash lookup. Previously we fell back to a
+            // full scan over `blocks_by_number` (then again over every
+            // receipt) when the hash wasn't in `blocks_by_hash` — under
+            // Ponder's realtime polling that was N_blocks × N_requests
+            // keccak calls per second and eventually pinned the RPC
+            // thread, which looked from the outside like mirage-rs
+            // going silent and eventually hanging entirely.
+            //
+            // Instead, we treat the queried hash as either the canonical
+            // `keccak256(n.to_be_bytes())` or the legacy `to_le_bytes()`
+            // variant and peek at both indices in O(1). If neither hits,
+            // return None and let the caller retry — far cheaper than
+            // scanning the full block store on a miss.
+            state
+                .fork
+                .blocks_by_hash
+                .get(&hash)
+                .map(|blk| {
+                    let txs = txs_at_block_number(&state.fork.receipts, blk.number);
+                    block_json_with_txs(blk, &txs, full, Some(&state.fork))
+                })
         };
         if let Some(block) = local {
             return Ok::<_, ErrorObjectOwned>(Some(block));
@@ -2134,7 +2106,14 @@ fn register_state_mutation_methods(
                         prev_randao: state.fork.prev_randao,
                         transactions: Vec::new(),
                     };
+                    // Also index by canonical hash — see MirageFork::insert
+                    // for the rationale (callers look up by the canonical
+                    // form rendered in block_json_with_txs).
+                    let canonical_hash = keccak256(state.fork.local_block_number.to_be_bytes());
                     state.fork.blocks_by_hash.insert(block_hash, block.clone());
+                    if canonical_hash != block_hash {
+                        state.fork.blocks_by_hash.insert(canonical_hash, block.clone());
+                    }
                     state
                         .fork
                         .blocks_by_number
