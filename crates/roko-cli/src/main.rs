@@ -1490,6 +1490,43 @@ fn main() {
     let mut cli = Cli::parse();
     apply_env_overrides(&mut cli);
 
+    // ── TUI mode: redirect stderr before tracing init ────────────────
+    // When `serve --tui` is active, redirect fd 2 (stderr) to a log file
+    // so serve tracing output doesn't stomp on the ratatui TUI rendering.
+    // Must happen *before* tracing_subscriber::init() so the subscriber
+    // captures the redirected fd, not the original terminal.
+    let tui_mode = matches!(
+        &cli.command,
+        Some(Command::Serve { tui: true, .. })
+    );
+    if tui_mode {
+        let workdir = match &cli.command {
+            Some(Command::Serve { workdir, .. }) => workdir
+                .clone()
+                .unwrap_or_else(|| resolve_workdir(&cli)),
+            _ => resolve_workdir(&cli),
+        };
+        let log_path = workdir.join(".roko").join("serve-tui.log");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(log_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+        {
+            use std::os::unix::io::IntoRawFd;
+            let fd = log_file.into_raw_fd();
+            #[allow(unsafe_code)]
+            // SAFETY: fd is a valid file descriptor we just opened.
+            unsafe {
+                libc::dup2(fd, 2); // stderr → log file
+                libc::close(fd);
+            }
+        }
+    }
+
     // ── Color mode ──────────────────────────────────────────────────
     let use_color = cli.color.should_color();
 
@@ -1833,6 +1870,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 // Start the HTTP server in the background, then run the TUI
                 // with the live SharedStateHub. When the user quits the TUI
                 // (press 'q'), the server shuts down.
+                // Note: stderr was already redirected to .roko/serve-tui.log
+                // at the top of main() before tracing_subscriber::init().
                 let (state, server_handle) =
                     roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
                 let hub = state.state_hub.clone();
