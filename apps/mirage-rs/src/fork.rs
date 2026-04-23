@@ -1128,7 +1128,15 @@ impl ForkState {
         self.local_block_number = block.number;
         self.transactions.insert(transaction.hash, transaction);
         self.receipts.insert(receipt.transaction_hash, receipt);
+        // Index under both the as-sealed `block.hash` and the canonical
+        // `keccak256(n.to_be_bytes())` form that the RPC layer renders to
+        // callers — eth_getBlockByHash then gets an O(1) hit regardless
+        // of which byte-order the seal path used.
+        let canonical_hash = alloy_primitives::keccak256(block.number.to_be_bytes());
         self.blocks_by_hash.insert(block.hash, block.clone());
+        if canonical_hash != block.hash {
+            self.blocks_by_hash.insert(canonical_hash, block.clone());
+        }
         self.blocks_by_number.insert(block.number, block);
         self.prune_old_blocks();
     }
@@ -2123,7 +2131,13 @@ impl EvmExecutor {
             prev_randao: state.prev_randao,
             transactions: vec![tx_hash],
         };
+        // Also index by canonical hash — see the `insert` method in
+        // MirageFork for the rationale.
+        let canonical_hash = alloy_primitives::keccak256(state.local_block_number.to_be_bytes());
         state.blocks_by_hash.insert(block_hash, block.clone());
+        if canonical_hash != block_hash {
+            state.blocks_by_hash.insert(canonical_hash, block.clone());
+        }
         state
             .blocks_by_number
             .insert(state.local_block_number, block);

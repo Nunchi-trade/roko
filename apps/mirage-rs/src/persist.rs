@@ -181,6 +181,20 @@ pub fn apply_fork_snapshot(fork: &mut ForkState, snap: ForkSnapshot) {
     fork.transactions = snap.transactions;
     fork.blocks_by_number = snap.blocks_by_number;
     fork.blocks_by_hash = snap.blocks_by_hash;
+    // Older snapshots only indexed `blocks_by_hash` under whatever variant
+    // the seal path emitted. Re-index every block under its canonical
+    // `keccak256(number.to_be_bytes())` form so post-restart
+    // eth_getBlockByHash lookups are O(1) regardless of which byte-order
+    // the originally-sealed block used.
+    let extras: Vec<(alloy_primitives::B256, crate::fork::LocalBlock)> = fork
+        .blocks_by_number
+        .iter()
+        .map(|(n, blk)| (alloy_primitives::keccak256(n.to_be_bytes()), blk.clone()))
+        .filter(|(h, _)| !fork.blocks_by_hash.contains_key(h))
+        .collect();
+    for (hash, blk) in extras {
+        fork.blocks_by_hash.insert(hash, blk);
+    }
 }
 
 /// Constructs a [`ChainContext`] from a chain snapshot.
