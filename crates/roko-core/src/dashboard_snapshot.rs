@@ -843,22 +843,37 @@ impl DashboardSnapshot {
                 }
             }
             DashboardEvent::AgentSpawned { agent_id, role } => {
-                self.stats.agents_active += 1;
-                self.agents.insert(
-                    agent_id.clone(),
-                    AgentState {
-                        agent_id: agent_id.clone(),
-                        role: role.clone(),
-                        active: true,
-                        output_bytes: 0,
-                        model: String::new(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cost_usd: 0.0,
-                        current_task: String::new(),
-                        current_plan: String::new(),
-                    },
-                );
+                // Only increment the counter if this is a genuinely new agent,
+                // or if an existing agent is being re-activated after completion.
+                let entry = self.agents.entry(agent_id.clone());
+                match entry {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let agent = e.get_mut();
+                        if !agent.active {
+                            self.stats.agents_active += 1;
+                        }
+                        agent.active = true;
+                        if !role.is_empty() {
+                            agent.role.clone_from(role);
+                        }
+                        // Preserve accumulated tokens/cost — don't reset.
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        self.stats.agents_active += 1;
+                        e.insert(AgentState {
+                            agent_id: agent_id.clone(),
+                            role: role.clone(),
+                            active: true,
+                            output_bytes: 0,
+                            model: String::new(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cost_usd: 0.0,
+                            current_task: String::new(),
+                            current_plan: String::new(),
+                        });
+                    }
+                }
             }
             DashboardEvent::AgentOutput { agent_id, content } => {
                 if let Some(agent) = self.agents.get_mut(agent_id) {
