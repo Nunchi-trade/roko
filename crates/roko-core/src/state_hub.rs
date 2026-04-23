@@ -216,6 +216,33 @@ impl StateHub {
         count
     }
 
+    /// Replay events from a log file into the snapshot (immutable `self`).
+    ///
+    /// Unlike [`ingest_log`] which requires `&mut self`, this method uses
+    /// `snapshot_tx.send_modify()` which only requires `&self`. This allows
+    /// callers who hold a `SharedStateHub` (which wraps `Arc<StateHub>`) to
+    /// replay events via `Deref` without needing mutable access.
+    pub fn replay_log_into_snapshot(&self, log_path: &Path) -> usize {
+        let content = match std::fs::read_to_string(log_path) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let mut count = 0usize;
+        self.snapshot_tx.send_modify(|snap| {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<DashboardEvent>(line) {
+                    snap.apply(&event);
+                    count += 1;
+                }
+            }
+        });
+        count
+    }
+
     /// Replay events from the ring buffer starting at `after_seq`.
     pub fn replay_from(&self, after_seq: u64) -> Vec<event_bus::Envelope<DashboardEvent>> {
         self.event_bus.replay_from(after_seq)

@@ -418,6 +418,14 @@ impl App {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let state_hub = roko_core::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        // Replay events.jsonl to pick up events from roko run / roko serve.
+        let events_path = root.as_ref().join(".roko").join("events.jsonl");
+        if events_path.exists() {
+            let count = state_hub.replay_log_into_snapshot(&events_path);
+            if count > 0 {
+                tracing::info!(count, path = %events_path.display(), "replayed events from log");
+            }
+        }
         Self::new_connected_with_state_hub(root, None, state_hub)
     }
 
@@ -426,6 +434,14 @@ impl App {
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
         let state_hub = roko_core::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
+        // Replay events.jsonl to pick up events from roko run / roko serve.
+        let events_path = root.as_ref().join(".roko").join("events.jsonl");
+        if events_path.exists() {
+            let count = state_hub.replay_log_into_snapshot(&events_path);
+            if count > 0 {
+                tracing::info!(count, path = %events_path.display(), "replayed events from log");
+            }
+        }
         Self::new_connected_with_state_hub(root, initial_page, state_hub)
     }
 
