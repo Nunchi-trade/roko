@@ -1234,12 +1234,33 @@ fn build_rpc_module(
 
     module.register_async_method("eth_getBlockByHash", |params, ctx, _| async move {
         let (hash, full): (B256, bool) = params.parse().map_err(invalid_params)?;
+        // First try blocks_by_hash (which may be keyed by whichever byte-order
+        // hash the seal path used). Then fall back to a canonical-hash scan
+        // because block_json_with_txs returns canonical
+        // `keccak256(number.to_be_bytes())` — callers (e.g. Ponder) will
+        // subsequently query by that canonical hash, which won't be in
+        // blocks_by_hash if the block was originally sealed with the
+        // to_le_bytes variant in evm_mine.
         let local = {
             let state = ctx.state.read();
-            state.fork.blocks_by_hash.get(&hash).map(|blk| {
+            // Exact match in blocks_by_hash.
+            if let Some(blk) = state.fork.blocks_by_hash.get(&hash) {
                 let txs = txs_at_block_number(&state.fork.receipts, blk.number);
-                block_json_with_txs(blk, &txs)
-            })
+                Some(block_json_with_txs(blk, &txs))
+            } else {
+                // Canonical-hash reverse lookup. Scan blocks_by_number for
+                // the one whose number produces the queried hash. O(tip) in
+                // the worst case but cheap for mirage devnet scale.
+                let mut found: Option<serde_json::Value> = None;
+                for (n, blk) in state.fork.blocks_by_number.iter() {
+                    if keccak256(n.to_be_bytes()) == hash {
+                        let txs = txs_at_block_number(&state.fork.receipts, *n);
+                        found = Some(block_json_with_txs(blk, &txs));
+                        break;
+                    }
+                }
+                found
+            }
         };
         if let Some(block) = local {
             return Ok::<_, ErrorObjectOwned>(Some(block));
@@ -3192,17 +3213,23 @@ fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::L
 /// Ponder's sanity check (`'log.transactionHash' not found in 'block.transactions'`)
 /// triggers "Detected inconsistent RPC responses" and aborts sync.
 fn block_json_with_txs(block: &LocalBlock, transactions: &[B256]) -> serde_json::Value {
-    // Parent hash must derive from the same byte-order used to seal blocks
-    // in `fork.rs::execute_tx` (to_be_bytes). Previously used to_le_bytes
-    // here, producing a parent_hash that didn't match the actual block's
-    // stored hash — Ponder sees a broken parent chain and panics as a reorg.
+    // Normalise hash output. Two code paths store block hashes with
+    // DIFFERENT byte orders:
+    //   - fork.rs::execute_tx       → keccak256(n.to_be_bytes())
+    //   - rpc.rs::evm_mine            → keccak256(n.to_le_bytes())
+    //
+    // This makes `blocks_by_hash` unreliable (lookup by the hash one code
+    // path produced fails for blocks from the other). Rather than audit
+    // every seal path, always derive a canonical `keccak256(n.to_be_bytes())`
+    // at read time. Parent hash uses the same formula one block earlier.
+    let canonical_hash = keccak256(block.number.to_be_bytes());
     let parent_hash = if block.number > 0 {
         keccak256((block.number - 1).to_be_bytes())
     } else {
         B256::ZERO
     };
     serde_json::json!({
-        "hash": block.hash,
+        "hash": canonical_hash,
         "parentHash": format!("{parent_hash}"),
         "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
         "miner": block.coinbase,
