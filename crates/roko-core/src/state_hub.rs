@@ -19,14 +19,43 @@
 //! ```
 
 use std::fmt;
+use std::io::Write;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use roko_runtime::event_bus::{self, EventBus};
 use tokio::sync::watch;
 
 use crate::dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+
+/// Append-only JSONL writer for persisting events to disk.
+struct EventLogWriter {
+    writer: std::io::BufWriter<std::fs::File>,
+}
+
+impl EventLogWriter {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self {
+            writer: std::io::BufWriter::new(file),
+        })
+    }
+
+    fn append(&mut self, event: &DashboardEvent) {
+        // Best-effort: log but don't propagate serialization or I/O errors.
+        if let Ok(json) = serde_json::to_string(event) {
+            let _ = writeln!(self.writer, "{json}");
+            let _ = self.writer.flush();
+        }
+    }
+}
 
 /// Unified state hub driving all dashboard consumers from a single event
 /// stream.
@@ -35,10 +64,16 @@ use crate::dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
 /// 1. Broadcasts the event to live subscribers (WebSocket, SSE).
 /// 2. Records the event in the replay ring for late joiners.
 /// 3. Applies the event to the materialized snapshot so the TUI can borrow it.
+/// 4. Optionally appends to the on-disk event log (`.roko/events.jsonl`).
+///    Shared event log handle that can be cloned into `StateHubSender`s.
+type SharedEventLog = Arc<Mutex<EventLogWriter>>;
+
 pub struct StateHub {
     snapshot_tx: watch::Sender<DashboardSnapshot>,
     snapshot_rx: watch::Receiver<DashboardSnapshot>,
     event_bus: EventBus<DashboardEvent>,
+    /// Optional on-disk event log for persistence across restarts.
+    event_log: Option<SharedEventLog>,
 }
 
 impl StateHub {
@@ -49,6 +84,7 @@ impl StateHub {
             snapshot_tx,
             snapshot_rx,
             event_bus: EventBus::new(ring_capacity),
+            event_log: None,
         }
     }
 
@@ -57,10 +93,52 @@ impl StateHub {
         Self::new(1024)
     }
 
-    /// Publish an event: broadcast, record in ring, and apply to snapshot.
+    /// Create a new hub that persists events to the given JSONL log file.
+    ///
+    /// Every call to [`publish`] also appends the event to disk so that
+    /// future consumers (e.g. `roko dashboard` in standalone mode) can
+    /// replay the log to reconstruct the snapshot.
+    pub fn with_event_log(ring_capacity: usize, log_path: &Path) -> Self {
+        let event_log = EventLogWriter::open(log_path)
+            .map(|w| Arc::new(Mutex::new(w)))
+            .ok();
+        if event_log.is_none() {
+            tracing::warn!(
+                path = %log_path.display(),
+                "failed to open event log; events will not be persisted"
+            );
+        }
+        let (snapshot_tx, snapshot_rx) = watch::channel(DashboardSnapshot::default());
+        Self {
+            snapshot_tx,
+            snapshot_rx,
+            event_bus: EventBus::new(ring_capacity),
+            event_log,
+        }
+    }
+
+    /// Enable event log persistence on an existing hub.
+    pub fn enable_event_log(&mut self, log_path: &Path) {
+        match EventLogWriter::open(log_path) {
+            Ok(w) => self.event_log = Some(Arc::new(Mutex::new(w))),
+            Err(e) => tracing::warn!(
+                path = %log_path.display(),
+                error = %e,
+                "failed to open event log"
+            ),
+        }
+    }
+
+    /// Publish an event: broadcast, record in ring, apply to snapshot, and
+    /// optionally persist to the on-disk event log.
     pub fn publish(&self, event: DashboardEvent) {
         self.event_bus.emit(event.clone());
         self.snapshot_tx.send_modify(|snap| snap.apply(&event));
+        if let Some(log) = &self.event_log {
+            if let Ok(mut writer) = log.lock() {
+                writer.append(&event);
+            }
+        }
     }
 
     /// Publish a batch of events atomically (snapshot updates are visible
@@ -70,6 +148,11 @@ impl StateHub {
             for event in events {
                 self.event_bus.emit(event.clone());
                 snap.apply(&event);
+                if let Some(log) = &self.event_log {
+                    if let Ok(mut writer) = log.lock() {
+                        writer.append(&event);
+                    }
+                }
             }
         });
     }
@@ -99,6 +182,40 @@ impl StateHub {
         self.event_bus.subscribe()
     }
 
+    /// Replay events from the on-disk event log into the snapshot.
+    ///
+    /// Reads `.roko/events.jsonl`, deserializes each line as a
+    /// [`DashboardEvent`], and applies it to the materialized snapshot.
+    /// Returns the number of events replayed.
+    pub fn replay_from_log(log_path: &Path) -> (Self, usize) {
+        let mut hub = Self::default_capacity();
+        let count = hub.ingest_log(log_path);
+        (hub, count)
+    }
+
+    /// Ingest events from a log file into this hub's snapshot (without
+    /// re-persisting them).
+    pub fn ingest_log(&mut self, log_path: &Path) -> usize {
+        let content = match std::fs::read_to_string(log_path) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let mut count = 0usize;
+        self.snapshot_tx.send_modify(|snap| {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<DashboardEvent>(line) {
+                    snap.apply(&event);
+                    count += 1;
+                }
+            }
+        });
+        count
+    }
+
     /// Replay events from the ring buffer starting at `after_seq`.
     pub fn replay_from(&self, after_seq: u64) -> Vec<event_bus::Envelope<DashboardEvent>> {
         self.event_bus.replay_from(after_seq)
@@ -109,6 +226,7 @@ impl StateHub {
         StateHubSender {
             snapshot_tx: self.snapshot_tx.clone(),
             bus_sender: self.event_bus.sender(),
+            event_log: self.event_log.clone(),
         }
     }
 
@@ -131,6 +249,7 @@ impl StateHub {
 pub struct StateHubSender {
     snapshot_tx: watch::Sender<DashboardSnapshot>,
     bus_sender: event_bus::BusSender<DashboardEvent>,
+    event_log: Option<SharedEventLog>,
 }
 
 impl StateHubSender {
@@ -138,6 +257,11 @@ impl StateHubSender {
     pub fn publish(&self, event: DashboardEvent) {
         self.bus_sender.emit(event.clone());
         self.snapshot_tx.send_modify(|snap| snap.apply(&event));
+        if let Some(log) = &self.event_log {
+            if let Ok(mut writer) = log.lock() {
+                writer.append(&event);
+            }
+        }
     }
 }
 
@@ -339,5 +463,55 @@ mod tests {
         assert!(snapshot.agents.contains_key("agent-a"));
         assert_eq!(snapshot.stats.gates_passed, 1);
         assert_eq!(snapshot.stats.errors_total, 1);
+    }
+
+    #[test]
+    fn event_log_persists_and_replays() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let log_path = tmpdir.path().join("events.jsonl");
+
+        // Create hub with event log and publish events.
+        let hub = StateHub::with_event_log(16, &log_path);
+        hub.publish(DashboardEvent::AgentSpawned {
+            agent_id: "a1".into(),
+            role: "coder".into(),
+        });
+        hub.publish(DashboardEvent::PlanStarted {
+            plan_id: "p1".into(),
+        });
+
+        // Verify file was written.
+        let content = std::fs::read_to_string(&log_path).expect("read event log");
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2, "expected 2 lines, got: {content}");
+
+        // Replay into a new hub and verify snapshot matches.
+        let (replayed, count) = StateHub::replay_from_log(&log_path);
+        assert_eq!(count, 2);
+        let snap = replayed.current_snapshot();
+        assert_eq!(snap.stats.agents_active, 1);
+        assert!(snap.agents.contains_key("a1"));
+        assert_eq!(snap.stats.plans_active, 1);
+        assert!(snap.plans.contains_key("p1"));
+    }
+
+    #[test]
+    fn sender_persists_to_event_log() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let log_path = tmpdir.path().join("events.jsonl");
+
+        let hub = StateHub::with_event_log(16, &log_path);
+        let sender = hub.sender();
+
+        sender.publish(DashboardEvent::AgentSpawned {
+            agent_id: "s1".into(),
+            role: "auditor".into(),
+        });
+
+        let content = std::fs::read_to_string(&log_path).expect("read event log");
+        assert!(
+            content.contains("s1"),
+            "sender should persist to event log: {content}"
+        );
     }
 }

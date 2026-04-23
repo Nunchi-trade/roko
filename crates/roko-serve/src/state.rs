@@ -363,6 +363,13 @@ impl AppState {
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
 
+        // Create StateHub with on-disk event log so all published events
+        // persist to `.roko/events.jsonl` for replay by standalone consumers.
+        let event_log_path = layout.root().join("events.jsonl");
+        let state_hub = roko_core::SharedStateHub::new(
+            roko_core::StateHub::with_event_log(1024, &event_log_path),
+        );
+
         Self {
             workdir,
             layout,
@@ -373,7 +380,7 @@ impl AppState {
             supervisor,
             affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(16_384),
-            state_hub: roko_core::shared_state_hub(),
+            state_hub,
             subscriptions,
             runtime,
             roko_config: ArcSwap::from_pointee(roko_config),
