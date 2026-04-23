@@ -571,6 +571,22 @@ async fn create_job(
     };
     write_job(&path, &job).await?;
     publish_job_event(&state, ServerEventKind::Created, &job)?;
+    // Emit plan/task events so the TUI shows the new job immediately.
+    {
+        use roko_core::DashboardEvent;
+        let plan_id = format!("job-{}", &job.id[..8.min(job.id.len())]);
+        state.state_hub.publish_batch(vec![
+            DashboardEvent::PlanStarted { plan_id: plan_id.clone() },
+            DashboardEvent::TaskStarted {
+                plan_id: plan_id.clone(), task_id: job.title.clone(), phase: "open".into(),
+            },
+            DashboardEvent::EventLogEntry {
+                timestamp_ms: job_now_millis(), event_type: "job_created".into(),
+                plan_id, task_id: job.title.clone(),
+                message: format!("new job: {} (reward: {})", job.title, job.reward),
+            },
+        ]);
+    }
     for candidate_id in &job.committed_candidates {
         state.event_bus.publish(ServerEvent::JobPostedToCandidate {
             job_id: job.id.clone(),
@@ -815,6 +831,141 @@ fn publish_transition(state: &AppState, job: &JobRecord, prev_status: &str) {
             Some(job.assigned_to.clone())
         },
     });
+    // Emit rich DashboardEvents so every TUI panel shows job lifecycle activity.
+    publish_job_dashboard_events(state, job, prev_status);
+}
+
+/// Map job lifecycle transitions to DashboardEvents for every TUI panel:
+/// plans (F1/F2), agents (F3), gates, output, efficiency, episodes.
+fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: &str) {
+    use roko_core::DashboardEvent;
+
+    let plan_id = format!("job-{}", &job.id[..8.min(job.id.len())]);
+    let task_id = job.title.clone();
+    let status = normalise_status(&job.status);
+    let prev = normalise_status(prev_status);
+    let agent_id = job.assigned_to.clone();
+
+    let mut events: Vec<DashboardEvent> = Vec::new();
+
+    match status.as_str() {
+        "assigned" if prev == "open" => {
+            events.push(DashboardEvent::PlanStarted { plan_id: plan_id.clone() });
+            events.push(DashboardEvent::TaskStarted {
+                plan_id: plan_id.clone(), task_id: task_id.clone(), phase: "assigned".into(),
+            });
+            if !agent_id.is_empty() {
+                events.push(DashboardEvent::EventLogEntry {
+                    timestamp_ms: job_now_millis(), event_type: "job_assigned".into(),
+                    plan_id: plan_id.clone(), task_id: task_id.clone(),
+                    message: format!("assigned to {agent_id}"),
+                });
+            }
+        }
+        "in_progress" if prev == "assigned" => {
+            events.push(DashboardEvent::TaskPhaseChanged {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                old_phase: "assigned".into(), new_phase: "implementing".into(),
+            });
+            if !agent_id.is_empty() {
+                events.push(DashboardEvent::AgentOutput {
+                    agent_id: agent_id.clone(),
+                    content: format!("▶ started work on: {}", job.title),
+                });
+            }
+            events.push(DashboardEvent::EventLogEntry {
+                timestamp_ms: job_now_millis(), event_type: "job_started".into(),
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                message: format!("{agent_id} began implementation"),
+            });
+        }
+        "submitted" if prev == "in_progress" => {
+            events.push(DashboardEvent::TaskPhaseChanged {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                old_phase: "implementing".into(), new_phase: "gating".into(),
+            });
+            let summary = job.submission.as_ref()
+                .and_then(|s| s.get("result_summary"))
+                .and_then(|v| v.as_str()).unwrap_or("(submitted)");
+            if !agent_id.is_empty() {
+                events.push(DashboardEvent::AgentOutput {
+                    agent_id: agent_id.clone(),
+                    content: format!("✓ submitted: {summary}"),
+                });
+            }
+            if let Some(gates) = job.submission.as_ref()
+                .and_then(|s| s.get("gate_results"))
+                .and_then(|v| v.as_array())
+            {
+                for gate in gates {
+                    let name = gate.get("gate").and_then(|v| v.as_str()).unwrap_or("check");
+                    let passed = gate.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+                    events.push(DashboardEvent::GateResult {
+                        plan_id: plan_id.clone(), task_id: task_id.clone(),
+                        gate: name.to_string(), passed,
+                    });
+                }
+            }
+            events.push(DashboardEvent::EventLogEntry {
+                timestamp_ms: job_now_millis(), event_type: "job_submitted".into(),
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                message: format!("{agent_id} submitted: {summary}"),
+            });
+        }
+        "completed" => {
+            let feedback = job.evaluation.as_ref()
+                .and_then(|e| e.get("feedback"))
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let accepted = job.evaluation.as_ref()
+                .and_then(|e| e.get("accepted"))
+                .and_then(|v| v.as_bool()).unwrap_or(true);
+            events.push(DashboardEvent::TaskCompleted {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                outcome: if accepted { "success".into() } else { "rejected".into() },
+            });
+            events.push(DashboardEvent::PlanCompleted {
+                plan_id: plan_id.clone(), success: accepted,
+            });
+            if !agent_id.is_empty() {
+                events.push(DashboardEvent::AgentCompleted { agent_id: agent_id.clone() });
+                events.push(DashboardEvent::EpisodeRecorded {
+                    agent_id: agent_id.clone(), role: "job-executor".into(),
+                    episode_id: job.id.clone(), passed: accepted,
+                });
+                events.push(DashboardEvent::AgentOutput {
+                    agent_id: agent_id.clone(),
+                    content: format!("{} {feedback}", if accepted { "✓ accepted:" } else { "✗ rejected:" }),
+                });
+            }
+            events.push(DashboardEvent::EventLogEntry {
+                timestamp_ms: job_now_millis(), event_type: "job_completed".into(),
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                message: if accepted { format!("✓ accepted: {feedback}") } else { format!("✗ rejected: {feedback}") },
+            });
+        }
+        "cancelled" => {
+            events.push(DashboardEvent::TaskCompleted {
+                plan_id: plan_id.clone(), task_id: task_id.clone(), outcome: "cancelled".into(),
+            });
+            events.push(DashboardEvent::PlanCompleted { plan_id: plan_id.clone(), success: false });
+            events.push(DashboardEvent::EventLogEntry {
+                timestamp_ms: job_now_millis(), event_type: "job_cancelled".into(),
+                plan_id: plan_id.clone(), task_id: task_id.clone(), message: "job cancelled".into(),
+            });
+        }
+        _ => {}
+    }
+
+    if !events.is_empty() {
+        state.state_hub.publish_batch(events);
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn job_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 async fn job_stats(

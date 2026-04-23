@@ -803,7 +803,8 @@ impl App {
                     | Tab::Config
                     | Tab::Inspect
                     | Tab::Marketplace
-                    | Tab::Atelier => FocusZone::RightPanel,
+                    | Tab::Atelier
+                    | Tab::Learning => FocusZone::RightPanel,
                 };
                 // Sync legacy page
                 if let Some(page_id) = tab_to_page(tab) {
@@ -1387,7 +1388,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         (self.tui_state.git_branch_cursor + 1).min(max);
                 }
-                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier | Tab::Learning => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::DrillOut => match self.tui_state.active_tab {
@@ -1404,7 +1405,7 @@ impl App {
                     self.tui_state.git_branch_cursor =
                         self.tui_state.git_branch_cursor.saturating_sub(1);
                 }
-                Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
+                Tab::Inspect | Tab::Marketplace | Tab::Atelier | Tab::Learning => {}
                 Tab::Agents | Tab::Logs | Tab::Config => {}
             },
             TuiAction::WaveNext => {
@@ -2109,7 +2110,12 @@ impl App {
                 self.tui_state
                     .clamp_log_scroll(self.current_log_max_scroll());
             }
-            Tab::Plans | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {}
+            Tab::Plans
+            | Tab::Config
+            | Tab::Inspect
+            | Tab::Marketplace
+            | Tab::Atelier
+            | Tab::Learning => {}
         }
     }
 
@@ -2572,6 +2578,14 @@ impl App {
                 secondary_selected: 0,
                 auto_tail: false,
                 search_query: self.tui_state.filter.clone(),
+            },
+            Tab::Learning => ViewState {
+                scroll: 0,
+                selected: 0,
+                sub_tab: self.tui_state.sub_tab_for(Tab::Learning),
+                secondary_selected: 0,
+                auto_tail: false,
+                search_query: String::new(),
             },
         }
     }
@@ -3102,7 +3116,7 @@ fn tab_to_page(tab: Tab) -> Option<PageId> {
         Tab::Agents => Some(PageId::AgentStatus),
         Tab::Logs => Some(PageId::LogView),
         Tab::Config => Some(PageId::ConfigView),
-        Tab::Git | Tab::Inspect | Tab::Marketplace | Tab::Atelier => None,
+        Tab::Git | Tab::Inspect | Tab::Marketplace | Tab::Atelier | Tab::Learning => None,
     }
 }
 

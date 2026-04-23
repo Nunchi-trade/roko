@@ -1576,7 +1576,7 @@ impl TuiState {
             Tab::Inspect => self.inspect_sub_tab,
             Tab::Marketplace => self.marketplace_sub_tab,
             Tab::Atelier => self.atelier_sub_tab,
-            Tab::Git | Tab::Logs => 0,
+            Tab::Git | Tab::Logs | Tab::Learning => 0,
         }
     }
 
@@ -1589,7 +1589,7 @@ impl TuiState {
             Tab::Inspect => self.inspect_sub_tab = idx,
             Tab::Marketplace => self.marketplace_sub_tab = idx,
             Tab::Atelier => self.atelier_sub_tab = idx,
-            Tab::Git | Tab::Logs => {}
+            Tab::Git | Tab::Logs | Tab::Learning => {}
         }
     }
 
