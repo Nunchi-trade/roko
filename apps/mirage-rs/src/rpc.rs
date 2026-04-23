@@ -1178,17 +1178,19 @@ fn build_rpc_module(
             let state = ctx.state.read();
             if number == "latest" {
                 let n = state.fork.local_block_number;
-                let b = state
-                    .fork
-                    .blocks_by_number
-                    .get(&n)
-                    .map(block_json);
+                let b = state.fork.blocks_by_number.get(&n).map(|blk| {
+                    let txs = txs_at_block_number(&state.fork.receipts, n);
+                    block_json_with_txs(blk, &txs)
+                });
                 (b, Some(n))
             } else {
                 let n = parse_hex_quantity(&number).ok();
-                let b = n
-                    .and_then(|nn| state.fork.blocks_by_number.get(&nn))
-                    .map(block_json);
+                let b = n.and_then(|nn| {
+                    state.fork.blocks_by_number.get(&nn).map(|blk| {
+                        let txs = txs_at_block_number(&state.fork.receipts, nn);
+                        block_json_with_txs(blk, &txs)
+                    })
+                });
                 (b, n)
             }
         };
@@ -1209,7 +1211,8 @@ fn build_rpc_module(
                 } else {
                     keccak256((n - 1).to_be_bytes())
                 };
-                let synth = synthetic_block_json(hash, n, state.fork.timestamp, parent_hash);
+                let txs = txs_at_block_number(&state.fork.receipts, n);
+                let synth = synthetic_block_json(hash, n, state.fork.timestamp, parent_hash, &txs);
                 return Ok::<_, ErrorObjectOwned>(Some(synth));
             }
         }
@@ -1233,7 +1236,10 @@ fn build_rpc_module(
         let (hash, full): (B256, bool) = params.parse().map_err(invalid_params)?;
         let local = {
             let state = ctx.state.read();
-            state.fork.blocks_by_hash.get(&hash).map(block_json)
+            state.fork.blocks_by_hash.get(&hash).map(|blk| {
+                let txs = txs_at_block_number(&state.fork.receipts, blk.number);
+                block_json_with_txs(blk, &txs)
+            })
         };
         if let Some(block) = local {
             return Ok::<_, ErrorObjectOwned>(Some(block));
@@ -3157,7 +3163,35 @@ fn transaction_json(tx: &LocalTransaction) -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 fn block_json(block: &LocalBlock) -> serde_json::Value {
+    block_json_with_txs(block, &block.transactions)
+}
+
+/// Collect all transaction hashes whose receipts say they landed in
+/// `block_number`. Used to rebuild the authoritative `transactions` list
+/// on block retrieval — some code paths (mine_block) overwrite the
+/// LocalBlock.transactions list with an empty vec, so we prefer the view
+/// derived from receipts every time.
+fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::LocalReceipt>, block_number: u64) -> Vec<B256> {
+    let mut out: Vec<B256> = receipts
+        .iter()
+        .filter_map(|(h, r)| if r.block_number == block_number { Some(*h) } else { None })
+        .collect();
+    // Stable ordering so repeated calls produce identical output (tx hashes
+    // are globally unique — sort by raw bytes).
+    out.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
+    out
+}
+
+/// Render a block with a caller-supplied transaction list.
+///
+/// Used by the RPC handlers to substitute the authoritative tx list from
+/// receipts — because `mine_block` paths overwrite `LocalBlock.transactions`
+/// with an empty vec even when `execute_tx` previously populated it, and
+/// Ponder's sanity check (`'log.transactionHash' not found in 'block.transactions'`)
+/// triggers "Detected inconsistent RPC responses" and aborts sync.
+fn block_json_with_txs(block: &LocalBlock, transactions: &[B256]) -> serde_json::Value {
     // Parent hash must derive from the same byte-order used to seal blocks
     // in `fork.rs::execute_tx` (to_be_bytes). Previously used to_le_bytes
     // here, producing a parent_hash that didn't match the actual block's
@@ -3185,7 +3219,7 @@ fn block_json(block: &LocalBlock) -> serde_json::Value {
         "mixHash": format!("{}", block.prev_randao),
         "nonce": "0x0000000000000000",
         "baseFeePerGas": format!("0x{:x}", block.base_fee_per_gas),
-        "transactions": block.transactions,
+        "transactions": transactions,
     })
 }
 
@@ -3200,6 +3234,7 @@ fn synthetic_block_json(
     number: u64,
     timestamp: u64,
     parent_hash: B256,
+    transactions: &[B256],
 ) -> serde_json::Value {
     serde_json::json!({
         "hash": hash,
@@ -3219,7 +3254,7 @@ fn synthetic_block_json(
         "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "nonce": "0x0000000000000000",
         "baseFeePerGas": "0x1",
-        "transactions": serde_json::Value::Array(vec![]),
+        "transactions": transactions,
         "uncles": serde_json::Value::Array(vec![]),
     })
 }
