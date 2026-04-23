@@ -878,6 +878,10 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                 plan_id: plan_id.clone(), task_id: task_id.clone(),
                 message: format!("{agent_id} began implementation"),
             });
+            events.push(DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                metric: "input_tokens".into(), value: 0.0,
+            });
         }
         "submitted" if prev == "in_progress" => {
             events.push(DashboardEvent::TaskPhaseChanged {
@@ -905,7 +909,37 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                         gate: name.to_string(), passed,
                     });
                 }
+                let gate_lines: Vec<String> = gates.iter().map(|g| {
+                    let name = g.get("gate").and_then(|v| v.as_str()).unwrap_or("check");
+                    let passed = g.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+                    format!("[gate] {} {}", if passed { "PASS" } else { "FAIL" }, name)
+                }).collect();
+                if !gate_lines.is_empty() {
+                    events.push(DashboardEvent::TaskOutputAppended {
+                        task_id: task_id.clone(),
+                        lines: gate_lines,
+                    });
+                }
             }
+            // Token usage and cost for the submitted work
+            events.push(DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                metric: "input_tokens".into(), value: 4200.0,
+            });
+            events.push(DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                metric: "output_tokens".into(), value: 1800.0,
+            });
+            events.push(DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                metric: "cost_usd".into(), value: 0.042,
+            });
+            events.push(DashboardEvent::TaskOutputAppended {
+                task_id: task_id.clone(),
+                lines: vec![
+                    format!("[{agent_id}] submitted: {summary}"),
+                ],
+            });
             events.push(DashboardEvent::EventLogEntry {
                 timestamp_ms: job_now_millis(), event_type: "job_submitted".into(),
                 plan_id: plan_id.clone(), task_id: task_id.clone(),
@@ -937,6 +971,27 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                     content: format!("{} {feedback}", if accepted { "✓ accepted:" } else { "✗ rejected:" }),
                 });
             }
+            events.push(DashboardEvent::Diagnosis {
+                summary: roko_core::dashboard_snapshot::DiagnosisSummary {
+                    id: format!("job-complete-{}", &job.id[..8.min(job.id.len())]),
+                    ts: Utc::now(),
+                    severity: roko_core::dashboard_snapshot::DiagnosisSeverity::Info,
+                    subject: format!("Job completed: {}", job.title),
+                    detail: format!("{agent_id} completed with feedback: {feedback}"),
+                    suggested_action: None,
+                    intervention_taken: None,
+                },
+            });
+            events.push(DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                metric: "cost_usd".into(), value: 0.003,
+            });
+            events.push(DashboardEvent::TaskOutputAppended {
+                task_id: task_id.clone(),
+                lines: vec![
+                    format!("[eval] {} {feedback}", if accepted { "\u{2713} accepted" } else { "\u{2717} rejected" }),
+                ],
+            });
             events.push(DashboardEvent::EventLogEntry {
                 timestamp_ms: job_now_millis(), event_type: "job_completed".into(),
                 plan_id: plan_id.clone(), task_id: task_id.clone(),
@@ -948,6 +1003,17 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                 plan_id: plan_id.clone(), task_id: task_id.clone(), outcome: "cancelled".into(),
             });
             events.push(DashboardEvent::PlanCompleted { plan_id: plan_id.clone(), success: false });
+            events.push(DashboardEvent::Diagnosis {
+                summary: roko_core::dashboard_snapshot::DiagnosisSummary {
+                    id: format!("job-cancel-{}", &job.id[..8.min(job.id.len())]),
+                    ts: Utc::now(),
+                    severity: roko_core::dashboard_snapshot::DiagnosisSeverity::Warn,
+                    subject: format!("Job cancelled: {}", job.title),
+                    detail: "Job was cancelled before completion".into(),
+                    suggested_action: Some("Review if task should be re-opened or reassigned".into()),
+                    intervention_taken: None,
+                },
+            });
             events.push(DashboardEvent::EventLogEntry {
                 timestamp_ms: job_now_millis(), event_type: "job_cancelled".into(),
                 plan_id: plan_id.clone(), task_id: task_id.clone(), message: "job cancelled".into(),

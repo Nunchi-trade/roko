@@ -23,8 +23,10 @@ use roko_core::agent::resolve_model;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
+use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, Substrate, Verdict,
+    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, StateHub, Substrate,
+    Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
@@ -77,6 +79,10 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         .map_err(|e| anyhow!("open substrate: {e}"))?;
 
     let ctx = Context::now();
+
+    // Create a local StateHub for emitting DashboardEvents to the event log.
+    let events_path = workdir.join(".roko").join("events.jsonl");
+    let event_hub = StateHub::with_event_log(64, &events_path);
 
     // Seed prompt sections: system role + user prompt + any injected files.
     let mut sections: Vec<Engram> = Vec::with_capacity(2 + config.prompt.files.len());
@@ -150,6 +156,30 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
             .map_err(|e| anyhow!("persist agent trace: {e}"))?;
     }
 
+    // Emit DashboardEvents for the TUI: plan/task start + agent output.
+    let run_plan_id = format!("run-{}", chrono::Utc::now().format("%H%M%S"));
+    event_hub.publish(DashboardEvent::PlanStarted { plan_id: run_plan_id.clone() });
+    event_hub.publish(DashboardEvent::TaskStarted {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect::<String>(),
+        phase: "implementing".into(),
+    });
+    event_hub.publish(DashboardEvent::AgentSpawned {
+        agent_id: config.agent.command.clone(),
+        role: config.prompt.role.clone(),
+    });
+    if let Ok(text) = final_output_sig.body.as_text() {
+        let preview: String = text.chars().take(200).collect();
+        event_hub.publish(DashboardEvent::AgentOutput {
+            agent_id: config.agent.command.clone(),
+            content: preview,
+        });
+        event_hub.publish(DashboardEvent::TaskOutputAppended {
+            task_id: prompt_text.chars().take(60).collect(),
+            lines: text.lines().take(20).map(String::from).collect(),
+        });
+    }
+
     // Run every configured gate against the working dir.
     let gate_input = build_gate_input(workdir, final_output_sig.id)?;
     substrate
@@ -176,6 +206,16 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
             .map_err(|e| anyhow!("persist verdict: {e}"))?;
         verdict_summary.push((verdict.gate.clone(), verdict.passed));
         verdict_sigs.push(sig);
+    }
+
+    // Emit gate result events for the TUI.
+    for (gate_name, passed) in &verdict_summary {
+        event_hub.publish(DashboardEvent::GateResult {
+            plan_id: run_plan_id.clone(),
+            task_id: prompt_text.chars().take(60).collect(),
+            gate: gate_name.clone(),
+            passed: *passed,
+        });
     }
 
     // Emit the wrap-up Episode signal.
@@ -205,6 +245,42 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     {
         eprintln!("[run] episode logger failed: {err}");
     }
+
+    // Emit completion, episode, and efficiency events for the TUI.
+    let all_passed = verdict_summary.iter().all(|(_, p)| *p);
+    event_hub.publish(DashboardEvent::TaskCompleted {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        outcome: if agent_result.success && all_passed { "success".into() } else { "failed".into() },
+    });
+    event_hub.publish(DashboardEvent::PlanCompleted {
+        plan_id: run_plan_id.clone(),
+        success: agent_result.success && all_passed,
+    });
+    event_hub.publish(DashboardEvent::EpisodeRecorded {
+        agent_id: config.agent.command.clone(),
+        role: config.prompt.role.clone(),
+        episode_id: episode.id.to_hex(),
+        passed: agent_result.success && all_passed,
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "input_tokens".into(),
+        value: f64::from(agent_result.usage.input_tokens),
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "output_tokens".into(),
+        value: f64::from(agent_result.usage.output_tokens),
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id,
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "cost_usd".into(),
+        value: f64::from(agent_result.usage.cost_usd),
+    });
 
     let total_signals = substrate
         .len()
@@ -316,6 +392,7 @@ async fn dispatch_agent(
     let mut routing_config = roko_core::config::load_config(workdir)
         .with_context(|| format!("load routing config from {}", workdir.display()))?;
     routing_config.apply_process_env();
+    crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
     if has_routing {
