@@ -1243,20 +1243,49 @@ fn build_rpc_module(
         // to_le_bytes variant in evm_mine.
         let local = {
             let state = ctx.state.read();
-            // Exact match in blocks_by_hash.
+            // (a) Exact match in blocks_by_hash (may be keyed by either
+            //     to_be or to_le variant depending on the seal path).
             if let Some(blk) = state.fork.blocks_by_hash.get(&hash) {
                 let txs = txs_at_block_number(&state.fork.receipts, blk.number);
                 Some(block_json_with_txs(blk, &txs))
             } else {
-                // Canonical-hash reverse lookup. Scan blocks_by_number for
-                // the one whose number produces the queried hash. O(tip) in
-                // the worst case but cheap for mirage devnet scale.
+                // (b) Scan blocks_by_number for a block whose number
+                //     produces the queried canonical hash.
                 let mut found: Option<serde_json::Value> = None;
                 for (n, blk) in state.fork.blocks_by_number.iter() {
                     if keccak256(n.to_be_bytes()) == hash {
                         let txs = txs_at_block_number(&state.fork.receipts, *n);
                         found = Some(block_json_with_txs(blk, &txs));
                         break;
+                    }
+                }
+                // (c) Last resort: derive the block number from a receipt
+                //     whose block_hash matches the queried hash. This
+                //     covers blocks that have receipts+logs but whose
+                //     LocalBlock entry was lost (e.g. a persistence
+                //     drop of blocks_by_number across a restart).
+                if found.is_none() {
+                    for (_, receipt) in state.fork.receipts.iter() {
+                        if receipt.block_hash == hash
+                            || keccak256(receipt.block_number.to_be_bytes()) == hash
+                        {
+                            let n = receipt.block_number;
+                            let parent_hash = if n == 0 {
+                                B256::ZERO
+                            } else {
+                                keccak256((n - 1).to_be_bytes())
+                            };
+                            let txs = txs_at_block_number(&state.fork.receipts, n);
+                            let canonical = keccak256(n.to_be_bytes());
+                            found = Some(synthetic_block_json(
+                                canonical,
+                                n,
+                                state.fork.timestamp,
+                                parent_hash,
+                                &txs,
+                            ));
+                            break;
+                        }
                     }
                 }
                 found
