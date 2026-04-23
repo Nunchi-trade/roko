@@ -102,6 +102,32 @@ pub(crate) async fn spawn_background_run(
         async move {
             publish_run_started(&bus, &run_id, &prompt_for_handle, agent_target.as_deref());
 
+            // Emit rich DashboardEvents so the TUI shows run activity.
+            let plan_id = format!("run-{}", &run_id[..8]);
+            let task_id: String = prompt_for_handle.chars().take(60).collect();
+            let agent_label = agent_target.as_deref().unwrap_or("claude");
+            {
+                use roko_core::DashboardEvent;
+                state_for_task.state_hub.publish_batch(vec![
+                    DashboardEvent::TaskStarted {
+                        plan_id: plan_id.clone(),
+                        task_id: task_id.clone(),
+                        phase: "implementing".into(),
+                    },
+                    DashboardEvent::AgentSpawned {
+                        agent_id: agent_label.to_string(),
+                        role: "run".into(),
+                    },
+                    DashboardEvent::EventLogEntry {
+                        timestamp_ms: run_now_millis(),
+                        event_type: "run_started".into(),
+                        plan_id: plan_id.clone(),
+                        task_id: task_id.clone(),
+                        message: format!("▶ {agent_label}: {task_id}"),
+                    },
+                ]);
+            }
+
             match runtime
                 .run_once(workdir.as_path(), &prompt_for_handle)
                 .await
@@ -120,6 +146,45 @@ pub(crate) async fn spawn_background_run(
                             })
                         }),
                     );
+                    // Rich TUI events on success
+                    {
+                        use roko_core::DashboardEvent;
+                        let mut events = vec![
+                            DashboardEvent::TaskCompleted {
+                                plan_id: plan_id.clone(),
+                                task_id: task_id.clone(),
+                                outcome: if result.success { "success".into() } else { "failed".into() },
+                            },
+                            DashboardEvent::EpisodeRecorded {
+                                agent_id: agent_label.to_string(),
+                                role: "run".into(),
+                                episode_id: run_id.clone(),
+                                passed: result.success,
+                            },
+                            DashboardEvent::EventLogEntry {
+                                timestamp_ms: run_now_millis(),
+                                event_type: "run_completed".into(),
+                                plan_id: plan_id.clone(),
+                                task_id: task_id.clone(),
+                                message: format!(
+                                    "{} {agent_label}: {task_id}",
+                                    if result.success { "✓" } else { "✗" }
+                                ),
+                            },
+                        ];
+                        if let Some(ref text) = result.output_text {
+                            let preview: String = text.chars().take(200).collect();
+                            events.push(DashboardEvent::AgentOutput {
+                                agent_id: agent_label.to_string(),
+                                content: preview,
+                            });
+                            events.push(DashboardEvent::TaskOutputAppended {
+                                task_id: task_id.clone(),
+                                lines: text.lines().take(10).map(String::from).collect(),
+                            });
+                        }
+                        state_for_task.state_hub.publish_batch(events);
+                    }
                 }
                 Err(e) => {
                     state_for_task.provider_health.record_failure("default");
@@ -135,6 +200,25 @@ pub(crate) async fn spawn_background_run(
                         false,
                         Some(serde_json::json!({ "error": error_message })),
                     );
+                    // Rich TUI events on failure
+                    {
+                        use roko_core::DashboardEvent;
+                        state_for_task.state_hub.publish_batch(vec![
+                            DashboardEvent::TaskCompleted {
+                                plan_id: plan_id.clone(),
+                                task_id: task_id.clone(),
+                                outcome: "failed".into(),
+                            },
+                            DashboardEvent::Error { message: error_message.clone() },
+                            DashboardEvent::EventLogEntry {
+                                timestamp_ms: run_now_millis(),
+                                event_type: "run_failed".into(),
+                                plan_id,
+                                task_id,
+                                message: format!("✗ {error_message}"),
+                            },
+                        ]);
+                    }
                 }
             }
         }
@@ -231,4 +315,11 @@ fn publish_run_completed(
         run_id: run_id.to_owned(),
         success,
     });
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn run_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
