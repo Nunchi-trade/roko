@@ -656,7 +656,19 @@ async fn finish_start_rpc_server(
     api_router: Option<Router>,
 ) -> Result<(SocketAddr, ServerHandle)> {
     let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
+    // Default jsonrpsee body limits are 10 MiB, which trips
+    // `Error("Memory capacity exceeded")` when Ponder's realtime sync asks
+    // for a full-tx block at the tip (a heavily-loaded block with many
+    // ClearingHouse log entries serializes well over 10 MiB). 128 MiB in
+    // each direction is plenty of headroom for any Ethereum-shape payload
+    // we'd actually emit.
+    const MAX_BODY_BYTES: u32 = 128 * 1024 * 1024;
+    let server_config = jsonrpsee::server::ServerConfig::builder()
+        .max_request_body_size(MAX_BODY_BYTES)
+        .max_response_body_size(MAX_BODY_BYTES)
+        .build();
     let rpc_service = ServerBuilder::default()
+        .set_config(server_config)
         .to_service_builder()
         .build(module, stop_handle);
     let rpc_fallback = tower::service_fn(move |request: Request<Body>| {
