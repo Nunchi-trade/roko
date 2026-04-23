@@ -3347,9 +3347,11 @@ fn render_transactions_json(
         let nonce_hex = tx
             .map(|t| hex_u64(t.nonce))
             .unwrap_or_else(|| "0x0".to_string());
-        let input_hex = tx
-            .map(|t| format!("0x{}", hex::encode(&t.input)))
-            .unwrap_or_else(|| "0x".to_string());
+        // Deliberately omit `input` (calldata) — it's the only unbounded
+        // field on a tx, and Ponder's assertions don't read it. Dropping it
+        // keeps heavy blocks (e.g. ClearingHouse batches with ~200 bytes of
+        // calldata per tx × many txs) from ballooning the getBlockByHash
+        // response and tripping jsonrpsee's body-size ceiling under load.
         arr.push(serde_json::json!({
             "hash": format!("{tx_hash}"),
             "blockHash": block_hash_hex,
@@ -3361,7 +3363,7 @@ fn render_transactions_json(
             "gas": gas_hex,
             "gasPrice": "0x1",
             "nonce": nonce_hex,
-            "input": input_hex,
+            "input": "0x",
             "type": "0x0",
             "chainId": "0x1",
             "v": "0x0",
