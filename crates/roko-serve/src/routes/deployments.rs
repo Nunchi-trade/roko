@@ -113,9 +113,13 @@ async fn create_deployment(
     }
 
     // Read all config values we need from one config snapshot.
+    // `ROKO_CONTROL_PLANE_URL` in the server's environment overrides the
+    // computed bind:port — required once roko-serve itself is deployed to a
+    // cloud provider and its public URL differs from the local listener.
     let (control_url, image, region) = {
         let rc = state.load_roko_config();
-        let url = format!("http://{}:{}", rc.server.bind, rc.server.port);
+        let url = std::env::var("ROKO_CONTROL_PLANE_URL")
+            .unwrap_or_else(|_| format!("http://{}:{}", rc.server.bind, rc.server.port));
         let img = rc
             .deploy
             .worker_image
