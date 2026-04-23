@@ -157,7 +157,7 @@ impl MetricsSink for JsonlMetricsSink {
     fn record(&self, key: &MetricsKey, metrics: &ToolMetrics) {
         let record = ToolMetricsRecord::now(key.clone(), *metrics);
         if let Err(err) = self.append(&record) {
-            eprintln!(
+            let _ = format!(
                 "JsonlMetricsSink: failed to append {}: {err}",
                 self.path.display()
             );

@@ -139,7 +139,7 @@ impl JsonlTraceSink {
                 let now = (self.clock)();
                 let date_dir = self.root.join(now.format("%Y-%m-%d").to_string());
                 if let Err(e) = std::fs::create_dir_all(&date_dir) {
-                    eprintln!(
+                    let _ = format!(
                         "JsonlTraceSink: failed to create {}: {e}",
                         date_dir.display()
                     );
@@ -149,7 +149,7 @@ impl JsonlTraceSink {
                 let file = match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("JsonlTraceSink: failed to open {}: {e}", path.display());
+                        let _ = format!("JsonlTraceSink: failed to open {}: {e}", path.display());
                         return None;
                     }
                 };
@@ -177,7 +177,7 @@ impl TraceSink for JsonlTraceSink {
         let line = match serde_json::to_string(&event) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("JsonlTraceSink: failed to serialize event: {e}");
+                let _ = format!("JsonlTraceSink: failed to serialize event: {e}");
                 return;
             }
         };
@@ -186,14 +186,14 @@ impl TraceSink for JsonlTraceSink {
             return;
         };
         if let Err(e) = writer.writer.write_all(line.as_bytes()) {
-            eprintln!(
+            let _ = format!(
                 "JsonlTraceSink: write failed ({}): {e}",
                 writer.path.display()
             );
             return;
         }
         if let Err(e) = writer.writer.write_all(b"\n") {
-            eprintln!(
+            let _ = format!(
                 "JsonlTraceSink: write failed ({}): {e}",
                 writer.path.display()
             );
@@ -205,26 +205,26 @@ impl TraceSink for JsonlTraceSink {
         let line = match serde_json::to_string(&trace) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("JsonlTraceSink: failed to serialize trace: {e}");
+                let _ = format!("JsonlTraceSink: failed to serialize trace: {e}");
                 return;
             }
         };
         let mut inner = self.inner.lock();
         if let Some(writer) = self.ensure_writer(&mut inner, trace_id) {
             if let Err(e) = writer.writer.write_all(line.as_bytes()) {
-                eprintln!(
+                let _ = format!(
                     "JsonlTraceSink: finish write failed ({}): {e}",
                     writer.path.display()
                 );
             }
             if let Err(e) = writer.writer.write_all(b"\n") {
-                eprintln!(
+                let _ = format!(
                     "JsonlTraceSink: finish write failed ({}): {e}",
                     writer.path.display()
                 );
             }
             if let Err(e) = writer.writer.flush() {
-                eprintln!(
+                let _ = format!(
                     "JsonlTraceSink: flush failed ({}): {e}",
                     writer.path.display()
                 );

@@ -148,11 +148,10 @@ async fn replay_log(log_path: &Path) -> Result<HashMap<ContentHash, Engram>> {
     Ok(index)
 }
 
-fn tracing_line_error(path: &Path, line: usize, err: &serde_json::Error) {
-    eprintln!(
-        "roko-fs: skipping malformed signal at {}:{line}: {err}",
-        path.display()
-    );
+fn tracing_line_error(_path: &Path, _line: usize, _err: &serde_json::Error) {
+    // Silently skip malformed lines. These are typically from older schema
+    // versions or interrupted writes. Logging here would corrupt the TUI
+    // since roko-fs doesn't depend on tracing.
 }
 
 fn matches_query(signal: &Engram, q: &Query, ctx: &Context) -> bool {
