@@ -293,11 +293,41 @@ impl ServerBuilder {
     }
 }
 
+/// Load [`RokoConfig`] from the workdir's `roko.toml`, falling back to the
+/// global `~/.roko/config.toml` if no project config exists.
+fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
+    let project_path = workdir.join("roko.toml");
+    if project_path.exists() {
+        let text = std::fs::read_to_string(&project_path)
+            .with_context(|| format!("read {}", project_path.display()))?;
+        return toml::from_str(&text)
+            .with_context(|| format!("parse {}", project_path.display()));
+    }
+
+    // No project config — try global ~/.roko/config.toml.
+    if let Ok(home) = std::env::var("HOME") {
+        let global_path = PathBuf::from(&home).join(".roko").join("config.toml");
+        if global_path.exists() {
+            let text = std::fs::read_to_string(&global_path)
+                .with_context(|| format!("read {}", global_path.display()))?;
+            info!("using global config: {}", global_path.display());
+            return toml::from_str(&text)
+                .with_context(|| format!("parse {}", global_path.display()));
+        }
+    }
+
+    warn!(
+        "no roko.toml found at {} and no global config; using defaults",
+        project_path.display()
+    );
+    Ok(RokoConfig::default())
+}
+
 /// Start the HTTP server.
 ///
 /// # Errors
 ///
-/// Returns an error if `roko.toml` cannot be read or parsed, if the resolved
+/// Returns an error if config cannot be read or parsed, if the resolved
 /// listener cannot bind, or if serving the Axum router fails.
 pub async fn run_server(
     workdir: PathBuf,
@@ -305,20 +335,7 @@ pub async fn run_server(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
-    let roko_toml_path = workdir.join("roko.toml");
-
-    let roko_config: RokoConfig = if roko_toml_path.exists() {
-        let text = std::fs::read_to_string(&roko_toml_path)
-            .with_context(|| format!("read {}", roko_toml_path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
-    } else {
-        warn!(
-            "no roko.toml found at {}; using defaults",
-            roko_toml_path.display()
-        );
-        RokoConfig::default()
-    };
-
+    let roko_config = load_roko_config(&workdir)?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await
 }
@@ -337,20 +354,7 @@ pub async fn start_server_background(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
-    let roko_toml_path = workdir.join("roko.toml");
-
-    let roko_config: RokoConfig = if roko_toml_path.exists() {
-        let text = std::fs::read_to_string(&roko_toml_path)
-            .with_context(|| format!("read {}", roko_toml_path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
-    } else {
-        warn!(
-            "no roko.toml found at {}; using defaults",
-            roko_toml_path.display()
-        );
-        RokoConfig::default()
-    };
-
+    let roko_config = load_roko_config(&workdir)?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).start_background().await
 }
@@ -452,7 +456,7 @@ fn scan_marketplace_jobs(workdir: &Path) -> Vec<roko_core::MarketplaceJob> {
         match serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
             Ok(job) => jobs.push(job),
             Err(err) => {
-                warn!(
+                debug!(
                     path = %path.display(),
                     error = %err,
                     "skipping malformed job file during startup scan"
