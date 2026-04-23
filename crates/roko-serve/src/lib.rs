@@ -285,7 +285,7 @@ pub async fn run_server(
 ) -> Result<()> {
     let roko_toml_path = workdir.join("roko.toml");
 
-    let mut roko_config: RokoConfig = if roko_toml_path.exists() {
+    let roko_config: RokoConfig = if roko_toml_path.exists() {
         let text = std::fs::read_to_string(&roko_toml_path)
             .with_context(|| format!("read {}", roko_toml_path.display()))?;
         toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
@@ -296,10 +296,6 @@ pub async fn run_server(
         );
         RokoConfig::default()
     };
-
-    // Let `ROKO_DEPLOY_*` env vars override the TOML-declared deploy config so
-    // secrets like `ROKO_DEPLOY_RAILWAY_API_TOKEN` never land in `roko.toml`.
-    roko_config.deploy.apply_process_env();
 
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await

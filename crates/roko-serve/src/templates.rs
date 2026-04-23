@@ -679,92 +679,6 @@ pub fn slack_notify_template() -> AgentTemplate {
     }
 }
 
-/// Built-in template: ISFR (Implied Spot-Funding Rate) observer agent.
-pub fn isfr_observer_template() -> AgentTemplate {
-    AgentTemplate {
-        name: "isfr-observer".into(),
-        description:
-            "Monitor Hyperliquid funding rates and post ISFR observations back to the control plane."
-                .into(),
-        model: "sonnet".into(),
-        role: "researcher".into(),
-        system_prompt: concat!(
-            "You are the ISFR Observer agent for Nunchi. ",
-            "Your job is to monitor funding rates on Hyperliquid perpetual futures, ",
-            "compute the Implied Spot-Funding Rate (ISFR) for each market, ",
-            "and post observations back to the Roko control plane at {{ROKO_CONTROL_PLANE_URL}}. ",
-            "Stay within your deployment context (`ROKO_DEPLOYMENT_ID={{ROKO_DEPLOYMENT_ID}}`). ",
-            "Report markets with unusual funding divergence as insights.",
-        )
-        .into(),
-        max_turns: 40,
-        output_format: TemplateOutputFormat::Json,
-        mcp_servers: vec![],
-        allowed_tools: vec![],
-        denied_tools: vec![],
-        experiment: None,
-    }
-}
-
-/// Built-in template: yield optimization agent.
-pub fn yield_optimizer_template() -> AgentTemplate {
-    AgentTemplate {
-        name: "yield-optimizer".into(),
-        description:
-            "Scan for yield arbitrage using ISFR signals and propose trades within risk budget."
-                .into(),
-        model: "sonnet".into(),
-        role: "operator".into(),
-        system_prompt: concat!(
-            "You are the Yield Optimizer agent for Nunchi. ",
-            "Using ISFR observations and current rUSD/srUSD yields, identify ",
-            "yield arbitrage opportunities across Hyperliquid perpetuals and peaq-chain vaults. ",
-            "Report candidate trades as structured proposals to the Roko control plane ",
-            "at {{ROKO_CONTROL_PLANE_URL}}. Never execute trades directly; the control plane ",
-            "decides whether to dispatch to the clearing layer. ",
-            "Deployment: `ROKO_DEPLOYMENT_ID={{ROKO_DEPLOYMENT_ID}}`.",
-        )
-        .into(),
-        max_turns: 40,
-        output_format: TemplateOutputFormat::Json,
-        mcp_servers: vec![],
-        allowed_tools: vec![],
-        denied_tools: vec![],
-        experiment: None,
-    }
-}
-
-/// Built-in template: risk monitoring / liquidation sentinel.
-pub fn risk_sentinel_template() -> AgentTemplate {
-    AgentTemplate {
-        name: "risk-sentinel".into(),
-        description:
-            "Monitor open positions against liquidation thresholds and raise warnings early."
-                .into(),
-        model: "sonnet".into(),
-        role: "researcher".into(),
-        system_prompt: concat!(
-            "You are the Risk Sentinel agent for Nunchi. ",
-            "Continuously evaluate open positions against their liquidation thresholds ",
-            "on Hyperliquid and on-chain margin accounts. ",
-            "When the margin-to-liquidation ratio falls below configured bands, ",
-            "post a warning insight to the Roko control plane at {{ROKO_CONTROL_PLANE_URL}}. ",
-            "Deployment: `ROKO_DEPLOYMENT_ID={{ROKO_DEPLOYMENT_ID}}`. ",
-            "Never close or adjust positions yourself — alerting only.",
-        )
-        .into(),
-        max_turns: 40,
-        output_format: TemplateOutputFormat::Json,
-        mcp_servers: vec![],
-        allowed_tools: vec![],
-        denied_tools: vec![
-            "write_file".into(),
-            "edit_file".into(),
-        ],
-        experiment: None,
-    }
-}
-
 /// All built-in template factory functions.
 pub const BUILTIN_TEMPLATE_FACTORIES: &[fn() -> AgentTemplate] = &[
     pr_review_template,
@@ -773,9 +687,6 @@ pub const BUILTIN_TEMPLATE_FACTORIES: &[fn() -> AgentTemplate] = &[
     gate_fixer_template,
     doc_lifecycle_template,
     slack_notify_template,
-    isfr_observer_template,
-    yield_optimizer_template,
-    risk_sentinel_template,
 ];
 
 /// Return all built-in templates as a vector.
@@ -1045,7 +956,7 @@ mcp_servers = ["github", "missing-server"]
 
     #[test]
     fn builtin_templates_count() {
-        assert_eq!(builtin_templates().len(), 9, "expected 9 builtin templates");
+        assert_eq!(builtin_templates().len(), 6, "expected 6 builtin templates");
     }
 
     #[test]
