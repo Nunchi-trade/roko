@@ -229,6 +229,7 @@ impl ServerBuilder {
             self.config.roko_config.relay.clone(),
             serve_port,
             Arc::clone(&state.agent_count),
+            Arc::clone(&state.relay_health),
         );
 
         let router = routes::build_router(

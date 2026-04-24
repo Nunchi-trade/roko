@@ -22,6 +22,7 @@ use axum::{
         Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
+    http::StatusCode,
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -67,7 +68,15 @@ pub async fn ws_handler(
     State(state): State<ApiState>,
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, params))
+    if !state.ws_registry.try_connect() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let registry = Arc::clone(&state.ws_registry);
+    ws.on_upgrade(move |socket| async move {
+        handle_ws(socket, state, params).await;
+        registry.disconnect();
+    })
+    .into_response()
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {

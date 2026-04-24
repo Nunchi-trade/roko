@@ -152,12 +152,23 @@ impl RelayHealth {
 /// Default staleness threshold in seconds (30s).
 pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 30;
 
+/// Number of consecutive heartbeat failures before the circuit breaker opens
+/// and exponential backoff kicks in.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+
+/// Maximum backoff duration (60 seconds).
+const MAX_BACKOFF_SECS: u64 = 60;
+
+/// Base backoff duration (2 seconds), doubled for each failure beyond the threshold.
+const BASE_BACKOFF_SECS: u64 = 2;
+
 // ---------------------------------------------------------------------------
 // Workspace registration (roko-serve → relay)
 // ---------------------------------------------------------------------------
 
 use std::sync::Arc;
 
+use parking_lot::RwLock;
 use roko_core::config::schema::RelayConfig;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -190,14 +201,55 @@ fn resolve_workspace_name(config: &RelayConfig) -> String {
         .unwrap_or_else(|_| "roko".into())
 }
 
+/// Compute the backoff delay for the circuit breaker.
+///
+/// After `CIRCUIT_BREAKER_THRESHOLD` consecutive failures, applies exponential
+/// backoff: `min(BASE_BACKOFF_SECS * 2^(failures - threshold), MAX_BACKOFF_SECS)`.
+fn circuit_breaker_backoff(consecutive_failures: u32) -> std::time::Duration {
+    if consecutive_failures < CIRCUIT_BREAKER_THRESHOLD {
+        return std::time::Duration::ZERO;
+    }
+    let exponent = consecutive_failures.saturating_sub(CIRCUIT_BREAKER_THRESHOLD);
+    let backoff_secs = BASE_BACKOFF_SECS.saturating_mul(1u64 << exponent.min(30));
+    std::time::Duration::from_secs(backoff_secs.min(MAX_BACKOFF_SECS))
+}
+
+/// Transition the shared relay health to `Degraded` state.
+fn mark_degraded(health: &RwLock<RelayHealth>, relay_url: &str, reason: &str) {
+    let mut h = health.write();
+    if !matches!(h.connection, RelayConnectionState::Degraded { .. }) {
+        warn!(
+            relay_url = %relay_url,
+            reason = %reason,
+            "relay connection degraded"
+        );
+    }
+    h.connection = RelayConnectionState::Degraded {
+        relay_url: relay_url.to_string(),
+        since: chrono::Utc::now().to_rfc3339(),
+        reason: reason.to_string(),
+    };
+    h.freshness.check();
+}
+
+/// Transition the shared relay health back to `Relayed` state.
+fn mark_relayed(health: &RwLock<RelayHealth>, relay_url: &str) {
+    let mut h = health.write();
+    h.connection = RelayConnectionState::Relayed {
+        relay_url: relay_url.to_string(),
+    };
+    h.freshness.mark_confirmed();
+}
+
 /// Start a background task that registers this roko instance with the relay
-/// and sends periodic heartbeats.
+/// and sends periodic heartbeats with a circuit breaker.
 ///
 /// Returns `None` if relay is not configured.
 pub fn start_workspace_registration(
     relay_config: RelayConfig,
     port: u16,
     agent_count: Arc<std::sync::atomic::AtomicU32>,
+    relay_health: Arc<RwLock<RelayHealth>>,
 ) -> Option<JoinHandle<()>> {
     let relay_url = relay_config.url.as_deref()?.to_string();
     let public_url = resolve_public_url(&relay_config, port);
@@ -232,6 +284,7 @@ pub fn start_workspace_registration(
         match client.post(&register_url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!(workspace_id = %workspace_id, "registered with relay");
+                mark_relayed(&relay_health, &relay_url);
             }
             Ok(resp) => {
                 warn!(
@@ -244,12 +297,25 @@ pub fn start_workspace_registration(
             }
         }
 
-        // Periodic heartbeat loop.
+        // Periodic heartbeat loop with circuit breaker.
         let mut interval = tokio::time::interval(
             std::time::Duration::from_secs(heartbeat_secs),
         );
+        let mut consecutive_failures: u32 = 0;
+
         loop {
             interval.tick().await;
+
+            // Apply exponential backoff when the circuit breaker is open.
+            let backoff = circuit_breaker_backoff(consecutive_failures);
+            if !backoff.is_zero() {
+                debug!(
+                    failures = consecutive_failures,
+                    backoff_secs = backoff.as_secs(),
+                    "circuit breaker active, applying backoff"
+                );
+                tokio::time::sleep(backoff).await;
+            }
 
             let heartbeat_url = format!(
                 "{relay_http}/relay/workspaces/{workspace_id}/heartbeat"
@@ -261,12 +327,29 @@ pub fn start_workspace_registration(
             match client.post(&heartbeat_url).json(&hb_body).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     debug!(workspace_id = %workspace_id, "relay heartbeat sent");
+                    if consecutive_failures > 0 {
+                        info!(
+                            previous_failures = consecutive_failures,
+                            "relay heartbeat recovered"
+                        );
+                    }
+                    consecutive_failures = 0;
+                    mark_relayed(&relay_health, &relay_url);
                 }
                 Ok(resp) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     debug!(
                         status = %resp.status(),
+                        consecutive_failures,
                         "relay heartbeat returned non-success, re-registering"
                     );
+                    if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+                        mark_degraded(
+                            &relay_health,
+                            &relay_url,
+                            &format!("heartbeat non-success: {}", resp.status()),
+                        );
+                    }
                     // Re-register in case the relay restarted.
                     let body = serde_json::json!({
                         "workspace_id": workspace_id,
@@ -278,7 +361,19 @@ pub fn start_workspace_registration(
                     let _ = client.post(&register_url).json(&body).send().await;
                 }
                 Err(e) => {
-                    debug!(error = %e, "relay heartbeat failed");
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    debug!(
+                        error = %e,
+                        consecutive_failures,
+                        "relay heartbeat failed"
+                    );
+                    if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+                        mark_degraded(
+                            &relay_health,
+                            &relay_url,
+                            &format!("heartbeat error: {e}"),
+                        );
+                    }
                 }
             }
         }
@@ -380,6 +475,72 @@ mod tests {
         let health = RelayHealth::default();
         assert_eq!(health.connection, RelayConnectionState::Local);
         assert!(health.is_healthy()); // local + fresh = healthy
+    }
+
+    #[test]
+    fn circuit_breaker_no_backoff_below_threshold() {
+        assert_eq!(circuit_breaker_backoff(0), std::time::Duration::ZERO);
+        assert_eq!(circuit_breaker_backoff(1), std::time::Duration::ZERO);
+        assert_eq!(circuit_breaker_backoff(2), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn circuit_breaker_exponential_backoff_at_threshold() {
+        assert_eq!(
+            circuit_breaker_backoff(3),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            circuit_breaker_backoff(4),
+            std::time::Duration::from_secs(4)
+        );
+        assert_eq!(
+            circuit_breaker_backoff(5),
+            std::time::Duration::from_secs(8)
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_caps_at_max() {
+        assert_eq!(
+            circuit_breaker_backoff(100),
+            std::time::Duration::from_secs(MAX_BACKOFF_SECS)
+        );
+    }
+
+    #[test]
+    fn mark_degraded_transitions_health() {
+        let health = Arc::new(RwLock::new(RelayHealth::default()));
+        mark_degraded(&health, "wss://relay.example.com", "test failure");
+        let h = health.read();
+        assert!(matches!(
+            h.connection,
+            RelayConnectionState::Degraded { .. }
+        ));
+        assert!(!h.is_healthy());
+    }
+
+    #[test]
+    fn mark_relayed_recovers_health() {
+        let health = Arc::new(RwLock::new(RelayHealth::default()));
+        mark_degraded(&health, "wss://relay.example.com", "test failure");
+        mark_relayed(&health, "wss://relay.example.com");
+        let h = health.read();
+        assert!(matches!(
+            h.connection,
+            RelayConnectionState::Relayed { .. }
+        ));
+        assert!(h.is_healthy());
+    }
+
+    #[test]
+    fn start_workspace_registration_returns_none_without_url() {
+        let config = RelayConfig::default();
+        let agent_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let relay_health = Arc::new(RwLock::new(RelayHealth::default()));
+        assert!(
+            start_workspace_registration(config, 6677, agent_count, relay_health).is_none()
+        );
     }
 
     #[test]

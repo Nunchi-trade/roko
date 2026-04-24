@@ -337,6 +337,8 @@ pub struct AppState {
     pub chain_wallet: Option<Arc<AlloyChainWallet>>,
     /// Atomic counter of active agents (used by relay workspace heartbeat).
     pub agent_count: Arc<std::sync::atomic::AtomicU32>,
+    /// Shared relay health state, updated by the heartbeat circuit breaker.
+    pub relay_health: Arc<parking_lot::RwLock<crate::relay::RelayHealth>>,
 }
 
 impl AppState {
@@ -418,6 +420,7 @@ impl AppState {
             chain_client,
             chain_wallet,
             agent_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            relay_health: Arc::new(parking_lot::RwLock::new(crate::relay::RelayHealth::default())),
         }
     }
 
