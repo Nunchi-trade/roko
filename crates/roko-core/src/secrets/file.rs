@@ -90,6 +90,38 @@ impl FileStore {
         &self.path
     }
 
+    /// Delete a secret by namespace. Returns `true` if the key existed.
+    pub fn delete(&self, ns: &Namespace) -> Result<bool> {
+        let mut cache = self.cache.write();
+        let existed = cache
+            .as_table_mut()
+            .and_then(|root| root.get_mut(&ns.category))
+            .and_then(toml::Value::as_table_mut)
+            .is_some_and(|cat| cat.remove(&ns.provider).is_some());
+        if existed {
+            let snapshot = cache.clone();
+            drop(cache);
+            self.persist(&snapshot)?;
+        }
+        Ok(existed)
+    }
+
+    /// List all `(category, provider)` pairs stored in the file.
+    pub fn list_entries(&self) -> Vec<(String, String)> {
+        let cache = self.cache.read();
+        let mut entries = Vec::new();
+        if let Some(root) = cache.as_table() {
+            for (category, val) in root {
+                if let Some(providers) = val.as_table() {
+                    for provider in providers.keys() {
+                        entries.push((category.clone(), provider.clone()));
+                    }
+                }
+            }
+        }
+        entries
+    }
+
     fn persist(&self, value: &toml::Value) -> Result<()> {
         let text = toml::to_string_pretty(value)
             .map_err(|e| RokoError::invalid(format!("serialize secrets toml: {e}")))?;

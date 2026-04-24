@@ -2327,6 +2327,8 @@ impl ServeAuthLayer {
         roko_core::config::ServeAuthConfig {
             enabled: self.enabled.unwrap_or(defaults.enabled),
             api_key: self.api_key.unwrap_or(defaults.api_key),
+            api_keys: defaults.api_keys,
+            privy_app_id: defaults.privy_app_id,
         }
     }
 }
@@ -2448,19 +2450,75 @@ pub struct ConfigPaths {
 
 /// Resolve the path to the global config file.
 ///
-/// Honors `$XDG_CONFIG_HOME` then falls back to `$HOME/.config`.
+/// Canonical path: `~/.roko/config.toml`.
+/// Backward compat: if canonical doesn't exist but the legacy
+/// `~/.config/roko/config.toml` (or `$XDG_CONFIG_HOME/roko/config.toml`)
+/// does, return the legacy path. If neither exists, return the canonical
+/// path so that `init` writes to the right place.
 #[must_use]
 pub fn global_config_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("roko").join("config.toml");
-        }
-    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home)
-        .join(".config")
-        .join("roko")
-        .join("config.toml")
+    let canonical = PathBuf::from(&home).join(".roko").join("config.toml");
+
+    if canonical.exists() {
+        return canonical;
+    }
+
+    // Legacy: $XDG_CONFIG_HOME/roko/config.toml or ~/.config/roko/config.toml
+    let legacy = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            PathBuf::from(xdg).join("roko").join("config.toml")
+        } else {
+            PathBuf::from(&home)
+                .join(".config")
+                .join("roko")
+                .join("config.toml")
+        }
+    } else {
+        PathBuf::from(&home)
+            .join(".config")
+            .join("roko")
+            .join("config.toml")
+    };
+
+    if legacy.exists() {
+        return legacy;
+    }
+
+    // Neither exists — return canonical for new installs.
+    canonical
+}
+
+/// Merge providers and models from the global config into `config`.
+///
+/// Any provider/model in the global file that is *not* already in `config`
+/// gets inserted. This lets project `roko.toml` files override specific
+/// entries while inheriting the rest from `~/.roko/config.toml`.
+pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig) {
+    let global_path = global_config_path();
+    if !global_path.exists() {
+        return;
+    }
+    let text = match std::fs::read_to_string(&global_path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(path = %global_path.display(), error = %e, "failed to read global config");
+            return;
+        }
+    };
+    let global = match roko_core::config::schema::RokoConfig::from_toml(&text) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(path = %global_path.display(), error = %e, "failed to parse global config");
+            return;
+        }
+    };
+    for (name, provider) in global.providers {
+        config.providers.entry(name).or_insert(provider);
+    }
+    for (name, model) in global.models {
+        config.models.entry(name).or_insert(model);
+    }
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.
@@ -3524,7 +3582,10 @@ program = "echo"
     #[test]
     fn global_path_ends_in_roko_config_toml() {
         let path = global_config_path();
-        assert!(path.ends_with("roko/config.toml"));
+        assert!(
+            path.ends_with(".roko/config.toml") || path.ends_with("roko/config.toml"),
+            "expected path ending in .roko/config.toml or roko/config.toml, got: {path:?}"
+        );
     }
 
     #[test]

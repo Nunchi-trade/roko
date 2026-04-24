@@ -9,8 +9,10 @@ use axum::http::Request;
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use roko_core::config::ServeAuthConfig;
+use chrono::Utc;
+use roko_core::config::{ApiKeyEntry, ServeAuthConfig};
 use roko_core::obs::LogScrubber;
+use sha2::{Digest, Sha256};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::ApiError;
@@ -56,20 +58,71 @@ fn is_base64url_byte(b: u8) -> bool {
 
 /// Which authentication method was used for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthMethod {
+pub enum AuthMethod {
+    /// Authenticated via `X-Api-Key` header.
     ApiKey,
+    /// Authenticated via a structurally valid JWT in `Authorization: Bearer`.
     Jwt,
+    /// Authenticated via a non-JWT bearer token.
     Bearer,
 }
 
 impl AuthMethod {
-    fn header_value(self) -> &'static str {
+    /// Machine-readable label set in the `X-Auth-Method` response header.
+    pub fn header_value(self) -> &'static str {
         match self {
             Self::ApiKey => "api_key",
             Self::Jwt => "jwt",
             Self::Bearer => "bearer",
         }
     }
+}
+
+/// Authenticated caller context injected into request extensions.
+///
+/// Routes can extract this via `req.extensions().get::<AuthContext>()` or
+/// the axum `Extension<AuthContext>` extractor.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    /// How the caller authenticated.
+    pub method: AuthMethod,
+    /// Permission scope (e.g. "admin", "agent:write", "read").
+    pub scope: String,
+    /// Optional user/key identifier.
+    pub user_id: Option<String>,
+}
+
+/// Compute the hex-encoded SHA-256 hash of a plaintext API key.
+pub fn hash_api_key(plaintext: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(plaintext.as_bytes());
+    let digest = hasher.finalize();
+    // Inline hex encoding to avoid adding a `hex` dependency.
+    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// Check an API key against the list of named key entries.
+///
+/// Returns the matching entry if the hash matches and the key has not expired.
+fn match_api_key_entry<'a>(token: &str, entries: &'a [ApiKeyEntry]) -> Option<&'a ApiKeyEntry> {
+    let token_hash = hash_api_key(token);
+    let now = Utc::now().to_rfc3339();
+    entries.iter().find(|entry| {
+        if entry.key_hash != token_hash {
+            return false;
+        }
+        // Reject expired keys.
+        if let Some(ref expires) = entry.expires_at {
+            if *expires < now {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 enum ApiCredential<'a> {
@@ -101,30 +154,98 @@ fn api_credential(headers: &HeaderMap) -> ApiCredential<'_> {
     ApiCredential::Missing
 }
 
+/// Authenticate the supplied token against the legacy single key and the
+/// named `api_keys` list. Returns `(AuthMethod, scope, user_id)` on success.
+fn authenticate_token(
+    token: &str,
+    auth: &ServeAuthConfig,
+    via_header: bool,
+) -> Option<(AuthMethod, String, Option<String>)> {
+    // 1. Try named API keys first.
+    if let Some(entry) = match_api_key_entry(token, &auth.api_keys) {
+        let method = if via_header {
+            AuthMethod::ApiKey
+        } else if is_structurally_valid_jwt(token) {
+            AuthMethod::Jwt
+        } else {
+            AuthMethod::Bearer
+        };
+        return Some((method, entry.scope.clone(), Some(entry.name.clone())));
+    }
+
+    // 2. Fall back to legacy single api_key for backwards compatibility.
+    if !auth.api_key.is_empty() && token == auth.api_key {
+        let method = if via_header {
+            AuthMethod::ApiKey
+        } else if is_structurally_valid_jwt(token) {
+            AuthMethod::Jwt
+        } else {
+            AuthMethod::Bearer
+        };
+        return Some((method, "admin".to_string(), None));
+    }
+
+    // 3. Bearer-only: check if it looks like a Privy JWT (stub).
+    if !via_header && is_structurally_valid_jwt(token) && auth.privy_app_id.is_some() {
+        // TODO(phase-1b): real Privy JWT signature verification.
+        // For now, accept any structurally-valid JWT when privy_app_id is configured.
+        return Some((AuthMethod::Jwt, "read".to_string(), None));
+    }
+
+    None
+}
+
 /// Require a matching API credential for the request to continue.
 ///
-/// `X-Api-Key` retains precedence when both auth headers are present so
-/// credential resolution stays deterministic for existing clients.
+/// Supports three credential sources:
+/// - `X-Api-Key` header (checked first for deterministic precedence)
+/// - `Authorization: Bearer <token>` (API key or JWT)
+/// - Named API keys from `api_keys` list (SHA-256 hash comparison)
+///
+/// On success, injects [`AuthContext`] into request extensions so downstream
+/// routes can inspect the caller's scope and identity.
 pub async fn require_api_key(
     State(auth): State<ServeAuthConfig>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let auth_method = match api_credential(req.headers()) {
-        ApiCredential::XApiKey(supplied) if supplied == auth.api_key => AuthMethod::ApiKey,
-        ApiCredential::Bearer(supplied) if supplied == auth.api_key => {
-            if is_structurally_valid_jwt(supplied) {
-                AuthMethod::Jwt
-            } else {
-                AuthMethod::Bearer
+    let (auth_method, ctx) = match api_credential(req.headers()) {
+        ApiCredential::XApiKey(supplied) => match authenticate_token(supplied, &auth, true) {
+            Some((method, scope, user_id)) => (
+                method,
+                AuthContext {
+                    method,
+                    scope,
+                    user_id,
+                },
+            ),
+            None => {
+                return Err(ApiError::unauthorized(
+                    "invalid or missing X-Api-Key header",
+                ));
             }
-        }
-        ApiCredential::XApiKey(_) | ApiCredential::InvalidXApiKey => {
+        },
+        ApiCredential::Bearer(supplied) => match authenticate_token(supplied, &auth, false) {
+            Some((method, scope, user_id)) => (
+                method,
+                AuthContext {
+                    method,
+                    scope,
+                    user_id,
+                },
+            ),
+            None => {
+                return Err(ApiError::unauthorized(
+                    "invalid or missing Authorization bearer token",
+                ));
+            }
+        },
+        ApiCredential::InvalidXApiKey => {
             return Err(ApiError::unauthorized(
                 "invalid or missing X-Api-Key header",
             ));
         }
-        ApiCredential::Bearer(_) | ApiCredential::InvalidAuthorization => {
+        ApiCredential::InvalidAuthorization => {
             return Err(ApiError::unauthorized(
                 "invalid or missing Authorization bearer token",
             ));
@@ -135,6 +256,9 @@ pub async fn require_api_key(
             ));
         }
     };
+
+    // Inject AuthContext for downstream handlers.
+    req.extensions_mut().insert(ctx);
 
     let mut response = next.run(req).await;
     response.headers_mut().insert(
@@ -253,6 +377,15 @@ mod tests {
             ))
     }
 
+    fn legacy_auth(api_key: &str) -> ServeAuthConfig {
+        ServeAuthConfig {
+            enabled: true,
+            api_key: api_key.into(),
+            api_keys: Vec::new(),
+            privy_app_id: None,
+        }
+    }
+
     fn auth_test_app(auth: ServeAuthConfig) -> Router {
         Router::new()
             .route("/test", get(|| async { StatusCode::NO_CONTENT }))
@@ -280,10 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_api_key_accepts_matching_x_api_key_header() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
 
         let response = auth_response(app, |req| req.header("X-Api-Key", "secret-key-123")).await;
 
@@ -292,10 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_api_key_accepts_matching_bearer_token() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
 
         let response = auth_response(app, |req| {
             req.header(AUTHORIZATION, "Bearer secret-key-123")
@@ -307,10 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_api_key_rejects_missing_credentials() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
 
         let response = auth_response(app, |req| req).await;
         let status = response.status();
@@ -326,10 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_api_key_rejects_invalid_bearer_token() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
 
         let response =
             auth_response(app, |req| req.header(AUTHORIZATION, "Bearer wrong-key")).await;
@@ -345,10 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_api_key_prefers_x_api_key_when_both_headers_are_present() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
 
         let response = auth_response(app, |req| {
             req.header("X-Api-Key", "wrong-key")
@@ -573,10 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_method_header_set_to_api_key() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
         let response = auth_response(app, |req| req.header("X-Api-Key", "secret-key-123")).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
@@ -592,10 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_method_header_set_to_bearer() {
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: "secret-key-123".into(),
-        });
+        let app = auth_test_app(legacy_auth("secret-key-123"));
         let response = auth_response(app, |req| {
             req.header(AUTHORIZATION, "Bearer secret-key-123")
         })
@@ -616,10 +728,7 @@ mod tests {
     async fn auth_method_header_set_to_jwt() {
         // Use a JWT-shaped token (3 dot-separated base64url segments) as the api_key
         let jwt_key = "eyJhbGci.eyJzdWIi.abc123";
-        let app = auth_test_app(ServeAuthConfig {
-            enabled: true,
-            api_key: jwt_key.into(),
-        });
+        let app = auth_test_app(legacy_auth(jwt_key));
         let response = auth_response(app, |req| {
             req.header(AUTHORIZATION, format!("Bearer {jwt_key}"))
         })
