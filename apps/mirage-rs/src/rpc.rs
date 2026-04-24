@@ -107,15 +107,24 @@ struct StagedErc20Mint {
 struct RelayProxyState {
     upstream_http: String,
     client: reqwest::Client,
+    /// Tracks whether the upstream relay is healthy. Updated on every proxy
+    /// attempt. Shared across all handler clones.
+    healthy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RelayProxyState {
     fn from_env() -> Self {
         let upstream_http = std::env::var("ROKO_AGENT_RELAY_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:9011".to_owned());
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             upstream_http,
-            client: reqwest::Client::new(),
+            client,
+            healthy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -132,6 +141,18 @@ impl RelayProxyState {
             format!("ws://{}", self.upstream_http.trim_start_matches('/'))
         };
         format!("{}{}", base.trim_end_matches('/'), uri)
+    }
+
+    fn mark_healthy(&self) {
+        self.healthy.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn mark_unhealthy(&self) {
+        self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -493,16 +514,59 @@ pub fn build_relay_proxy_router_for_tests(upstream_http: String) -> Router<()> {
     build_relay_proxy_router_with_state(RelayProxyState {
         upstream_http,
         client: reqwest::Client::new(),
+        healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     })
 }
 
 fn build_relay_proxy_router_with_state(state: RelayProxyState) -> Router<()> {
+    // Spawn a background health probe for the relay sidecar.
+    let probe_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let url = format!(
+                "{}/relay/health",
+                probe_state.upstream_http.trim_end_matches('/')
+            );
+            let ok = probe_state
+                .client
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+            if ok {
+                if !probe_state.is_healthy() {
+                    tracing::info!("relay sidecar is now reachable");
+                }
+                probe_state.mark_healthy();
+            } else {
+                if probe_state.is_healthy() {
+                    tracing::warn!("relay sidecar is unreachable");
+                }
+                probe_state.mark_unhealthy();
+            }
+        }
+    });
+
     Router::new()
+        .route("/relay/health", get(relay_health))
         .route("/relay/agents/ws", get(relay_proxy_ws))
         .route("/relay/events/ws", get(relay_proxy_ws))
         .route("/relay", any(relay_proxy_http))
         .route("/relay/{*path}", any(relay_proxy_http))
         .with_state(state)
+}
+
+/// `/relay/health` — always returns 200 so the dashboard stays connected.
+/// Includes relay sidecar status so consumers know if relay features work.
+async fn relay_health(State(state): State<RelayProxyState>) -> impl IntoResponse {
+    let relay_up = state.is_healthy();
+    axum::Json(serde_json::json!({
+        "status": if relay_up { "ok" } else { "degraded" },
+        "relay_connected": relay_up,
+        "upstream": state.upstream_http,
+    }))
 }
 
 async fn relay_proxy_http(
@@ -519,7 +583,7 @@ async fn relay_proxy_http(
         }
     };
 
-    let mut upstream = state.client.request(parts.method.clone(), upstream_url);
+    let mut upstream = state.client.request(parts.method.clone(), &upstream_url);
     for (name, value) in &parts.headers {
         if is_hop_by_hop_header(name) {
             continue;
@@ -528,9 +592,17 @@ async fn relay_proxy_http(
     }
 
     let upstream_response = match upstream.body(body).send().await {
-        Ok(response) => response,
+        Ok(response) => {
+            state.mark_healthy();
+            response
+        }
         Err(error) => {
-            tracing::warn!(%error, "relay proxy upstream request failed");
+            state.mark_unhealthy();
+            tracing::warn!(
+                %error,
+                path = %parts.uri,
+                "relay proxy: upstream unreachable"
+            );
             return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream unavailable");
         }
     };
@@ -540,7 +612,7 @@ async fn relay_proxy_http(
     let body = match upstream_response.bytes().await {
         Ok(body) => body,
         Err(error) => {
-            tracing::warn!(%error, "failed to read relay proxy upstream response body");
+            tracing::warn!(%error, "relay proxy: failed to read upstream response body");
             return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay upstream response invalid");
         }
     };
@@ -563,10 +635,11 @@ async fn relay_proxy_ws(
     headers: HeaderMap,
 ) -> Response<Body> {
     let upstream_url = state.upstream_ws_url(&uri);
+    tracing::info!(path = %uri, "relay WS proxy: upgrade request");
     let mut upstream_request = match upstream_url.clone().into_client_request() {
         Ok(request) => request,
         Err(error) => {
-            tracing::warn!(%error, "failed to construct relay websocket request");
+            tracing::warn!(%error, "relay WS proxy: failed to construct request");
             return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket request invalid");
         }
     };
@@ -577,9 +650,14 @@ async fn relay_proxy_ws(
     }
 
     let upstream_socket = match connect_async(upstream_request).await {
-        Ok((socket, _response)) => socket,
+        Ok((socket, _response)) => {
+            state.mark_healthy();
+            tracing::info!(path = %uri, "relay WS proxy: upstream connected");
+            socket
+        }
         Err(error) => {
-            tracing::warn!(%error, %upstream_url, "failed to connect relay websocket upstream");
+            state.mark_unhealthy();
+            tracing::warn!(%error, %upstream_url, "relay WS proxy: upstream unreachable");
             return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket unavailable");
         }
     };
