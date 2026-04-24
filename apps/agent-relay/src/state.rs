@@ -7,8 +7,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::protocol::{
-    AgentHello, ConnectedAgent, RelayEvent, RelayMessageRequest, RelayMessageResponse,
-    RelayOutboundFrame,
+    AgentHello, ConnectedAgent, ConnectedWorkspace, RelayEvent, RelayMessageRequest,
+    RelayMessageResponse, RelayOutboundFrame, WorkspaceHello,
 };
 
 struct ConnectedAgentHandle {
@@ -27,6 +27,7 @@ struct RelayStateInner {
     agents: HashMap<String, ConnectedAgentHandle>,
     cards: HashMap<String, Value>,
     pending: HashMap<String, PendingResponse>,
+    workspaces: HashMap<String, ConnectedWorkspace>,
 }
 
 /// Shared in-memory relay state for directory, cards, and pending replies.
@@ -249,6 +250,84 @@ impl RelayState {
             message_id: None,
             error,
         });
+    }
+
+    // ── Workspace directory ──────────────────────────────────────────
+
+    #[must_use]
+    pub fn list_workspaces(&self) -> Vec<ConnectedWorkspace> {
+        let mut workspaces = self
+            .inner
+            .read()
+            .workspaces
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        workspaces.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+        workspaces
+    }
+
+    pub fn register_workspace(&self, hello: WorkspaceHello) {
+        let now = now_ms();
+        let workspace = ConnectedWorkspace {
+            workspace_id: hello.workspace_id.clone(),
+            name: hello.name,
+            url: hello.url,
+            version: hello.version,
+            owner_wallet: hello.owner_wallet,
+            agents_count: hello.agents_count,
+            connected_at_ms: now,
+            last_heartbeat_ms: now,
+        };
+        self.inner
+            .write()
+            .workspaces
+            .insert(hello.workspace_id, workspace.clone());
+        let _ = self
+            .events_tx
+            .send(RelayEvent::WorkspaceConnected { workspace });
+    }
+
+    pub fn workspace_heartbeat(&self, workspace_id: &str, agents_count: u32) {
+        let mut inner = self.inner.write();
+        if let Some(ws) = inner.workspaces.get_mut(workspace_id) {
+            ws.last_heartbeat_ms = now_ms();
+            ws.agents_count = agents_count;
+        }
+        drop(inner);
+        let _ = self.events_tx.send(RelayEvent::WorkspaceHeartbeat {
+            workspace_id: workspace_id.to_string(),
+            agents_count,
+        });
+    }
+
+    pub fn unregister_workspace(&self, workspace_id: &str) {
+        self.inner.write().workspaces.remove(workspace_id);
+        let _ = self.events_tx.send(RelayEvent::WorkspaceDisconnected {
+            workspace_id: workspace_id.to_string(),
+        });
+    }
+
+    /// Remove workspaces that haven't sent a heartbeat in `stale_ms`.
+    pub fn expire_stale_workspaces(&self, stale_ms: u64) -> Vec<String> {
+        let now = now_ms();
+        let mut expired = Vec::new();
+        let mut inner = self.inner.write();
+        inner.workspaces.retain(|id, ws| {
+            if now.saturating_sub(ws.last_heartbeat_ms) > stale_ms {
+                expired.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        drop(inner);
+        for id in &expired {
+            let _ = self.events_tx.send(RelayEvent::WorkspaceDisconnected {
+                workspace_id: id.clone(),
+            });
+        }
+        expired
     }
 }
 

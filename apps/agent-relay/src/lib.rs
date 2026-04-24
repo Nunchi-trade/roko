@@ -33,6 +33,19 @@ pub fn app(state: Arc<RelayState>) -> Router {
         .route("/relay/cards/{id}", get(get_card))
         .route("/relay/messages", post(forward_message))
         .route("/relay/events/ws", get(events_ws))
+        .route("/relay/workspaces", get(list_workspaces))
+        .route(
+            "/relay/workspaces/register",
+            post(register_workspace),
+        )
+        .route(
+            "/relay/workspaces/{id}/heartbeat",
+            post(workspace_heartbeat),
+        )
+        .route(
+            "/relay/workspaces/{id}",
+            axum::routing::delete(unregister_workspace),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -43,6 +56,41 @@ async fn health() -> &'static str {
 
 async fn list_agents(State(state): State<Arc<RelayState>>) -> Json<Vec<protocol::ConnectedAgent>> {
     Json(state.list_agents())
+}
+
+async fn list_workspaces(
+    State(state): State<Arc<RelayState>>,
+) -> Json<Vec<protocol::ConnectedWorkspace>> {
+    Json(state.list_workspaces())
+}
+
+async fn register_workspace(
+    State(state): State<Arc<RelayState>>,
+    Json(hello): Json<protocol::WorkspaceHello>,
+) -> impl IntoResponse {
+    state.register_workspace(hello);
+    StatusCode::OK
+}
+
+async fn workspace_heartbeat(
+    State(state): State<Arc<RelayState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agents_count = body
+        .get("agents_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    state.workspace_heartbeat(&id, agents_count);
+    StatusCode::OK
+}
+
+async fn unregister_workspace(
+    State(state): State<Arc<RelayState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    state.unregister_workspace(&id);
+    StatusCode::OK
 }
 
 async fn get_card(
