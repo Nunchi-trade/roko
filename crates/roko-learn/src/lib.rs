@@ -110,6 +110,8 @@ pub mod efficiency;
 pub mod episode_logger;
 /// Cheap pre-processing of noisy gate failures into retry-ready diagnoses.
 pub mod error_enrichment;
+/// Persistent storage for error patterns discovered during plan execution.
+pub mod error_pattern_store;
 /// Event subscriber that fans runtime events into learning subsystems.
 pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.

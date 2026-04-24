@@ -343,6 +343,10 @@ pub struct AppState {
     pub relay_health: Arc<parking_lot::RwLock<crate::relay::RelayHealth>>,
     /// JWKS cache for Privy JWT verification.
     pub jwks_cache: Arc<crate::jwks::JwksCache>,
+    /// In-memory connector registry.
+    pub connectors: RwLock<roko_core::ConnectorRegistry>,
+    /// In-memory feed registry.
+    pub feeds: RwLock<roko_core::FeedRegistry>,
 }
 
 impl AppState {
@@ -429,6 +433,8 @@ impl AppState {
             relay_health: Arc::new(parking_lot::RwLock::new(
                 crate::relay::RelayHealth::default(),
             )),
+            connectors: RwLock::new(roko_core::ConnectorRegistry::new()),
+            feeds: RwLock::new(roko_core::FeedRegistry::new()),
         }
     }
 

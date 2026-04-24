@@ -9,9 +9,11 @@ mod aggregator;
 mod auth;
 mod chain;
 pub(crate) mod config;
+mod connectors;
 mod deployments;
 mod diagnosis;
 mod dream;
+mod feeds;
 mod gateway;
 mod heartbeats;
 mod integrations;
@@ -75,6 +77,8 @@ pub fn build_router(
         .merge(dream::routes())
         .merge(gateway::routes())
         .merge(chain::routes())
+        .merge(connectors::routes())
+        .merge(feeds::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
         .merge(team::routes())

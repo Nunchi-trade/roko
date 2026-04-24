@@ -61,6 +61,8 @@ pub mod cfactor;
 pub mod chat_types;
 pub mod conductor;
 pub mod config;
+/// Connector trait for external system I/O (MCP, API, Database, Blockchain, Feed, Custom).
+pub mod connector;
 pub mod context;
 pub mod dashboard_snapshot;
 pub mod datum;
@@ -71,6 +73,8 @@ pub mod domain_profile;
 pub mod engram;
 pub mod error;
 pub mod extension;
+/// Feed trait for agent-produced data streams (Raw, Derived, Composite, Meta).
+pub mod feed;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
 pub mod hash;
@@ -129,6 +133,10 @@ pub use chat_types::{
     ToolCallMessage, ToolChoice, Usage,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
+pub use connector::{
+    ConnectorConfig, ConnectorHealth, ConnectorInfo, ConnectorKind, ConnectorRegistry,
+    ConnectorStatus,
+};
 pub use context::Context;
 pub use datum::Datum;
 pub use decay::Decay;
@@ -136,6 +144,7 @@ pub use demurrage::Demurrage;
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
 pub use error::{Result, RokoError};
+pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
