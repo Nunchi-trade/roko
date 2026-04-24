@@ -298,9 +298,7 @@ pub fn start_workspace_registration(
         }
 
         // Periodic heartbeat loop with circuit breaker.
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(heartbeat_secs),
-        );
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
         let mut consecutive_failures: u32 = 0;
 
         loop {
@@ -317,9 +315,7 @@ pub fn start_workspace_registration(
                 tokio::time::sleep(backoff).await;
             }
 
-            let heartbeat_url = format!(
-                "{relay_http}/relay/workspaces/{workspace_id}/heartbeat"
-            );
+            let heartbeat_url = format!("{relay_http}/relay/workspaces/{workspace_id}/heartbeat");
             let hb_body = serde_json::json!({
                 "agents_count": agent_count.load(std::sync::atomic::Ordering::Relaxed),
             });
@@ -368,11 +364,7 @@ pub fn start_workspace_registration(
                         "relay heartbeat failed"
                     );
                     if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-                        mark_degraded(
-                            &relay_health,
-                            &relay_url,
-                            &format!("heartbeat error: {e}"),
-                        );
+                        mark_degraded(&relay_health, &relay_url, &format!("heartbeat error: {e}"));
                     }
                 }
             }
@@ -526,10 +518,7 @@ mod tests {
         mark_degraded(&health, "wss://relay.example.com", "test failure");
         mark_relayed(&health, "wss://relay.example.com");
         let h = health.read();
-        assert!(matches!(
-            h.connection,
-            RelayConnectionState::Relayed { .. }
-        ));
+        assert!(matches!(h.connection, RelayConnectionState::Relayed { .. }));
         assert!(h.is_healthy());
     }
 
@@ -538,9 +527,7 @@ mod tests {
         let config = RelayConfig::default();
         let agent_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let relay_health = Arc::new(RwLock::new(RelayHealth::default()));
-        assert!(
-            start_workspace_registration(config, 6677, agent_count, relay_health).is_none()
-        );
+        assert!(start_workspace_registration(config, 6677, agent_count, relay_health).is_none());
     }
 
     #[test]

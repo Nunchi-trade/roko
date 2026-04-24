@@ -16,6 +16,7 @@ use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::runtime::RunResult;
+use crate::sanitize::sanitize_agent_content;
 use crate::state::{AppState, OperationStatus, RunHandle};
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -308,22 +309,33 @@ fn publish_run_completed(
     metadata: Option<Value>,
 ) {
     if let Some(agent_id) = agent_target {
-        let content = metadata
+        let raw_content = metadata
             .as_ref()
             .and_then(|value| value.get("output_text"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let clean_content = sanitize_agent_content(&raw_content);
         bus.publish(ServerEvent::AgentOutput {
             agent_id: agent_id.to_owned(),
             run_id: Some(run_id.to_owned()),
-            content,
+            content: clean_content,
             done: true,
             metadata: Some(serde_json::json!({
                 "status": if success { "completed" } else { "failed" },
                 "success": success,
-                "details": metadata.unwrap_or(Value::Null),
+                "details": metadata.clone().unwrap_or(Value::Null),
             })),
+        });
+        // Emit raw trace for debug subscribers.
+        bus.publish(ServerEvent::AgentTrace {
+            agent_id: agent_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            content: raw_content,
+            tool_calls: None,
+            reasoning: None,
+            usage: None,
+            done: true,
         });
     }
 

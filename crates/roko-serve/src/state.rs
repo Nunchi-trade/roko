@@ -341,6 +341,8 @@ pub struct AppState {
     pub agent_count: Arc<std::sync::atomic::AtomicU32>,
     /// Shared relay health state, updated by the heartbeat circuit breaker.
     pub relay_health: Arc<parking_lot::RwLock<crate::relay::RelayHealth>>,
+    /// JWKS cache for Privy JWT verification.
+    pub jwks_cache: Arc<crate::jwks::JwksCache>,
 }
 
 impl AppState {
@@ -390,6 +392,7 @@ impl AppState {
 
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
+        let http_client = reqwest::Client::new();
 
         Self {
             workdir,
@@ -415,14 +418,17 @@ impl AppState {
             deployments: RwLock::new(HashMap::new()),
             template_runs: RwLock::new(HashMap::new()),
             scrubber: Arc::new(LogScrubber::new()),
-            http_client: reqwest::Client::new(),
+            jwks_cache: crate::jwks::new_jwks_cache(http_client.clone()),
+            http_client,
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
             heartbeats: RwLock::new(VecDeque::new()),
             chain_client,
             chain_wallet,
             agent_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            relay_health: Arc::new(parking_lot::RwLock::new(crate::relay::RelayHealth::default())),
+            relay_health: Arc::new(parking_lot::RwLock::new(
+                crate::relay::RelayHealth::default(),
+            )),
         }
     }
 
@@ -736,7 +742,10 @@ impl AppState {
     /// Find a supervised process by its label (agent_id).
     ///
     /// Returns `(ProcessId, os_pid, uptime)` if a matching handle is found.
-    pub async fn find_process_by_label(&self, label: &str) -> Option<(ProcessId, Option<u32>, Duration)> {
+    pub async fn find_process_by_label(
+        &self,
+        label: &str,
+    ) -> Option<(ProcessId, Option<u32>, Duration)> {
         let entries = self.supervisor.list().await;
         let pid = entries
             .iter()

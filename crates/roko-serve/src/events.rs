@@ -91,7 +91,7 @@ pub enum ServerEvent {
     /// An agent process was spawned.
     AgentSpawned { agent_id: String, role: String },
 
-    /// Incremental agent output (streamed).
+    /// Incremental agent output (streamed, sanitized for consumers).
     AgentOutput {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +101,26 @@ pub enum ServerEvent {
         done: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<Value>,
+    },
+
+    /// Raw agent trace output for debugging / inspection.
+    ///
+    /// Contains unsanitized content plus optional structured fields
+    /// (tool calls, reasoning, token usage).  Only consumers that
+    /// explicitly subscribe to `agent_trace` see these events.
+    AgentTrace {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Value>,
+        #[serde(default)]
+        done: bool,
     },
 
     /// A gate check completed for a task.

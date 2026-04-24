@@ -75,6 +75,16 @@ impl ApiError {
         }
     }
 
+    /// 403 Forbidden.
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden".into(),
+            message: msg.into(),
+            details: None,
+        }
+    }
+
     /// 409 Conflict.
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self {

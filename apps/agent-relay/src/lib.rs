@@ -34,10 +34,7 @@ pub fn app(state: Arc<RelayState>) -> Router {
         .route("/relay/messages", post(forward_message))
         .route("/relay/events/ws", get(events_ws))
         .route("/relay/workspaces", get(list_workspaces))
-        .route(
-            "/relay/workspaces/register",
-            post(register_workspace),
-        )
+        .route("/relay/workspaces/register", post(register_workspace))
         .route(
             "/relay/workspaces/{id}/heartbeat",
             post(workspace_heartbeat),

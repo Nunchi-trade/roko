@@ -1233,12 +1233,18 @@ fn build_rpc_module(
         // because it reflects the canonical tx order; fall back to a stable
         // sort-by-hash derivation via txs_at_block_number when the block
         // index was lost.
-        let mut by_block: BTreeMap<u64, Vec<(&alloy_primitives::B256, &crate::fork::LocalReceipt)>> = BTreeMap::new();
+        let mut by_block: BTreeMap<
+            u64,
+            Vec<(&alloy_primitives::B256, &crate::fork::LocalReceipt)>,
+        > = BTreeMap::new();
         for (tx_hash, receipt) in state.fork.receipts.iter() {
             if receipt.block_number < from || receipt.block_number > to {
                 continue;
             }
-            by_block.entry(receipt.block_number).or_default().push((tx_hash, receipt));
+            by_block
+                .entry(receipt.block_number)
+                .or_default()
+                .push((tx_hash, receipt));
         }
 
         let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1301,21 +1307,37 @@ fn build_rpc_module(
         // doesn't formally guarantee it.
         out.sort_by(|a, b| {
             let an = u64::from_str_radix(
-                a.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                a.get("blockNumber")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0x0")
+                    .trim_start_matches("0x"),
                 16,
-            ).unwrap_or(0);
+            )
+            .unwrap_or(0);
             let bn = u64::from_str_radix(
-                b.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                b.get("blockNumber")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0x0")
+                    .trim_start_matches("0x"),
                 16,
-            ).unwrap_or(0);
+            )
+            .unwrap_or(0);
             let al = u64::from_str_radix(
-                a.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                a.get("logIndex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0x0")
+                    .trim_start_matches("0x"),
                 16,
-            ).unwrap_or(0);
+            )
+            .unwrap_or(0);
             let bl = u64::from_str_radix(
-                b.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                b.get("logIndex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0x0")
+                    .trim_start_matches("0x"),
                 16,
-            ).unwrap_or(0);
+            )
+            .unwrap_or(0);
             an.cmp(&bn).then(al.cmp(&bl))
         });
         Ok::<_, ErrorObjectOwned>(out)
@@ -1420,14 +1442,10 @@ fn build_rpc_module(
             // variant and peek at both indices in O(1). If neither hits,
             // return None and let the caller retry — far cheaper than
             // scanning the full block store on a miss.
-            state
-                .fork
-                .blocks_by_hash
-                .get(&hash)
-                .map(|blk| {
-                    let txs = txs_at_block_number(&state.fork.receipts, blk.number);
-                    block_json_with_txs(blk, &txs, full, Some(&state.fork))
-                })
+            state.fork.blocks_by_hash.get(&hash).map(|blk| {
+                let txs = txs_at_block_number(&state.fork.receipts, blk.number);
+                block_json_with_txs(blk, &txs, full, Some(&state.fork))
+            })
         };
         if let Some(block) = local {
             return Ok::<_, ErrorObjectOwned>(Some(block));
@@ -1971,9 +1989,9 @@ fn register_chain_subscription_methods(
 
             // First message: tell the client its external id so it can call
             // chain_unsubscribe(id) later.
-            if let Ok(handshake) = serde_json::value::to_raw_value(
-                &serde_json::json!({"subscriptionId": external_id}),
-            ) {
+            if let Ok(handshake) =
+                serde_json::value::to_raw_value(&serde_json::json!({"subscriptionId": external_id}))
+            {
                 let _ = sink.send(handshake).await;
             }
 
@@ -2019,9 +2037,9 @@ fn register_chain_subscription_methods(
                 return Ok(());
             };
 
-            if let Ok(handshake) = serde_json::value::to_raw_value(
-                &serde_json::json!({"subscriptionId": external_id}),
-            ) {
+            if let Ok(handshake) =
+                serde_json::value::to_raw_value(&serde_json::json!({"subscriptionId": external_id}))
+            {
                 let _ = sink.send(handshake).await;
             }
 
@@ -2207,7 +2225,10 @@ fn register_state_mutation_methods(
                     let canonical_hash = keccak256(state.fork.local_block_number.to_be_bytes());
                     state.fork.blocks_by_hash.insert(block_hash, block.clone());
                     if canonical_hash != block_hash {
-                        state.fork.blocks_by_hash.insert(canonical_hash, block.clone());
+                        state
+                            .fork
+                            .blocks_by_hash
+                            .insert(canonical_hash, block.clone());
                     }
                     state
                         .fork
@@ -2904,11 +2925,7 @@ fn register_mirage_methods(
             ));
         }
         let supplied: ShutdownParams = params.parse().map_err(|_| {
-            ErrorObjectOwned::owned(
-                -32602,
-                "missing required parameter: secret",
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32602, "missing required parameter: secret", None::<()>)
         })?;
         if supplied.secret != expected {
             tracing::warn!("mirage_shutdown called with wrong secret — rejecting");
@@ -3399,10 +3416,19 @@ fn block_json(block: &LocalBlock) -> serde_json::Value {
 /// on block retrieval — some code paths (mine_block) overwrite the
 /// LocalBlock.transactions list with an empty vec, so we prefer the view
 /// derived from receipts every time.
-fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::LocalReceipt>, block_number: u64) -> Vec<B256> {
+fn txs_at_block_number(
+    receipts: &std::collections::HashMap<B256, crate::fork::LocalReceipt>,
+    block_number: u64,
+) -> Vec<B256> {
     let mut out: Vec<B256> = receipts
         .iter()
-        .filter_map(|(h, r)| if r.block_number == block_number { Some(*h) } else { None })
+        .filter_map(|(h, r)| {
+            if r.block_number == block_number {
+                Some(*h)
+            } else {
+                None
+            }
+        })
         .collect();
     // Stable ordering so repeated calls produce identical output (tx hashes
     // are globally unique — sort by raw bytes).

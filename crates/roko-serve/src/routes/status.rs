@@ -1835,8 +1835,8 @@ fn dispatch_bias_label(bias: AgentDispatchBias) -> String {
 // ── Relay health ─────────────────────────────────────────────────────
 
 /// `GET /api/relay/health` — return relay connection diagnostics.
-async fn relay_health() -> Json<Value> {
-    let health = crate::relay::RelayHealth::default();
+async fn relay_health(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let health = state.relay_health.read().clone();
     Json(serde_json::to_value(&health).unwrap_or_default())
 }
 
@@ -2168,6 +2168,7 @@ mod tests {
             plan_dir: dir.path().join(".roko/plans/plan-1"),
             status: OperationStatus::Running,
             handle: tokio::spawn(async {}),
+            cancel: roko_runtime::cancel::CancelToken::new(),
         };
         state
             .active_plans

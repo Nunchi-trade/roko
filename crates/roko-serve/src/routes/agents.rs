@@ -874,10 +874,7 @@ async fn get_agent(
     };
 
     // Find last heartbeat for this agent.
-    let last_hb = latest_heartbeat_for_agent(
-        &heartbeats,
-        &[id.as_str()],
-    );
+    let last_hb = latest_heartbeat_for_agent(&heartbeats, &[id.as_str()]);
     let last_heartbeat_ts = last_hb.map(|hb| hb.timestamp.clone());
 
     if let Some(agent) = state.discovered_agent(&id).await {
@@ -1379,9 +1376,10 @@ async fn proxy_sidecar_stream(
                             agent_id: agent_id.clone(),
                             run_id: Some(run_id.clone()),
                             content: chunk.to_string(),
-                            tool_calls: value.get("tool_calls").cloned().map(|v| {
-                                if let Value::Array(a) = v { a } else { vec![v] }
-                            }),
+                            tool_calls: value
+                                .get("tool_calls")
+                                .cloned()
+                                .map(|v| if let Value::Array(a) = v { a } else { vec![v] }),
                             reasoning: value
                                 .get("reasoning")
                                 .and_then(Value::as_str)

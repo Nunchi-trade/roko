@@ -28,6 +28,7 @@ mod secrets;
 mod sse;
 mod status;
 mod subscriptions;
+mod team;
 mod templates;
 mod webhooks;
 mod ws;
@@ -49,7 +50,6 @@ pub fn build_router(
     api_auth: ServeAuthConfig,
 ) -> Router {
     let cors = middleware::cors_layer(cors_origins);
-    let ws_auth = api_auth.clone();
 
     let api = Router::new()
         .merge(crate::openapi::routes())
@@ -75,16 +75,18 @@ pub fn build_router(
         .merge(chain::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
+        .merge(team::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
         .merge(sse::routes());
 
     let api = if api_auth.enabled {
-        api.layer(axum::middleware::from_fn_with_state(
-            api_auth,
-            middleware::require_api_key,
-        ))
+        api.layer(axum::middleware::from_fn(middleware::require_scope))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                middleware::require_api_key,
+            ))
     } else {
         api
     };
@@ -96,9 +98,9 @@ pub fn build_router(
         middleware::scrub_secrets,
     ));
 
-    let ws = if ws_auth.enabled {
+    let ws = if api_auth.enabled {
         ws::routes().layer(axum::middleware::from_fn_with_state(
-            ws_auth,
+            Arc::clone(&state),
             middleware::require_api_key,
         ))
     } else {
