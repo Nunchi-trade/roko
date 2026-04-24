@@ -110,6 +110,11 @@ pub struct ChainContext {
     pub prediction_store: crate::chain::PredictionStore,
     /// Broadcast bus for prediction lifecycle events.
     pub prediction_bus: tokio::sync::broadcast::Sender<crate::chain::PredictionEvent>,
+    /// Deployed contract address registry (name → hex address).
+    ///
+    /// Populated by `POST /api/deployment` after a Foundry deploy and seeded
+    /// with ERC-8004 bootstrap addresses at startup. Persisted in snapshots.
+    pub contract_registry: std::collections::HashMap<String, String>,
 }
 
 impl ChainContext {
@@ -130,6 +135,7 @@ impl ChainContext {
             task_bus: tokio::sync::broadcast::channel(1_024).0,
             prediction_store: crate::chain::PredictionStore::new(),
             prediction_bus: tokio::sync::broadcast::channel(1_024).0,
+            contract_registry: std::collections::HashMap::new(),
         }
     }
 
@@ -150,6 +156,7 @@ impl ChainContext {
             task_bus: tokio::sync::broadcast::channel(1_024).0,
             prediction_store: crate::chain::PredictionStore::new(),
             prediction_bus: tokio::sync::broadcast::channel(1_024).0,
+            contract_registry: std::collections::HashMap::new(),
         }
     }
 
@@ -174,6 +181,7 @@ impl ChainContext {
             task_bus: tokio::sync::broadcast::channel(1_024).0,
             prediction_store: crate::chain::PredictionStore::new(),
             prediction_bus: tokio::sync::broadcast::channel(1_024).0,
+            contract_registry: std::collections::HashMap::new(),
         }
     }
 

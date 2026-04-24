@@ -1416,10 +1416,10 @@ pub struct ChainConfig {
     /// ERC-8004 ValidationRegistry contract address.
     #[serde(default)]
     pub validation_registry: Option<String>,
-    /// AgentRegistry contract address (e.g. `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`).
+    /// AgentRegistry contract address. Required for on-chain agent features.
     #[serde(default)]
     pub agent_registry: Option<String>,
-    /// BountyMarket contract address (e.g. `0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9`).
+    /// BountyMarket contract address. Required for on-chain bounty features.
     #[serde(default)]
     pub bounty_market: Option<String>,
     /// Deployer / funder address.

@@ -51,7 +51,7 @@ async fn chain_agents(State(state): State<Arc<AppState>>) -> Result<Json<Value>,
         .chain
         .agent_registry
         .as_deref()
-        .unwrap_or("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+        .ok_or_else(|| ApiError::bad_request("[chain].agent_registry not configured in roko.toml"))?
         .parse()
         .map_err(|e| ApiError::bad_request(format!("invalid agent_registry address: {e}")))?;
 
@@ -83,7 +83,7 @@ async fn chain_bounties(State(state): State<Arc<AppState>>) -> Result<Json<Value
         .chain
         .bounty_market
         .as_deref()
-        .unwrap_or("0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9")
+        .ok_or_else(|| ApiError::bad_request("[chain].bounty_market not configured in roko.toml"))?
         .parse()
         .map_err(|e| ApiError::bad_request(format!("invalid bounty_market address: {e}")))?;
 

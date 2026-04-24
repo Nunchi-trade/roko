@@ -91,6 +91,9 @@ pub struct ChainSnapshot {
     pub agents: crate::chain::AgentRegistrySnapshot,
     pub tasks: crate::chain::TaskStoreSnapshot,
     pub predictions: crate::chain::PredictionStoreSnapshot,
+    /// Deployed contract addresses (name → hex address).
+    #[serde(default)]
+    pub contract_registry: std::collections::HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +140,7 @@ pub fn capture_snapshot(
         agents: ctx.agent_registry.snapshot(),
         tasks: ctx.task_store.snapshot(),
         predictions: ctx.prediction_store.snapshot(),
+        contract_registry: ctx.contract_registry.clone(),
     });
     MirageSnapshot {
         version: SNAPSHOT_VERSION,
@@ -215,6 +219,7 @@ pub fn chain_context_from_snapshot(
         agents: legacy_agent_snapshot,
         tasks: task_snapshot,
         predictions: prediction_snapshot,
+        contract_registry,
     } = snap;
 
     // `from_snapshot` rebuilds the brute-force HDC index. HNSW is not persisted
@@ -247,6 +252,7 @@ pub fn chain_context_from_snapshot(
         task_bus: tokio::sync::broadcast::channel(1_024).0,
         prediction_store: PredictionStore::from_snapshot(prediction_snapshot),
         prediction_bus: tokio::sync::broadcast::channel(1_024).0,
+        contract_registry,
     }
 }
 
@@ -488,6 +494,7 @@ mod tests {
             agents: agent_registry.snapshot(),
             tasks: crate::chain::TaskStore::new().snapshot(),
             predictions: crate::chain::PredictionStore::new().snapshot(),
+            contract_registry: std::collections::HashMap::new(),
         };
 
         let restored = chain_context_from_snapshot(snap, 1_000);

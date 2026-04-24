@@ -32,6 +32,7 @@ use crate::error::ApiError;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::routes::run::spawn_background_run;
 use crate::runtime::RunResult;
+use crate::sanitize::sanitize_agent_content;
 use crate::state::{AgentRegistrationRecord, AppState, DiscoveredAgent, OperationStatus};
 
 const AGENT_MESSAGE_INLINE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -486,19 +487,15 @@ async fn register_agent(
         let config = state.load_roko_config();
         let agent_id = agent.agent_id.clone();
         let capabilities = agent.capabilities.join(",");
-        let registry_addr = config
-            .chain
-            .agent_registry
-            .as_deref()
-            .unwrap_or("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
-            .to_string();
-        tokio::spawn(async move {
-            if let Err(e) =
-                chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
-            {
-                tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
-            }
-        });
+        if let Some(registry_addr) = config.chain.agent_registry.clone() {
+            tokio::spawn(async move {
+                if let Err(e) =
+                    chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
+                {
+                    tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
+                }
+            });
+        }
     }
 
     let token = if req.issue_token.unwrap_or(false) {
@@ -676,19 +673,15 @@ mode = "self_hosted"
         let config = state.load_roko_config();
         let agent_id = agent.agent_id.clone();
         let capabilities = agent.capabilities.join(",");
-        let registry_addr = config
-            .chain
-            .agent_registry
-            .as_deref()
-            .unwrap_or("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
-            .to_string();
-        tokio::spawn(async move {
-            if let Err(e) =
-                chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
-            {
-                tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
-            }
-        });
+        if let Some(registry_addr) = config.chain.agent_registry.clone() {
+            tokio::spawn(async move {
+                if let Err(e) =
+                    chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
+                {
+                    tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
+                }
+            });
+        }
     }
 
     Ok((
@@ -1155,15 +1148,28 @@ async fn send_message(
 
                     let run_id = uuid::Uuid::new_v4().to_string();
 
-                    // Emit an agent_output event so WS/SSE clients see it.
+                    // Emit sanitized agent_output for consumers.
+                    let clean_text = sanitize_agent_content(&response_text);
                     state
                         .event_bus
                         .publish(crate::events::ServerEvent::AgentOutput {
                             agent_id: agent_id.clone(),
                             run_id: Some(run_id.clone()),
-                            content: response_text.clone(),
+                            content: clean_text.clone(),
                             done: true,
                             metadata: None,
+                        });
+                    // Emit raw trace for debug subscribers.
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentTrace {
+                            agent_id: agent_id.clone(),
+                            run_id: Some(run_id.clone()),
+                            content: response_text.clone(),
+                            tool_calls: None,
+                            reasoning: None,
+                            usage: None,
+                            done: true,
                         });
 
                     return Ok((
@@ -1172,7 +1178,7 @@ async fn send_message(
                             "run_id": run_id,
                             "agent_id": agent_id,
                             "status": "completed",
-                            "response": response_text,
+                            "response": clean_text,
                         })),
                     ));
                 }
@@ -1354,22 +1360,42 @@ async fn proxy_sidecar_stream(
                 }
                 if let Some(chunk) = stream_content_chunk(&value) {
                     response_text.push_str(chunk);
+                    let clean_chunk = sanitize_agent_content(chunk);
+                    if !clean_chunk.is_empty() {
+                        state
+                            .event_bus
+                            .publish(crate::events::ServerEvent::AgentOutput {
+                                agent_id: agent_id.clone(),
+                                run_id: Some(run_id.clone()),
+                                content: clean_chunk,
+                                done: false,
+                                metadata: None,
+                            });
+                    }
+                    // Always emit the raw chunk as a trace event.
                     state
                         .event_bus
-                        .publish(crate::events::ServerEvent::AgentOutput {
+                        .publish(crate::events::ServerEvent::AgentTrace {
                             agent_id: agent_id.clone(),
                             run_id: Some(run_id.clone()),
                             content: chunk.to_string(),
+                            tool_calls: value.get("tool_calls").cloned().map(|v| {
+                                if let Value::Array(a) = v { a } else { vec![v] }
+                            }),
+                            reasoning: value
+                                .get("reasoning")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            usage: value.get("usage").cloned(),
                             done: false,
-                            metadata: None,
                         });
                 }
                 if value.get("done").and_then(Value::as_bool).unwrap_or(false) {
                     state
                         .event_bus
                         .publish(crate::events::ServerEvent::AgentOutput {
-                            agent_id,
-                            run_id: Some(run_id),
+                            agent_id: agent_id.clone(),
+                            run_id: Some(run_id.clone()),
                             content: String::new(),
                             done: true,
                             metadata: Some(json!({
@@ -1381,6 +1407,18 @@ async fn proxy_sidecar_stream(
                                     .cloned()
                                     .unwrap_or(Value::Null),
                             })),
+                        });
+                    // Final trace event with usage/session metadata.
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentTrace {
+                            agent_id,
+                            run_id: Some(run_id),
+                            content: String::new(),
+                            tool_calls: None,
+                            reasoning: None,
+                            usage: value.get("usage").cloned(),
+                            done: true,
                         });
                     return Ok(response_text);
                 }

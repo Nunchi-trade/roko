@@ -71,12 +71,14 @@ pub mod relay;
 pub mod retention;
 pub mod routes;
 pub mod runtime;
+pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
 pub mod truth_map;
 
 pub use crate::routes::reload_config_from_disk;
+pub use crate::sanitize::sanitize_agent_content;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

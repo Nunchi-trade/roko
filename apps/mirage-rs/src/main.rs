@@ -318,6 +318,20 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
                         std::sync::Arc::new(mirage_rs::roko_bridge::InsightBus::new()),
                     );
                 }
+                // Seed ERC-8004 bootstrap addresses into the contract registry
+                // so GET /api/deployment always includes them.
+                ctx.contract_registry.insert(
+                    "IdentityRegistry".into(),
+                    format!("{:#x}", erc8004_contracts.identity_registry),
+                );
+                ctx.contract_registry.insert(
+                    "ReputationRegistry".into(),
+                    format!("{:#x}", erc8004_contracts.reputation_registry),
+                );
+                ctx.contract_registry.insert(
+                    "ValidationRegistry".into(),
+                    format!("{:#x}", erc8004_contracts.validation_registry),
+                );
                 std::sync::Arc::new(parking_lot::RwLock::new(ctx))
             };
             tracing::info!(

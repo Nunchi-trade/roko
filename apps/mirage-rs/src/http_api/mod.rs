@@ -362,7 +362,9 @@ pub fn build_router(state: ApiState) -> Router {
             get(prediction::get_calibration),
         )
         // Combined stats
-        .route("/stats", get(combined_stats));
+        .route("/stats", get(combined_stats))
+        // Contract deployment registry
+        .route("/deployment", get(get_deployment).post(post_deployment));
 
     #[cfg(feature = "roko")]
     let router = router.route("/ws", get(ws::ws_handler));
@@ -440,6 +442,58 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
             "total": ws_total,
         }
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Contract deployment registry
+// ---------------------------------------------------------------------------
+
+/// `GET /api/deployment` — return all registered contract addresses.
+///
+/// The dashboard calls this at startup to discover deployed contract addresses
+/// instead of hardcoding them. Addresses are seeded with ERC-8004 bootstrap
+/// contracts and updated by `POST /api/deployment` after Foundry deploys.
+async fn get_deployment(State(state): State<ApiState>) -> Json<serde_json::Value> {
+    let chain = state.chain.read();
+    let contracts = &chain.contract_registry;
+    Json(serde_json::json!({
+        "chain_id": 1,
+        "contracts": contracts,
+    }))
+}
+
+/// `POST /api/deployment` — register or update contract addresses.
+///
+/// Accepts `{ "contracts": { "AgentRegistry": "0x...", ... } }`.
+/// Merges into the existing registry (does not replace it).
+async fn post_deployment(
+    State(state): State<ApiState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let contracts = body
+        .get("contracts")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| ApiError {
+            error: "expected { \"contracts\": { \"Name\": \"0x...\" } }".into(),
+            code: 400,
+        })?;
+
+    let mut chain = state.chain.write();
+    let mut updated = 0usize;
+    for (name, addr) in contracts {
+        if let Some(addr_str) = addr.as_str() {
+            chain
+                .contract_registry
+                .insert(name.clone(), addr_str.to_string());
+            updated += 1;
+        }
+    }
+
+    let total = chain.contract_registry.len();
+    Ok(Json(serde_json::json!({
+        "updated": updated,
+        "total": total,
+    })))
 }
 
 /// Combined dashboard statistics.

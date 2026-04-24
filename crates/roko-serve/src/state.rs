@@ -227,6 +227,8 @@ pub struct PlanHandle {
     pub status: OperationStatus,
     /// Background task driving the plan runner.
     pub handle: JoinHandle<()>,
+    /// Cancel token for pausing / stopping the execution.
+    pub cancel: CancelToken,
 }
 
 /// A tracked generic operation (PRD draft, research, etc.).
