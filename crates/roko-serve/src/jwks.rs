@@ -10,6 +10,9 @@ use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+/// The Nunchi Privy application ID. Project-level constant, not a secret.
+pub const NUNCHI_PRIVY_APP_ID: &str = "cmhw01vut003tjx0d5lmqc8zs";
+
 /// JWKS endpoint for Privy.
 const JWKS_URL: &str = "https://auth.privy.io/.well-known/jwks.json";
 

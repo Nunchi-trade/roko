@@ -428,8 +428,21 @@ pub async fn run_server_with_state(state: Arc<AppState>, bind: &str, port: u16) 
 fn build_app_state(
     workdir: PathBuf,
     runtime: Arc<dyn CliRuntime>,
-    roko_config: RokoConfig,
+    mut roko_config: RokoConfig,
 ) -> AppState {
+    // Auto-configure Privy JWT auth: always set the app ID (it's a project
+    // constant) and auto-enable auth when a stored Privy credential exists.
+    if roko_config.serve.auth.privy_app_id.is_none() {
+        roko_config.serve.auth.privy_app_id = Some(crate::jwks::NUNCHI_PRIVY_APP_ID.to_string());
+    }
+    if !roko_config.serve.auth.enabled {
+        if let Ok(Some(cred)) = load_stored_credential() {
+            if cred.get("method").and_then(|v| v.as_str()) == Some("privy") {
+                info!("Privy credential found — enabling auth");
+                roko_config.serve.auth.enabled = true;
+            }
+        }
+    }
     let deploy_backend = create_deploy_backend(&roko_config);
     let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
     let _ = state.state_hub.bootstrap_from_workdir(&state.workdir);
@@ -973,6 +986,21 @@ async fn signal_ingest_loop(
 async fn shutdown_on_cancel(state: Arc<AppState>) {
     state.cancel.cancelled().await;
     state.shutdown().await;
+}
+
+/// Read `~/.roko/credentials.json` and return the "default" profile as a
+/// raw JSON value. This avoids a dependency on roko-cli's `Credential` type.
+fn load_stored_credential() -> Result<Option<serde_json::Value>> {
+    let path = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".roko")
+        .join("credentials.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read_to_string(&path)?;
+    let store: serde_json::Value = serde_json::from_str(&data)?;
+    Ok(store.get("default").cloned())
 }
 
 fn create_deploy_backend(roko_config: &RokoConfig) -> Arc<dyn deploy::DeployBackend> {

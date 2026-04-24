@@ -480,16 +480,27 @@ Examples:
     /// Authenticate with a roko-serve instance.
     #[command(after_help = "\
 Examples:
-  roko login                              Login to localhost:6677 (prompts for API key)
-  roko login https://my-server.com        Login to a remote server
-  roko login --api-key                    Login with an API key (non-interactive check)")]
+  roko login                              Login via browser (Privy)
+  roko login --api-key                    Login with an API key (prompts)
+  roko login --api-key --check            Validate stored API key credential
+  roko login https://my-server.com        Login to a remote server")]
     Login {
         /// URL of the roko-serve instance (default: http://localhost:6677).
         #[arg(default_value = "http://localhost:6677")]
         url: String,
-        /// Login with an existing API key (non-interactive: validate stored credential).
+        /// Login with an API key instead of browser auth.
         #[arg(long)]
         api_key: bool,
+        /// Non-interactive: validate stored credential only.
+        #[arg(long, requires = "api_key")]
+        check: bool,
+        /// URL of the dashboard for browser auth (default: http://localhost:5173).
+        #[arg(
+            long,
+            env = "NUNCHI_DASHBOARD_URL",
+            default_value = "http://localhost:5173"
+        )]
+        dashboard_url: String,
     },
     /// Remove stored credentials.
     Logout,
@@ -1995,7 +2006,12 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
 
         // ── Authentication ────────────────────────────────────────────
-        Command::Login { url, api_key } => cmd_login(&url, api_key).await,
+        Command::Login {
+            url,
+            api_key,
+            check,
+            dashboard_url,
+        } => cmd_login(&url, api_key, check, &dashboard_url).await,
         Command::Logout => cmd_logout(),
         Command::Whoami => cmd_whoami().await,
     }
@@ -2751,83 +2767,203 @@ fn cmd_explain(topic: &str, depth: u8) {
 // Authentication: login / logout / whoami
 // -----------------------------------------------------------------------
 
-async fn cmd_login(url: &str, api_key_mode: bool) -> Result<i32> {
+async fn cmd_login(url: &str, api_key_mode: bool, check: bool, dashboard_url: &str) -> Result<i32> {
     use roko_cli::credentials;
 
     let url = url.trim_end_matches('/');
 
     if api_key_mode {
-        // Non-interactive: check if we already have a stored credential and
-        // validate it against the server.
-        match credentials::load_credential()? {
-            Some(cred) => match validate_credential(&cred.url, &cred.token).await {
-                Ok(true) => {
-                    println!("authenticated to {} (stored credential valid)", cred.url);
-                    return Ok(EXIT_SUCCESS);
-                }
-                Ok(false) => {
-                    eprintln!("stored credential for {} is no longer valid", cred.url);
+        if check {
+            // Non-interactive: validate stored credential only.
+            match credentials::load_credential()? {
+                Some(cred) => match validate_credential(&cred.url, &cred.token).await {
+                    Ok(true) => {
+                        println!("authenticated to {} (stored credential valid)", cred.url);
+                        return Ok(EXIT_SUCCESS);
+                    }
+                    Ok(false) => {
+                        eprintln!("stored credential for {} is no longer valid", cred.url);
+                        return Ok(EXIT_FAILURE);
+                    }
+                    Err(e) => {
+                        eprintln!("could not connect to {}: {e}", cred.url);
+                        return Ok(EXIT_FAILURE);
+                    }
+                },
+                None => {
+                    eprintln!("no stored credential found; run `roko login` to authenticate");
                     return Ok(EXIT_FAILURE);
                 }
-                Err(e) => {
-                    eprintln!("could not connect to {}: {e}", cred.url);
-                    return Ok(EXIT_FAILURE);
-                }
-            },
-            None => {
-                eprintln!("no stored credential found; run `roko login` to authenticate");
+            }
+        }
+
+        // Interactive API key entry.
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "error: stdin is not a terminal; use --api-key --check for non-interactive mode"
+            );
+            return Ok(EXIT_FAILURE);
+        }
+
+        print!("Enter API key for {url}: ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let key = read_password_from_terminal().unwrap_or_else(|_| {
+            let mut buf = String::new();
+            let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf);
+            buf
+        });
+        let key = key.trim().to_string();
+
+        if key.is_empty() {
+            eprintln!("error: empty API key");
+            return Ok(EXIT_FAILURE);
+        }
+
+        match validate_credential(url, &key).await {
+            Ok(true) => {
+                let cred = credentials::Credential {
+                    url: url.to_string(),
+                    token: key,
+                    method: "api_key".into(),
+                    stored_at: chrono::Utc::now().to_rfc3339(),
+                    privy_user_id: None,
+                    email: None,
+                    wallet_address: None,
+                    login_method: None,
+                };
+                credentials::store_credential(&cred)?;
+                println!("authenticated to {url}");
+                println!(
+                    "credentials stored in {}",
+                    credentials::credentials_path().display()
+                );
+                return Ok(EXIT_SUCCESS);
+            }
+            Ok(false) => {
+                eprintln!("invalid API key (server returned 401)");
+                return Ok(EXIT_FAILURE);
+            }
+            Err(e) => {
+                eprintln!("could not connect to {url}: {e}");
                 return Ok(EXIT_FAILURE);
             }
         }
     }
 
-    // Interactive: prompt for API key.
-    if !std::io::stdin().is_terminal() {
-        eprintln!("error: stdin is not a terminal; use --api-key for non-interactive mode");
-        return Ok(EXIT_FAILURE);
+    // Default: browser-based Privy auth flow.
+    cmd_login_browser(url, dashboard_url).await
+}
+
+/// Browser-based login: start a localhost callback server, open the
+/// dashboard's `/cli/auth` page, wait for Privy credentials.
+async fn cmd_login_browser(url: &str, dashboard_url: &str) -> Result<i32> {
+    use roko_cli::credentials;
+    use tokio::sync::oneshot;
+
+    // Callback payload from the dashboard's CliAuth page.
+    #[derive(serde::Deserialize)]
+    struct CallbackPayload {
+        access_token: String,
+        privy_user_id: String,
+        email: Option<String>,
+        wallet_address: Option<String>,
+        #[serde(default)]
+        login_method: Option<String>,
     }
 
-    print!("Enter API key for {url}: ");
+    let (tx, rx) = oneshot::channel::<CallbackPayload>();
+    let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    // Build the callback server.
+    let tx_for_handler = std::sync::Arc::clone(&tx);
+    let app = axum::Router::new()
+        .route(
+            "/callback",
+            axum::routing::options(|| async {
+                axum::http::Response::builder()
+                    .status(204)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+                    .header("Access-Control-Allow-Headers", "Content-Type")
+                    .body(axum::body::Body::empty())
+                    .expect("invariant: cors preflight response builds")
+            }),
+        )
+        .route(
+            "/callback",
+            axum::routing::post(move |axum::Json(payload): axum::Json<CallbackPayload>| {
+                let tx = std::sync::Arc::clone(&tx_for_handler);
+                async move {
+                    if let Some(sender) = tx.lock().await.take() {
+                        let _ = sender.send(payload);
+                    }
+                    axum::http::Response::builder()
+                        .status(200)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(axum::body::Body::from(r#"{"ok":true}"#))
+                        .expect("invariant: callback response builds")
+                }
+            }),
+        );
+
+    // Bind to a random port.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+
+    // Spawn the server.
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    // Open the browser.
+    let dashboard_url = dashboard_url.trim_end_matches('/');
+    let auth_url = format!("{dashboard_url}/cli/auth?port={port}");
+    println!("Opening browser to authenticate...");
+    if webbrowser::open(&auth_url).is_err() {
+        println!("Could not open browser automatically.");
+        println!("Please open this URL manually:\n  {auth_url}");
+    }
+
+    print!("Waiting for login... ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    // Read the key. We try rpassword-style hidden input first, but fall
-    // back to plain stdin if the terminal doesn't cooperate.
-    let key = read_password_from_terminal().unwrap_or_else(|_| {
-        // Fallback: read a plain line from stdin.
-        let mut buf = String::new();
-        let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf);
-        buf
-    });
-    let key = key.trim().to_string();
+    // Wait for the callback with a 5-minute timeout.
+    let result = tokio::time::timeout(Duration::from_secs(300), rx).await;
+    server_handle.abort();
 
-    if key.is_empty() {
-        eprintln!("error: empty API key");
-        return Ok(EXIT_FAILURE);
-    }
+    match result {
+        Ok(Ok(payload)) => {
+            println!("done");
+            let display_name = payload.email.as_deref().unwrap_or(&payload.privy_user_id);
+            println!("\nAuthenticated as {display_name}");
 
-    // Validate the key against the server's health endpoint.
-    match validate_credential(url, &key).await {
-        Ok(true) => {
             let cred = credentials::Credential {
                 url: url.to_string(),
-                token: key,
-                method: "api_key".into(),
+                token: payload.access_token,
+                method: "privy".into(),
                 stored_at: chrono::Utc::now().to_rfc3339(),
+                privy_user_id: Some(payload.privy_user_id),
+                email: payload.email,
+                wallet_address: payload.wallet_address,
+                login_method: payload.login_method,
             };
             credentials::store_credential(&cred)?;
-            println!("authenticated to {url}");
             println!(
-                "credentials stored in {}",
+                "Credentials saved to {}",
                 credentials::credentials_path().display()
             );
             Ok(EXIT_SUCCESS)
         }
-        Ok(false) => {
-            eprintln!("invalid API key (server returned 401)");
+        Ok(Err(_)) => {
+            println!("failed");
+            eprintln!("error: callback channel closed unexpectedly");
             Ok(EXIT_FAILURE)
         }
-        Err(e) => {
-            eprintln!("could not connect to {url}: {e}");
+        Err(_) => {
+            println!("timed out");
+            eprintln!("error: no response within 5 minutes");
+            eprintln!("hint: run `roko login` to try again");
             Ok(EXIT_FAILURE)
         }
     }
@@ -2916,6 +3052,20 @@ async fn cmd_whoami() -> Result<i32> {
             println!("method:     {}", cred.method);
             println!("stored at:  {}", cred.stored_at);
 
+            // Show Privy-specific fields.
+            if let Some(ref user_id) = cred.privy_user_id {
+                println!("user:       {user_id}");
+            }
+            if let Some(ref email) = cred.email {
+                println!("email:      {email}");
+            }
+            if let Some(ref wallet) = cred.wallet_address {
+                println!("wallet:     {wallet}");
+            }
+            if let Some(ref method) = cred.login_method {
+                println!("via:        {method}");
+            }
+
             // Mask the token for display: show first 8 chars + "..."
             let masked = if cred.token.len() > 8 {
                 format!("{}...", &cred.token[..8])
@@ -2925,18 +3075,20 @@ async fn cmd_whoami() -> Result<i32> {
             println!("token:      {masked}");
 
             // Validate the credential is still good.
-            print!("status:     ");
-            std::io::Write::flush(&mut std::io::stdout())?;
-            match validate_credential(&cred.url, &cred.token).await {
-                Ok(true) => println!("valid"),
-                Ok(false) => println!("invalid (server returned 401)"),
-                Err(e) => println!("unreachable ({e})"),
+            if cred.method == "api_key" {
+                print!("status:     ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                match validate_credential(&cred.url, &cred.token).await {
+                    Ok(true) => println!("valid"),
+                    Ok(false) => println!("invalid (server returned 401)"),
+                    Err(e) => println!("unreachable ({e})"),
+                }
             }
             Ok(EXIT_SUCCESS)
         }
         None => {
             println!("not logged in");
-            println!("run `roko login <url>` to authenticate with a roko-serve instance");
+            println!("run `roko login` to authenticate");
             Ok(EXIT_SUCCESS)
         }
     }

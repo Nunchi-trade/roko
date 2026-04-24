@@ -164,8 +164,7 @@ impl RelayProxyState {
     }
 
     fn is_healthy(&self) -> bool {
-        self.healthy
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.healthy.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

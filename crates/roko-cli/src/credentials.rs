@@ -20,17 +20,33 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 
+/// The Nunchi Privy application ID. This is a project-level constant,
+/// not a secret — it identifies the Privy app, not a user.
+pub const NUNCHI_PRIVY_APP_ID: &str = "cmhw01vut003tjx0d5lmqc8zs";
+
 /// A single stored credential entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
     /// URL of the roko-serve instance.
     pub url: String,
-    /// The API key / token value.
+    /// The API key / token value (API key or Privy JWT).
     pub token: String,
-    /// How the credential was obtained (e.g. "api_key").
+    /// How the credential was obtained: `"api_key"` or `"privy"`.
     pub method: String,
     /// ISO-8601 timestamp of when the credential was stored.
     pub stored_at: String,
+    /// Privy user identifier (e.g. `did:privy:cm...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privy_user_id: Option<String>,
+    /// Email address from Privy auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Primary wallet address from Privy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
+    /// Privy login method (e.g. `"email"`, `"google"`, `"wallet"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>,
 }
 
 /// On-disk format: a map of profile names to credentials.
@@ -145,6 +161,10 @@ mod tests {
             token: "rk_test_123".into(),
             method: "api_key".into(),
             stored_at: "2026-04-24T00:00:00Z".into(),
+            privy_user_id: None,
+            email: None,
+            wallet_address: None,
+            login_method: None,
         };
 
         let mut store = HashMap::new();
