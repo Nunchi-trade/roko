@@ -153,6 +153,139 @@ impl RelayHealth {
 pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
+// Workspace registration (roko-serve → relay)
+// ---------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+use roko_core::config::schema::RelayConfig;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+/// Resolve the public URL for this roko instance.
+///
+/// Priority: config > RAILWAY_PUBLIC_DOMAIN > FLY_APP_NAME > localhost fallback.
+fn resolve_public_url(config: &RelayConfig, port: u16) -> String {
+    if let Some(url) = &config.public_url {
+        return url.clone();
+    }
+    if let Ok(domain) = std::env::var("RAILWAY_PUBLIC_DOMAIN") {
+        return format!("https://{domain}");
+    }
+    if let Ok(app) = std::env::var("FLY_APP_NAME") {
+        return format!("https://{app}.fly.dev");
+    }
+    format!("http://localhost:{port}")
+}
+
+/// Resolve the workspace name.
+///
+/// Priority: config > hostname > "roko".
+fn resolve_workspace_name(config: &RelayConfig) -> String {
+    if let Some(name) = &config.workspace_name {
+        return name.clone();
+    }
+    gethostname::gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "roko".into())
+}
+
+/// Start a background task that registers this roko instance with the relay
+/// and sends periodic heartbeats.
+///
+/// Returns `None` if relay is not configured.
+pub fn start_workspace_registration(
+    relay_config: RelayConfig,
+    port: u16,
+    agent_count: Arc<std::sync::atomic::AtomicU32>,
+) -> Option<JoinHandle<()>> {
+    let relay_url = relay_config.url.as_deref()?.to_string();
+    let public_url = resolve_public_url(&relay_config, port);
+    let workspace_name = resolve_workspace_name(&relay_config);
+    let workspace_id = format!("ws-{}", uuid::Uuid::new_v4());
+    let heartbeat_secs = relay_config.heartbeat_interval_secs;
+
+    info!(
+        relay_url = %relay_url,
+        public_url = %public_url,
+        workspace_name = %workspace_name,
+        "starting workspace relay registration"
+    );
+
+    Some(tokio::spawn(async move {
+        // Convert relay WS URL to HTTP for REST calls.
+        let relay_http = relay_url
+            .replace("wss://", "https://")
+            .replace("ws://", "http://");
+        let client = reqwest::Client::new();
+
+        // Register workspace.
+        let register_url = format!("{relay_http}/relay/workspaces/register");
+        let body = serde_json::json!({
+            "workspace_id": workspace_id,
+            "name": workspace_name,
+            "url": public_url,
+            "version": env!("CARGO_PKG_VERSION"),
+            "agents_count": agent_count.load(std::sync::atomic::Ordering::Relaxed),
+        });
+
+        match client.post(&register_url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!(workspace_id = %workspace_id, "registered with relay");
+            }
+            Ok(resp) => {
+                warn!(
+                    status = %resp.status(),
+                    "relay registration returned non-success"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to register with relay (will retry on heartbeat)");
+            }
+        }
+
+        // Periodic heartbeat loop.
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(heartbeat_secs),
+        );
+        loop {
+            interval.tick().await;
+
+            let heartbeat_url = format!(
+                "{relay_http}/relay/workspaces/{workspace_id}/heartbeat"
+            );
+            let hb_body = serde_json::json!({
+                "agents_count": agent_count.load(std::sync::atomic::Ordering::Relaxed),
+            });
+
+            match client.post(&heartbeat_url).json(&hb_body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(workspace_id = %workspace_id, "relay heartbeat sent");
+                }
+                Ok(resp) => {
+                    debug!(
+                        status = %resp.status(),
+                        "relay heartbeat returned non-success, re-registering"
+                    );
+                    // Re-register in case the relay restarted.
+                    let body = serde_json::json!({
+                        "workspace_id": workspace_id,
+                        "name": workspace_name,
+                        "url": public_url,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "agents_count": agent_count.load(std::sync::atomic::Ordering::Relaxed),
+                    });
+                    let _ = client.post(&register_url).json(&body).send().await;
+                }
+                Err(e) => {
+                    debug!(error = %e, "relay heartbeat failed");
+                }
+            }
+        }
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

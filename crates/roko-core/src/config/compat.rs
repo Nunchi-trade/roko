@@ -12,9 +12,9 @@ use super::schema::{
     AgentConfig, AgentRoleToggles, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION,
     ChainConfig, ConductorConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig,
     GeminiConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig,
-    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RokoConfig,
-    RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig, TemporalConfig,
-    ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
+    OneirographyConfig, PerplexityConfig, PipelineConfig, PrdConfig, ProjectConfig, RelayConfig,
+    RokoConfig, RoleOverride, RoutingConfig, SchedulerConfig, ServeConfig, ServerConfig,
+    TemporalConfig, ToolsConfig, TuiConfig, WatcherConfig, WebhooksConfig,
 };
 
 /// Subset of Mori's `ConfigState` that we recognize.
@@ -127,6 +127,7 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         gemini: GeminiConfig::default(),
         attention: AttentionConfig::default(),
         chain: ChainConfig::default(),
+        relay: RelayConfig::default(),
         immune: ImmuneConfig::default(),
         temporal: TemporalConfig::default(),
         goals: GoalsConfig::default(),

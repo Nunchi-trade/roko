@@ -335,6 +335,8 @@ pub struct AppState {
     pub chain_client: Option<Arc<AlloyChainClient>>,
     /// Optional alloy wallet for on-chain writes (feature: alloy-backend).
     pub chain_wallet: Option<Arc<AlloyChainWallet>>,
+    /// Atomic counter of active agents (used by relay workspace heartbeat).
+    pub agent_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AppState {
@@ -415,6 +417,7 @@ impl AppState {
             heartbeats: RwLock::new(VecDeque::new()),
             chain_client,
             chain_wallet,
+            agent_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 

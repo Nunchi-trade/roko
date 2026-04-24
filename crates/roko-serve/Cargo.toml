@@ -60,6 +60,7 @@ utoipa = { version = "5", features = ["macros"] }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 validator = { version = "0.20", features = ["derive"] }
+gethostname = "1.1.0"
 
 [dev-dependencies]
 async-trait = { workspace = true }

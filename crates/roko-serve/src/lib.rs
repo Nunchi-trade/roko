@@ -222,6 +222,15 @@ impl ServerBuilder {
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
+
+        // Register workspace with relay if configured.
+        let serve_port = self.config.port.unwrap_or(6677);
+        let _relay_registration = relay::start_workspace_registration(
+            self.config.roko_config.relay.clone(),
+            serve_port,
+            Arc::clone(&state.agent_count),
+        );
+
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
