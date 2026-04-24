@@ -67,4 +67,4 @@ WORKDIR /workspace
 EXPOSE 8545
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["/usr/local/bin/start-mirage-with-relay", "--chain-id", "1"]
+CMD ["/usr/local/bin/start-mirage-with-relay"]

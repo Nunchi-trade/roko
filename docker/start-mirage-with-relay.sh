@@ -9,6 +9,7 @@ STATE_DIR="${MIRAGE_STATE_DIR:-/workspace/.roko/state}"
 VOLUME_ROOT="${RAILWAY_VOLUME_MOUNT_PATH:-}"
 SNAPSHOT_INTERVAL="${MIRAGE_SNAPSHOT_INTERVAL_SECS:-15}"
 BLOCK_INTERVAL_MS="${MIRAGE_BLOCK_INTERVAL_MS:-}"
+CHAIN_ID="${MIRAGE_CHAIN_ID:-88888}"
 
 ETH_RPC_URL="${ETH_RPC_URL:-}"
 
@@ -73,6 +74,7 @@ start_relay
 MIRAGE_ARGS=(
   --host "${MIRAGE_HOST}"
   --port "${PUBLIC_PORT}"
+  --chain-id "${CHAIN_ID}"
   --enable-hdc
   --enable-knowledge
   --enable-stigmergy

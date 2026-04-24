@@ -221,6 +221,16 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
         .state_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from(".roko/state"));
+    // Log persistence diagnostics so Railway deploy logs show the state dir
+    // and whether prior snapshots exist.
+    tracing::info!(
+        state_dir = %state_dir.display(),
+        volume_mount = %std::env::var("RAILWAY_VOLUME_MOUNT_PATH").unwrap_or_else(|_| "(not set)".into()),
+        no_persist = cli.no_persist,
+        snapshot_file_exists = state_dir.join("mirage-snapshot.json").exists(),
+        "persistence config"
+    );
+
     let loaded_snapshot = if cli.no_persist {
         None
     } else {
