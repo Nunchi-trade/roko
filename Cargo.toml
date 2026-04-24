@@ -169,6 +169,7 @@ rand = "0.8"
 rand_chacha = "0.3"
 regex = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }
+jsonwebtoken = "9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

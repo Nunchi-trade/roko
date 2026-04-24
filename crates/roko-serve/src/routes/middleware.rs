@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::http::Request;
 use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, Method, Request};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
@@ -16,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::ApiError;
+use crate::state::AppState;
 
 /// Extract a bearer token from an `Authorization` header value.
 ///
@@ -156,7 +156,10 @@ fn api_credential(headers: &HeaderMap) -> ApiCredential<'_> {
 
 /// Authenticate the supplied token against the legacy single key and the
 /// named `api_keys` list. Returns `(AuthMethod, scope, user_id)` on success.
-fn authenticate_token(
+///
+/// This function handles API-key-based auth only — Privy JWT verification
+/// is handled asynchronously by [`try_privy_jwt`].
+fn authenticate_api_key(
     token: &str,
     auth: &ServeAuthConfig,
     via_header: bool,
@@ -185,32 +188,45 @@ fn authenticate_token(
         return Some((method, "admin".to_string(), None));
     }
 
-    // 3. Bearer-only: check if it looks like a Privy JWT (stub).
-    if !via_header && is_structurally_valid_jwt(token) && auth.privy_app_id.is_some() {
-        // TODO(phase-1b): real Privy JWT signature verification.
-        // For now, accept any structurally-valid JWT when privy_app_id is configured.
-        return Some((AuthMethod::Jwt, "read".to_string(), None));
-    }
-
     None
+}
+
+/// Attempt to validate a Bearer token as a Privy JWT using the JWKS cache.
+///
+/// Returns `(Jwt, "admin", Some(sub))` on success — JWT users are dashboard
+/// users and get admin scope.
+async fn try_privy_jwt(
+    token: &str,
+    auth: &ServeAuthConfig,
+    state: &Arc<AppState>,
+) -> Option<(AuthMethod, String, Option<String>)> {
+    let privy_app_id = auth.privy_app_id.as_deref()?;
+    if !is_structurally_valid_jwt(token) {
+        return None;
+    }
+    let claims = state.jwks_cache.validate(token, privy_app_id).await?;
+    Some((AuthMethod::Jwt, "admin".to_string(), Some(claims.sub)))
 }
 
 /// Require a matching API credential for the request to continue.
 ///
-/// Supports three credential sources:
-/// - `X-Api-Key` header (checked first for deterministic precedence)
-/// - `Authorization: Bearer <token>` (API key or JWT)
-/// - Named API keys from `api_keys` list (SHA-256 hash comparison)
+/// Supports four credential sources (checked in order):
+/// 1. `X-Api-Key` header (API key only)
+/// 2. `Authorization: Bearer <token>` matched against API keys
+/// 3. `Authorization: Bearer <jwt>` verified via Privy JWKS
+/// 4. Named API keys from `api_keys` list (SHA-256 hash comparison)
 ///
 /// On success, injects [`AuthContext`] into request extensions so downstream
 /// routes can inspect the caller's scope and identity.
 pub async fn require_api_key(
-    State(auth): State<ServeAuthConfig>,
+    State(state): State<Arc<AppState>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, ApiError> {
+    let auth = state.load_roko_config().serve.auth.clone();
+
     let (auth_method, ctx) = match api_credential(req.headers()) {
-        ApiCredential::XApiKey(supplied) => match authenticate_token(supplied, &auth, true) {
+        ApiCredential::XApiKey(supplied) => match authenticate_api_key(supplied, &auth, true) {
             Some((method, scope, user_id)) => (
                 method,
                 AuthContext {
@@ -225,21 +241,34 @@ pub async fn require_api_key(
                 ));
             }
         },
-        ApiCredential::Bearer(supplied) => match authenticate_token(supplied, &auth, false) {
-            Some((method, scope, user_id)) => (
-                method,
-                AuthContext {
+        ApiCredential::Bearer(supplied) => {
+            // Try API key match first (sync), then fall through to Privy JWT (async).
+            if let Some((method, scope, user_id)) = authenticate_api_key(supplied, &auth, false) {
+                (
                     method,
-                    scope,
-                    user_id,
-                },
-            ),
-            None => {
+                    AuthContext {
+                        method,
+                        scope,
+                        user_id,
+                    },
+                )
+            } else if let Some((method, scope, user_id)) =
+                try_privy_jwt(supplied, &auth, &state).await
+            {
+                (
+                    method,
+                    AuthContext {
+                        method,
+                        scope,
+                        user_id,
+                    },
+                )
+            } else {
                 return Err(ApiError::unauthorized(
                     "invalid or missing Authorization bearer token",
                 ));
             }
-        },
+        }
         ApiCredential::InvalidXApiKey => {
             return Err(ApiError::unauthorized(
                 "invalid or missing X-Api-Key header",
@@ -266,6 +295,79 @@ pub async fn require_api_key(
         axum::http::HeaderValue::from_static(auth_method.header_value()),
     );
     Ok(response)
+}
+
+/// Determine the required scope for a given HTTP method and path.
+fn required_scope_for(method: &Method, path: &str) -> &'static str {
+    // Read-only methods always pass.
+    if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
+        return "read";
+    }
+    // Admin-only routes.
+    if path.starts_with("/api/api-keys")
+        || path.starts_with("/api/secrets")
+        || path.starts_with("/api/config")
+    {
+        return "admin";
+    }
+    // Agent write routes.
+    if path.starts_with("/api/agents") {
+        return "agent:write";
+    }
+    // Plan/PRD write routes.
+    if path.starts_with("/api/plans") || path.starts_with("/api/prd") {
+        return "plan:write";
+    }
+    "read"
+}
+
+/// Check whether the caller's scope is sufficient for the required scope.
+fn is_scope_sufficient(has: &str, required: &str) -> bool {
+    if has == "admin" {
+        return true;
+    }
+    if required == "read" {
+        return true;
+    }
+    has == required
+}
+
+/// Enforce scope requirements on mutating routes.
+///
+/// Runs after [`require_api_key`] and reads the [`AuthContext`] from
+/// request extensions. GET/HEAD/OPTIONS always pass through.
+pub async fn require_scope(req: Request<Body>, next: Next) -> Result<Response, ApiError> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    // Read-only methods bypass scope checks.
+    if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
+        return Ok(next.run(req).await);
+    }
+
+    let required = required_scope_for(&method, &path);
+    let has_scope = req
+        .extensions()
+        .get::<AuthContext>()
+        .map(|ctx| ctx.scope.clone())
+        .unwrap_or_else(|| "read".to_string());
+
+    if !is_scope_sufficient(&has_scope, required) {
+        return Err(ApiError {
+            status: axum::http::StatusCode::FORBIDDEN,
+            code: "insufficient_scope".into(),
+            message: format!(
+                "scope '{has_scope}' is not sufficient for '{required}' on {method} {path}"
+            ),
+            details: Some(Box::new(serde_json::json!({
+                "required": required,
+                "has": has_scope,
+                "route": format!("{method} {path}"),
+            }))),
+        });
+    }
+
+    Ok(next.run(req).await)
 }
 
 /// Build the CORS layer from configured origins.
@@ -349,10 +451,14 @@ mod tests {
     use axum::http::StatusCode;
     use axum::http::header::AUTHORIZATION;
     use axum::http::header::CONTENT_TYPE;
-    use axum::routing::get;
-    use roko_core::config::ServeAuthConfig;
+    use axum::routing::{get, post};
+    use roko_core::config::{RokoConfig, ServeAuthConfig};
     use serde_json::Value;
+    use tempfile::tempdir;
     use tower::ServiceExt;
+
+    use crate::deploy::manual::ManualBackend;
+    use crate::runtime::NoOpRuntime;
 
     /// Build a test router that echoes the provided body, with the scrub
     /// middleware wired in.
@@ -386,10 +492,23 @@ mod tests {
         }
     }
 
+    fn make_test_state(auth: ServeAuthConfig) -> Arc<AppState> {
+        let tempdir = tempdir().expect("invariant: tempdir creates");
+        let mut config = RokoConfig::default();
+        config.serve.auth = auth;
+        Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            config,
+            Arc::new(ManualBackend::default()),
+        ))
+    }
+
     fn auth_test_app(auth: ServeAuthConfig) -> Router {
+        let state = make_test_state(auth);
         Router::new()
             .route("/test", get(|| async { StatusCode::NO_CONTENT }))
-            .layer(axum::middleware::from_fn_with_state(auth, require_api_key))
+            .layer(axum::middleware::from_fn_with_state(state, require_api_key))
     }
 
     async fn auth_response(
@@ -479,6 +598,107 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["message"], "invalid or missing X-Api-Key header");
     }
+
+    #[tokio::test]
+    async fn privy_jwt_without_cache_returns_401() {
+        // Configure privy_app_id but no JWKS cache is primed — should reject.
+        let auth = ServeAuthConfig {
+            enabled: true,
+            api_key: String::new(),
+            api_keys: Vec::new(),
+            privy_app_id: Some("app-id-123".to_string()),
+        };
+        let app = auth_test_app(auth);
+        // Send a structurally valid JWT that won't pass signature verification.
+        let fake_jwt = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InRlc3Qta2V5In0.\
+                         eyJzdWIiOiJkaWQ6cHJpdnk6dGVzdCIsImlzcyI6InByaXZ5LmlvIn0.\
+                         AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let response = auth_response(app, |req| {
+            req.header(AUTHORIZATION, format!("Bearer {fake_jwt}"))
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- scope enforcement tests ---
+
+    fn scope_test_app(scope: &str) -> Router {
+        let handler = || async { StatusCode::NO_CONTENT };
+        Router::new()
+            .route("/api/secrets", post(handler))
+            .route("/api/agents/test", post(handler))
+            .route("/api/plans/run", post(handler))
+            .route("/api/status", post(handler))
+            .route("/api/status", get(handler))
+            .layer(axum::middleware::from_fn(require_scope))
+            .layer(axum::Extension(AuthContext {
+                method: AuthMethod::ApiKey,
+                scope: scope.to_string(),
+                user_id: None,
+            }))
+    }
+
+    #[tokio::test]
+    async fn scope_enforcement_blocks_write_with_read_scope() {
+        let app = scope_test_app("read");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/secrets")
+            .body(Body::empty())
+            .expect("invariant: scope test request builds");
+        let resp = app.oneshot(req).await.expect("invariant: router responds");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn scope_enforcement_allows_get_with_read_scope() {
+        let app = scope_test_app("read");
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/status")
+            .body(Body::empty())
+            .expect("invariant: scope test request builds");
+        let resp = app.oneshot(req).await.expect("invariant: router responds");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn admin_scope_allows_everything() {
+        let app = scope_test_app("admin");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/secrets")
+            .body(Body::empty())
+            .expect("invariant: scope test request builds");
+        let resp = app.oneshot(req).await.expect("invariant: router responds");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn agent_write_scope_allows_agent_routes() {
+        let app = scope_test_app("agent:write");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/agents/test")
+            .body(Body::empty())
+            .expect("invariant: scope test request builds");
+        let resp = app.oneshot(req).await.expect("invariant: router responds");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn agent_write_scope_blocks_secrets() {
+        let app = scope_test_app("agent:write");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/secrets")
+            .body(Body::empty())
+            .expect("invariant: scope test request builds");
+        let resp = app.oneshot(req).await.expect("invariant: router responds");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- scrubbing tests ---
 
     #[tokio::test]
     async fn scrubs_api_key_from_json_response() {
@@ -743,5 +963,48 @@ mod tests {
                 .unwrap(),
             "jwt"
         );
+    }
+
+    // --- scope helper unit tests ---
+
+    #[test]
+    fn required_scope_for_get_is_read() {
+        assert_eq!(required_scope_for(&Method::GET, "/api/secrets"), "read");
+    }
+
+    #[test]
+    fn required_scope_for_post_secrets_is_admin() {
+        assert_eq!(required_scope_for(&Method::POST, "/api/secrets"), "admin");
+    }
+
+    #[test]
+    fn required_scope_for_post_agents_is_agent_write() {
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/agents/test"),
+            "agent:write"
+        );
+    }
+
+    #[test]
+    fn required_scope_for_post_plans_is_plan_write() {
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/plans/run"),
+            "plan:write"
+        );
+    }
+
+    #[test]
+    fn admin_scope_is_sufficient_for_everything() {
+        assert!(is_scope_sufficient("admin", "admin"));
+        assert!(is_scope_sufficient("admin", "agent:write"));
+        assert!(is_scope_sufficient("admin", "plan:write"));
+        assert!(is_scope_sufficient("admin", "read"));
+    }
+
+    #[test]
+    fn read_scope_only_sufficient_for_read() {
+        assert!(is_scope_sufficient("read", "read"));
+        assert!(!is_scope_sufficient("read", "admin"));
+        assert!(!is_scope_sufficient("read", "agent:write"));
     }
 }

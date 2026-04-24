@@ -44,6 +44,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 hmac = { workspace = true }
 regex = { workspace = true }
+jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 octocrab = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

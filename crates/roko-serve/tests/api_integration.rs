@@ -85,7 +85,14 @@ fn test_app_state() -> (tempfile::TempDir, Arc<AppState>, axum::Router) {
 /// Build a test router with API-key auth enabled.
 fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
     let dir = tempdir().expect("tempdir");
-    let config = RokoConfig::default();
+    let mut config = RokoConfig::default();
+    let auth = ServeAuthConfig {
+        enabled: true,
+        api_key: api_key.to_string(),
+        api_keys: Vec::new(),
+        privy_app_id: None,
+    };
+    config.serve.auth = auth.clone();
     let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
     let state = Arc::new(AppState::new(
         dir.path().to_path_buf(),
@@ -93,12 +100,6 @@ fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
         config,
         deploy,
     ));
-    let auth = ServeAuthConfig {
-        enabled: true,
-        api_key: api_key.to_string(),
-        api_keys: Vec::new(),
-        privy_app_id: None,
-    };
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, router)
 }
