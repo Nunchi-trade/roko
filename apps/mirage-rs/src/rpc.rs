@@ -107,9 +107,10 @@ struct StagedErc20Mint {
 struct RelayProxyState {
     upstream_http: String,
     client: reqwest::Client,
-    /// Tracks whether the upstream relay is healthy. Updated on every proxy
-    /// attempt. Shared across all handler clones.
+    /// Tracks whether the upstream relay is healthy. Shared across handlers.
     healthy: Arc<std::sync::atomic::AtomicBool>,
+    /// Consecutive probe failures. Only flips unhealthy after 3.
+    consecutive_failures: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl RelayProxyState {
@@ -117,7 +118,7 @@ impl RelayProxyState {
         let upstream_http = std::env::var("ROKO_AGENT_RELAY_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:9011".to_owned());
         let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(2))
+            .connect_timeout(std::time::Duration::from_secs(3))
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
@@ -125,6 +126,7 @@ impl RelayProxyState {
             upstream_http,
             client,
             healthy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -144,15 +146,26 @@ impl RelayProxyState {
     }
 
     fn mark_healthy(&self) {
-        self.healthy.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.consecutive_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.healthy
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn mark_unhealthy(&self) {
-        self.healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+    fn record_failure(&self) {
+        let prev = self
+            .consecutive_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Only flip to unhealthy after 3 consecutive failures to avoid flapping.
+        if prev >= 2 {
+            self.healthy
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn is_healthy(&self) -> bool {
-        self.healthy.load(std::sync::atomic::Ordering::Relaxed)
+        self.healthy
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -515,6 +528,7 @@ pub fn build_relay_proxy_router_for_tests(upstream_http: String) -> Router<()> {
         upstream_http,
         client: reqwest::Client::new(),
         healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     })
 }
 
@@ -523,6 +537,7 @@ fn build_relay_proxy_router_with_state(state: RelayProxyState) -> Router<()> {
     let probe_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut was_healthy = false;
         loop {
             interval.tick().await;
             let url = format!(
@@ -536,15 +551,18 @@ fn build_relay_proxy_router_with_state(state: RelayProxyState) -> Router<()> {
                 .await
                 .is_ok_and(|r| r.status().is_success());
             if ok {
-                if !probe_state.is_healthy() {
+                if !was_healthy {
                     tracing::info!("relay sidecar is now reachable");
+                    was_healthy = true;
                 }
                 probe_state.mark_healthy();
             } else {
-                if probe_state.is_healthy() {
-                    tracing::warn!("relay sidecar is unreachable");
+                probe_state.record_failure();
+                // Only log the transition after the failure threshold is met.
+                if was_healthy && !probe_state.is_healthy() {
+                    tracing::warn!("relay sidecar is unreachable (3 consecutive failures)");
+                    was_healthy = false;
                 }
-                probe_state.mark_unhealthy();
             }
         }
     });
@@ -597,7 +615,7 @@ async fn relay_proxy_http(
             response
         }
         Err(error) => {
-            state.mark_unhealthy();
+            state.record_failure();
             tracing::warn!(
                 %error,
                 path = %parts.uri,
@@ -656,7 +674,7 @@ async fn relay_proxy_ws(
             socket
         }
         Err(error) => {
-            state.mark_unhealthy();
+            state.record_failure();
             tracing::warn!(%error, %upstream_url, "relay WS proxy: upstream unreachable");
             return relay_proxy_error(StatusCode::BAD_GATEWAY, "relay websocket unavailable");
         }
