@@ -22,6 +22,7 @@
 //! | F7 Inspect | Knowledge | Engram DAG, Episode Replay, Knowledge Browse |
 //! | F8 Marketplace | Jobs | Job List, Job Detail, Create Job |
 //! | F9 Atelier | Workshop | PRD Workshop, Plan Explorer |
+//! | F10 Learning | Learning | Router, History, Efficiency |
 
 pub mod agents_view;
 pub mod atelier_view;

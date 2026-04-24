@@ -1,9 +1,9 @@
 //! `roko config` subcommand group — setup wizard, provenance viewer, editor.
 //!
-//! These commands operate on the global (`$XDG_CONFIG_HOME/roko/config.toml`)
-//! and/or project (`./roko.toml`) config files. The `init` wizard is the
-//! primary onboarding path: it detects installed LLM CLIs and writes a
-//! working global config with one interactive pass.
+//! These commands operate on the global (`~/.roko/config.toml`) and/or
+//! project (`./roko.toml`) config files. The `init` wizard is the primary
+//! onboarding path: it detects installed LLM CLIs and writes a working
+//! global config with one interactive pass.
 
 use crate::config::{
     AgentLayer, ConfigLayer, ConfigPaths, DetectedCli, ExecutorLayer, GateConfig, PromptLayer,
@@ -164,6 +164,25 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
     }
     std::fs::write(&path, rendered).with_context(|| format!("write {}", path.display()))?;
     println!("wrote {}", path.display());
+
+    // Also create ~/.roko/.env with a commented template if it doesn't exist.
+    if let Some(parent) = path.parent() {
+        let env_path = parent.join(".env");
+        if !env_path.exists() {
+            let template = "\
+# Roko environment — secrets and API keys.
+# This file is loaded at startup by load_startup_env_files().
+#
+# ANTHROPIC_API_KEY=sk-ant-...
+# GITHUB_TOKEN=ghp_...
+# SLACK_BOT_TOKEN=xoxb-...
+";
+            std::fs::write(&env_path, template)
+                .with_context(|| format!("write {}", env_path.display()))?;
+            println!("wrote {}", env_path.display());
+        }
+    }
+
     Ok(path)
 }
 
@@ -556,7 +575,7 @@ pub fn cmd_set(workdir: &Path, target: EditTarget, key: &str, value: &str) -> Re
 /// Which file `config edit` / `config set` should target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditTarget {
-    /// `~/.config/roko/config.toml`.
+    /// `~/.roko/config.toml`.
     Global,
     /// `./roko.toml` (creating it if absent).
     Project,

@@ -49,14 +49,14 @@ RestartSteps=5
 
 Environment=RUST_LOG={log_level}
 Environment=HOME={home}
-EnvironmentFile=-{home}/.config/roko/daemon.env
+EnvironmentFile=-{home}/.roko/daemon.env
 
 LimitNOFILE=4096
 
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths={home}/.roko {home}/.local/state/roko {home}/.config/roko
+ReadWritePaths={home}/.roko {home}/.local/state/roko
 PrivateTmp=true
 
 WorkingDirectory={home}
