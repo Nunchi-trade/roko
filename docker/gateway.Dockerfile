@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # roko-gateway container image (§42.3).
 #
@@ -31,9 +30,7 @@ RUN apt-get update \
 COPY . .
 
 # TODO(roko-gateway): replace --bin roko with --bin roko-gateway once the crate exists.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --bin roko && \
+RUN cargo build --release --bin roko && \
     cp target/release/roko /roko-gateway
 
 FROM gcr.io/distroless/cc-debian12:nonroot

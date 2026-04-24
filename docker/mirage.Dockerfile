@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # mirage-rs container image (§42.2).
 #
@@ -29,9 +28,7 @@ COPY . .
 # Build mirage-rs with the `binary` + `roko` features so the resulting image
 # keeps the JSON-RPC chain surface while also mounting the full REST + WebSocket
 # API from main. Build `agent-relay` alongside it for same-origin `/relay/*`.
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-target,target=/src/target \
-    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
+RUN cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
     && cargo build --release -p agent-relay --bin agent-relay \
     && cp target/release/mirage-rs /mirage-rs \
     && cp target/release/agent-relay /agent-relay

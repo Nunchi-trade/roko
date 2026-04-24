@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # Roko CLI container image (§42.1).
 #
@@ -25,9 +24,7 @@ RUN apt-get update \
 COPY . .
 
 # Build the `roko` binary from the roko-cli crate.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --bin roko && \
+RUN cargo build --release --bin roko && \
     cp target/release/roko /roko
 
 FROM debian:bookworm-slim

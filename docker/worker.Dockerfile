@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # Roko worker container image.
 #
@@ -22,9 +21,7 @@ RUN apt-get update \
 
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --bin roko && \
+RUN cargo build --release --bin roko && \
     cp target/release/roko /roko
 
 # --- Runtime stage ---
