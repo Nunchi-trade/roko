@@ -656,7 +656,19 @@ async fn finish_start_rpc_server(
     api_router: Option<Router>,
 ) -> Result<(SocketAddr, ServerHandle)> {
     let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
+    // Default jsonrpsee body limits are 10 MiB, which trips
+    // `Error("Memory capacity exceeded")` when Ponder's realtime sync asks
+    // for a full-tx block at the tip (a heavily-loaded block with many
+    // ClearingHouse log entries serializes well over 10 MiB). 128 MiB in
+    // each direction is plenty of headroom for any Ethereum-shape payload
+    // we'd actually emit.
+    const MAX_BODY_BYTES: u32 = 128 * 1024 * 1024;
+    let server_config = jsonrpsee::server::ServerConfig::builder()
+        .max_request_body_size(MAX_BODY_BYTES)
+        .max_response_body_size(MAX_BODY_BYTES)
+        .build();
     let rpc_service = ServerBuilder::default()
+        .set_config(server_config)
         .to_service_builder()
         .build(module, stop_handle);
     let rpc_fallback = tower::service_fn(move |request: Request<Body>| {
@@ -1100,15 +1112,61 @@ fn build_rpc_module(
             },
             _ => Vec::new(),
         };
+        // Iterate receipts directly — the earlier implementation looped over
+        // blocks_by_number[N].transactions, but the anvil-style mine_block
+        // path overwrites block entries with an empty transactions vec,
+        // hiding every log even though the receipt itself is intact.
+        //
+        // We collect receipts per-block so we can assign globally-correct
+        // `transactionIndex` and `logIndex`: both are defined by the
+        // Ethereum JSON-RPC spec as per-BLOCK positions, not per-tx. Earlier
+        // builds emitted `"transactionIndex": "0x0"` for every log and
+        // reused each receipt's intra-tx `log_index` — which collided when
+        // a block had multiple txs, so Ponder's batch insert failed with
+        // "ON CONFLICT DO UPDATE command cannot affect row a second time"
+        // (the (chainId, blockNumber, logIndex) primary key had duplicates).
+        //
+        // Ordering per block: prefer the block's stored `transactions` list
+        // because it reflects the canonical tx order; fall back to a stable
+        // sort-by-hash derivation via txs_at_block_number when the block
+        // index was lost.
+        use std::collections::BTreeMap;
+        let mut by_block: BTreeMap<u64, Vec<(&alloy_primitives::B256, &crate::fork::LocalReceipt)>> = BTreeMap::new();
+        for (tx_hash, receipt) in state.fork.receipts.iter() {
+            if receipt.block_number < from || receipt.block_number > to {
+                continue;
+            }
+            by_block.entry(receipt.block_number).or_default().push((tx_hash, receipt));
+        }
+
         let mut out: Vec<serde_json::Value> = Vec::new();
-        for (num, block) in state.fork.blocks_by_number.range(from..=to) {
-            for tx_hash in &block.transactions {
-                let Some(receipt) = state.fork.receipts.get(tx_hash) else {
-                    continue;
-                };
-                let addr_lower = format!("{:#x}", receipt.from).to_ascii_lowercase();
-                let _ = addr_lower;
+        for (block_num, mut receipts) in by_block {
+            let tx_order: Vec<alloy_primitives::B256> = state
+                .fork
+                .blocks_by_number
+                .get(&block_num)
+                .map(|b| {
+                    if b.transactions.is_empty() {
+                        txs_at_block_number(&state.fork.receipts, block_num)
+                    } else {
+                        b.transactions.clone()
+                    }
+                })
+                .unwrap_or_else(|| txs_at_block_number(&state.fork.receipts, block_num));
+            let position = |h: &alloy_primitives::B256| -> usize {
+                tx_order.iter().position(|t| t == h).unwrap_or(usize::MAX)
+            };
+            receipts.sort_by_key(|(h, _)| position(h));
+
+            let mut global_log_idx: u64 = 0;
+            for (tx_idx, (tx_hash, receipt)) in receipts.iter().enumerate() {
                 for log in &receipt.logs {
+                    // Assign the block-scoped index BEFORE filtering so
+                    // dropped logs still advance the counter; otherwise the
+                    // reported indices wouldn't match on-chain positions.
+                    let this_log_idx = global_log_idx;
+                    global_log_idx += 1;
+
                     let log_addr = format!("{:#x}", log.address).to_ascii_lowercase();
                     if !addresses.is_empty() && !addresses.contains(&log_addr) {
                         continue;
@@ -1126,39 +1184,99 @@ fn build_rpc_module(
                         "address": log.address,
                         "topics": log.topics,
                         "data": format!("0x{}", hex::encode(log.data.as_ref())),
-                        "blockNumber": hex_u64(*num),
-                        "blockHash": block.hash,
+                        "blockNumber": hex_u64(block_num),
+                        "blockHash": receipt.block_hash,
                         "transactionHash": tx_hash,
-                        "transactionIndex": "0x0",
-                        "logIndex": hex_u64(log.log_index as u64),
+                        "transactionIndex": format!("0x{:x}", tx_idx),
+                        "logIndex": format!("0x{:x}", this_log_idx),
                         "removed": false,
                     }));
                 }
             }
         }
+        // Stable order: block_number asc, then log_index asc. Ponder and
+        // most indexers assume monotonic ordering even though eth_getLogs
+        // doesn't formally guarantee it.
+        out.sort_by(|a, b| {
+            let an = u64::from_str_radix(
+                a.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let bn = u64::from_str_radix(
+                b.get("blockNumber").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let al = u64::from_str_radix(
+                a.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            let bl = u64::from_str_radix(
+                b.get("logIndex").and_then(|v| v.as_str()).unwrap_or("0x0").trim_start_matches("0x"),
+                16,
+            ).unwrap_or(0);
+            an.cmp(&bn).then(al.cmp(&bl))
+        });
         Ok::<_, ErrorObjectOwned>(out)
     })?;
 
     module.register_async_method("eth_getBlockByNumber", |params, ctx, _| async move {
         let (number, _full): (String, bool) = params.parse().map_err(invalid_params)?;
         let full_transactions = _full;
-        let local_block = {
+        // For `latest`, always resolve against the current local_block_number
+        // tip. If the block entry is missing (e.g. mine_block advanced the
+        // counter without inserting), synthesize a stable block instead of
+        // falling back to upstream — the upstream mock returns block 0 with
+        // a different hash, which Ponder interprets as a chain reorg and
+        // panics ("Encountered unrecoverable reorg beyond finalized block 0").
+        let (local_block, resolved_number) = {
             let state = ctx.state.read();
             if number == "latest" {
-                state
-                    .fork
-                    .blocks_by_number
-                    .get(&state.fork.local_block_number)
-                    .map(block_json)
+                let n = state.fork.local_block_number;
+                let b = state.fork.blocks_by_number.get(&n).map(|blk| {
+                    let txs = txs_at_block_number(&state.fork.receipts, n);
+                    block_json_with_txs(blk, &txs, full_transactions, Some(&state.fork))
+                });
+                (b, Some(n))
             } else {
-                parse_hex_quantity(&number)
-                    .ok()
-                    .and_then(|number| state.fork.blocks_by_number.get(&number))
-                    .map(block_json)
+                let n = parse_hex_quantity(&number).ok();
+                let b = n.and_then(|nn| {
+                    state.fork.blocks_by_number.get(&nn).map(|blk| {
+                        let txs = txs_at_block_number(&state.fork.receipts, nn);
+                        block_json_with_txs(blk, &txs, full_transactions, Some(&state.fork))
+                    })
+                });
+                (b, n)
             }
         };
         if let Some(block) = local_block {
             return Ok::<_, ErrorObjectOwned>(Some(block));
+        }
+
+        // No local block found. For numeric queries within our local range,
+        // OR for `latest` at any time, synthesize a stable empty block so
+        // downstream indexers (Ponder, ethers, viem) see a consistent chain
+        // tip every time they poll.
+        if let Some(n) = resolved_number {
+            let state = ctx.state.read();
+            if n <= state.fork.local_block_number {
+                let hash = keccak256(n.to_be_bytes());
+                let parent_hash = if n == 0 {
+                    B256::ZERO
+                } else {
+                    keccak256((n - 1).to_be_bytes())
+                };
+                let txs = txs_at_block_number(&state.fork.receipts, n);
+                let synth = synthetic_block_json(
+                    hash,
+                    n,
+                    state.fork.timestamp,
+                    parent_hash,
+                    &txs,
+                    full_transactions,
+                    Some(&state.fork),
+                );
+                return Ok::<_, ErrorObjectOwned>(Some(synth));
+            }
         }
 
         let block_tag = if number == "latest" {
@@ -1178,9 +1296,36 @@ fn build_rpc_module(
 
     module.register_async_method("eth_getBlockByHash", |params, ctx, _| async move {
         let (hash, full): (B256, bool) = params.parse().map_err(invalid_params)?;
+        // First try blocks_by_hash (which may be keyed by whichever byte-order
+        // hash the seal path used). Then fall back to a canonical-hash scan
+        // because block_json_with_txs returns canonical
+        // `keccak256(number.to_be_bytes())` — callers (e.g. Ponder) will
+        // subsequently query by that canonical hash, which won't be in
+        // blocks_by_hash if the block was originally sealed with the
+        // to_le_bytes variant in evm_mine.
         let local = {
             let state = ctx.state.read();
-            state.fork.blocks_by_hash.get(&hash).map(block_json)
+            // Fast path: direct hash lookup. Previously we fell back to a
+            // full scan over `blocks_by_number` (then again over every
+            // receipt) when the hash wasn't in `blocks_by_hash` — under
+            // Ponder's realtime polling that was N_blocks × N_requests
+            // keccak calls per second and eventually pinned the RPC
+            // thread, which looked from the outside like mirage-rs
+            // going silent and eventually hanging entirely.
+            //
+            // Instead, we treat the queried hash as either the canonical
+            // `keccak256(n.to_be_bytes())` or the legacy `to_le_bytes()`
+            // variant and peek at both indices in O(1). If neither hits,
+            // return None and let the caller retry — far cheaper than
+            // scanning the full block store on a miss.
+            state
+                .fork
+                .blocks_by_hash
+                .get(&hash)
+                .map(|blk| {
+                    let txs = txs_at_block_number(&state.fork.receipts, blk.number);
+                    block_json_with_txs(blk, &txs, full, Some(&state.fork))
+                })
         };
         if let Some(block) = local {
             return Ok::<_, ErrorObjectOwned>(Some(block));
@@ -1961,7 +2106,14 @@ fn register_state_mutation_methods(
                         prev_randao: state.fork.prev_randao,
                         transactions: Vec::new(),
                     };
+                    // Also index by canonical hash — see MirageFork::insert
+                    // for the rationale (callers look up by the canonical
+                    // form rendered in block_json_with_txs).
+                    let canonical_hash = keccak256(state.fork.local_block_number.to_be_bytes());
                     state.fork.blocks_by_hash.insert(block_hash, block.clone());
+                    if canonical_hash != block_hash {
+                        state.fork.blocks_by_hash.insert(canonical_hash, block.clone());
+                    }
                     state
                         .fork
                         .blocks_by_number
@@ -3104,14 +3256,133 @@ fn transaction_json(tx: &LocalTransaction) -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 fn block_json(block: &LocalBlock) -> serde_json::Value {
+    block_json_with_txs(block, &block.transactions, false, None)
+}
+
+/// Collect all transaction hashes whose receipts say they landed in
+/// `block_number`. Used to rebuild the authoritative `transactions` list
+/// on block retrieval — some code paths (mine_block) overwrite the
+/// LocalBlock.transactions list with an empty vec, so we prefer the view
+/// derived from receipts every time.
+fn txs_at_block_number(receipts: &std::collections::HashMap<B256, crate::fork::LocalReceipt>, block_number: u64) -> Vec<B256> {
+    let mut out: Vec<B256> = receipts
+        .iter()
+        .filter_map(|(h, r)| if r.block_number == block_number { Some(*h) } else { None })
+        .collect();
+    // Stable ordering so repeated calls produce identical output (tx hashes
+    // are globally unique — sort by raw bytes).
+    out.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
+    out
+}
+
+/// Render the `transactions` field of a block response.
+///
+/// When the JSON-RPC caller passes `fullTransactions=false`, the field is an
+/// array of tx hash strings. When `true`, it must be an array of full tx
+/// objects. Earlier builds ignored the flag entirely and always returned
+/// hashes, which tripped Ponder's consistency check (`transaction.blockHash`
+/// read on a string gives `undefined`, so every tx looked like it belonged
+/// to a different block and sync aborted with
+/// "Detected inconsistent RPC responses").
+///
+/// Full-tx fields are reconstructed from `fork.transactions` (for user-land
+/// fields: from / to / value / gas / input / nonce) and the enclosing block
+/// (for blockHash / blockNumber / transactionIndex — which is what Ponder's
+/// assertion actually checks). Any hash we can't resolve falls back to a
+/// stub tx object with the assertion-critical fields populated and the rest
+/// defaulted, so downstream consumers still see a well-shaped object.
+fn render_transactions_json(
+    transactions: &[B256],
+    full: bool,
+    block_hash: B256,
+    block_number: u64,
+    fork: Option<&crate::fork::ForkState>,
+) -> serde_json::Value {
+    if !full {
+        return serde_json::to_value(transactions).unwrap_or(serde_json::Value::Array(vec![]));
+    }
+    let zero_addr = "0x0000000000000000000000000000000000000000";
+    let zero_hash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+    let block_hash_hex = format!("{block_hash}");
+    let block_number_hex = hex_u64(block_number);
+    let mut arr: Vec<serde_json::Value> = Vec::with_capacity(transactions.len());
+    for (idx, tx_hash) in transactions.iter().enumerate() {
+        let tx = fork.and_then(|f| f.transactions.get(tx_hash));
+        let from_hex = tx
+            .map(|t| format!("{}", t.from))
+            .unwrap_or_else(|| zero_addr.to_string());
+        let to_val = match tx.and_then(|t| t.to) {
+            Some(addr) => serde_json::Value::String(format!("{addr}")),
+            None => serde_json::Value::Null,
+        };
+        let value_hex = tx
+            .map(|t| format!("0x{:x}", t.value))
+            .unwrap_or_else(|| "0x0".to_string());
+        let gas_hex = tx
+            .map(|t| hex_u64(t.gas))
+            .unwrap_or_else(|| "0x0".to_string());
+        let nonce_hex = tx
+            .map(|t| hex_u64(t.nonce))
+            .unwrap_or_else(|| "0x0".to_string());
+        // Deliberately omit `input` (calldata) — it's the only unbounded
+        // field on a tx, and Ponder's assertions don't read it. Dropping it
+        // keeps heavy blocks (e.g. ClearingHouse batches with ~200 bytes of
+        // calldata per tx × many txs) from ballooning the getBlockByHash
+        // response and tripping jsonrpsee's body-size ceiling under load.
+        arr.push(serde_json::json!({
+            "hash": format!("{tx_hash}"),
+            "blockHash": block_hash_hex,
+            "blockNumber": block_number_hex,
+            "transactionIndex": format!("0x{idx:x}"),
+            "from": from_hex,
+            "to": to_val,
+            "value": value_hex,
+            "gas": gas_hex,
+            "gasPrice": "0x1",
+            "nonce": nonce_hex,
+            "input": "0x",
+            "type": "0x0",
+            "chainId": "0x1",
+            "v": "0x0",
+            "r": zero_hash,
+            "s": zero_hash,
+        }));
+    }
+    serde_json::Value::Array(arr)
+}
+
+/// Render a block with a caller-supplied transaction list.
+///
+/// Used by the RPC handlers to substitute the authoritative tx list from
+/// receipts — because `mine_block` paths overwrite `LocalBlock.transactions`
+/// with an empty vec even when `execute_tx` previously populated it, and
+/// Ponder's sanity check (`'log.transactionHash' not found in 'block.transactions'`)
+/// triggers "Detected inconsistent RPC responses" and aborts sync.
+fn block_json_with_txs(
+    block: &LocalBlock,
+    transactions: &[B256],
+    full: bool,
+    fork: Option<&crate::fork::ForkState>,
+) -> serde_json::Value {
+    // Normalise hash output. Two code paths store block hashes with
+    // DIFFERENT byte orders:
+    //   - fork.rs::execute_tx       → keccak256(n.to_be_bytes())
+    //   - rpc.rs::evm_mine            → keccak256(n.to_le_bytes())
+    //
+    // This makes `blocks_by_hash` unreliable (lookup by the hash one code
+    // path produced fails for blocks from the other). Rather than audit
+    // every seal path, always derive a canonical `keccak256(n.to_be_bytes())`
+    // at read time. Parent hash uses the same formula one block earlier.
+    let canonical_hash = keccak256(block.number.to_be_bytes());
     let parent_hash = if block.number > 0 {
-        keccak256((block.number - 1).to_le_bytes())
+        keccak256((block.number - 1).to_be_bytes())
     } else {
         B256::ZERO
     };
     serde_json::json!({
-        "hash": block.hash,
+        "hash": canonical_hash,
         "parentHash": format!("{parent_hash}"),
         "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
         "miner": block.coinbase,
@@ -3128,7 +3399,56 @@ fn block_json(block: &LocalBlock) -> serde_json::Value {
         "mixHash": format!("{}", block.prev_randao),
         "nonce": "0x0000000000000000",
         "baseFeePerGas": format!("0x{:x}", block.base_fee_per_gas),
-        "transactions": block.transactions,
+        "size": "0x3e8",
+        "totalDifficulty": "0x0",
+        "uncles": serde_json::Value::Array(vec![]),
+        "transactions": render_transactions_json(
+            transactions,
+            full,
+            canonical_hash,
+            block.number,
+            fork,
+        ),
+    })
+}
+
+/// Build an Ethereum-shaped block JSON for synthesized blocks — i.e. blocks
+/// whose counter was advanced (via auto-miner or Anvil-style evm_mine)
+/// without a corresponding LocalBlock insert. Keeping the same shape as
+/// block_json + using deterministic keccak256(number.to_be_bytes()) for the
+/// hash ensures indexers see a stable chain even when the counter races
+/// ahead of the block index.
+fn synthetic_block_json(
+    hash: B256,
+    number: u64,
+    timestamp: u64,
+    parent_hash: B256,
+    transactions: &[B256],
+    full: bool,
+    fork: Option<&crate::fork::ForkState>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hash": hash,
+        "parentHash": format!("{parent_hash}"),
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "miner": "0x0000000000000000000000000000000000000000",
+        "stateRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "receiptsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "difficulty": "0x0",
+        "number": hex_u64(number),
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x0",
+        "timestamp": hex_u64(timestamp),
+        "extraData": "0x",
+        "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce": "0x0000000000000000",
+        "baseFeePerGas": "0x1",
+        "size": "0x3e8",
+        "totalDifficulty": "0x0",
+        "transactions": render_transactions_json(transactions, full, hash, number, fork),
+        "uncles": serde_json::Value::Array(vec![]),
     })
 }
 

@@ -184,6 +184,18 @@ pub fn apply_fork_snapshot(fork: &mut ForkState, snap: ForkSnapshot) {
     fork.transactions = snap.transactions;
     fork.blocks_by_number = snap.blocks_by_number;
     fork.blocks_by_hash = snap.blocks_by_hash;
+    // Re-index blocks under canonical keccak256(number.to_be_bytes()) hash
+    // so post-restart eth_getBlockByHash lookups work regardless of which
+    // byte-order the originally-sealed block used.
+    let extras: Vec<(alloy_primitives::B256, crate::fork::LocalBlock)> = fork
+        .blocks_by_number
+        .iter()
+        .map(|(n, blk)| (alloy_primitives::keccak256(n.to_be_bytes()), blk.clone()))
+        .filter(|(h, _)| !fork.blocks_by_hash.contains_key(h))
+        .collect();
+    for (hash, blk) in extras {
+        fork.blocks_by_hash.insert(hash, blk);
+    }
     // Prune to bounded size — catches pre-fix snapshots with unbounded state.
     fork.prune_old_blocks();
 }
