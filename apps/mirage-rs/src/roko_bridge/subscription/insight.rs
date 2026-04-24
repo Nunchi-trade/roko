@@ -183,7 +183,7 @@ impl std::fmt::Debug for InsightSubscription {
             .field("id", &self.id)
             .field("policy", &self.policy)
             .field("stats", &self.stats())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

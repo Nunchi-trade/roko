@@ -344,11 +344,9 @@ pub async fn start_rpc_server_with_chain(
             _ => None,
         }
     };
-    #[cfg(feature = "legacy-api")]
+    #[cfg(feature = "dashboard-api")]
     let api_router = {
-        tracing::info!(
-            "legacy mirage /api surface enabled for migration compatibility; prefer roko-serve /api for dashboard traffic"
-        );
+        tracing::info!("dashboard /api surface enabled");
         let block_state = Arc::clone(&local_state);
         let api_state = crate::http_api::ApiState {
             chain: chain.clone(),
@@ -361,10 +359,10 @@ pub async fn start_rpc_server_with_chain(
         };
         Some(crate::http_api::build_router(api_state))
     };
-    #[cfg(not(feature = "legacy-api"))]
+    #[cfg(not(feature = "dashboard-api"))]
     let api_router = {
         tracing::info!(
-            "legacy mirage /api surface disabled; use roko-serve /api aggregator for dashboard-compatible routes"
+            "dashboard /api surface disabled; use roko-serve /api aggregator for dashboard-compatible routes"
         );
         None
     };
@@ -802,6 +800,12 @@ async fn finish_start_rpc_server(
                 .headers()
                 .get(axum::http::header::UPGRADE)
                 .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+            if is_ws_upgrade {
+                tracing::info!(
+                    path = %request.uri().path(),
+                    "JSON-RPC WS upgrade request"
+                );
+            }
             if request.method() != axum::http::Method::POST && !is_ws_upgrade {
                 let mut response = Response::new(Body::from("Not Found"));
                 *response.status_mut() = StatusCode::NOT_FOUND;
@@ -1960,12 +1964,9 @@ fn register_chain_subscription_methods(
                 .pheromones()
                 .register(Arc::new(mpsc_sink), BackpressurePolicy::DropNewest);
             let external_id = format!("{}{}", PHEROMONE_SUB_PREFIX, bus_id.0);
-            let sink = match pending.accept().await {
-                Ok(s) => s,
-                Err(_) => {
-                    manager.pheromones().unregister(bus_id);
-                    return Ok(());
-                }
+            let Ok(sink) = pending.accept().await else {
+                manager.pheromones().unregister(bus_id);
+                return Ok(());
             };
 
             // First message: tell the client its external id so it can call
@@ -1980,13 +1981,12 @@ fn register_chain_subscription_methods(
                 tokio::select! {
                     _ = sink.closed() => break,
                     msg = rx.recv() => {
-                        match msg {
-                            Some(event) => {
-                                let payload = pheromone_event_to_json(&event);
-                                let Ok(raw) = serde_json::value::to_raw_value(&payload) else { break };
-                                if sink.send(raw).await.is_err() { break; }
-                            }
-                            None => break,
+                        if let Some(event) = msg {
+                            let payload = pheromone_event_to_json(&event);
+                            let Ok(raw) = serde_json::value::to_raw_value(&payload) else { break };
+                            if sink.send(raw).await.is_err() { break; }
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -2014,12 +2014,9 @@ fn register_chain_subscription_methods(
                 .insights()
                 .register(Arc::new(mpsc_sink), BackpressurePolicy::DropNewest);
             let external_id = format!("{}{}", INSIGHT_SUB_PREFIX, bus_id.0);
-            let sink = match pending.accept().await {
-                Ok(s) => s,
-                Err(_) => {
-                    manager.insights().unregister(bus_id);
-                    return Ok(());
-                }
+            let Ok(sink) = pending.accept().await else {
+                manager.insights().unregister(bus_id);
+                return Ok(());
             };
 
             if let Ok(handshake) = serde_json::value::to_raw_value(
@@ -2032,13 +2029,12 @@ fn register_chain_subscription_methods(
                 tokio::select! {
                     _ = sink.closed() => break,
                     msg = rx.recv() => {
-                        match msg {
-                            Some(event) => {
-                                let payload = insight_event_to_json(&event);
-                                let Ok(raw) = serde_json::value::to_raw_value(&payload) else { break };
-                                if sink.send(raw).await.is_err() { break; }
-                            }
-                            None => break,
+                        if let Some(event) = msg {
+                            let payload = insight_event_to_json(&event);
+                            let Ok(raw) = serde_json::value::to_raw_value(&payload) else { break };
+                            if sink.send(raw).await.is_err() { break; }
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -2376,6 +2372,11 @@ fn register_snapshot_methods(
         Ok::<_, ErrorObjectOwned>(true)
     })?;
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct ShutdownParams {
+    secret: String,
 }
 
 fn register_mirage_methods(
@@ -2890,8 +2891,34 @@ fn register_mirage_methods(
     module.register_async_method("mirage_cleanup", |_params, _ctx, _| async {
         Ok::<_, ErrorObjectOwned>(true)
     })?;
-    module.register_async_method(MIRAGE_SHUTDOWN_METHOD, |_params, ctx, _| async move {
-        tracing::warn!("mirage_shutdown RPC called — initiating shutdown");
+    module.register_async_method(MIRAGE_SHUTDOWN_METHOD, |params, ctx, _| async move {
+        let expected = std::env::var("MIRAGE_SHUTDOWN_SECRET").unwrap_or_default();
+        if expected.is_empty() {
+            tracing::warn!(
+                "mirage_shutdown called but MIRAGE_SHUTDOWN_SECRET is not set — rejecting"
+            );
+            return Err(ErrorObjectOwned::owned(
+                -32600,
+                "shutdown disabled: MIRAGE_SHUTDOWN_SECRET not configured",
+                None::<()>,
+            ));
+        }
+        let supplied: ShutdownParams = params.parse().map_err(|_| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "missing required parameter: secret",
+                None::<()>,
+            )
+        })?;
+        if supplied.secret != expected {
+            tracing::warn!("mirage_shutdown called with wrong secret — rejecting");
+            return Err(ErrorObjectOwned::owned(
+                -32600,
+                "invalid shutdown secret",
+                None::<()>,
+            ));
+        }
+        tracing::warn!("mirage_shutdown RPC called with valid secret — initiating shutdown");
         let _ = ctx.shutdown.send(());
         Ok::<_, ErrorObjectOwned>(true)
     })?;
@@ -3061,13 +3088,20 @@ async fn event_ws_handler(
     State(state): State<Arc<RwLock<MirageState>>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    tracing::info!(stream_id = %stream_id, "WS upgrade request on /events/{stream_id}");
     let filter = {
         let state = state.read();
         state.event_subscriptions.get(&stream_id).cloned()
     };
     filter.map_or_else(
-        || StatusCode::NOT_FOUND.into_response(),
-        |filter| ws.on_upgrade(move |socket| handle_event_socket(socket, state, filter)),
+        || {
+            tracing::warn!(stream_id = %stream_id, "WS upgrade rejected: stream not found");
+            StatusCode::NOT_FOUND.into_response()
+        },
+        |filter| {
+            tracing::info!(stream_id = %stream_id, "WS upgrade accepted for event stream");
+            ws.on_upgrade(move |socket| handle_event_socket(socket, state, filter))
+        },
     )
 }
 

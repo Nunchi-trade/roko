@@ -164,7 +164,7 @@ impl std::fmt::Debug for PheromoneSubscription {
             .field("id", &self.id)
             .field("policy", &self.policy)
             .field("stats", &self.stats())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

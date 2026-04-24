@@ -86,8 +86,8 @@ name = "agent_simulation"
 required-features = ["chain"]
 
 [features]
-# Default = backward-compatible binary surface with chain extensions + legacy REST.
-default = ["binary", "chain", "legacy-api"]
+# Default = backward-compatible binary surface with chain extensions + dashboard REST.
+default = ["binary", "chain"]
 
 # Binary entry point (src/main.rs).
 binary = []
@@ -101,10 +101,11 @@ sim-gas = []
 # Chain extensions: HDC index, InsightEntry knowledge layer, stigmergy pheromones.
 # Adds chain_* JSON-RPC methods and --enable-hdc / --enable-knowledge /
 # --enable-stigmergy CLI flags. Pulls in roko-primitives for HDC vectors.
-chain = ["dep:roko-primitives"]
+# Implies dashboard-api so any chain build gets the REST surface.
+chain = ["dep:roko-primitives", "dashboard-api"]
 
-# Legacy dashboard REST surface kept during the agent-server migration.
-legacy-api = ["chain"]
+# Dashboard REST surface (/api/*) for external dashboards and tooling.
+dashboard-api = []
 
 # Roko bridge: implements roko-core traits (Gate, Substrate) over mirage internals.
 # Turns mirage-rs into a drop-in simulation + knowledge substrate for roko golems.

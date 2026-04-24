@@ -89,7 +89,7 @@ pub mod chain_rpc;
 ///
 /// Covers the pheromone field, knowledge graph, and agent topology surfaces.
 /// Opt-in via the `chain` feature alongside HDC/knowledge/stigmergy.
-#[cfg(feature = "legacy-api")]
+#[cfg(feature = "dashboard-api")]
 pub mod http_api;
 
 /// Periodic atomic disk snapshots for state persistence across restarts.

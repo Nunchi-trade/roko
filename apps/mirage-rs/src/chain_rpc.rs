@@ -764,7 +764,7 @@ pub fn handle_deposit_pheromone(
     let vector = project_tokens(&params.content);
     let deposited_at = now_seconds();
     #[cfg(feature = "roko")]
-    let broadcast_vector = vector.clone();
+    let broadcast_vector = vector;
     let id = if let Some(tau) = params.half_life_seconds {
         chain_lock.pheromones.deposit_with_half_life(
             kind,

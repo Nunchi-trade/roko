@@ -20,11 +20,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// How a [`super::PheromoneSubscription`] or [`super::InsightSubscription`]
 /// reacts when its sink reports a full buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub enum BackpressurePolicy {
     /// Accept the drop of the oldest buffered event. The newest push is
     /// recorded as delivered and `dropped_oldest` is incremented by the
     /// number of evicted events.
+    #[default]
     DropOldest,
     /// Refuse the newest push. The rejected event is discarded and
     /// `dropped_newest` is incremented by one. Existing buffered events
@@ -33,12 +34,6 @@ pub enum BackpressurePolicy {
     /// Close the subscription on the first overflow. All subsequent pushes
     /// fail with `SinkError::Closed` and `dropped_newest` is incremented.
     CloseOnOverflow,
-}
-
-impl Default for BackpressurePolicy {
-    fn default() -> Self {
-        Self::DropOldest
-    }
 }
 
 /// Running counters for a single subscription.

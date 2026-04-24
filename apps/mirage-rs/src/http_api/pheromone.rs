@@ -428,7 +428,7 @@ pub async fn deposit_pheromone(
     }
 
     #[cfg(feature = "roko")]
-    let broadcast_vector = vector.clone();
+    let broadcast_vector = vector;
 
     let id = if let Some(tau) = req.half_life_secs {
         chain

@@ -37,6 +37,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WsParams {
     /// Subscribe to pheromone events (default true).
     #[serde(default = "default_true")]
@@ -68,35 +69,41 @@ pub async fn ws_handler(
     State(state): State<ApiState>,
     Query(params): Query<WsParams>,
 ) -> impl IntoResponse {
+    tracing::info!(
+        pheromones = params.pheromones,
+        insights = params.insights,
+        agents = params.agents,
+        predictions = params.predictions,
+        "WS upgrade request on /api/ws"
+    );
     if !state.ws_registry.try_connect() {
+        tracing::warn!("WS upgrade rejected: connection limit reached");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     let registry = Arc::clone(&state.ws_registry);
+    tracing::info!("WS connection accepted on /api/ws");
     ws.on_upgrade(move |socket| async move {
         handle_ws(socket, state, params).await;
         registry.disconnect();
+        tracing::info!("WS connection closed on /api/ws");
     })
     .into_response()
 }
 
 async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
-    let subs = match &state.subs {
-        Some(subs) => subs.clone(),
-        None => {
-            let _ = socket
-                .send(Message::Text(
-                    serde_json::json!({"error": "streaming not available (no subscription buses)"})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
-            return;
-        }
+    let Some(subs) = state.subs.clone() else {
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({"error": "streaming not available (no subscription buses)"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
     };
 
     // Set up broadcast sinks for each event type the client wants.
-    let mut pher_rx = None;
-    let mut pher_sub_id = None;
+    let (mut pher_rx, mut pher_sub_id) = (None, None);
     if params.pheromones {
         let (sink, rx) = BroadcastSink::<PheromoneEvent>::new(256);
         let id = subs.register_pheromone_sink(Arc::new(sink), BackpressurePolicy::DropOldest);
@@ -104,8 +111,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
         pher_sub_id = Some(id);
     }
 
-    let mut insi_rx = None;
-    let mut insi_sub_id = None;
+    let (mut insi_rx, mut insi_sub_id) = (None, None);
     if params.insights {
         let (sink, rx) = BroadcastSink::<InsightEvent>::new(256);
         let id = subs.register_insight_sink(Arc::new(sink), BackpressurePolicy::DropOldest);

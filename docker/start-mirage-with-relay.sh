@@ -36,6 +36,16 @@ has_arg() {
   return 1
 }
 
+# Relay restart settings
+RELAY_MAX_RESTARTS=10
+RELAY_BACKOFF_BASE=1
+RELAY_BACKOFF_MAX=30
+
+relay_pid=""
+mirage_pid=""
+relay_restarts=0
+relay_backoff="${RELAY_BACKOFF_BASE}"
+
 cleanup() {
   for pid in "${relay_pid:-}" "${mirage_pid:-}"; do
     if [ -n "${pid}" ]; then
@@ -52,8 +62,13 @@ cleanup() {
 
 trap 'cleanup; exit 143' INT TERM
 
-/usr/local/bin/agent-relay --bind "${RELAY_BIND}" &
-relay_pid=$!
+start_relay() {
+  /usr/local/bin/agent-relay --bind "${RELAY_BIND}" &
+  relay_pid=$!
+  echo "relay started (pid=${relay_pid})"
+}
+
+start_relay
 
 MIRAGE_ARGS=(
   --host "${MIRAGE_HOST}"
@@ -81,16 +96,51 @@ fi
 mirage_pid=$!
 
 while :; do
-  for pid in "${relay_pid}" "${mirage_pid}"; do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      if wait "${pid}"; then
-        status=0
-      else
-        status=$?
-      fi
-      cleanup
-      exit "${status}"
+  # Check mirage (primary process) — if it exits, container exits.
+  if ! kill -0 "${mirage_pid}" 2>/dev/null; then
+    if wait "${mirage_pid}"; then
+      status=0
+    else
+      status=$?
     fi
-  done
+    echo "mirage exited (status=${status}) — shutting down container"
+    cleanup
+    exit "${status}"
+  fi
+
+  # Check relay (sidecar) — restart with backoff on failure.
+  if [ -n "${relay_pid}" ] && ! kill -0 "${relay_pid}" 2>/dev/null; then
+    wait "${relay_pid}" 2>/dev/null || true
+    relay_restarts=$((relay_restarts + 1))
+    if [ "${relay_restarts}" -gt "${RELAY_MAX_RESTARTS}" ]; then
+      echo "relay exceeded ${RELAY_MAX_RESTARTS} restarts — giving up on relay"
+      relay_pid=""
+    else
+      echo "relay died (restart ${relay_restarts}/${RELAY_MAX_RESTARTS}), restarting in ${relay_backoff}s..."
+      sleep "${relay_backoff}"
+      # Exponential backoff: 1, 2, 4, 8, 16, 30, 30, ...
+      relay_backoff=$((relay_backoff * 2))
+      if [ "${relay_backoff}" -gt "${RELAY_BACKOFF_MAX}" ]; then
+        relay_backoff="${RELAY_BACKOFF_MAX}"
+      fi
+      start_relay
+      # Reset backoff on successful start (stays alive for >10s)
+      (
+        sleep 10
+        if kill -0 "${relay_pid}" 2>/dev/null; then
+          # Signal parent to reset backoff — we just write a marker file
+          touch /tmp/.relay-stable
+        fi
+      ) &
+    fi
+  fi
+
+  # Reset backoff if relay has been stable
+  if [ -f /tmp/.relay-stable ]; then
+    relay_backoff="${RELAY_BACKOFF_BASE}"
+    relay_restarts=0
+    rm -f /tmp/.relay-stable
+  fi
+
   sleep 1
 done
