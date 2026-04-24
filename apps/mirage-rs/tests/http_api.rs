@@ -300,31 +300,25 @@ async fn test_stats_returns_complete_response() {
 }
 
 #[tokio::test]
-async fn test_isfr_current_degrades_without_sidecar() {
+async fn test_isfr_current_returns_local_data_without_sidecar() {
     let router = empty_router();
     let (status, json) = get_json(&router, "/isfr/current").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "unavailable");
-    assert_eq!(json["source"], "mirage-local-fallback");
-    assert_eq!(json["state"], "no_data");
-    assert!(
-        json["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("ISFR_SERVICE_URL not configured")),
-        "fallback should explain missing sidecar: {json}",
-    );
-    assert_eq!(json["counts"]["insights"], 0);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["source"], "mirage-local-isfr-minimal");
+    assert_eq!(json["composite_rate_bps"], 690);
+    assert!(json["components"].as_array().is_some_and(|a| a.len() == 5));
 }
 
 #[tokio::test]
-async fn test_isfr_history_degrades_without_sidecar() {
+async fn test_isfr_history_returns_local_data_without_sidecar() {
     let router = empty_router();
     let (status, json) = get_json(&router, "/isfr/history?limit=10").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "unavailable");
-    assert_eq!(json["source"], "mirage-local-fallback");
-    assert!(json["items"].as_array().is_some_and(Vec::is_empty));
-    assert!(json["points"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["source"], "mirage-local-isfr-minimal");
+    assert!(json["items"].as_array().is_some_and(|a| a.len() == 10));
+    assert!(json["points"].as_array().is_some_and(|a| a.len() == 10));
     assert_eq!(json["query"]["limit"], "10");
 }
 
