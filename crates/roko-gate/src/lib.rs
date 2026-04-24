@@ -84,6 +84,8 @@ pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
 pub mod compile;
+/// Structured compile error classification: parse cargo JSON, classify by category.
+pub mod compile_errors;
 /// Standalone gate combinators: ParallelGate, VotingGate, FallbackGate (GATE-04).
 pub mod composition;
 pub mod diff_gate;
@@ -106,6 +108,7 @@ pub mod pelt;
 pub mod process_reward;
 pub mod property_test_gate;
 pub mod ratchet;
+pub mod review_verdict;
 pub mod rung_dispatch;
 pub mod rung_selector;
 pub mod shell;

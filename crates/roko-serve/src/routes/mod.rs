@@ -12,6 +12,7 @@ pub(crate) mod config;
 mod deployments;
 mod diagnosis;
 mod dream;
+mod gateway;
 mod heartbeats;
 mod integrations;
 mod jobs;
@@ -72,6 +73,7 @@ pub fn build_router(
         .merge(projections::routes())
         .merge(neuro::routes())
         .merge(dream::routes())
+        .merge(gateway::routes())
         .merge(chain::routes())
         .merge(auth::routes())
         .merge(secrets::routes())

@@ -1623,13 +1623,13 @@ async fn dispatch_agent(
         return;
     };
 
-    let outcome = match dispatch_template(
+    let outcome = match Box::pin(dispatch_template(
         state.clone(),
         template.clone(),
         signal.clone(),
         dispatcher,
         repo_ctx.as_ref(),
-    )
+    ))
     .await
     {
         Ok(outcome) => outcome,

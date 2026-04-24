@@ -193,6 +193,9 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
         data_llm: None,
+        mode: Default::default(),
+        extensions: Vec::new(),
+        domain: None,
     }
 }
 

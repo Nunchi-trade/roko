@@ -70,6 +70,7 @@ pub mod demurrage;
 pub mod domain_profile;
 pub mod engram;
 pub mod error;
+pub mod extension;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
 pub mod hash;

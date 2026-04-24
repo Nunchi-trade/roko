@@ -1982,6 +1982,33 @@ pub struct AgentConfig {
     /// LLM to consume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_llm: Option<DataLlmConfig>,
+
+    /// Default agent mode: how long the agent lives.
+    #[serde(default)]
+    pub mode: AgentMode,
+
+    /// Extensions loaded for all agents (can be overridden per-role).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+
+    /// Domain profile name (e.g. `"coding"`, `"research"`, `"chain"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+/// Agent execution mode controlling lifecycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    /// Agent runs a task then stops. Default for `plan run` tasks.
+    #[default]
+    Ephemeral,
+    /// Agent runs continuously until explicitly stopped.
+    /// Used for deployed agents (Railway, Fly) and `roko agent start`.
+    Persistent,
+    /// Agent sleeps until a trigger fires (webhook, cron, event).
+    /// Conserves resources; wakes on matching event.
+    Reactive,
 }
 
 fn default_model() -> String {
@@ -2033,6 +2060,9 @@ impl Default for AgentConfig {
             fallback_model: None,
             roles: HashMap::new(),
             data_llm: None,
+            mode: AgentMode::default(),
+            extensions: Vec::new(),
+            domain: None,
         }
     }
 }
