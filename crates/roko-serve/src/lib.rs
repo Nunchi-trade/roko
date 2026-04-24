@@ -226,6 +226,9 @@ impl ServerBuilder {
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
 
+        // Load persisted deployments from disk.
+        routes::load_persisted_deployments(&state).await;
+
         // Eagerly prime the JWKS cache if Privy auth is configured.
         if state.load_roko_config().serve.auth.privy_app_id.is_some() {
             let jwks = Arc::clone(&state.jwks_cache);

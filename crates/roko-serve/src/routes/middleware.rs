@@ -8,6 +8,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Method, Request};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use chrono::Utc;
 use roko_core::config::{ApiKeyEntry, ServeAuthConfig};
 use roko_core::obs::LogScrubber;
@@ -208,6 +209,40 @@ async fn try_privy_jwt(
     Some((AuthMethod::Jwt, "admin".to_string(), Some(claims.sub)))
 }
 
+/// Attempt to validate a Bearer token as an agent token.
+///
+/// Agent tokens are issued via `POST /api/agents/{id}/token` and stored as
+/// `base64(SHA-256(token))` in `DiscoveredAgent.token_hash`. Returns the
+/// matching agent_id on success.
+async fn try_agent_token(
+    token: &str,
+    state: &Arc<AppState>,
+) -> Option<(AuthMethod, String, Option<String>)> {
+    // Compute the same hash format used by rotate_agent_token().
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    let token_hash = base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest);
+
+    let agents = state.discovered_agents.read().await;
+    for agent in agents.values() {
+        if agent.token_hash.as_deref() == Some(&token_hash) {
+            // Check expiry.
+            if let Some(expires_at) = agent.token_expires_at {
+                if Utc::now() > expires_at {
+                    return None; // Token expired.
+                }
+            }
+            return Some((
+                AuthMethod::Bearer,
+                "agent:write".to_string(),
+                Some(agent.agent_id.clone()),
+            ));
+        }
+    }
+    None
+}
+
 /// Require a matching API credential for the request to continue.
 ///
 /// Supports four credential sources (checked in order):
@@ -242,8 +277,17 @@ pub async fn require_api_key(
             }
         },
         ApiCredential::Bearer(supplied) => {
-            // Try API key match first (sync), then fall through to Privy JWT (async).
+            // Try API key (sync) → agent token (async) → Privy JWT (async).
             if let Some((method, scope, user_id)) = authenticate_api_key(supplied, &auth, false) {
+                (
+                    method,
+                    AuthContext {
+                        method,
+                        scope,
+                        user_id,
+                    },
+                )
+            } else if let Some((method, scope, user_id)) = try_agent_token(supplied, &state).await {
                 (
                     method,
                     AuthContext {
@@ -285,6 +329,14 @@ pub async fn require_api_key(
             ));
         }
     };
+
+    // Inject identity headers so downstream handlers (team.rs, etc.)
+    // can read the caller's identity without parsing extensions.
+    if let Some(ref uid) = ctx.user_id {
+        if let Ok(val) = axum::http::HeaderValue::from_str(uid) {
+            req.headers_mut().insert("x-user-id", val);
+        }
+    }
 
     // Inject AuthContext for downstream handlers.
     req.extensions_mut().insert(ctx);
