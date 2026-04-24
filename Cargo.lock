@@ -5946,6 +5946,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6180,6 +6181,8 @@ dependencies = [
 name = "roko-serve"
 version = "0.1.0"
 dependencies = [
+ "alloy",
+ "alloy-primitives",
  "anyhow",
  "arc-swap",
  "async-trait",

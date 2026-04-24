@@ -29,6 +29,7 @@ pub mod config_view;
 pub mod context_view;
 pub mod dashboard_view;
 pub mod git_view;
+pub mod learning_view;
 pub mod logs_view;
 pub mod marketplace_view;
 pub mod plans_view;
@@ -116,6 +117,14 @@ pub enum SubView {
     PrdWorkshop,
     /// Plan explorer.
     PlanExplorer,
+
+    // ── Region 10: Learning (F10) ──
+    /// Cascade router overview and per-model stats.
+    LearningRouter,
+    /// Stage transition history timeline.
+    LearningHistory,
+    /// Per-model efficiency breakdown.
+    LearningEfficiency,
 }
 
 impl SubView {
@@ -157,6 +166,11 @@ impl SubView {
             ],
             Tab::Marketplace => &[SubView::JobList, SubView::JobDetail, SubView::CreateJob],
             Tab::Atelier => &[SubView::PrdWorkshop, SubView::PlanExplorer],
+            Tab::Learning => &[
+                SubView::LearningRouter,
+                SubView::LearningHistory,
+                SubView::LearningEfficiency,
+            ],
         }
     }
 
@@ -190,6 +204,9 @@ impl SubView {
             Self::CreateJob => "New Job",
             Self::PrdWorkshop => "PRDs",
             Self::PlanExplorer => "Plans",
+            Self::LearningRouter => "Router",
+            Self::LearningHistory => "History",
+            Self::LearningEfficiency => "Efficiency",
         }
     }
 
@@ -273,5 +290,6 @@ pub fn render_tab_content(
             marketplace_view::render(frame, area, data, tui_state, view_state, theme);
         }
         Tab::Atelier => atelier_view::render(frame, area, data, tui_state, view_state, theme),
+        Tab::Learning => learning_view::render(frame, area, data, tui_state, view_state, theme),
     }
 }

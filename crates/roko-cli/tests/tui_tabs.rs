@@ -1,11 +1,11 @@
-//! Verify F8 Marketplace and F9 Atelier tabs are fully wired.
+//! Verify F8 Marketplace, F9 Atelier, and F10 Learning tabs are fully wired.
 
 use roko_cli::tui::tabs::Tab;
 use roko_cli::tui::views::{SubView, ViewState};
 
 #[test]
-fn tab_all_has_nine_entries() {
-    assert_eq!(Tab::ALL.len(), 9);
+fn tab_all_has_ten_entries() {
+    assert_eq!(Tab::ALL.len(), 10);
 }
 
 #[test]
@@ -31,17 +31,35 @@ fn atelier_tab_basics() {
 }
 
 #[test]
-fn next_prev_cycle_nine_tabs() {
+fn next_prev_cycle_ten_tabs() {
     let mut t = Tab::Dashboard;
-    for _ in 0..9 {
+    for _ in 0..10 {
         t = t.next();
     }
     assert_eq!(t, Tab::Dashboard);
 
-    for _ in 0..9 {
+    for _ in 0..10 {
         t = t.prev();
     }
     assert_eq!(t, Tab::Dashboard);
+}
+
+#[test]
+fn learning_tab_basics() {
+    assert_eq!(Tab::Learning.fkey(), crossterm::event::KeyCode::F(10));
+    assert_eq!(
+        Tab::from_key(crossterm::event::KeyCode::F(10)),
+        Some(Tab::Learning)
+    );
+    assert_eq!(Tab::Learning.label(), "Learning");
+    assert_eq!(Tab::Learning.index(), 9);
+}
+
+#[test]
+fn learning_has_subviews() {
+    let subs = SubView::for_tab(Tab::Learning);
+    assert!(!subs.is_empty());
+    assert!(subs.iter().any(|s| s.label() == "Router"));
 }
 
 #[test]
@@ -59,14 +77,14 @@ fn atelier_has_subviews() {
 }
 
 #[test]
-fn fkey_roundtrip_all_nine() {
+fn fkey_roundtrip_all_ten() {
     for tab in Tab::ALL {
         assert_eq!(Tab::from_key(tab.fkey()), Some(tab));
     }
 }
 
 #[test]
-fn index_sequential_all_nine() {
+fn index_sequential_all_ten() {
     for (i, tab) in Tab::ALL.iter().enumerate() {
         assert_eq!(tab.index(), i);
     }

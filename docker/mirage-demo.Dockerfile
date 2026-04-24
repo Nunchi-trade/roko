@@ -23,7 +23,9 @@ RUN apt-get update \
 
 COPY . .
 
-RUN cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/src/target \
+    cargo build --release -p mirage-rs --bin mirage-rs --features "binary,roko" \
     && cargo build --release -p agent-relay --bin agent-relay \
     && cp target/release/mirage-rs /mirage-rs \
     && cp target/release/agent-relay /agent-relay

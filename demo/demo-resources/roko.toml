@@ -1,0 +1,23 @@
+# Demo-specific overrides. Global config (~/.roko/config.toml) provides
+# agent, prompt, and provider settings; this file only overrides what
+# the demo needs.
+
+auto_plan = false
+
+[agent]
+command = "echo"
+args = ["demo-stub"]
+timeout_ms = 30000
+
+[[gate]]
+kind = "shell"
+program = "true"
+args = []
+timeout_ms = 10000
+
+[executor]
+max_concurrent_plans = 1
+max_concurrent_tasks = 2
+max_auto_fix_iterations = 1
+task_timeout_secs = 60
+auto_replan = false

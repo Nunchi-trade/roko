@@ -300,8 +300,7 @@ fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     if project_path.exists() {
         let text = std::fs::read_to_string(&project_path)
             .with_context(|| format!("read {}", project_path.display()))?;
-        return toml::from_str(&text)
-            .with_context(|| format!("parse {}", project_path.display()));
+        return toml::from_str(&text).with_context(|| format!("parse {}", project_path.display()));
     }
 
     // No project config — try global ~/.roko/config.toml.
@@ -433,6 +432,17 @@ fn build_app_state(
             tasks: std::collections::HashMap::new(),
         });
     }
+    // Seed StateHub with knowledge entries from the neuro store.
+    let knowledge = scan_knowledge_entries(&state.workdir);
+    if !knowledge.is_empty() {
+        info!(
+            count = knowledge.len(),
+            "loaded existing knowledge entries from neuro store"
+        );
+        state
+            .state_hub
+            .publish(DashboardEvent::KnowledgeEntriesUpdated { entries: knowledge });
+    }
     state
 }
 
@@ -497,6 +507,44 @@ fn scan_prd_summaries(workdir: &Path) -> Vec<roko_core::PrdSummary> {
         }
     }
     prds
+}
+
+/// Load knowledge entries from the neuro JSONL store and project them into
+/// lightweight `KnowledgeBrowseEntry` summaries for the dashboard snapshot.
+fn scan_knowledge_entries(
+    workdir: &Path,
+) -> Vec<roko_core::dashboard_snapshot::KnowledgeBrowseEntry> {
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_workdir(workdir);
+    let entries = match store.query("*", 200) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let preview = if entry.content.len() > 200 {
+                format!("{}…", &entry.content[..200])
+            } else {
+                entry.content.clone()
+            };
+            let tier_str = match entry.tier {
+                roko_neuro::KnowledgeTier::Transient => "transient",
+                roko_neuro::KnowledgeTier::Working => "working",
+                roko_neuro::KnowledgeTier::Consolidated => "consolidated",
+                roko_neuro::KnowledgeTier::Persistent => "persistent",
+            };
+            roko_core::dashboard_snapshot::KnowledgeBrowseEntry {
+                id: entry.id,
+                kind: entry.kind.as_str().to_string(),
+                content_preview: preview,
+                confidence: entry.confidence,
+                tier: tier_str.to_string(),
+                tags: entry.tags,
+                created_at: entry.created_at,
+                frozen: false,
+            }
+        })
+        .collect()
 }
 
 fn start_state_hub_bridge(state: Arc<AppState>) -> JoinHandle<()> {

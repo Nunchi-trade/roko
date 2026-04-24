@@ -3,16 +3,15 @@
 # Roko CLI container image (§42.1).
 #
 # Multi-stage build:
-#   builder : rust:1.91-bookworm-slim — compiles the workspace's `roko` binary
+#   builder : rust:1.91-slim-bookworm — compiles the workspace's `roko` binary
 #   runtime : distroless/cc-debian12:nonroot — minimal, non-root, no shell
 #
 # The `roko-cli` crate produces a binary named `roko` (see crates/roko-cli/Cargo.toml).
 # Build context is expected to be the `roko/` workspace root.
 
-ARG BUILDPLATFORM
-ARG TARGETPLATFORM
+ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-slim-bookworm AS builder
 WORKDIR /src
 
 # System deps commonly required by crates in this workspace (openssl-sys, etc).

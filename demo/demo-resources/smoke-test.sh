@@ -5,4 +5,5 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+echo -e "\033[0;36m▸ roko smoke test\033[0m"
 exec bash "$DIR/bin/roko-smoke.sh" "$@"

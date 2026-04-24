@@ -5,14 +5,37 @@ source "$(dirname "$0")/common.sh"
 ITERATIONS="${1:-30}"
 BATCH_SIZE=10
 
-header "Learning Loop Demo"
-info "Iterations: $ITERATIONS (reporting every $BATCH_SIZE)"
+banner
+step 3 "Learning Loop"
+narrate "The system learns which models work best — adaptive routing in action"
+
+info "Iterations: ${BOLD}$ITERATIONS${NC} (reporting every $BATCH_SIZE)"
+echo
 
 WORKSPACE=$(setup_workspace)
 trap "cleanup_workspace '$WORKSPACE'" EXIT
 cd "$WORKSPACE"
 
 "$ROKO" init 2>/dev/null || true
+
+# When using the serve API, learning data lives in the server's workdir.
+# Resolve the effective learn dir for reporting.
+if [[ -n "$ROKO_SERVE_URL" ]]; then
+    # Ask the server for its workdir
+    SERVER_WORKDIR=$(curl -s "${ROKO_SERVE_URL}/api/status" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('workdir',''))" 2>/dev/null)
+    if [[ -n "$SERVER_WORKDIR" ]]; then
+        LEARN_DIR="${SERVER_WORKDIR}/.roko/learn"
+        info "Using serve mode — learning data at: ${DIM}$LEARN_DIR${NC}"
+    else
+        LEARN_DIR="$WORKSPACE/.roko/learn"
+        info "Using serve mode (could not resolve server workdir)"
+    fi
+    REPORT_WORKDIR="${SERVER_WORKDIR:-$WORKSPACE}"
+else
+    LEARN_DIR="$WORKSPACE/.roko/learn"
+    REPORT_WORKDIR="$WORKSPACE"
+fi
 
 # Varied task prompts to exercise different complexity levels
 PROMPTS=(
@@ -36,38 +59,65 @@ PROMPTS=(
 completed=0
 failed=0
 
+hr
+
 for ((i=1; i<=ITERATIONS; i++)); do
     prompt_idx=$(( (i - 1) % ${#PROMPTS[@]} ))
     prompt="${PROMPTS[$prompt_idx]}"
-
-    # Cycle through available models (let cascade router decide if configured)
-    info "[$i/$ITERATIONS] $prompt"
+    short="${prompt:0:55}"
 
     if roko_run "$prompt" "" "$WORKSPACE"; then
         ((completed++)) || true
+        printf "\r  ${GREEN}✓${NC} ${DIM}[%d/%d]${NC} %s\n" "$i" "$ITERATIONS" "$short"
     else
         ((failed++)) || true
+        printf "\r  ${RED}✗${NC} ${DIM}[%d/%d]${NC} %s\n" "$i" "$ITERATIONS" "$short"
     fi
+
+    # Progress bar
+    progress_bar "$i" "$ITERATIONS" ""
 
     # Report every BATCH_SIZE iterations
     if (( i % BATCH_SIZE == 0 )); then
-        header "Progress Report (after $i iterations)"
-        info "Completed: $completed | Failed: $failed"
+        echo ""
+        echo ""
+        echo -e "  ${BOLD}Progress Report${NC} ${DIM}(after $i iterations)${NC}"
+        hr
+        echo -e "  ${DIM}Completed:${NC} ${GREEN}$completed${NC}   ${DIM}Failed:${NC} ${RED}$failed${NC}   ${DIM}Success rate:${NC} $(( completed * 100 / i ))%"
         echo
-        "$ROKO" learn router --workdir "$WORKSPACE" 2>/dev/null || warn "Could not read router state"
+        "$ROKO" learn router --workdir "$REPORT_WORKDIR" 2>/dev/null || warn "Could not read router state"
+        hr
         echo
     fi
 done
 
-header "Final Report"
-info "Total: $ITERATIONS | Completed: $completed | Failed: $failed"
+echo ""
+echo ""
+printf "  ${CYAN}${BOLD}╔"; printf '═%.0s' $(seq 1 58); printf "╗${NC}\n"
+printf "  ${CYAN}${BOLD}║${NC}%-58s${CYAN}${BOLD}║${NC}\n" "$(printf '%*s' 36 'Learning Complete')"
+printf "  ${CYAN}${BOLD}╚"; printf '═%.0s' $(seq 1 58); printf "╝${NC}\n"
+echo ""
+
+table_set_widths 22 30
+table_header "Metric" "Value"
+table_row "Total iterations" "$ITERATIONS"
+table_row "Completed" "$completed"
+table_row "Failed" "$failed"
+table_row "Success rate" "$(( completed * 100 / ITERATIONS ))%"
+table_footer
+
 echo
-"$ROKO" learn router --workdir "$WORKSPACE" 2>/dev/null || true
+"$ROKO" learn router --workdir "$REPORT_WORKDIR" 2>/dev/null || true
 echo
 
-header "Learning State Files"
-ls -la "$WORKSPACE/.roko/learn/" 2>/dev/null || warn "No learning data found"
+echo -e "  ${BOLD}Learning State Files${NC}"
+hr
+ls -la "$LEARN_DIR/" 2>/dev/null || warn "No learning data found"
+echo
 
-header "Done"
-info "Inspect router state: cat $WORKSPACE/.roko/learn/cascade-router.json | python3 -m json.tool"
-info "Visualize: python3 $(dirname "$0")/04-visualize-learning.py $WORKSPACE/.roko/learn/"
+hr
+echo -e "  ${DIM}Inspect:${NC}    cat $LEARN_DIR/cascade-router.json | python3 -m json.tool"
+echo -e "  ${DIM}Visualize:${NC}  python3 $(dirname "$0")/04-visualize-learning.py $LEARN_DIR/"
+echo ""
+echo -e "  ${DIM}${ITALIC}The system improves with every iteration.${NC}"
+echo

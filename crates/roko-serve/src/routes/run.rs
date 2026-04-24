@@ -9,6 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use validator::Validate;
 
 use crate::error::ApiError;
@@ -95,11 +96,13 @@ pub(crate) async fn spawn_background_run(
     let bus = state.event_bus.clone();
     let runtime = state.runtime.clone();
     let state_for_task = Arc::clone(state);
+    let (start_tx, start_rx) = oneshot::channel::<()>();
 
     let handle = tokio::spawn({
         let run_id = run_id.clone();
         let prompt_for_handle = prompt.clone();
         async move {
+            let _ = start_rx.await;
             publish_run_started(&bus, &run_id, &prompt_for_handle, agent_target.as_deref());
 
             // Emit rich DashboardEvents so the TUI shows run activity.
@@ -153,7 +156,11 @@ pub(crate) async fn spawn_background_run(
                             DashboardEvent::TaskCompleted {
                                 plan_id: plan_id.clone(),
                                 task_id: task_id.clone(),
-                                outcome: if result.success { "success".into() } else { "failed".into() },
+                                outcome: if result.success {
+                                    "success".into()
+                                } else {
+                                    "failed".into()
+                                },
                             },
                             DashboardEvent::EpisodeRecorded {
                                 agent_id: agent_label.to_string(),
@@ -209,7 +216,9 @@ pub(crate) async fn spawn_background_run(
                                 task_id: task_id.clone(),
                                 outcome: "failed".into(),
                             },
-                            DashboardEvent::Error { message: error_message.clone() },
+                            DashboardEvent::Error {
+                                message: error_message.clone(),
+                            },
                             DashboardEvent::EventLogEntry {
                                 timestamp_ms: run_now_millis(),
                                 event_type: "run_failed".into(),
@@ -237,6 +246,7 @@ pub(crate) async fn spawn_background_run(
         .write()
         .await
         .insert(run_id.clone(), run_handle);
+    let _ = start_tx.send(());
     run_id
 }
 
@@ -298,10 +308,16 @@ fn publish_run_completed(
     metadata: Option<Value>,
 ) {
     if let Some(agent_id) = agent_target {
+        let content = metadata
+            .as_ref()
+            .and_then(|value| value.get("output_text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         bus.publish(ServerEvent::AgentOutput {
             agent_id: agent_id.to_owned(),
             run_id: Some(run_id.to_owned()),
-            content: String::new(),
+            content,
             done: true,
             metadata: Some(serde_json::json!({
                 "status": if success { "completed" } else { "failed" },

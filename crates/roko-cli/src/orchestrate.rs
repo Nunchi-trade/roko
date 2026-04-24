@@ -4630,9 +4630,19 @@ impl PlanRunner {
         }
 
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> = load_roko_config(workdir)
+            .map(|rc| rc.effective_models().keys().cloned().collect())
+            .unwrap_or_default();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -4829,9 +4839,19 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> = load_roko_config(workdir)
+            .map(|rc| rc.effective_models().keys().cloned().collect())
+            .unwrap_or_default();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -5024,9 +5044,19 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> = load_roko_config(workdir)
+            .map(|rc| rc.effective_models().keys().cloned().collect())
+            .unwrap_or_default();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));

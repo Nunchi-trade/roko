@@ -25,18 +25,18 @@
 
 use std::sync::Arc;
 
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use parking_lot::RwLock;
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{CallInput, CallInputs, Gas, InstructionResult, InterpreterResult},
-    primitives::{hardfork::SpecId, Bytes},
+    primitives::{Bytes, hardfork::SpecId},
 };
 use roko_primitives::HdcVector;
 
-use crate::chain::{projection, HdcIndex, Hit, InsightId};
+use crate::chain::{HdcIndex, Hit, InsightId, projection};
 
 /// Canonical precompile address — reserved `0xA0C` slot in the Nunchi `0xA00–0xA0F` range.
 pub const HDC_PRECOMPILE_ADDRESS: Address = address!("0x0000000000000000000000000000000000000A0C");

@@ -57,11 +57,18 @@ pub(crate) fn render(
     theme: &Theme,
 ) {
     let outer = Layout::vertical([Constraint::Min(0), Constraint::Length(6)]).split(area);
-    let main = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(outer[0]);
 
-    render_left_panel(frame, main[0], data, tui_state, view_state, theme);
-    render_right_panel(frame, main[1], data, tui_state, view_state, theme);
+    // Only show the left panel when plans are actively running.
+    let has_active_plans = tui_state.plans.iter().any(|p| p.active);
+    if has_active_plans {
+        let main = Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+            .split(outer[0]);
+        render_left_panel(frame, main[0], data, tui_state, view_state, theme);
+        render_right_panel(frame, main[1], data, tui_state, view_state, theme);
+    } else {
+        render_right_panel(frame, outer[0], data, tui_state, view_state, theme);
+    }
+
     render_bottom_ribbon(frame, outer[1], data, tui_state, theme);
 }
 

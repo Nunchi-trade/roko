@@ -163,6 +163,9 @@ pub fn capture_snapshot(mirage: &MirageFork) -> MirageSnapshot {
 // ---------------------------------------------------------------------------
 
 /// Mutates a fresh [`ForkState`] with data from a snapshot.
+///
+/// After restoring, prunes excess blocks (and their txs/receipts) so that
+/// snapshots written before the pruning fix don't immediately OOM.
 pub fn apply_fork_snapshot(fork: &mut ForkState, snap: ForkSnapshot) {
     fork.local_block_number = snap.local_block_number;
     fork.chain_id = snap.chain_id;
@@ -181,6 +184,8 @@ pub fn apply_fork_snapshot(fork: &mut ForkState, snap: ForkSnapshot) {
     fork.transactions = snap.transactions;
     fork.blocks_by_number = snap.blocks_by_number;
     fork.blocks_by_hash = snap.blocks_by_hash;
+    // Prune to bounded size — catches pre-fix snapshots with unbounded state.
+    fork.prune_old_blocks();
 }
 
 /// Constructs a [`ChainContext`] from a chain snapshot.

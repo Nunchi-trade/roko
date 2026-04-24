@@ -489,6 +489,23 @@ impl LearningRuntime {
         Self::open(LearningPaths::under(root), RegressionConfig::default()).await
     }
 
+    /// Open a runtime at `root` with a custom model list for the cascade router.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persistence files cannot be read/initialized.
+    pub async fn open_under_with_models(
+        root: impl Into<PathBuf>,
+        models: Vec<String>,
+    ) -> Result<Self, LearningRuntimeError> {
+        Self::open_with_models(
+            LearningPaths::under(root),
+            RegressionConfig::default(),
+            models,
+        )
+        .await
+    }
+
     /// Borrow configured paths.
     #[must_use]
     pub const fn paths(&self) -> &LearningPaths {
@@ -1001,16 +1018,17 @@ impl LearningRuntime {
         );
     }
 
-    /// Update the cascade router from episode metadata if role + model are available.
+    /// Update the cascade router from episode metadata if model is available.
     fn update_cascade_router(&self, episode: &Episode) -> bool {
         let role_str = extra_string(episode, "role");
         let model_slug = extra_string(episode, "model");
-        let (Some(role_raw), Some(slug)) = (role_str, model_slug) else {
+        let Some(slug) = model_slug else {
             return false;
         };
-        let Some(role) = parse_agent_role(&role_raw) else {
-            return false;
-        };
+        let role = role_str
+            .as_deref()
+            .and_then(parse_agent_role)
+            .unwrap_or(AgentRole::Implementer);
         let category_str =
             extra_string(episode, "task_category").unwrap_or_else(|| "implementation".to_string());
         let cat_json = format!("\"{category_str}\"");

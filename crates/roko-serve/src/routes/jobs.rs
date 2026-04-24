@@ -576,13 +576,19 @@ async fn create_job(
         use roko_core::DashboardEvent;
         let plan_id = format!("job-{}", &job.id[..8.min(job.id.len())]);
         state.state_hub.publish_batch(vec![
-            DashboardEvent::PlanStarted { plan_id: plan_id.clone() },
+            DashboardEvent::PlanStarted {
+                plan_id: plan_id.clone(),
+            },
             DashboardEvent::TaskStarted {
-                plan_id: plan_id.clone(), task_id: job.title.clone(), phase: "open".into(),
+                plan_id: plan_id.clone(),
+                task_id: job.title.clone(),
+                phase: "open".into(),
             },
             DashboardEvent::EventLogEntry {
-                timestamp_ms: job_now_millis(), event_type: "job_created".into(),
-                plan_id, task_id: job.title.clone(),
+                timestamp_ms: job_now_millis(),
+                event_type: "job_created".into(),
+                plan_id,
+                task_id: job.title.clone(),
                 message: format!("new job: {} (reward: {})", job.title, job.reward),
             },
         ]);
@@ -850,22 +856,30 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
 
     match status.as_str() {
         "assigned" if prev == "open" => {
-            events.push(DashboardEvent::PlanStarted { plan_id: plan_id.clone() });
+            events.push(DashboardEvent::PlanStarted {
+                plan_id: plan_id.clone(),
+            });
             events.push(DashboardEvent::TaskStarted {
-                plan_id: plan_id.clone(), task_id: task_id.clone(), phase: "assigned".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                phase: "assigned".into(),
             });
             if !agent_id.is_empty() {
                 events.push(DashboardEvent::EventLogEntry {
-                    timestamp_ms: job_now_millis(), event_type: "job_assigned".into(),
-                    plan_id: plan_id.clone(), task_id: task_id.clone(),
+                    timestamp_ms: job_now_millis(),
+                    event_type: "job_assigned".into(),
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
                     message: format!("assigned to {agent_id}"),
                 });
             }
         }
         "in_progress" if prev == "assigned" => {
             events.push(DashboardEvent::TaskPhaseChanged {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                old_phase: "assigned".into(), new_phase: "implementing".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                old_phase: "assigned".into(),
+                new_phase: "implementing".into(),
             });
             if !agent_id.is_empty() {
                 events.push(DashboardEvent::AgentOutput {
@@ -874,46 +888,65 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                 });
             }
             events.push(DashboardEvent::EventLogEntry {
-                timestamp_ms: job_now_millis(), event_type: "job_started".into(),
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                timestamp_ms: job_now_millis(),
+                event_type: "job_started".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
                 message: format!("{agent_id} began implementation"),
             });
             events.push(DashboardEvent::EfficiencyEvent {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                metric: "input_tokens".into(), value: 0.0,
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                metric: "input_tokens".into(),
+                value: 0.0,
             });
         }
         "submitted" if prev == "in_progress" => {
             events.push(DashboardEvent::TaskPhaseChanged {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                old_phase: "implementing".into(), new_phase: "gating".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                old_phase: "implementing".into(),
+                new_phase: "gating".into(),
             });
-            let summary = job.submission.as_ref()
+            let summary = job
+                .submission
+                .as_ref()
                 .and_then(|s| s.get("result_summary"))
-                .and_then(|v| v.as_str()).unwrap_or("(submitted)");
+                .and_then(|v| v.as_str())
+                .unwrap_or("(submitted)");
             if !agent_id.is_empty() {
                 events.push(DashboardEvent::AgentOutput {
                     agent_id: agent_id.clone(),
                     content: format!("✓ submitted: {summary}"),
                 });
             }
-            if let Some(gates) = job.submission.as_ref()
+            if let Some(gates) = job
+                .submission
+                .as_ref()
                 .and_then(|s| s.get("gate_results"))
                 .and_then(|v| v.as_array())
             {
                 for gate in gates {
                     let name = gate.get("gate").and_then(|v| v.as_str()).unwrap_or("check");
-                    let passed = gate.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let passed = gate
+                        .get("passed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     events.push(DashboardEvent::GateResult {
-                        plan_id: plan_id.clone(), task_id: task_id.clone(),
-                        gate: name.to_string(), passed,
+                        plan_id: plan_id.clone(),
+                        task_id: task_id.clone(),
+                        gate: name.to_string(),
+                        passed,
                     });
                 }
-                let gate_lines: Vec<String> = gates.iter().map(|g| {
-                    let name = g.get("gate").and_then(|v| v.as_str()).unwrap_or("check");
-                    let passed = g.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
-                    format!("[gate] {} {}", if passed { "PASS" } else { "FAIL" }, name)
-                }).collect();
+                let gate_lines: Vec<String> = gates
+                    .iter()
+                    .map(|g| {
+                        let name = g.get("gate").and_then(|v| v.as_str()).unwrap_or("check");
+                        let passed = g.get("passed").and_then(|v| v.as_bool()).unwrap_or(false);
+                        format!("[gate] {} {}", if passed { "PASS" } else { "FAIL" }, name)
+                    })
+                    .collect();
                 if !gate_lines.is_empty() {
                     events.push(DashboardEvent::TaskOutputAppended {
                         task_id: task_id.clone(),
@@ -923,52 +956,81 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
             }
             // Token usage and cost for the submitted work
             events.push(DashboardEvent::EfficiencyEvent {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                metric: "input_tokens".into(), value: 4200.0,
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                metric: "input_tokens".into(),
+                value: 4200.0,
             });
             events.push(DashboardEvent::EfficiencyEvent {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                metric: "output_tokens".into(), value: 1800.0,
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                metric: "output_tokens".into(),
+                value: 1800.0,
             });
             events.push(DashboardEvent::EfficiencyEvent {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                metric: "cost_usd".into(), value: 0.042,
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                metric: "cost_usd".into(),
+                value: 0.042,
             });
             events.push(DashboardEvent::TaskOutputAppended {
                 task_id: task_id.clone(),
-                lines: vec![
-                    format!("[{agent_id}] submitted: {summary}"),
-                ],
+                lines: vec![format!("[{agent_id}] submitted: {summary}")],
             });
             events.push(DashboardEvent::EventLogEntry {
-                timestamp_ms: job_now_millis(), event_type: "job_submitted".into(),
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
+                timestamp_ms: job_now_millis(),
+                event_type: "job_submitted".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
                 message: format!("{agent_id} submitted: {summary}"),
             });
         }
         "completed" => {
-            let feedback = job.evaluation.as_ref()
+            let feedback = job
+                .evaluation
+                .as_ref()
                 .and_then(|e| e.get("feedback"))
-                .and_then(|v| v.as_str()).unwrap_or("");
-            let accepted = job.evaluation.as_ref()
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let accepted = job
+                .evaluation
+                .as_ref()
                 .and_then(|e| e.get("accepted"))
-                .and_then(|v| v.as_bool()).unwrap_or(true);
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             events.push(DashboardEvent::TaskCompleted {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                outcome: if accepted { "success".into() } else { "rejected".into() },
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                outcome: if accepted {
+                    "success".into()
+                } else {
+                    "rejected".into()
+                },
             });
             events.push(DashboardEvent::PlanCompleted {
-                plan_id: plan_id.clone(), success: accepted,
+                plan_id: plan_id.clone(),
+                success: accepted,
             });
             if !agent_id.is_empty() {
-                events.push(DashboardEvent::AgentCompleted { agent_id: agent_id.clone() });
+                events.push(DashboardEvent::AgentCompleted {
+                    agent_id: agent_id.clone(),
+                });
                 events.push(DashboardEvent::EpisodeRecorded {
-                    agent_id: agent_id.clone(), role: "job-executor".into(),
-                    episode_id: job.id.clone(), passed: accepted,
+                    agent_id: agent_id.clone(),
+                    role: "job-executor".into(),
+                    episode_id: job.id.clone(),
+                    passed: accepted,
                 });
                 events.push(DashboardEvent::AgentOutput {
                     agent_id: agent_id.clone(),
-                    content: format!("{} {feedback}", if accepted { "✓ accepted:" } else { "✗ rejected:" }),
+                    content: format!(
+                        "{} {feedback}",
+                        if accepted {
+                            "✓ accepted:"
+                        } else {
+                            "✗ rejected:"
+                        }
+                    ),
                 });
             }
             events.push(DashboardEvent::Diagnosis {
@@ -983,26 +1045,44 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                 },
             });
             events.push(DashboardEvent::EfficiencyEvent {
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                metric: "cost_usd".into(), value: 0.003,
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                metric: "cost_usd".into(),
+                value: 0.003,
             });
             events.push(DashboardEvent::TaskOutputAppended {
                 task_id: task_id.clone(),
-                lines: vec![
-                    format!("[eval] {} {feedback}", if accepted { "\u{2713} accepted" } else { "\u{2717} rejected" }),
-                ],
+                lines: vec![format!(
+                    "[eval] {} {feedback}",
+                    if accepted {
+                        "\u{2713} accepted"
+                    } else {
+                        "\u{2717} rejected"
+                    }
+                )],
             });
             events.push(DashboardEvent::EventLogEntry {
-                timestamp_ms: job_now_millis(), event_type: "job_completed".into(),
-                plan_id: plan_id.clone(), task_id: task_id.clone(),
-                message: if accepted { format!("✓ accepted: {feedback}") } else { format!("✗ rejected: {feedback}") },
+                timestamp_ms: job_now_millis(),
+                event_type: "job_completed".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                message: if accepted {
+                    format!("✓ accepted: {feedback}")
+                } else {
+                    format!("✗ rejected: {feedback}")
+                },
             });
         }
         "cancelled" => {
             events.push(DashboardEvent::TaskCompleted {
-                plan_id: plan_id.clone(), task_id: task_id.clone(), outcome: "cancelled".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                outcome: "cancelled".into(),
             });
-            events.push(DashboardEvent::PlanCompleted { plan_id: plan_id.clone(), success: false });
+            events.push(DashboardEvent::PlanCompleted {
+                plan_id: plan_id.clone(),
+                success: false,
+            });
             events.push(DashboardEvent::Diagnosis {
                 summary: roko_core::dashboard_snapshot::DiagnosisSummary {
                     id: format!("job-cancel-{}", &job.id[..8.min(job.id.len())]),
@@ -1010,13 +1090,18 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
                     severity: roko_core::dashboard_snapshot::DiagnosisSeverity::Warn,
                     subject: format!("Job cancelled: {}", job.title),
                     detail: "Job was cancelled before completion".into(),
-                    suggested_action: Some("Review if task should be re-opened or reassigned".into()),
+                    suggested_action: Some(
+                        "Review if task should be re-opened or reassigned".into(),
+                    ),
                     intervention_taken: None,
                 },
             });
             events.push(DashboardEvent::EventLogEntry {
-                timestamp_ms: job_now_millis(), event_type: "job_cancelled".into(),
-                plan_id: plan_id.clone(), task_id: task_id.clone(), message: "job cancelled".into(),
+                timestamp_ms: job_now_millis(),
+                event_type: "job_cancelled".into(),
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                message: "job cancelled".into(),
             });
         }
         _ => {}

@@ -8,10 +8,9 @@
 #
 # Build context is the `roko/` workspace root.
 
-ARG BUILDPLATFORM
-ARG TARGETPLATFORM
+ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-slim-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update \

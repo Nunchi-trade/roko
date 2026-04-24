@@ -73,9 +73,13 @@ impl FocusZone {
                 }
                 Self::AgentOutput => Self::RightPanel,
             },
-            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {
-                self
-            }
+            Tab::Git
+            | Tab::Logs
+            | Tab::Config
+            | Tab::Inspect
+            | Tab::Marketplace
+            | Tab::Atelier
+            | Tab::Learning => self,
         }
     }
 
@@ -102,9 +106,13 @@ impl FocusZone {
                 }
                 Self::AgentOutput => Self::RightPanel,
             },
-            Tab::Git | Tab::Logs | Tab::Config | Tab::Inspect | Tab::Marketplace | Tab::Atelier => {
-                self
-            }
+            Tab::Git
+            | Tab::Logs
+            | Tab::Config
+            | Tab::Inspect
+            | Tab::Marketplace
+            | Tab::Atelier
+            | Tab::Learning => self,
         }
     }
 }
@@ -429,6 +437,7 @@ pub fn handle_key(
         Tab::Inspect => handle_inspect_key(key, focus),
         Tab::Marketplace => handle_marketplace_key(key, focus),
         Tab::Atelier => handle_atelier_key(key, focus),
+        Tab::Learning => TuiAction::None,
     }
 }
 
@@ -562,9 +571,29 @@ fn handle_global_key(key: KeyEvent) -> Option<TuiAction> {
         return Some(TuiAction::SwitchTab(tab));
     }
 
-    // Number keys 1-9 switch sub-views within the current tab (UI-04).
-    // Only when no modifiers are held (plain digit press).
+    // Number keys 1-9 switch top-level tabs (same as F1-F9).
+    // 0 switches to F10 (Learning). Plain digit press, no modifiers.
     if key.modifiers.is_empty() {
+        let tab = match key.code {
+            KeyCode::Char('1') => Some(Tab::Dashboard),
+            KeyCode::Char('2') => Some(Tab::Plans),
+            KeyCode::Char('3') => Some(Tab::Agents),
+            KeyCode::Char('4') => Some(Tab::Git),
+            KeyCode::Char('5') => Some(Tab::Logs),
+            KeyCode::Char('6') => Some(Tab::Config),
+            KeyCode::Char('7') => Some(Tab::Inspect),
+            KeyCode::Char('8') => Some(Tab::Marketplace),
+            KeyCode::Char('9') => Some(Tab::Atelier),
+            KeyCode::Char('0') => Some(Tab::Learning),
+            _ => None,
+        };
+        if let Some(tab) = tab {
+            return Some(TuiAction::SwitchTab(tab));
+        }
+    }
+
+    // Alt+number switches sub-views within the current tab (UI-04).
+    if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c @ '1'..='9') = key.code {
             let index = (c as usize) - ('1' as usize); // 0-based
             return Some(TuiAction::SwitchSubView(index));
@@ -965,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn logs_tab_number_keys_switch_subview() {
+    fn number_keys_switch_tabs() {
         let action = handle_key(
             key(KeyCode::Char('3')),
             InputMode::Normal,
@@ -973,8 +1002,32 @@ mod tests {
             FocusZone::PlanTree,
             &modals(None),
         );
-        // Number keys on logs tab switch sub-views (0-indexed from the key digit).
-        assert_eq!(action, TuiAction::SwitchSubView(2));
+        // Plain number keys now switch top-level tabs.
+        assert_eq!(action, TuiAction::SwitchTab(Tab::Agents));
+    }
+
+    #[test]
+    fn zero_key_switches_to_learning_tab() {
+        let action = handle_key(
+            key(KeyCode::Char('0')),
+            InputMode::Normal,
+            Tab::Dashboard,
+            FocusZone::PlanTree,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::SwitchTab(Tab::Learning));
+    }
+
+    #[test]
+    fn alt_number_switches_subview() {
+        let action = handle_key(
+            key_with_mod(KeyCode::Char('2'), KeyModifiers::ALT),
+            InputMode::Normal,
+            Tab::Logs,
+            FocusZone::PlanTree,
+            &modals(None),
+        );
+        assert_eq!(action, TuiAction::SwitchSubView(1));
     }
 
     #[test]

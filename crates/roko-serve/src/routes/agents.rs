@@ -1,6 +1,7 @@
 //! Agent registration, token, and process management endpoints.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Query;
@@ -9,16 +10,31 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use futures::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use validator::Validate;
 
-use roko_runtime::process::ProcessId;
+use alloy::primitives::{Address, FixedBytes};
+use alloy::sol;
+
+use roko_chain::alloy_impl::AlloyChainWallet;
+use roko_core::HeartbeatPayload;
+use roko_core::config::schema::{ModelProfile, RokoConfig};
+use roko_learn::provider_health::HealthState;
+use roko_runtime::process::{ProcessId, SpawnConfig};
 
 use crate::error::ApiError;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
 use crate::routes::run::spawn_background_run;
-use crate::state::{AgentRegistrationRecord, AppState};
+use crate::runtime::RunResult;
+use crate::state::{AgentRegistrationRecord, AppState, DiscoveredAgent, OperationStatus};
+
+const AGENT_MESSAGE_INLINE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -26,10 +42,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/agents/register", post(register_agent))
         .route("/agents/create", post(create_agent))
         .route("/agents/{id}", get(get_agent))
+        .route("/agents/{id}/profile", get(get_agent_profile))
         .route("/agents/{id}/stop", post(stop_agent))
         .route("/agents/{id}/episodes", get(agent_episodes))
         .route("/agents/{id}/logs", get(proxy_agent_logs))
         .route("/agents/{id}/message", post(send_message))
+        .route("/agents/{id}/start", post(start_agent))
+        .route("/agents/{id}/restart", post(restart_agent))
         .route("/agents/{id}/token", get(token_status).post(issue_token))
 }
 
@@ -39,6 +58,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
     let entries = state.supervisor.list().await;
     let discovered = state.discovered_agents.read().await;
+    let config = state.load_roko_config();
+    let heartbeats = state.heartbeats.read().await.clone();
 
     let mut seen_agent_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut items: Vec<Value> = Vec::with_capacity(entries.len() + discovered.len());
@@ -52,22 +73,33 @@ async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> 
         if let Some(info) = agent_info {
             seen_agent_ids.insert(info.agent_id.clone());
         }
-        items.push(json!({
-            "id": agent_info.map_or_else(|| label.clone(), |a| a.agent_id.clone()),
-            "process_id": id.0,
-            "label": agent_info.and_then(|a| a.label.clone()).unwrap_or_else(|| label.clone()),
-            "status": agent_info.map_or("running", |a| {
-                if a.status.is_empty() { "running" } else { &a.status }
-            }),
-            "role": agent_info.and_then(|a| a.capabilities.first()).cloned(),
-            "model": Value::Null,
-            "tier": agent_info.and_then(|a| a.tier.clone()),
-            "current_task": Value::Null,
-            "endpoints": agent_info.map(|a| json!({
-                "rest": a.endpoints.rest,
-                "websocket": a.endpoints.websocket,
-            })),
-        }));
+        let agent_id = agent_info.map_or_else(|| label.clone(), |a| a.agent_id.clone());
+        let label = agent_info
+            .and_then(|a| a.label.clone())
+            .unwrap_or_else(|| label.clone());
+        let status = agent_info.map_or_else(
+            || "running".to_string(),
+            |a| {
+                if a.status.is_empty() {
+                    "running".to_string()
+                } else {
+                    a.status.clone()
+                }
+            },
+        );
+        items.push(agent_dashboard_payload(
+            &state,
+            &config,
+            &heartbeats,
+            AgentDashboardInput {
+                agent_id,
+                label,
+                process_id: Some(id.0),
+                status,
+                current_task: Value::Null,
+                agent: agent_info,
+            },
+        ));
     }
 
     // 2. Discovered-only agents (registered via POST /api/agents/register or
@@ -76,22 +108,347 @@ async fn list_managed_agents(State(state): State<Arc<AppState>>) -> Json<Value> 
         if seen_agent_ids.contains(&agent.agent_id) {
             continue;
         }
-        items.push(json!({
-            "id": agent.agent_id,
-            "label": agent.label.clone().unwrap_or_else(|| agent.agent_id.clone()),
-            "status": if agent.status.is_empty() { "registered" } else { &agent.status },
-            "role": agent.capabilities.first().cloned(),
-            "model": Value::Null,
-            "tier": agent.tier.clone(),
-            "current_task": Value::Null,
-            "endpoints": json!({
-                "rest": agent.endpoints.rest,
-                "websocket": agent.endpoints.websocket,
-            }),
-        }));
+        items.push(agent_dashboard_payload(
+            &state,
+            &config,
+            &heartbeats,
+            AgentDashboardInput {
+                agent_id: agent.agent_id.clone(),
+                label: agent
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| agent.agent_id.clone()),
+                process_id: agent.process_id,
+                status: if agent.status.is_empty() {
+                    "registered".to_string()
+                } else {
+                    agent.status.clone()
+                },
+                current_task: Value::Null,
+                agent: Some(agent),
+            },
+        ));
     }
 
     Json(Value::Array(items))
+}
+
+fn dashboard_default_model(config: &RokoConfig) -> Option<String> {
+    let default_model = config.agent.default_model.trim();
+    (!default_model.is_empty()).then(|| default_model.to_string())
+}
+
+struct AgentDashboardInput<'a> {
+    agent_id: String,
+    label: String,
+    process_id: Option<u64>,
+    status: String,
+    current_task: Value,
+    agent: Option<&'a DiscoveredAgent>,
+}
+
+fn agent_dashboard_payload(
+    state: &AppState,
+    config: &RokoConfig,
+    heartbeats: &std::collections::VecDeque<HeartbeatPayload>,
+    input: AgentDashboardInput<'_>,
+) -> Value {
+    let (model, model_source) =
+        resolve_agent_model(config, input.agent.and_then(|a| a.model.as_deref()));
+    let profile = model
+        .as_deref()
+        .and_then(|model| model_profile_for(config, model));
+    let provider = profile
+        .as_ref()
+        .map(|(_, profile)| profile.provider.clone())
+        .or_else(|| infer_provider_from_model(model.as_deref()));
+    let model_profile = profile
+        .as_ref()
+        .map(|(key, profile)| model_profile_json(key, profile));
+    let provider_health = provider
+        .as_deref()
+        .map(|provider| provider_health_json(state, provider));
+
+    let heartbeat = latest_heartbeat_for_agent(
+        heartbeats,
+        &[
+            input.agent_id.as_str(),
+            input.label.as_str(),
+            input.agent.and_then(|a| a.label.as_deref()).unwrap_or(""),
+        ],
+    );
+    let heartbeat_summary = heartbeat.map(heartbeat_summary_json);
+    let performance = agent_performance_json(input.agent, heartbeat);
+    let learning = agent_learning_json(input.agent, heartbeat);
+    let costs = agent_cost_json(heartbeat, model_profile.as_ref());
+    let endpoints = input.agent.map(|agent| {
+        json!({
+            "rest": agent.endpoints.rest,
+            "websocket": agent.endpoints.websocket,
+            "a2a": agent.endpoints.a2a,
+            "mcp": agent.endpoints.mcp,
+        })
+    });
+    let stream_url = input.agent.and_then(stream_url_for_agent);
+    let capabilities = input
+        .agent
+        .map(|agent| agent.capabilities.clone())
+        .unwrap_or_default();
+    let domain_tags = input
+        .agent
+        .map(|agent| agent.domain_tags.clone())
+        .unwrap_or_default();
+    let skills = input
+        .agent
+        .map(|agent| agent.skills.clone())
+        .unwrap_or_default();
+    let role = capabilities
+        .first()
+        .cloned()
+        .or_else(|| domain_tags.first().cloned());
+    let message_endpoint = format!("/api/agents/{}/message", input.agent_id);
+
+    json!({
+        "id": input.agent_id.clone(),
+        "agent_id": input.agent_id,
+        "process_id": input.process_id,
+        "label": input.label,
+        "status": input.status,
+        "role": role,
+        "model": model,
+        "model_source": model_source,
+        "provider": provider,
+        "provider_health": provider_health,
+        "model_profile": model_profile,
+        "tier": input.agent.and_then(|agent| agent.tier.clone()),
+        "current_task": input.current_task,
+        "owner": input.agent.map(|agent| agent.owner.clone()).unwrap_or_default(),
+        "registered_at": input.agent.map(|agent| agent.registered_at),
+        "last_seen_at": input.agent.map(|agent| agent.last_seen_at),
+        "card_uri": input.agent.and_then(|agent| agent.card_uri.clone()),
+        "capabilities": capabilities,
+        "domain_tags": domain_tags,
+        "skills": skills,
+        "reputation": input.agent.map_or(0, |agent| agent.reputation),
+        "past_jobs_completed": input.agent.map_or(0, |agent| agent.past_jobs_completed),
+        "max_concurrent_jobs": input.agent.map_or(0, |agent| agent.max_concurrent_jobs),
+        "endpoints": endpoints,
+        "heartbeat": heartbeat_summary,
+        "performance": performance,
+        "learning": learning,
+        "costs": costs,
+        "chat": {
+            "message_endpoint": message_endpoint,
+            "streaming_supported": stream_url.is_some(),
+            "stream_endpoint": stream_url,
+            "inline_timeout_ms": AGENT_MESSAGE_INLINE_TIMEOUT.as_millis(),
+            "correlation": "run_id",
+        },
+    })
+}
+
+fn resolve_agent_model(
+    config: &RokoConfig,
+    agent_model: Option<&str>,
+) -> (Option<String>, &'static str) {
+    if let Some(model) = agent_model.map(str::trim).filter(|model| !model.is_empty()) {
+        return (Some(model.to_string()), "agent");
+    }
+    if let Some(model) = dashboard_default_model(config) {
+        return (Some(model), "default");
+    }
+    (None, "none")
+}
+
+fn model_profile_for(config: &RokoConfig, model: &str) -> Option<(String, ModelProfile)> {
+    let models = config.effective_models();
+    models
+        .get(model)
+        .cloned()
+        .map(|profile| (model.to_string(), profile))
+        .or_else(|| {
+            models
+                .into_iter()
+                .find(|(_, profile)| profile.slug == model)
+        })
+}
+
+fn model_profile_json(key: &str, profile: &ModelProfile) -> Value {
+    json!({
+        "key": key,
+        "slug": profile.slug,
+        "provider": profile.provider,
+        "context_window": profile.context_window,
+        "max_output": profile.max_output,
+        "tool_format": profile.tool_format,
+        "thinking_level": profile.thinking_level,
+        "supports": {
+            "tools": profile.supports_tools,
+            "thinking": profile.supports_thinking,
+            "vision": profile.supports_vision,
+            "web_search": profile.supports_web_search || profile.supports_search,
+            "mcp_tools": profile.supports_mcp_tools,
+            "partial": profile.supports_partial,
+            "grounding": profile.supports_grounding,
+            "code_execution": profile.supports_code_execution,
+            "caching": profile.supports_caching,
+            "citations": profile.supports_citations,
+            "async": profile.supports_async,
+            "embedding": profile.is_embedding_model,
+        },
+        "pricing": {
+            "input_per_m": profile.cost_input_per_m,
+            "output_per_m": profile.cost_output_per_m,
+            "input_per_m_high": profile.cost_input_per_m_high,
+            "output_per_m_high": profile.cost_output_per_m_high,
+            "cache_read_per_m": profile.cost_cache_read_per_m,
+            "cache_write_per_m": profile.cost_cache_write_per_m,
+            "per_request": profile.cost_per_request,
+        },
+    })
+}
+
+fn infer_provider_from_model(model: Option<&str>) -> Option<String> {
+    let model = model?.to_ascii_lowercase();
+    let provider = if model.contains("claude") {
+        "anthropic"
+    } else if model.contains("gpt") || model.contains("o3") || model.contains("o4") {
+        "openai"
+    } else if model.contains("gemini") {
+        "gemini"
+    } else if model.contains("glm") || model.contains("z-ai") {
+        "zai"
+    } else if model.contains("sonar") {
+        "perplexity"
+    } else if model.contains("llama") || model.contains("qwen") {
+        "openrouter"
+    } else {
+        return None;
+    };
+    Some(provider.to_string())
+}
+
+fn provider_health_json(state: &AppState, provider: &str) -> Value {
+    let status = state.provider_health.get(provider);
+    json!({
+        "state": provider_state_label(status.state),
+        "consecutive_failures": status.consecutive_failures,
+        "total_attempts": status.total_attempts,
+        "total_successes": status.total_successes,
+        "error_rate": status.error_rate(),
+        "last_failure_at": status.last_failure_at,
+        "last_success_at": status.last_success_at,
+    })
+}
+
+fn provider_state_label(state: HealthState) -> &'static str {
+    match state {
+        HealthState::Healthy => "healthy",
+        HealthState::Unhealthy { .. } => "unhealthy",
+        HealthState::Probing => "probing",
+    }
+}
+
+fn latest_heartbeat_for_agent<'a>(
+    heartbeats: &'a std::collections::VecDeque<HeartbeatPayload>,
+    candidates: &[&str],
+) -> Option<&'a HeartbeatPayload> {
+    heartbeats.iter().rev().find(|heartbeat| {
+        candidates
+            .iter()
+            .any(|candidate| !candidate.is_empty() && heartbeat.sender_id == *candidate)
+    })
+}
+
+fn heartbeat_summary_json(heartbeat: &HeartbeatPayload) -> Value {
+    let age_seconds = heartbeat_age_seconds(&heartbeat.timestamp);
+    json!({
+        "sender_id": heartbeat.sender_id,
+        "timestamp": heartbeat.timestamp,
+        "age_seconds": age_seconds,
+        "stale": age_seconds.is_none_or(|age| age > 300),
+        "active_tasks": heartbeat.active_tasks,
+        "completed_tasks": heartbeat.completed_tasks,
+        "failed_tasks": heartbeat.failed_tasks,
+        "active_agents": heartbeat.active_agents,
+        "frequency": heartbeat.frequency,
+        "metrics": heartbeat.metrics,
+    })
+}
+
+fn heartbeat_age_seconds(timestamp: &str) -> Option<i64> {
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+        return Some(
+            (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0),
+        );
+    }
+    let raw = timestamp.parse::<i64>().ok()?;
+    let seconds = if raw > 9_999_999_999 {
+        raw / 1_000
+    } else {
+        raw
+    };
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|parsed| (chrono::Utc::now() - parsed).num_seconds().max(0))
+}
+
+fn agent_performance_json(
+    agent: Option<&DiscoveredAgent>,
+    heartbeat: Option<&HeartbeatPayload>,
+) -> Value {
+    let metrics = heartbeat.map(|heartbeat| &heartbeat.metrics);
+    json!({
+        "active_tasks": heartbeat.map(|heartbeat| heartbeat.active_tasks).unwrap_or_default(),
+        "completed_tasks": heartbeat.map(|heartbeat| heartbeat.completed_tasks).unwrap_or_default(),
+        "failed_tasks": heartbeat.map(|heartbeat| heartbeat.failed_tasks).unwrap_or_default(),
+        "frequency": heartbeat.map(|heartbeat| heartbeat.frequency).unwrap_or_default(),
+        "gate_pass_rate": metric_value(metrics, &["gate_pass_rate", "gate_rate", "success_rate"]),
+        "context_utilization": metric_value(metrics, &["context_utilization", "context_utilization_pct"]),
+        "token_burn_rate": metric_value(metrics, &["token_burn_rate", "tokens_per_minute", "tokens_min"]),
+        "latency_ms": metric_value(metrics, &["latency_ms", "p50_latency_ms"]),
+        "throughput": metric_value(metrics, &["throughput", "tasks_per_hour"]),
+        "reputation": agent.map_or(0, |agent| agent.reputation),
+        "past_jobs_completed": agent.map_or(0, |agent| agent.past_jobs_completed),
+        "max_concurrent_jobs": agent.map_or(0, |agent| agent.max_concurrent_jobs),
+    })
+}
+
+fn agent_learning_json(
+    agent: Option<&DiscoveredAgent>,
+    heartbeat: Option<&HeartbeatPayload>,
+) -> Value {
+    let metrics = heartbeat.map(|heartbeat| &heartbeat.metrics);
+    json!({
+        "episode_count": metric_value(metrics, &["episode_count", "episodes"]),
+        "playbook_size": metric_value(metrics, &["playbook_size", "patterns"]),
+        "insight_count": metric_value(metrics, &["insight_count", "insights"]),
+        "gate_pass_rate": metric_value(metrics, &["gate_pass_rate", "gate_rate", "success_rate"]),
+        "context_lift": metric_value(metrics, &["context_lift", "section_lift", "vcg_lift"]),
+        "memory_freshness": metric_value(metrics, &["memory_freshness", "knowledge_freshness"]),
+        "skills": agent.map(|agent| agent.skills.clone()).unwrap_or_default(),
+        "capabilities": agent.map(|agent| agent.capabilities.clone()).unwrap_or_default(),
+    })
+}
+
+fn agent_cost_json(heartbeat: Option<&HeartbeatPayload>, model_profile: Option<&Value>) -> Value {
+    let metrics = heartbeat.map(|heartbeat| &heartbeat.metrics);
+    json!({
+        "cumulative_usd": metric_value(metrics, &["cumulative_cost_usd", "cost_usd", "total_cost_usd"]),
+        "burn_rate_usd_per_hour": metric_value(metrics, &["burn_rate_usd_per_hour", "usd_per_hour"]),
+        "token_burn_rate": metric_value(metrics, &["token_burn_rate", "tokens_per_minute", "tokens_min"]),
+        "pricing": model_profile
+            .and_then(|profile| profile.get("pricing"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn metric_value(metrics: Option<&std::collections::HashMap<String, f64>>, keys: &[&str]) -> Value {
+    metrics
+        .and_then(|metrics| keys.iter().find_map(|key| metrics.get(*key).copied()))
+        .map_or(Value::Null, Value::from)
 }
 
 /// `POST /api/agents/register` — upsert a discovery entry for an agent server.
@@ -115,12 +472,34 @@ async fn register_agent(
             capabilities: req.capabilities,
             domain_tags: req.domain_tags,
             tier: req.tier,
+            model: req.model,
             reputation: req.reputation,
             skills: req.skills,
             past_jobs_completed: req.past_jobs_completed,
             max_concurrent_jobs: req.max_concurrent_jobs,
         })
         .await;
+
+    // Dual-write: non-blocking on-chain registration when chain wallet is configured.
+    if let Some(wallet) = state.chain_wallet.as_ref() {
+        let wallet = Arc::clone(wallet);
+        let config = state.load_roko_config();
+        let agent_id = agent.agent_id.clone();
+        let capabilities = agent.capabilities.join(",");
+        let registry_addr = config
+            .chain
+            .agent_registry
+            .as_deref()
+            .unwrap_or("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+            .to_string();
+        tokio::spawn(async move {
+            if let Err(e) =
+                chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
+            {
+                tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
+            }
+        });
+    }
 
     let token = if req.issue_token.unwrap_or(false) {
         state.rotate_agent_token(&agent.agent_id).await
@@ -132,6 +511,38 @@ async fn register_agent(
         "agent": agent,
         "token": token,
     })))
+}
+
+// Minimal sol! binding for on-chain agent registration.
+sol! {
+    #[sol(rpc)]
+    contract OnChainAgentRegistry {
+        function register(string calldata capabilities, bytes32 passportHash) external;
+    }
+}
+
+/// Non-blocking on-chain agent registration via alloy.
+async fn chain_register_agent(
+    wallet: &AlloyChainWallet,
+    registry_addr: &str,
+    agent_id: &str,
+    capabilities: &str,
+) -> Result<(), String> {
+    let addr: Address = registry_addr.parse().map_err(|e| format!("{e}"))?;
+    let registry = OnChainAgentRegistry::new(addr, wallet.provider());
+    let passport_hash = FixedBytes::ZERO;
+    let pending = registry
+        .register(capabilities.to_string(), passport_hash)
+        .send()
+        .await
+        .map_err(|e| format!("send failed: {e}"))?;
+    let tx_hash = pending.tx_hash();
+    tracing::info!(
+        agent_id,
+        tx_hash = %tx_hash,
+        "on-chain agent registration tx submitted"
+    );
+    Ok(())
 }
 
 /// Request payload for `POST /api/agents/create`.
@@ -155,6 +566,9 @@ struct CreateAgentRequest {
     /// Agent tier label.
     #[serde(default)]
     tier: Option<String>,
+    /// Optional per-agent model override.
+    #[serde(default)]
+    model: Option<String>,
     /// Reputation score (0–100).
     #[serde(default)]
     reputation: u32,
@@ -249,11 +663,33 @@ mode = "self_hosted"
             domain_tags: vec![req.domain.clone()],
             skills: req.skills,
             tier: req.tier,
+            model: req.model,
             reputation: req.reputation,
             max_concurrent_jobs: req.max_concurrent_jobs,
             ..Default::default()
         })
         .await;
+
+    // Dual-write: non-blocking on-chain registration when chain wallet is configured.
+    if let Some(wallet) = state.chain_wallet.as_ref() {
+        let wallet = Arc::clone(wallet);
+        let config = state.load_roko_config();
+        let agent_id = agent.agent_id.clone();
+        let capabilities = agent.capabilities.join(",");
+        let registry_addr = config
+            .chain
+            .agent_registry
+            .as_deref()
+            .unwrap_or("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
+            .to_string();
+        tokio::spawn(async move {
+            if let Err(e) =
+                chain_register_agent(&wallet, &registry_addr, &agent_id, &capabilities).await
+            {
+                tracing::warn!(agent_id, error = %e, "on-chain agent registration failed (non-blocking)");
+            }
+        });
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -274,13 +710,218 @@ fn toml_quote(s: &str) -> String {
     }
 }
 
+// ─── Agent lifecycle: start / restart ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct StartAgentRequest {
+    /// Override bind address (default: "127.0.0.1:0" for auto-port).
+    #[serde(default)]
+    bind: Option<String>,
+    /// Override the default model for this agent.
+    #[serde(default)]
+    model_override: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StartAgentResponse {
+    status: String,
+    process_id: u64,
+    agent_id: String,
+}
+
+/// `POST /api/agents/{id}/start` — spawn an agent sidecar process.
+///
+/// Mirrors the logic of `roko agent start`: verifies a manifest exists,
+/// checks the agent isn't already supervised, then spawns
+/// `roko agent serve --agent-id <id> --bind <addr>` under the [`ProcessSupervisor`].
+/// The sidecar will self-register back to `/api/agents/register` with its port.
+async fn start_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    Json(opts): Json<StartAgentRequest>,
+) -> Result<Json<StartAgentResponse>, ApiError> {
+    // 1. Verify agent manifest exists.
+    let manifest_path = state
+        .workdir
+        .join(".roko")
+        .join("agents")
+        .join(&agent_id)
+        .join("manifest.toml");
+    let known_in_discovery = state.discovered_agent(&agent_id).await.is_some();
+
+    if !manifest_path.exists() && !known_in_discovery {
+        return Err(ApiError::not_found(format!(
+            "agent '{agent_id}' not found (no manifest at {} and not in discovery)",
+            manifest_path.display()
+        )));
+    }
+
+    // Check for a DELETED marker.
+    let deleted_marker = manifest_path
+        .parent()
+        .map(|p| p.join("DELETED"))
+        .filter(|p| p.exists());
+    if deleted_marker.is_some() {
+        return Err(ApiError::bad_request(format!(
+            "agent '{agent_id}' has been deleted"
+        )));
+    }
+
+    // 2. Check agent isn't already running in the supervisor.
+    if state.find_process_by_label(&agent_id).await.is_some() {
+        return Err(ApiError::conflict(format!(
+            "agent '{agent_id}' is already running"
+        )));
+    }
+
+    // 3. Build spawn config.
+    let roko_bin = std::env::current_exe()
+        .map_err(|e| ApiError::internal(format!("determine roko binary path: {e}")))?;
+    let bind = opts.bind.unwrap_or_else(|| "127.0.0.1:0".to_string());
+
+    let mut args = vec![
+        "agent".to_string(),
+        "serve".to_string(),
+        "--agent-id".to_string(),
+        agent_id.clone(),
+        "--bind".to_string(),
+        bind,
+    ];
+
+    // Pass the serve URL so the sidecar can self-register.
+    let config = state.load_roko_config();
+    let port = config.server.port;
+    let serve_url = format!("http://127.0.0.1:{port}");
+    args.extend(["--serve-url".to_string(), serve_url]);
+
+    if let Some(ref model) = opts.model_override {
+        args.extend(["--model".to_string(), model.clone()]);
+    }
+
+    let spawn_config = SpawnConfig {
+        program: roko_bin.to_string_lossy().into_owned(),
+        args,
+        working_dir: Some(state.workdir.clone()),
+        label: agent_id.clone(),
+        ..Default::default()
+    };
+
+    // 4. Spawn via supervisor.
+    let process_id = state
+        .supervisor
+        .spawn(spawn_config)
+        .await
+        .map_err(|e| ApiError::internal(format!("spawn agent: {e}")))?;
+
+    tracing::info!(agent_id = %agent_id, process_id = %process_id, "agent started via HTTP");
+
+    Ok(Json(StartAgentResponse {
+        status: "starting".to_string(),
+        process_id: process_id.0,
+        agent_id,
+    }))
+}
+
+/// `POST /api/agents/{id}/restart` — shut down and re-spawn an agent.
+async fn restart_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    // 1. Find the running process.
+    let (pid, _, _) = state
+        .find_process_by_label(&agent_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::not_found(format!("agent '{agent_id}' is not running in supervisor"))
+        })?;
+
+    // 2. Shut down gracefully.
+    state.supervisor.shutdown(pid).await;
+
+    // 3. Re-spawn with default options.
+    let restart_result = start_agent(
+        State(Arc::clone(&state)),
+        Path(agent_id.clone()),
+        Json(StartAgentRequest {
+            bind: None,
+            model_override: None,
+        }),
+    )
+    .await;
+
+    match restart_result {
+        Ok(Json(resp)) => Ok(Json(json!({
+            "status": "restarting",
+            "old_process_id": pid.0,
+            "new_process_id": resp.process_id,
+            "agent_id": agent_id,
+        }))),
+        Err(e) => Err(ApiError::internal(format!(
+            "agent '{agent_id}' stopped but failed to restart: {e:?}"
+        ))),
+    }
+}
+
 /// `GET /api/agents/{id}` — get info about a discovered or supervised agent.
+///
+/// The response is enriched with `process_status`, `uptime_secs`, `os_pid`,
+/// and `last_heartbeat` when the agent is supervised locally.
 async fn get_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let config = state.load_roko_config();
+    let heartbeats = state.heartbeats.read().await.clone();
+
+    // Look up process lifecycle info from supervisor.
+    let process_info = state.find_process_by_label(&id).await;
+    let (process_status, uptime_secs, os_pid) = match &process_info {
+        Some((_, os, uptime)) => ("running", Some(uptime.as_secs()), *os),
+        None => ("stopped", None, None),
+    };
+
+    // Find last heartbeat for this agent.
+    let last_hb = latest_heartbeat_for_agent(
+        &heartbeats,
+        &[id.as_str()],
+    );
+    let last_heartbeat_ts = last_hb.map(|hb| hb.timestamp.clone());
+
     if let Some(agent) = state.discovered_agent(&id).await {
-        return Ok(Json(json!(agent)));
+        let mut payload = agent_dashboard_payload(
+            &state,
+            &config,
+            &heartbeats,
+            AgentDashboardInput {
+                agent_id: agent.agent_id.clone(),
+                label: agent
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| agent.agent_id.clone()),
+                process_id: agent.process_id,
+                status: if agent.status.is_empty() {
+                    "registered".to_string()
+                } else {
+                    agent.status.clone()
+                },
+                current_task: Value::Null,
+                agent: Some(&agent),
+            },
+        );
+        // Enrich with process lifecycle fields.
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("process_status".to_string(), json!(process_status));
+            if let Some(up) = uptime_secs {
+                obj.insert("uptime_secs".to_string(), json!(up));
+            }
+            if let Some(pid) = os_pid {
+                obj.insert("os_pid".to_string(), json!(pid));
+            }
+            if let Some(ref ts) = last_heartbeat_ts {
+                obj.insert("last_heartbeat".to_string(), json!(ts));
+            }
+        }
+        return Ok(Json(payload));
     }
 
     let parsed_id = id
@@ -290,12 +931,35 @@ async fn get_agent(
     let found = entries.into_iter().find(|(pid, _)| pid.0 == parsed_id);
 
     match found {
-        Some((pid, label)) => Ok(Json(json!({
-            "id": pid.0,
-            "label": label,
-        }))),
+        Some((pid, label)) => {
+            let mut payload = agent_dashboard_payload(
+                &state,
+                &config,
+                &heartbeats,
+                AgentDashboardInput {
+                    agent_id: label.clone(),
+                    label,
+                    process_id: Some(pid.0),
+                    status: "running".to_string(),
+                    current_task: Value::Null,
+                    agent: None,
+                },
+            );
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("process_status".to_string(), json!("running"));
+            }
+            Ok(Json(payload))
+        }
         None => Err(ApiError::not_found(format!("agent {id} not found"))),
     }
+}
+
+/// `GET /api/agents/{id}/profile` — alias for the enriched agent detail payload.
+async fn get_agent_profile(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    get_agent(State(state), Path(id)).await
 }
 
 /// `POST /api/agents/{id}/stop` — shut down a specific supervised process.
@@ -428,71 +1092,104 @@ async fn send_message(
     Path(agent_id): Path<String>,
     ValidJson(req): ValidJson<SendMessageRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(agent) = state.discovered_agent(&agent_id).await
-        && let Some(rest) = agent.endpoints.rest
-    {
-        let url = format!("{}/message", rest.trim_end_matches('/'));
-        let mut request = state.http_client.post(url).json(&json!({
-            "prompt": req.message,
-            "context": req.context,
-        }));
-
-        if let Some(token) = agent.proxy_token {
-            request = request.bearer_auth(token);
+    if let Some(agent) = state.discovered_agent(&agent_id).await {
+        if let Some(ws_url) = stream_url_for_agent(&agent) {
+            let (run_id, rx) =
+                spawn_sidecar_stream(Arc::clone(&state), agent_id.clone(), ws_url, &agent, &req);
+            match wait_for_sidecar_stream(rx, AGENT_MESSAGE_INLINE_TIMEOUT).await {
+                Some(Ok(response_text)) => {
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "run_id": run_id,
+                            "agent_id": agent_id,
+                            "status": "completed",
+                            "response": response_text,
+                        })),
+                    ));
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(agent_id, %error, "streaming agent message proxy failed, trying direct message proxy");
+                }
+                None => {
+                    return Ok((
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "run_id": run_id,
+                            "agent_id": agent_id,
+                            "conversation_id": req.conversation_id,
+                            "response_mode": req.response_mode,
+                            "status": "running",
+                        })),
+                    ));
+                }
+            }
         }
 
-        match request.send().await {
-            Ok(response) if response.status().is_success() => {
-                let body = response
-                    .json::<Value>()
-                    .await
-                    .unwrap_or_else(|_| json!({ "status": "proxy_error" }));
+        if let Some(rest) = agent.endpoints.rest {
+            let url = format!("{}/message", rest.trim_end_matches('/'));
+            let mut request = state.http_client.post(url).json(&json!({
+                "prompt": req.message,
+                "context": req.context.clone(),
+            }));
 
-                // Extract text from sidecar response.  If the response
-                // field contains raw JSON (e.g. Claude CLI streaming
-                // protocol), try to extract the result text.
-                let response_text = body
-                    .get("response")
-                    .and_then(Value::as_str)
-                    .map(extract_response_text)
-                    .unwrap_or_default();
-
-                let run_id = uuid::Uuid::new_v4().to_string();
-
-                // Emit an agent_output event so WS/SSE clients see it.
-                state
-                    .event_bus
-                    .publish(crate::events::ServerEvent::AgentOutput {
-                        agent_id: agent_id.clone(),
-                        run_id: Some(run_id.clone()),
-                        content: response_text.clone(),
-                        done: true,
-                        metadata: None,
-                    });
-
-                return Ok((
-                    StatusCode::OK,
-                    Json(json!({
-                        "run_id": run_id,
-                        "agent_id": agent_id,
-                        "status": "completed",
-                        "response": response_text,
-                    })),
-                ));
+            if let Some(token) = agent.proxy_token {
+                request = request.bearer_auth(token);
             }
-            Ok(response) => {
-                let status = response.status();
-                let body = response
-                    .json::<Value>()
-                    .await
-                    .unwrap_or_else(|_| json!({ "status": "proxy_error" }));
-                return Ok((
-                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                    Json(body),
-                ));
-            }
-            Err(error) => {
-                tracing::warn!(agent_id, %error, "direct agent message proxy failed, falling back to background run");
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    let body = response
+                        .json::<Value>()
+                        .await
+                        .unwrap_or_else(|_| json!({ "status": "proxy_error" }));
+
+                    // Extract text from sidecar response.  If the response
+                    // field contains raw JSON (e.g. Claude CLI streaming
+                    // protocol), try to extract the result text.
+                    let response_text = body
+                        .get("response")
+                        .and_then(Value::as_str)
+                        .map(extract_response_text)
+                        .unwrap_or_default();
+
+                    let run_id = uuid::Uuid::new_v4().to_string();
+
+                    // Emit an agent_output event so WS/SSE clients see it.
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentOutput {
+                            agent_id: agent_id.clone(),
+                            run_id: Some(run_id.clone()),
+                            content: response_text.clone(),
+                            done: true,
+                            metadata: None,
+                        });
+
+                    return Ok((
+                        StatusCode::OK,
+                        Json(json!({
+                            "run_id": run_id,
+                            "agent_id": agent_id,
+                            "status": "completed",
+                            "response": response_text,
+                        })),
+                    ));
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response
+                        .json::<Value>()
+                        .await
+                        .unwrap_or_else(|_| json!({ "status": "proxy_error" }));
+                    return Ok((
+                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                        Json(body),
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(agent_id, %error, "direct agent message proxy failed, falling back to background run");
+                }
             }
         }
     }
@@ -500,8 +1197,33 @@ async fn send_message(
     let prompt = build_agent_prompt(&agent_id, &req.message, req.context.as_ref());
     let run_id = spawn_background_run(&state, prompt, None, Some(agent_id.clone())).await;
 
+    if let Some(completion) =
+        wait_for_background_run(&state, &run_id, AGENT_MESSAGE_INLINE_TIMEOUT).await
+    {
+        return match completion {
+            RunCompletion::Completed { response } => Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "run_id": run_id,
+                    "agent_id": agent_id,
+                    "status": "completed",
+                    "response": response,
+                })),
+            )),
+            RunCompletion::Failed { error } => Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "run_id": run_id,
+                    "agent_id": agent_id,
+                    "status": "failed",
+                    "error": error,
+                })),
+            )),
+        };
+    }
+
     Ok((
-        axum::http::StatusCode::ACCEPTED,
+        StatusCode::ACCEPTED,
         Json(json!({
             "run_id": run_id,
             "agent_id": agent_id,
@@ -510,6 +1232,251 @@ async fn send_message(
             "status": "running",
         })),
     ))
+}
+
+fn stream_url_for_agent(agent: &DiscoveredAgent) -> Option<String> {
+    if let Some(url) = agent.endpoints.websocket.as_deref() {
+        return Some(url.to_string());
+    }
+
+    let rest = agent.endpoints.rest.as_deref()?.trim_end_matches('/');
+    if let Some(pathless) = rest.strip_prefix("https://") {
+        return Some(format!("wss://{pathless}/stream"));
+    }
+    if let Some(pathless) = rest.strip_prefix("http://") {
+        return Some(format!("ws://{pathless}/stream"));
+    }
+    None
+}
+
+fn spawn_sidecar_stream(
+    state: Arc<AppState>,
+    agent_id: String,
+    ws_url: String,
+    agent: &DiscoveredAgent,
+    req: &SendMessageRequest,
+) -> (
+    String,
+    oneshot::Receiver<std::result::Result<String, String>>,
+) {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let prompt = req.message.clone();
+    let token = agent.proxy_token.clone();
+    let (tx, rx) = oneshot::channel();
+    let run_id_for_task = run_id.clone();
+
+    tokio::spawn(async move {
+        let result =
+            proxy_sidecar_stream(state, agent_id, run_id_for_task, ws_url, token, prompt).await;
+        let _ = tx.send(result);
+    });
+
+    (run_id, rx)
+}
+
+async fn wait_for_sidecar_stream(
+    rx: oneshot::Receiver<std::result::Result<String, String>>,
+    timeout: Duration,
+) -> Option<std::result::Result<String, String>> {
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => Some(result),
+        Ok(Err(_closed)) => Some(Err("stream task ended without a result".to_string())),
+        Err(_elapsed) => None,
+    }
+}
+
+async fn proxy_sidecar_stream(
+    state: Arc<AppState>,
+    agent_id: String,
+    run_id: String,
+    ws_url: String,
+    token: Option<String>,
+    prompt: String,
+) -> std::result::Result<String, String> {
+    state
+        .event_bus
+        .publish(crate::events::ServerEvent::AgentOutput {
+            agent_id: agent_id.clone(),
+            run_id: Some(run_id.clone()),
+            content: String::new(),
+            done: false,
+            metadata: Some(json!({ "status": "started" })),
+        });
+
+    let mut request = ws_url
+        .as_str()
+        .into_client_request()
+        .map_err(|error| format!("build stream request: {error}"))?;
+    if let Some(token) = token {
+        let header_value = format!("Bearer {token}")
+            .parse()
+            .map_err(|error| format!("build authorization header: {error}"))?;
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, header_value);
+    }
+
+    let (mut socket, _response) =
+        tokio::time::timeout(Duration::from_secs(3), connect_async(request))
+            .await
+            .map_err(|_| "connect sidecar stream timed out".to_string())?
+            .map_err(|error| format!("connect sidecar stream: {error}"))?;
+    socket
+        .send(WsMessage::Text(prompt.into()))
+        .await
+        .map_err(|error| format!("send stream prompt: {error}"))?;
+
+    let mut response_text = String::new();
+    while let Some(message) = socket.next().await {
+        let message = message.map_err(|error| format!("read stream message: {error}"))?;
+        match message {
+            WsMessage::Text(text) => {
+                let value = serde_json::from_str::<Value>(&text).unwrap_or_else(|_| {
+                    json!({
+                        "chunk": text.to_string(),
+                        "done": false,
+                    })
+                });
+                if let Some(error) = value.get("error").and_then(Value::as_str) {
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentOutput {
+                            agent_id,
+                            run_id: Some(run_id),
+                            content: String::new(),
+                            done: true,
+                            metadata: Some(json!({
+                                "status": "failed",
+                                "error": error,
+                            })),
+                        });
+                    return Err(error.to_string());
+                }
+                if let Some(chunk) = stream_content_chunk(&value) {
+                    response_text.push_str(chunk);
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentOutput {
+                            agent_id: agent_id.clone(),
+                            run_id: Some(run_id.clone()),
+                            content: chunk.to_string(),
+                            done: false,
+                            metadata: None,
+                        });
+                }
+                if value.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                    state
+                        .event_bus
+                        .publish(crate::events::ServerEvent::AgentOutput {
+                            agent_id,
+                            run_id: Some(run_id),
+                            content: String::new(),
+                            done: true,
+                            metadata: Some(json!({
+                                "status": "completed",
+                                "session": value.get("session").cloned().unwrap_or(Value::Null),
+                                "usage": value.get("usage").cloned().unwrap_or(Value::Null),
+                                "finish_reason": value
+                                    .get("finish_reason")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                            })),
+                        });
+                    return Ok(response_text);
+                }
+            }
+            WsMessage::Close(_) => break,
+            WsMessage::Ping(_)
+            | WsMessage::Pong(_)
+            | WsMessage::Binary(_)
+            | WsMessage::Frame(_) => {}
+        }
+    }
+
+    if response_text.is_empty() {
+        Err("sidecar stream closed before producing output".to_string())
+    } else {
+        state
+            .event_bus
+            .publish(crate::events::ServerEvent::AgentOutput {
+                agent_id,
+                run_id: Some(run_id),
+                content: String::new(),
+                done: true,
+                metadata: Some(json!({ "status": "completed" })),
+            });
+        Ok(response_text)
+    }
+}
+
+fn stream_content_chunk(value: &Value) -> Option<&str> {
+    value
+        .get("chunk")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("content").and_then(Value::as_str))
+        .filter(|chunk| !chunk.is_empty())
+}
+
+enum RunCompletion {
+    Completed { response: String },
+    Failed { error: String },
+}
+
+async fn wait_for_background_run(
+    state: &AppState,
+    run_id: &str,
+    timeout: Duration,
+) -> Option<RunCompletion> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(completion) = background_run_completion(state, run_id).await {
+            return Some(completion);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn background_run_completion(state: &AppState, run_id: &str) -> Option<RunCompletion> {
+    let runs = state.active_runs.read().await;
+    let handle = runs.get(run_id)?;
+    match &handle.status {
+        OperationStatus::Completed { result } => {
+            let response = handle
+                .result
+                .as_ref()
+                .and_then(|result| result.output_text.clone())
+                .or_else(|| result.clone())
+                .unwrap_or_default();
+            Some(RunCompletion::Completed { response })
+        }
+        OperationStatus::Failed { error } => Some(RunCompletion::Failed {
+            error: error.clone(),
+        }),
+        OperationStatus::Running => handle
+            .handle
+            .is_finished()
+            .then(|| completed_from_finished_handle(handle.result.as_ref())),
+    }
+}
+
+fn completed_from_finished_handle(result: Option<&RunResult>) -> RunCompletion {
+    match result {
+        Some(result) if result.success => RunCompletion::Completed {
+            response: result.output_text.clone().unwrap_or_default(),
+        },
+        Some(result) => RunCompletion::Failed {
+            error: result
+                .output_text
+                .clone()
+                .unwrap_or_else(|| "run failed".to_string()),
+        },
+        None => RunCompletion::Failed {
+            error: "run finished without recording a result".to_string(),
+        },
+    }
 }
 
 /// `POST /api/agents/{id}/token` — issue or rotate a bearer token.
@@ -657,6 +1624,8 @@ struct RegisterAgentRequest {
     #[serde(alias = "maxConcurrentJobs")]
     max_concurrent_jobs: u32,
     #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     issue_token: Option<bool>,
 }
 
@@ -670,6 +1639,7 @@ impl RequestPayload for RegisterAgentRequest {
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
     use std::error::Error;
     use std::sync::Arc;
     use std::time::Duration;
@@ -784,12 +1754,13 @@ mod tests {
         .expect("send message")
         .into_response();
 
-        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
         let payload: Value = serde_json::from_slice(&body).expect("json body");
         let run_id = payload["run_id"].as_str().expect("run_id").to_string();
+        assert_eq!(payload["status"], "completed");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -835,6 +1806,7 @@ mod tests {
                 a2a_endpoint: None,
                 mcp_endpoint: None,
                 tier: None,
+                model: None,
                 reputation: 0,
                 skills: Vec::new(),
                 past_jobs_completed: 0,
@@ -850,6 +1822,76 @@ mod tests {
             .await
             .expect("token status");
         assert!(status.exists);
+    }
+
+    #[tokio::test]
+    async fn managed_agents_include_model_with_default_fallback() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "claude-sonnet-4-20250514".into();
+        let state = Arc::new(AppState::new(
+            tempdir.path().to_path_buf(),
+            Arc::new(NoOpRuntime),
+            config,
+            Arc::new(ManualBackend::default()),
+        ));
+
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "fallback-agent".into(),
+                label: Some("fallback-agent".into()),
+                capabilities: vec!["coding".into()],
+                ..Default::default()
+            })
+            .await;
+        state
+            .upsert_discovered_agent(AgentRegistrationRecord {
+                agent_id: "override-agent".into(),
+                label: Some("override-agent".into()),
+                capabilities: vec!["research".into()],
+                model: Some("custom-model".into()),
+                ..Default::default()
+            })
+            .await;
+        let mut metrics = HashMap::new();
+        metrics.insert("gate_pass_rate".to_string(), 0.93);
+        metrics.insert("token_burn_rate".to_string(), 42.0);
+        metrics.insert("cumulative_cost_usd".to_string(), 1.25);
+        state.heartbeats.write().await.push_back(HeartbeatPayload {
+            sender_id: "fallback-agent".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            active_tasks: 1,
+            completed_tasks: 7,
+            failed_tasks: 1,
+            active_agents: 2,
+            frequency: 0.5,
+            metrics,
+        });
+
+        let Json(payload) = list_managed_agents(State(state)).await;
+        let agents = payload.as_array().expect("agents array");
+        let fallback = agents
+            .iter()
+            .find(|agent| agent["id"] == "fallback-agent")
+            .expect("fallback agent");
+        let override_agent = agents
+            .iter()
+            .find(|agent| agent["id"] == "override-agent")
+            .expect("override agent");
+
+        assert_eq!(fallback["model"], "claude-sonnet-4-20250514");
+        assert_eq!(fallback["model_source"], "default");
+        assert_eq!(fallback["provider"], "claude_cli");
+        assert_eq!(
+            fallback["model_profile"]["slug"],
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(fallback["heartbeat"]["active_tasks"], 1);
+        assert_eq!(fallback["performance"]["gate_pass_rate"], 0.93);
+        assert_eq!(fallback["costs"]["cumulative_usd"], 1.25);
+        assert_eq!(fallback["chat"]["correlation"], "run_id");
+        assert_eq!(override_agent["model"], "custom-model");
+        assert_eq!(override_agent["model_source"], "agent");
     }
 
     #[tokio::test(flavor = "multi_thread")]
