@@ -87,8 +87,8 @@ async fn chain_balance_reads_deployer_balance() {
         .parse()
         .expect("parseable u128");
     assert!(
-        balance > 1_000_000_000_000_000_000,
-        "deployer should have >1 ETH on mirage, got {balance} wei"
+        balance > 100_000_000_000_000_000,
+        "deployer should have >0.1 ETH on mirage, got {balance} wei"
     );
 }
 

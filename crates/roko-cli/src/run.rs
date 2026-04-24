@@ -1386,6 +1386,10 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_agent_uses_exec_agent_for_plain_commands_without_routing() {
+        if std::env::var("ANTHROPIC_API_KEY").is_err() {
+            eprintln!("skipping: ANTHROPIC_API_KEY not set");
+            return;
+        }
         let tempdir = TempDir::new().expect("tempdir");
         let config = Config::default();
         let prompt = Engram::builder(Kind::Prompt)
