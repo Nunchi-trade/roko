@@ -77,11 +77,11 @@ impl Agent for PerplexityEmbedAgentAdapter {
                 let output = derived_output(
                     input,
                     Kind::AgentOutput,
-                    Body::text(&format!("embedding error: {err}")),
+                    Body::text(format!("embedding error: {err}")),
                 )
                 .provenance(Provenance::agent(&self.name))
                 .tag("agent", &self.name)
-                .tag("error", &err.to_string())
+                .tag("error", err.to_string())
                 .build();
                 AgentResult::fail(output)
             }

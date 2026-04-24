@@ -437,7 +437,7 @@ pub fn handle_key(
         Tab::Inspect => handle_inspect_key(key, focus),
         Tab::Marketplace => handle_marketplace_key(key, focus),
         Tab::Atelier => handle_atelier_key(key, focus),
-        Tab::Learning => TuiAction::None,
+        Tab::Learning => handle_learning_key(key),
     }
 }
 
@@ -887,6 +887,17 @@ fn handle_atelier_key(key: KeyEvent, _focus: FocusZone) -> TuiAction {
         KeyCode::Char('j') | KeyCode::Down => TuiAction::ScrollFocusedDown,
         KeyCode::Char('k') | KeyCode::Up => TuiAction::ScrollFocusedUp,
         KeyCode::Enter => TuiAction::ExpandCollapse,
+        KeyCode::Char('r') => TuiAction::Refresh,
+        KeyCode::Home => TuiAction::ScrollFocusedHome,
+        KeyCode::End => TuiAction::ScrollFocusedEnd,
+        _ => TuiAction::None,
+    }
+}
+
+fn handle_learning_key(key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => TuiAction::ScrollFocusedDown,
+        KeyCode::Char('k') | KeyCode::Up => TuiAction::ScrollFocusedUp,
         KeyCode::Char('r') => TuiAction::Refresh,
         KeyCode::Home => TuiAction::ScrollFocusedHome,
         KeyCode::End => TuiAction::ScrollFocusedEnd,

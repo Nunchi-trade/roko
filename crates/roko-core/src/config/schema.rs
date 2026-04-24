@@ -4463,15 +4463,13 @@ tool_format = "openai_json"
         let cfg = RokoConfig::from_toml(&text).expect("parse roko.toml");
         let models = cfg.effective_models();
 
-        let mechanical = models.get("claude-haiku-4-5").expect("mechanical model");
-        assert_eq!(mechanical.provider, "claude_cli");
-        assert_eq!(mechanical.slug, "claude-haiku-4-5");
-        assert!(mechanical.supports_tools);
-        assert_eq!(mechanical.tool_format, "anthropic_blocks");
-
+        // The workspace roko.toml uses the default model (sonnet).
+        // tier_models are empty, so only the default model is synthesized.
         let default_model = models.get("claude-sonnet-4-6").expect("default model");
         assert_eq!(default_model.provider, "claude_cli");
         assert_eq!(default_model.slug, "claude-sonnet-4-6");
+        assert!(default_model.supports_tools);
+        assert_eq!(default_model.tool_format, "anthropic_blocks");
     }
 
     #[test]

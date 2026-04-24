@@ -76,8 +76,9 @@ async fn workspace_heartbeat(
 ) -> impl IntoResponse {
     let agents_count = body
         .get("agents_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let agents_count = u32::try_from(agents_count).unwrap_or(u32::MAX);
     state.workspace_heartbeat(&id, agents_count);
     StatusCode::OK
 }
