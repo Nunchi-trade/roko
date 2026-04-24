@@ -92,6 +92,7 @@ pub async fn ws_handler(
 
 async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let Some(subs) = state.subs.clone() else {
+        tracing::warn!("WS /api/ws: no subscription buses available — sending error and closing");
         let _ = socket
             .send(Message::Text(
                 serde_json::json!({"error": "streaming not available (no subscription buses)"})
@@ -154,6 +155,8 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
     let mut last_pong = Instant::now();
 
     // Forward events from the buses to the WebSocket.
+    let ws_start = Instant::now();
+    let close_reason: &str;
     loop {
         tokio::select! {
             // Pheromone events
@@ -170,6 +173,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                             "data": pheromone_event_to_json(&ev),
                         });
                         if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            close_reason = "pheromone send failed";
                             break;
                         }
                     }
@@ -179,7 +183,10 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                                 .to_string().into()
                         )).await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        close_reason = "pheromone bus closed";
+                        break;
+                    }
                 }
             }
 
@@ -197,6 +204,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                             "data": insight_event_to_json(&ev),
                         });
                         if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            close_reason = "insight send failed";
                             break;
                         }
                     }
@@ -206,7 +214,10 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                                 .to_string().into()
                         )).await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        close_reason = "insight bus closed";
+                        break;
+                    }
                 }
             }
 
@@ -235,6 +246,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                             "data": ev,
                         });
                         if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            close_reason = "agent send failed";
                             break;
                         }
                     }
@@ -244,7 +256,10 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                                 .to_string().into()
                         )).await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        close_reason = "agent bus closed";
+                        break;
+                    }
                 }
             }
 
@@ -273,6 +288,7 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                             "data": ev,
                         });
                         if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                            close_reason = "prediction send failed";
                             break;
                         }
                     }
@@ -282,17 +298,25 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
                                 .to_string().into()
                         )).await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        close_reason = "prediction bus closed";
+                        break;
+                    }
                 }
             }
 
             // Server-initiated ping / dead-connection check
             _ = ping_interval.tick() => {
                 if last_pong.elapsed() > PONG_TIMEOUT {
-                    tracing::debug!("WebSocket client failed pong timeout, closing");
+                    tracing::warn!(
+                        elapsed_secs = last_pong.elapsed().as_secs(),
+                        "WS /api/ws: pong timeout — closing"
+                    );
+                    close_reason = "pong timeout";
                     break;
                 }
                 if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    close_reason = "ping send failed";
                     break;
                 }
             }
@@ -300,18 +324,41 @@ async fn handle_ws(mut socket: WebSocket, state: ApiState, params: WsParams) {
             // Client message or disconnect
             msg = socket.recv() => {
                 match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        tracing::info!(
+                            ?frame,
+                            "WS /api/ws: client sent close frame"
+                        );
+                        close_reason = "client close frame";
+                        break;
+                    }
+                    None => {
+                        close_reason = "client disconnected (stream ended)";
+                        break;
+                    }
                     Some(Ok(Message::Ping(data))) => {
                         let _ = socket.send(Message::Pong(data)).await;
                     }
                     Some(Ok(Message::Pong(_))) => {
                         last_pong = Instant::now();
                     }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "WS /api/ws: recv error");
+                        close_reason = "recv error";
+                        break;
+                    }
                     _ => {} // ignore other messages
                 }
             }
         }
     }
+
+    let duration = ws_start.elapsed();
+    tracing::info!(
+        reason = close_reason,
+        duration_secs = duration.as_secs(),
+        "WS /api/ws connection ended"
+    );
 
     // Cleanup: unsubscribe from buses.
     if let Some(id) = pher_sub_id {
