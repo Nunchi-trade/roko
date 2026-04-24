@@ -1576,7 +1576,7 @@ impl TuiState {
             Tab::Inspect => self.inspect_sub_tab,
             Tab::Marketplace => self.marketplace_sub_tab,
             Tab::Atelier => self.atelier_sub_tab,
-            Tab::Git | Tab::Logs => 0,
+            Tab::Git | Tab::Logs | Tab::Learning => 0,
         }
     }
 
@@ -1589,7 +1589,7 @@ impl TuiState {
             Tab::Inspect => self.inspect_sub_tab = idx,
             Tab::Marketplace => self.marketplace_sub_tab = idx,
             Tab::Atelier => self.atelier_sub_tab = idx,
-            Tab::Git | Tab::Logs => {}
+            Tab::Git | Tab::Logs | Tab::Learning => {}
         }
     }
 
@@ -2341,6 +2341,85 @@ impl TuiState {
             self.task_output_tails
                 .insert(task_id.clone(), lines.iter().cloned().collect());
         }
+
+        // --- Marketplace / Atelier from snapshot ---
+        if !snap.marketplace_jobs.is_empty() {
+            self.marketplace_jobs = snap.marketplace_jobs.clone();
+        }
+        if !snap.atelier_prds.is_empty() {
+            self.atelier_prds = snap.atelier_prds.clone();
+            self.atelier_tasks_by_slug = snap.atelier_tasks.clone();
+        }
+        if self.marketplace_jobs.is_empty() {
+            self.marketplace_selected_job = 0;
+        } else if self.marketplace_selected_job >= self.marketplace_jobs.len() {
+            self.marketplace_selected_job = self.marketplace_jobs.len() - 1;
+        }
+        if self.atelier_prds.is_empty() {
+            self.atelier_selected_prd = 0;
+        } else if self.atelier_selected_prd >= self.atelier_prds.len() {
+            self.atelier_selected_prd = self.atelier_prds.len() - 1;
+        }
+
+        // --- Knowledge entries from snapshot ---
+        if !snap.knowledge_entries.is_empty() {
+            self.knowledge_entries = snap
+                .knowledge_entries
+                .iter()
+                .map(|entry| KnowledgeBrowseEntry {
+                    id: entry.id.clone(),
+                    kind: entry.kind.clone(),
+                    content_preview: entry.content_preview.clone(),
+                    confidence: entry.confidence,
+                    tier: entry.tier.clone(),
+                    tags: entry.tags.clone(),
+                    created_at: entry.created_at,
+                    frozen: entry.frozen,
+                })
+                .collect();
+        }
+
+        // --- Efficiency trend → efficiency summary for bottom bar ---
+        if !snap.efficiency_trend.is_empty() {
+            let total_cost_cents: u64 =
+                snap.efficiency_trend.iter().map(|b| b.cost_usd_cents).sum();
+            let total_turns: u64 = snap.efficiency_trend.iter().map(|b| b.turns).sum();
+            let total_in: u64 = snap.efficiency_trend.iter().map(|b| b.tokens_in).sum();
+            let total_out: u64 = snap.efficiency_trend.iter().map(|b| b.tokens_out).sum();
+            let avg_latency: f64 = if total_turns > 0 {
+                snap.efficiency_trend
+                    .iter()
+                    .map(|b| b.latency_ms_avg * b.turns as f64)
+                    .sum::<f64>()
+                    / total_turns as f64
+            } else {
+                0.0
+            };
+            self.efficiency_summary = EfficiencySummary {
+                event_count: total_turns as usize,
+                total_cost_usd: total_cost_cents as f64 / 100.0,
+                total_input_tokens: total_in,
+                total_output_tokens: total_out,
+                passed_count: 0,
+                average_wall_time_ms: avg_latency,
+            };
+        }
+
+        // --- C-factor trend buckets ---
+        if !snap.cfactor_trend.is_empty() {
+            self.cfactor_trend_buckets = snap
+                .cfactor_trend
+                .iter()
+                .map(|b| roko_learn::aggregate::CFactorBucket {
+                    start: b.start,
+                    samples: b.samples,
+                    avg: b.avg,
+                    p50: b.p50,
+                    p95: b.p95,
+                })
+                .collect();
+        }
+
         self.refresh_cached_unified_log();
     }
 
@@ -4398,6 +4477,10 @@ tier = "focused"
             task_outputs: Default::default(),
             cascade_router_json: String::new(),
             gate_thresholds_json: String::new(),
+            marketplace_jobs: Vec::new(),
+            atelier_prds: Vec::new(),
+            atelier_tasks: HashMap::new(),
+            knowledge_entries: Vec::new(),
             stats: Default::default(),
         };
 

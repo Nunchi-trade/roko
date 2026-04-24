@@ -26,13 +26,14 @@ use roko_daimon::{DaimonState, StrategySpaceDefinition};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
 use roko_runtime::cancel::CancelToken;
-use roko_runtime::process::ProcessSupervisor;
+use roko_runtime::process::{ProcessId, ProcessSupervisor};
 
 use crate::deploy::{DeployBackend, Deployment};
 use crate::dispatch::SubscriptionRegistry;
 use crate::event_bus::EventBus;
 use crate::runtime::CliRuntime;
 use crate::runtime::RunResult;
+use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
 use roko_core::obs::metrics::MetricRegistry;
 use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
@@ -89,6 +90,9 @@ pub struct DiscoveredAgent {
     /// Agent tier (e.g. "Unverified", "Verified", "Trusted", "Expert", "Pioneer").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Model override used by this agent, when it differs from the global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Agent reputation score (0–100).
     #[serde(default)]
     pub reputation: u32,
@@ -148,6 +152,9 @@ pub struct AgentRegistrationRecord {
     /// Agent tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Optional per-agent model override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Agent reputation score.
     #[serde(default)]
     pub reputation: u32,
@@ -324,6 +331,14 @@ pub struct AppState {
     pub aggregator_cache: RwLock<HashMap<String, CachedJsonValue>>,
     /// Ring buffer of recent heartbeat payloads.
     pub heartbeats: RwLock<VecDeque<roko_core::HeartbeatPayload>>,
+    /// Optional alloy JSON-RPC client for on-chain reads (feature: alloy-backend).
+    pub chain_client: Option<Arc<AlloyChainClient>>,
+    /// Optional alloy wallet for on-chain writes (feature: alloy-backend).
+    pub chain_wallet: Option<Arc<AlloyChainWallet>>,
+    /// Atomic counter of active agents (used by relay workspace heartbeat).
+    pub agent_count: Arc<std::sync::atomic::AtomicU32>,
+    /// Shared relay health state, updated by the heartbeat circuit breaker.
+    pub relay_health: Arc<parking_lot::RwLock<crate::relay::RelayHealth>>,
 }
 
 impl AppState {
@@ -363,6 +378,17 @@ impl AppState {
         let mut template_registry = TemplateRegistry::new(workdir.clone());
         template_registry.scan();
 
+        // Create StateHub with on-disk event log so all published events
+        // persist to `.roko/events.jsonl` for replay by standalone consumers.
+        let event_log_path = layout.root().join("events.jsonl");
+        let state_hub = roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
+            1024,
+            &event_log_path,
+        ));
+
+        // Initialize chain client + wallet from [chain] config section.
+        let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
+
         Self {
             workdir,
             layout,
@@ -373,7 +399,7 @@ impl AppState {
             supervisor,
             affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(16_384),
-            state_hub: roko_core::shared_state_hub(),
+            state_hub,
             subscriptions,
             runtime,
             roko_config: ArcSwap::from_pointee(roko_config),
@@ -391,7 +417,54 @@ impl AppState {
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
             heartbeats: RwLock::new(VecDeque::new()),
+            chain_client,
+            chain_wallet,
+            agent_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            relay_health: Arc::new(parking_lot::RwLock::new(crate::relay::RelayHealth::default())),
         }
+    }
+
+    /// Build chain client + wallet from the `[chain]` config section.
+    /// Returns `(None, None)` when `chain.rpc_url` is not set.
+    fn init_chain(
+        config: &RokoConfig,
+    ) -> (Option<Arc<AlloyChainClient>>, Option<Arc<AlloyChainWallet>>) {
+        let rpc_url = match config.chain.rpc_url.as_deref() {
+            Some(url) if !url.is_empty() => url,
+            _ => return (None, None),
+        };
+
+        let client = match AlloyChainClient::http(rpc_url) {
+            Ok(c) => {
+                tracing::info!(rpc_url, "chain client connected");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                tracing::warn!(rpc_url, error = %e, "failed to create chain client");
+                None
+            }
+        };
+
+        let wallet = config
+            .chain
+            .wallet_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .and_then(|key| {
+                let chain_id = config.chain.chain_id.unwrap_or(31337);
+                match AlloyChainWallet::from_hex_key(rpc_url, key, chain_id) {
+                    Ok(w) => {
+                        tracing::info!(address = %w.address_typed(), "chain wallet loaded");
+                        Some(Arc::new(w))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to create chain wallet");
+                        None
+                    }
+                }
+            });
+
+        (client, wallet)
     }
 
     /// Load the current config snapshot.
@@ -403,6 +476,14 @@ impl AppState {
     /// Atomically swap in a new config snapshot.
     pub fn store_roko_config(&self, roko_config: RokoConfig) {
         self.roko_config.store(Arc::new(roko_config));
+    }
+
+    /// Publish the current job list to the StateHub so dashboard consumers
+    /// (TUI, REST, SSE) see an up-to-date marketplace view after any mutation.
+    pub fn refresh_jobs_in_state_hub(&self) {
+        let jobs = crate::scan_marketplace_jobs(&self.workdir);
+        self.state_hub
+            .publish(roko_core::DashboardEvent::MarketplaceJobsUpdated { jobs });
     }
 
     /// Initiate graceful shutdown: cancel all work and stop supervised processes.
@@ -491,6 +572,7 @@ impl AppState {
                     capabilities: registration.capabilities.clone(),
                     domain_tags: registration.domain_tags.clone(),
                     tier: registration.tier.clone(),
+                    model: registration.model.clone(),
                     reputation: registration.reputation,
                     skills: registration.skills.clone(),
                     past_jobs_completed: registration.past_jobs_completed,
@@ -530,6 +612,9 @@ impl AppState {
             if registration.tier.is_some() {
                 entry.tier = registration.tier;
             }
+            if registration.model.is_some() {
+                entry.model = registration.model;
+            }
             if registration.reputation > 0 {
                 entry.reputation = registration.reputation;
             }
@@ -547,6 +632,15 @@ impl AppState {
             entry.clone()
         };
         self.invalidate_aggregator_cache().await;
+        // Publish agent registration to StateHub so the TUI sees it immediately.
+        self.state_hub
+            .publish(roko_core::DashboardEvent::AgentSpawned {
+                agent_id: stored.agent_id.clone(),
+                role: stored
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| stored.agent_id.clone()),
+            });
         stored
     }
 
@@ -635,6 +729,28 @@ impl AppState {
                 value,
             },
         );
+    }
+
+    /// Find a supervised process by its label (agent_id).
+    ///
+    /// Returns `(ProcessId, os_pid, uptime)` if a matching handle is found.
+    pub async fn find_process_by_label(&self, label: &str) -> Option<(ProcessId, Option<u32>, Duration)> {
+        let entries = self.supervisor.list().await;
+        let pid = entries
+            .iter()
+            .find(|(_, l)| l == label)
+            .map(|(pid, _)| *pid)?;
+
+        let active_pids = self.supervisor.active_pids().await;
+        let os_pid = active_pids
+            .iter()
+            .find(|(_, l)| l == label)
+            .map(|(p, _)| *p);
+
+        // Approximate uptime from server start — the supervisor tracks per-handle
+        // uptime internally but we don't expose it through the list API.
+        let uptime = self.started_at.elapsed();
+        Some((pid, os_pid, uptime))
     }
 
     /// Clear short-lived aggregator projections after discovery changes.

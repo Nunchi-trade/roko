@@ -180,14 +180,13 @@ impl ServerBuilder {
         self
     }
 
-    /// Bind and run the HTTP server until shutdown.
+    /// Start the server in the background and return the live state handle.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the `PORT` environment variable is not a valid
-    /// `u16`, the listener cannot bind, or the Axum server exits with an
-    /// error.
-    pub async fn run(mut self) -> Result<()> {
+    /// The returned [`Arc<AppState>`] carries the [`SharedStateHub`] that the
+    /// TUI or other in-process consumers can subscribe to.  The
+    /// [`JoinHandle`] resolves when the server shuts down (e.g. because
+    /// `state.cancel.cancel()` was called).
+    pub async fn start_background(mut self) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
         // -- PORT env var override (Railway / cloud platforms) -------------
         let addr = if let Ok(env_port) = std::env::var("PORT") {
             let p: u16 = env_port
@@ -221,11 +220,18 @@ impl ServerBuilder {
         let _prd_publish_subscriber = start_prd_publish_orchestrator(Arc::clone(&state));
         let _feedback_loop = feedback::start_feedback_loop(Arc::clone(&state));
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
-        // NOTE: start_orchestrator_event_bridge is intentionally NOT started here.
-        // It creates a feedback loop: EventBus → StateHub → EventBus → ∞.
-        // The orchestrator publishes directly to the StateHub when running in-process.
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
+
+        // Register workspace with relay if configured.
+        let serve_port = self.config.port.unwrap_or(6677);
+        let _relay_registration = relay::start_workspace_registration(
+            self.config.roko_config.relay.clone(),
+            serve_port,
+            Arc::clone(&state.agent_count),
+            Arc::clone(&state.relay_health),
+        );
+
         let router = routes::build_router(
             Arc::clone(&state),
             &self.config.roko_config.server.cors_origins,
@@ -261,21 +267,76 @@ impl ServerBuilder {
             });
         }
 
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal(state))
-            .await
-            .context("axum server error")?;
+        let serve_state = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown_on_cancel(serve_state))
+                .await
+                .context("axum server error")?;
+            info!("server stopped");
+            Ok(())
+        });
 
-        info!("server stopped");
+        Ok((state, handle))
+    }
+
+    /// Bind and run the HTTP server until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `PORT` environment variable is not a valid
+    /// `u16`, the listener cannot bind, or the Axum server exits with an
+    /// error.
+    pub async fn run(self) -> Result<()> {
+        let (state, handle) = self.start_background().await?;
+        // Block on Ctrl-C to shut down.
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received ctrl-c, shutting down");
+        state.shutdown().await;
+        // Wait for the server task to finish.
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(anyhow::anyhow!("server task panicked: {e}")),
+        }
         Ok(())
     }
+}
+
+/// Load [`RokoConfig`] from the workdir's `roko.toml`, falling back to the
+/// global `~/.roko/config.toml` if no project config exists.
+fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
+    let project_path = workdir.join("roko.toml");
+    if project_path.exists() {
+        let text = std::fs::read_to_string(&project_path)
+            .with_context(|| format!("read {}", project_path.display()))?;
+        return toml::from_str(&text).with_context(|| format!("parse {}", project_path.display()));
+    }
+
+    // No project config — try global ~/.roko/config.toml.
+    if let Ok(home) = std::env::var("HOME") {
+        let global_path = PathBuf::from(&home).join(".roko").join("config.toml");
+        if global_path.exists() {
+            let text = std::fs::read_to_string(&global_path)
+                .with_context(|| format!("read {}", global_path.display()))?;
+            info!("using global config: {}", global_path.display());
+            return toml::from_str(&text)
+                .with_context(|| format!("parse {}", global_path.display()));
+        }
+    }
+
+    warn!(
+        "no roko.toml found at {} and no global config; using defaults",
+        project_path.display()
+    );
+    Ok(RokoConfig::default())
 }
 
 /// Start the HTTP server.
 ///
 /// # Errors
 ///
-/// Returns an error if `roko.toml` cannot be read or parsed, if the resolved
+/// Returns an error if config cannot be read or parsed, if the resolved
 /// listener cannot bind, or if serving the Axum router fails.
 pub async fn run_server(
     workdir: PathBuf,
@@ -283,22 +344,28 @@ pub async fn run_server(
     bind: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
-    let roko_toml_path = workdir.join("roko.toml");
-
-    let roko_config: RokoConfig = if roko_toml_path.exists() {
-        let text = std::fs::read_to_string(&roko_toml_path)
-            .with_context(|| format!("read {}", roko_toml_path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse {}", roko_toml_path.display()))?
-    } else {
-        warn!(
-            "no roko.toml found at {}; using defaults",
-            roko_toml_path.display()
-        );
-        RokoConfig::default()
-    };
-
+    let roko_config = load_roko_config(&workdir)?;
     let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
     ServerBuilder::new(config).run().await
+}
+
+/// Start the HTTP server in the background and return the live app state.
+///
+/// The returned [`Arc<AppState>`] carries the [`SharedStateHub`] that an
+/// in-process TUI or other consumer can subscribe to.  The
+/// [`JoinHandle`] resolves when the server shuts down.
+///
+/// Call `state.cancel.cancel()` or `state.shutdown().await` to stop the
+/// server.
+pub async fn start_server_background(
+    workdir: PathBuf,
+    runtime: Arc<dyn CliRuntime>,
+    bind: Option<String>,
+    port: Option<u16>,
+) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
+    let roko_config = load_roko_config(&workdir)?;
+    let config = ServerBuildConfig::new(workdir, runtime, roko_config, bind, port);
+    ServerBuilder::new(config).start_background().await
 }
 
 /// Start the PRD-publish auto-orchestration background tasks for an existing state.
@@ -375,6 +442,17 @@ fn build_app_state(
             tasks: std::collections::HashMap::new(),
         });
     }
+    // Seed StateHub with knowledge entries from the neuro store.
+    let knowledge = scan_knowledge_entries(&state.workdir);
+    if !knowledge.is_empty() {
+        info!(
+            count = knowledge.len(),
+            "loaded existing knowledge entries from neuro store"
+        );
+        state
+            .state_hub
+            .publish(DashboardEvent::KnowledgeEntriesUpdated { entries: knowledge });
+    }
     state
 }
 
@@ -398,7 +476,7 @@ fn scan_marketplace_jobs(workdir: &Path) -> Vec<roko_core::MarketplaceJob> {
         match serde_json::from_str::<roko_core::MarketplaceJob>(&data) {
             Ok(job) => jobs.push(job),
             Err(err) => {
-                warn!(
+                debug!(
                     path = %path.display(),
                     error = %err,
                     "skipping malformed job file during startup scan"
@@ -439,6 +517,44 @@ fn scan_prd_summaries(workdir: &Path) -> Vec<roko_core::PrdSummary> {
         }
     }
     prds
+}
+
+/// Load knowledge entries from the neuro JSONL store and project them into
+/// lightweight `KnowledgeBrowseEntry` summaries for the dashboard snapshot.
+fn scan_knowledge_entries(
+    workdir: &Path,
+) -> Vec<roko_core::dashboard_snapshot::KnowledgeBrowseEntry> {
+    let store = roko_neuro::knowledge_store::KnowledgeStore::for_workdir(workdir);
+    let entries = match store.query("*", 200) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let preview = if entry.content.len() > 200 {
+                format!("{}…", &entry.content[..200])
+            } else {
+                entry.content.clone()
+            };
+            let tier_str = match entry.tier {
+                roko_neuro::KnowledgeTier::Transient => "transient",
+                roko_neuro::KnowledgeTier::Working => "working",
+                roko_neuro::KnowledgeTier::Consolidated => "consolidated",
+                roko_neuro::KnowledgeTier::Persistent => "persistent",
+            };
+            roko_core::dashboard_snapshot::KnowledgeBrowseEntry {
+                id: entry.id,
+                kind: entry.kind.as_str().to_string(),
+                content_preview: preview,
+                confidence: entry.confidence,
+                tier: tier_str.to_string(),
+                tags: entry.tags,
+                created_at: entry.created_at,
+                frozen: false,
+            }
+        })
+        .collect()
 }
 
 fn start_state_hub_bridge(state: Arc<AppState>) -> JoinHandle<()> {
@@ -568,6 +684,22 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         }),
         ServerEvent::Error { message } => Some(DashboardEvent::Error {
             message: message.clone(),
+        }),
+        // Map one-shot runs as ephemeral plans so the TUI's plan/task views show them.
+        ServerEvent::RunStarted { run_id, .. } => Some(DashboardEvent::PlanStarted {
+            plan_id: format!("run-{run_id}"),
+        }),
+        ServerEvent::RunCompleted { run_id, success } => Some(DashboardEvent::PlanCompleted {
+            plan_id: format!("run-{run_id}"),
+            success: *success,
+        }),
+        // Map agent lifecycle events from the supervisor.
+        ServerEvent::AgentStarted { agent_id, .. } => Some(DashboardEvent::AgentSpawned {
+            agent_id: agent_id.clone(),
+            role: String::new(),
+        }),
+        ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
+            agent_id: agent_id.clone(),
         }),
         _ => None,
     }

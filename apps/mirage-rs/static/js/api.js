@@ -26,6 +26,59 @@ var REMOTE_BASE_KEY = 'mirage.dashboard.remoteBase';
 var rpcId = 1;
 var cardCache = new Map();
 
+/* ---------- Circuit breaker ---------- */
+var _cb = {
+  failures: 0,           // consecutive failure count
+  threshold: 3,          // trip after N consecutive failures
+  open: false,           // true = rejecting requests
+  nextRetryAt: 0,        // timestamp (ms) when we allow the next probe
+  baseDelay: 2000,       // initial backoff (ms)
+  maxDelay: 60000,       // cap at 60 s
+  halfOpenInFlight: false,
+};
+
+function cbDelay() {
+  // exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s
+  return Math.min(_cb.baseDelay * Math.pow(2, _cb.failures - _cb.threshold), _cb.maxDelay);
+}
+
+function cbOnSuccess() {
+  if (_cb.failures > 0 || _cb.open) {
+    logReq('info', 'circuit-breaker: connection restored after ' + _cb.failures + ' failures');
+  }
+  _cb.failures = 0;
+  _cb.open = false;
+  _cb.halfOpenInFlight = false;
+}
+
+function cbOnFailure() {
+  _cb.failures++;
+  _cb.halfOpenInFlight = false;
+  if (_cb.failures >= _cb.threshold && !_cb.open) {
+    _cb.open = true;
+    var delay = cbDelay();
+    _cb.nextRetryAt = Date.now() + delay;
+    logReq('warn', 'circuit-breaker OPEN — backing off ' + Math.round(delay / 1000) + 's (' + _cb.failures + ' consecutive failures)');
+  } else if (_cb.open) {
+    var delay = cbDelay();
+    _cb.nextRetryAt = Date.now() + delay;
+    logReq('warn', 'circuit-breaker still open — next probe in ' + Math.round(delay / 1000) + 's');
+  }
+}
+
+/** Returns true if the request should be allowed through. */
+function cbAllow() {
+  if (!_cb.open) return true;
+  if (Date.now() < _cb.nextRetryAt) return false;
+  // half-open: allow one probe request
+  if (_cb.halfOpenInFlight) return false;
+  _cb.halfOpenInFlight = true;
+  return true;
+}
+
+/** Expose for the connection chip UI. */
+export function circuitBreakerState() { return _cb; }
+
 /* ---------- Base URL wiring ---------- */
 export function loadInitialRemoteBase() {
   if (typeof window === 'undefined') return state.remoteBase;
@@ -60,6 +113,14 @@ async function requestJson(url, opts) {
   var method = opts && opts.method ? opts.method : 'GET';
   var label = opts && opts.label ? opts.label : 'api';
   var message = opts && opts.message ? opts.message : method + ' ' + url;
+
+  // Circuit breaker gate — drop request if circuit is open
+  if (!cbAllow()) {
+    var wait = Math.round((_cb.nextRetryAt - Date.now()) / 1000);
+    if (opts && opts.softFail) return null;
+    throw new Error('circuit-breaker open (retry in ' + Math.max(0, wait) + 's)');
+  }
+
   state.rpc.total++;
   logReq(label, message);
   var t0 = performance.now();
@@ -75,9 +136,11 @@ async function requestJson(url, opts) {
     }
     var json = text ? JSON.parse(text) : null;
     var ms = performance.now() - t0;
+    cbOnSuccess();
     logReq('ok', message + ' ' + Math.round(ms) + 'ms');
     return { data: json, ms: ms };
   } catch (e) {
+    cbOnFailure();
     if (opts && opts.softFail) {
       logReq('warn', message + ' unavailable: ' + e.message);
       return null;

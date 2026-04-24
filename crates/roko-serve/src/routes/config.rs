@@ -36,6 +36,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Result<Json<Value>, A
     let cfg = state.load_roko_config();
     let mut value = serde_json::to_value(cfg.as_ref())
         .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
+    expose_dashboard_config_fields(&mut value, cfg.as_ref());
     mask_secret_fields(&mut value);
     Ok(Json(value))
 }
@@ -66,10 +67,25 @@ async fn update_config(
         .await
         .map_err(|e| ApiError::internal(format!("write roko.toml: {e}")))?;
 
+    expose_dashboard_config_fields(&mut current, &updated);
     state.store_roko_config(updated);
 
     mask_secret_fields(&mut current);
     Ok(Json(current))
+}
+
+fn expose_dashboard_config_fields(value: &mut Value, config: &RokoConfig) {
+    if let Some(map) = value.as_object_mut() {
+        let default_model = config.agent.default_model.trim();
+        map.insert(
+            "default_model".to_string(),
+            if default_model.is_empty() {
+                Value::Null
+            } else {
+                Value::String(default_model.to_string())
+            },
+        );
+    }
 }
 
 /// `POST /api/config/reload` — reload `roko.toml` from disk and swap it into
@@ -251,6 +267,18 @@ fn mask_secret_field(value: &mut Value, path: &[&str], field: &str, env_var: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expose_dashboard_config_fields_adds_default_model() {
+        let mut config = RokoConfig::default();
+        config.agent.default_model = "claude-sonnet-4-20250514".into();
+        let mut value = serde_json::to_value(&config).expect("serialize config");
+
+        expose_dashboard_config_fields(&mut value, &config);
+
+        assert_eq!(value["default_model"], "claude-sonnet-4-20250514");
+        assert_eq!(value["agent"]["default_model"], "claude-sonnet-4-20250514");
+    }
 
     #[test]
     fn mask_secret_fields_redacts_config_secrets() {

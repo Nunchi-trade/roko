@@ -1261,7 +1261,7 @@ impl LinUCBRouter {
             }
 
             // Otherwise, try other static entries.
-            for (_, candidate) in &self.static_table {
+            for candidate in self.static_table.values() {
                 if health.is_healthy(&provider_of(candidate)) {
                     return ModelSpec::from_slug(candidate.clone());
                 }

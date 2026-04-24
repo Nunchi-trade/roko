@@ -6,6 +6,8 @@
 
 mod agents;
 mod aggregator;
+mod auth;
+mod chain;
 pub(crate) mod config;
 mod deployments;
 mod diagnosis;
@@ -22,6 +24,7 @@ mod projections;
 mod providers;
 mod research;
 mod run;
+mod secrets;
 mod sse;
 mod status;
 mod subscriptions;
@@ -69,6 +72,9 @@ pub fn build_router(
         .merge(projections::routes())
         .merge(neuro::routes())
         .merge(dream::routes())
+        .merge(chain::routes())
+        .merge(auth::routes())
+        .merge(secrets::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

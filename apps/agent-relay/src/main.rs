@@ -35,7 +35,22 @@ async fn main() -> Result<()> {
     let addr = listener.local_addr().context("read bound relay address")?;
     info!(%addr, "agent relay listening");
 
-    axum::serve(listener, app(Arc::new(RelayState::new())))
+    let state = Arc::new(RelayState::new());
+
+    // Expire stale workspaces every 30 seconds (stale = no heartbeat in 60s).
+    let expiry_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let expired = expiry_state.expire_stale_workspaces(60_000);
+            for id in &expired {
+                tracing::debug!(workspace_id = %id, "expired stale workspace");
+            }
+        }
+    });
+
+    axum::serve(listener, app(state))
         .await
         .context("serve agent relay router")
 }

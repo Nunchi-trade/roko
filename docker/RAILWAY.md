@@ -196,7 +196,7 @@ Available providers: `claude` (default), `openai`, `ollama`, `gemini`, `perplexi
 - **No `VOLUME` directive**: Railway ignores Docker `VOLUME` — attach volumes via the Railway UI or API
 - **`PORT` is auto-injected**: Railway sets `PORT` automatically
 - **Volume permissions**: `entrypoint.sh` handles this — starts as root, chowns the volume mount, drops to non-root via `gosu`
-- **Build caching**: Uses BuildKit cache mounts for Cargo registry and target directories
+- **Build caching**: Railway's builder does not support `--mount=type=cache` (fails with "missing cacheKey prefix"). GHCR builds use GHA cache layer instead (`cache-from: type=gha` in the workflow)
 
 ## Troubleshooting
 

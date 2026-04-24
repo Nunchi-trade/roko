@@ -190,8 +190,9 @@ pub use task::{
 pub use dashboard_snapshot::{
     AgentState as DashboardAgentState, AgentTopology, AgentTopologyEdge, AgentTopologyNode,
     CFactorBucket, DashboardEvent, DashboardEventLogEntry, DashboardSnapshot, DiagnosisSeverity,
-    DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry, SnapshotStats,
-    TrendBucket, TrendBuckets,
+    DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
+    KnowledgeBrowseEntry as DashboardKnowledgeBrowseEntry, SnapshotStats, TrendBucket,
+    TrendBuckets,
 };
 pub use job::{
     CreateJobRequest, FileJobStore, JobError, JobEvaluation, JobFilter, JobGateResult,

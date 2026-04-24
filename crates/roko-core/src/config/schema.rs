@@ -178,6 +178,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub chain: ChainConfig,
 
+    /// Relay registration and workspace discovery settings.
+    #[serde(default)]
+    pub relay: RelayConfig,
+
     /// Agent definitions for multi-agent startup (`roko up`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentDefinition>,
@@ -226,6 +230,7 @@ impl Default for RokoConfig {
             tools: ToolsConfig::default(),
             oneirography: OneirographyConfig::default(),
             chain: ChainConfig::default(),
+            relay: RelayConfig::default(),
             agents: Vec::new(),
         }
     }
@@ -1411,9 +1416,60 @@ pub struct ChainConfig {
     /// ERC-8004 ValidationRegistry contract address.
     #[serde(default)]
     pub validation_registry: Option<String>,
+    /// AgentRegistry contract address (e.g. `0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0`).
+    #[serde(default)]
+    pub agent_registry: Option<String>,
+    /// BountyMarket contract address (e.g. `0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9`).
+    #[serde(default)]
+    pub bounty_market: Option<String>,
     /// Deployer / funder address.
     #[serde(default)]
     pub deployer: Option<String>,
+}
+
+/// Relay registration and workspace discovery settings.
+///
+/// When enabled, `roko serve` registers itself with the relay on startup so
+/// that dashboards can auto-discover the workspace without manual URL entry.
+///
+/// ```toml
+/// [relay]
+/// url = "wss://relay.nunchi.dev"
+/// workspace_name = "will-dev"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelayConfig {
+    /// Relay WebSocket URL (e.g. `wss://relay.nunchi.dev`).
+    /// If unset, workspace registration is disabled.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Human-readable workspace name shown in dashboard discovery.
+    /// Defaults to hostname.
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    /// Public URL of this roko instance (e.g. `https://my-roko.up.railway.app`).
+    /// Auto-detected from RAILWAY_PUBLIC_DOMAIN or FLY_APP_NAME if not set.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    /// Heartbeat interval in seconds for workspace presence. Default: 30.
+    #[serde(default = "default_relay_heartbeat")]
+    pub heartbeat_interval_secs: u64,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            workspace_name: None,
+            public_url: None,
+            heartbeat_interval_secs: 30,
+        }
+    }
+}
+
+const fn default_relay_heartbeat() -> u64 {
+    30
 }
 
 /// A single named tool profile with extra/excluded tool lists.
@@ -3541,9 +3597,15 @@ pub struct ServeAuthConfig {
     /// Whether `/api/*` routes require an `X-Api-Key` header.
     #[serde(default)]
     pub enabled: bool,
-    /// Shared API key expected in `X-Api-Key`.
+    /// Shared API key expected in `X-Api-Key` (legacy single-key mode).
     #[serde(default)]
     pub api_key: String,
+    /// Named API keys with scoped permissions (hashes stored in `.roko/api-keys.json`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<ApiKeyEntry>,
+    /// Privy application ID for JWT validation (Phase 1b — stub only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privy_app_id: Option<String>,
 }
 
 impl Default for ServeAuthConfig {
@@ -3551,8 +3613,31 @@ impl Default for ServeAuthConfig {
         Self {
             enabled: false,
             api_key: String::new(),
+            api_keys: Vec::new(),
+            privy_app_id: None,
         }
     }
+}
+
+/// A named API key entry with scoped permissions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiKeyEntry {
+    /// Human-readable name (e.g. "github-actions", "cli-default").
+    pub name: String,
+    /// SHA-256 hash of the plaintext key (hex-encoded).
+    pub key_hash: String,
+    /// Permission scope: "admin", "agent:write", "read", etc.
+    #[serde(default = "default_api_key_scope")]
+    pub scope: String,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+    /// Optional ISO 8601 expiry timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+fn default_api_key_scope() -> String {
+    "admin".into()
 }
 
 /// Cloud deployment settings attached to the API server configuration.

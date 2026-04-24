@@ -430,6 +430,11 @@ Examples:
         /// Working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Run the interactive TUI dashboard embedded in the server process.
+        /// The TUI reads live state directly from the server's StateHub
+        /// (zero-copy, no file polling).
+        #[arg(long)]
+        tui: bool,
     },
     /// Manage daemon mode (start, stop, status, logs, install).
     Daemon {
@@ -470,6 +475,26 @@ Examples:
         #[arg(long)]
         reduced_motion: bool,
     },
+
+    // ── Authentication ────────────────────────────────────────────────
+    /// Authenticate with a roko-serve instance.
+    #[command(after_help = "\
+Examples:
+  roko login                              Login to localhost:6677 (prompts for API key)
+  roko login https://my-server.com        Login to a remote server
+  roko login --api-key                    Login with an API key (non-interactive check)")]
+    Login {
+        /// URL of the roko-serve instance (default: http://localhost:6677).
+        #[arg(default_value = "http://localhost:6677")]
+        url: String,
+        /// Login with an existing API key (non-interactive: validate stored credential).
+        #[arg(long)]
+        api_key: bool,
+    },
+    /// Remove stored credentials.
+    Logout,
+    /// Show current authentication status.
+    Whoami,
 
     // ── Utilities ───────────────────────────────────────────────────
     /// Walk the lineage DAG rooted at a signal hash and print it.
@@ -1411,8 +1436,11 @@ enum ConfigProviderCmd {
     },
     /// Send a minimal request to verify provider connectivity.
     Test {
-        /// Provider name from `[providers.*]`.
-        provider: String,
+        /// Provider name from `[providers.*]`.  Omit when using `--all`.
+        provider: Option<String>,
+        /// Test every configured provider and print a summary table.
+        #[arg(long)]
+        all: bool,
         /// Directory containing `roko.toml` (default: cwd / --repo).
         #[arg(long)]
         workdir: Option<PathBuf>,
@@ -1485,6 +1513,9 @@ fn main() {
     let mut cli = Cli::parse();
     apply_env_overrides(&mut cli);
 
+    // ── TUI mode detection ─────────────────────────────────────────
+    let tui_mode = matches!(&cli.command, Some(Command::Serve { tui: true, .. }));
+
     // ── Color mode ──────────────────────────────────────────────────
     let use_color = cli.color.should_color();
 
@@ -1495,8 +1526,19 @@ fn main() {
             .unwrap_or(false);
     let started_at = Instant::now();
 
-    let filter = tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"));
+    // In TUI mode, route ALL tracing output to a file instead of stderr.
+    // This must be done here, before the global subscriber is set, to
+    // prevent serve background tasks from writing over the ratatui screen.
+    let filter = if tui_mode {
+        // Suppress noisy subsystems in TUI mode.
+        tracing_subscriber::EnvFilter::try_new(
+            "roko=info,roko_neuro=error,roko_agent=warn,hyper=error,tower=error",
+        )
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"))
+    } else {
+        tracing_subscriber::EnvFilter::try_new(tracing_log_directive())
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("roko=info"))
+    };
 
     // ROKO_LOG_RAW=1 disables secret redaction (useful for debugging).
     let raw_logs = env::var("ROKO_LOG_RAW")
@@ -1504,7 +1546,40 @@ fn main() {
         .unwrap_or(false);
 
     let ansi_logs = use_color;
-    if raw_logs {
+    // In TUI mode, write all tracing to a file so it doesn't corrupt the
+    // ratatui rendering. This sets the global subscriber to a file-backed
+    // writer before any background tasks are spawned.
+    if tui_mode {
+        let workdir = match &cli.command {
+            Some(Command::Serve { workdir, .. }) => {
+                workdir.clone().unwrap_or_else(|| resolve_workdir(&cli))
+            }
+            _ => resolve_workdir(&cli),
+        };
+        let log_path = workdir.join(".roko").join("serve-tui.log");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(log_file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+        {
+            tracing_subscriber::fmt()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log_file))
+                .with_env_filter(filter)
+                .init();
+        } else {
+            // Fallback: suppress everything if we can't open the log.
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::new("error"))
+                .init();
+        }
+    } else if raw_logs {
         match cli.log_format {
             LogFormat::Json => {
                 tracing_subscriber::fmt()
@@ -1818,13 +1893,34 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             bind,
             port,
             workdir,
+            tui,
         } => {
-            let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let wd = workdir.clone().unwrap_or_else(|| resolve_workdir(cli));
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
             let runtime = RokoCliRuntime::new(config, repo_registry).into_arc();
-            roko_serve::run_server(wd, runtime, bind, port).await?;
-            Ok(EXIT_SUCCESS)
+            if tui {
+                // Start the HTTP server in the background, then run the TUI
+                // with the live SharedStateHub. When the user quits the TUI
+                // (press 'q'), the server shuts down.
+                // Note: stderr was already redirected to .roko/serve-tui.log
+                // at the top of main() before tracing_subscriber::init().
+                let (state, server_handle) =
+                    roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
+                let hub = state.state_hub.clone();
+                let tui_result = cmd_dashboard(cli, Some(wd), None, false, false, Some(hub)).await;
+                // TUI exited — shut down the server gracefully.
+                state.cancel.cancel();
+                match server_handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("server error on shutdown: {e}"),
+                    Err(e) => eprintln!("server task panicked: {e}"),
+                }
+                tui_result
+            } else {
+                roko_serve::run_server(wd, runtime, bind, port).await?;
+                Ok(EXIT_SUCCESS)
+            }
         }
         Command::Daemon { cmd } => cmd_daemon(cli, cmd).await,
         Command::Deploy { cmd } => cmd_deploy(cli, cmd).await,
@@ -1897,6 +1993,11 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             cmd_explain(&topic, depth);
             Ok(EXIT_SUCCESS)
         }
+
+        // ── Authentication ────────────────────────────────────────────
+        Command::Login { url, api_key } => cmd_login(&url, api_key).await,
+        Command::Logout => cmd_logout(),
+        Command::Whoami => cmd_whoami().await,
     }
 }
 
@@ -2642,6 +2743,201 @@ fn cmd_explain(topic: &str, depth: u8) {
             eprintln!("unknown topic: {topic}");
             eprintln!("available topics: {}", explain::topic_names().join(", "));
             eprintln!("run `roko explain topics` to see all topics with descriptions");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Authentication: login / logout / whoami
+// -----------------------------------------------------------------------
+
+async fn cmd_login(url: &str, api_key_mode: bool) -> Result<i32> {
+    use roko_cli::credentials;
+
+    let url = url.trim_end_matches('/');
+
+    if api_key_mode {
+        // Non-interactive: check if we already have a stored credential and
+        // validate it against the server.
+        match credentials::load_credential()? {
+            Some(cred) => match validate_credential(&cred.url, &cred.token).await {
+                Ok(true) => {
+                    println!("authenticated to {} (stored credential valid)", cred.url);
+                    return Ok(EXIT_SUCCESS);
+                }
+                Ok(false) => {
+                    eprintln!("stored credential for {} is no longer valid", cred.url);
+                    return Ok(EXIT_FAILURE);
+                }
+                Err(e) => {
+                    eprintln!("could not connect to {}: {e}", cred.url);
+                    return Ok(EXIT_FAILURE);
+                }
+            },
+            None => {
+                eprintln!("no stored credential found; run `roko login` to authenticate");
+                return Ok(EXIT_FAILURE);
+            }
+        }
+    }
+
+    // Interactive: prompt for API key.
+    if !std::io::stdin().is_terminal() {
+        eprintln!("error: stdin is not a terminal; use --api-key for non-interactive mode");
+        return Ok(EXIT_FAILURE);
+    }
+
+    print!("Enter API key for {url}: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    // Read the key. We try rpassword-style hidden input first, but fall
+    // back to plain stdin if the terminal doesn't cooperate.
+    let key = read_password_from_terminal().unwrap_or_else(|_| {
+        // Fallback: read a plain line from stdin.
+        let mut buf = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut buf);
+        buf
+    });
+    let key = key.trim().to_string();
+
+    if key.is_empty() {
+        eprintln!("error: empty API key");
+        return Ok(EXIT_FAILURE);
+    }
+
+    // Validate the key against the server's health endpoint.
+    match validate_credential(url, &key).await {
+        Ok(true) => {
+            let cred = credentials::Credential {
+                url: url.to_string(),
+                token: key,
+                method: "api_key".into(),
+                stored_at: chrono::Utc::now().to_rfc3339(),
+            };
+            credentials::store_credential(&cred)?;
+            println!("authenticated to {url}");
+            println!(
+                "credentials stored in {}",
+                credentials::credentials_path().display()
+            );
+            Ok(EXIT_SUCCESS)
+        }
+        Ok(false) => {
+            eprintln!("invalid API key (server returned 401)");
+            Ok(EXIT_FAILURE)
+        }
+        Err(e) => {
+            eprintln!("could not connect to {url}: {e}");
+            Ok(EXIT_FAILURE)
+        }
+    }
+}
+
+/// Read a password from the terminal without echoing characters.
+///
+/// Uses raw terminal mode via crossterm (already a dependency) to suppress
+/// echo while the user types. Falls back to plain read on error.
+fn read_password_from_terminal() -> Result<String> {
+    use crossterm::terminal;
+    use std::io::Read as _;
+
+    terminal::enable_raw_mode()?;
+    let mut buf = Vec::new();
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+
+    loop {
+        let mut byte = [0u8; 1];
+        handle.read_exact(&mut byte)?;
+        match byte[0] {
+            b'\n' | b'\r' => break,
+            // Backspace / DEL
+            0x7f | 0x08 => {
+                buf.pop();
+            }
+            // Ctrl-C
+            3 => {
+                terminal::disable_raw_mode()?;
+                println!();
+                anyhow::bail!("interrupted");
+            }
+            b => buf.push(b),
+        }
+    }
+
+    terminal::disable_raw_mode()?;
+    println!(); // newline after hidden input
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Validate an API key against a roko-serve instance.
+///
+/// Calls `GET {url}/api/health` with the `X-Api-Key` header.
+/// Returns `Ok(true)` if the server responds 200, `Ok(false)` if 401/403,
+/// and `Err` on connection failure.
+async fn validate_credential(url: &str, token: &str) -> Result<bool> {
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let resp = client
+        .get(format!("{url}/api/health"))
+        .header("X-Api-Key", token)
+        .send()
+        .await?;
+
+    match resp.status().as_u16() {
+        200..=299 => Ok(true),
+        401 | 403 => Ok(false),
+        other => anyhow::bail!("unexpected status {other}"),
+    }
+}
+
+fn cmd_logout() -> Result<i32> {
+    use roko_cli::credentials;
+
+    let path = credentials::credentials_path();
+    if path.exists() {
+        credentials::clear_credential()?;
+        println!("credentials removed from {}", path.display());
+    } else {
+        println!("no stored credentials found");
+    }
+    Ok(EXIT_SUCCESS)
+}
+
+async fn cmd_whoami() -> Result<i32> {
+    use roko_cli::credentials;
+
+    match credentials::load_credential()? {
+        Some(cred) => {
+            println!("server:     {}", cred.url);
+            println!("method:     {}", cred.method);
+            println!("stored at:  {}", cred.stored_at);
+
+            // Mask the token for display: show first 8 chars + "..."
+            let masked = if cred.token.len() > 8 {
+                format!("{}...", &cred.token[..8])
+            } else {
+                "****".to_string()
+            };
+            println!("token:      {masked}");
+
+            // Validate the credential is still good.
+            print!("status:     ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            match validate_credential(&cred.url, &cred.token).await {
+                Ok(true) => println!("valid"),
+                Ok(false) => println!("invalid (server returned 401)"),
+                Err(e) => println!("unreachable ({e})"),
+            }
+            Ok(EXIT_SUCCESS)
+        }
+        None => {
+            println!("not logged in");
+            println!("run `roko login <url>` to authenticate with a roko-serve instance");
+            Ok(EXIT_SUCCESS)
         }
     }
 }
@@ -3723,14 +4019,30 @@ async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Result<()> {
     let provider = providers
         .get(provider_name)
         .ok_or_else(|| anyhow!("provider '{provider_name}' is not configured"))?;
-    let model = select_provider_test_model(&config, provider_name)
-        .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
 
     match provider.kind {
         ProviderKind::OpenAiCompat => {
+            let model = select_provider_test_model(&config, provider_name)
+                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
             run_openai_compat_provider_test(provider_name, provider, &model.1).await
         }
-        other => bail!("provider '{provider_name}' uses unsupported kind '{other}'"),
+        ProviderKind::AnthropicApi => {
+            let model = select_provider_test_model(&config, provider_name)
+                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+            run_anthropic_provider_test(provider_name, provider, &model.1).await
+        }
+        ProviderKind::ClaudeCli => run_claude_cli_provider_test(provider_name, provider).await,
+        ProviderKind::GeminiApi => {
+            let model = select_provider_test_model(&config, provider_name)
+                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+            run_gemini_provider_test(provider_name, provider, &model.1).await
+        }
+        ProviderKind::PerplexityApi => {
+            let model = select_provider_test_model(&config, provider_name)
+                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+            run_openai_compat_provider_test(provider_name, provider, &model.1).await
+        }
+        ProviderKind::CursorAcp => run_cursor_provider_test(provider_name, provider).await,
     }
 }
 
@@ -3932,6 +4244,349 @@ fn format_provider_test_duration(duration: Duration) -> String {
     } else {
         format!("{}ms", duration.as_millis())
     }
+}
+
+async fn run_anthropic_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) -> Result<()> {
+    let base = provider
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.anthropic.com")
+        .trim_end_matches('/');
+    let endpoint = format!("{base}/v1/messages");
+    let api_key = provider
+        .resolve_api_key()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            let env_name = provider.api_key_env.as_deref().unwrap_or("(none)");
+            anyhow!("missing API key for provider '{provider_name}' (env: {env_name})")
+        })?;
+
+    let body = json!({
+        "model": model.slug,
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "Say hello"}]
+    });
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!("  Endpoint: {endpoint}");
+    println!(
+        "  API Key:  set ({})",
+        provider.api_key_env.as_deref().unwrap_or("?")
+    );
+    println!("  Model:    {}", model.slug);
+    println!();
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_millis(
+            provider.timeout_ms.unwrap_or(120_000),
+        ))
+        .build()
+        .context("build provider test client")?;
+
+    let started = Instant::now();
+    let response = client
+        .post(&endpoint)
+        .header("content-type", "application/json")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("send provider test request to {endpoint}"))?;
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let response_text = response.text().await.context("read response body")?;
+
+    if !status.is_success() {
+        println!(
+            "  Response: {} ({})",
+            status,
+            format_provider_test_duration(elapsed)
+        );
+        println!("  Error:    {response_text}");
+        bail!("provider '{provider_name}' test failed");
+    }
+
+    let response_json: Value =
+        serde_json::from_str(&response_text).context("parse anthropic response")?;
+    let content = response_json["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let input_tokens = response_json["usage"]["input_tokens"].as_u64().unwrap_or(0);
+    let output_tokens = response_json["usage"]["output_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+
+    println!(
+        "  Response: {} ({})",
+        status,
+        format_provider_test_duration(elapsed)
+    );
+    println!("  Content:  {content}");
+    println!("  Tokens:   input={input_tokens}, output={output_tokens}");
+    println!();
+    println!("  \u{2713} Provider '{provider_name}' is working");
+    Ok(())
+}
+
+async fn run_claude_cli_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> Result<()> {
+    let cmd = provider.command.as_deref().unwrap_or("claude");
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!("  Command: {cmd}");
+    println!();
+
+    let started = Instant::now();
+    let output = tokio::process::Command::new(cmd)
+        .arg("--version")
+        .output()
+        .await
+        .with_context(|| format!("spawn '{cmd} --version'"))?;
+    let elapsed = started.elapsed();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!(
+            "  Status: exit {} ({})",
+            output.status,
+            format_provider_test_duration(elapsed)
+        );
+        println!("  Error:  {stderr}");
+        bail!("provider '{provider_name}' test failed");
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    println!(
+        "  Status:  exit 0 ({})",
+        format_provider_test_duration(elapsed)
+    );
+    println!("  Version: {version}");
+    println!();
+    println!("  \u{2713} Provider '{provider_name}' is working");
+    Ok(())
+}
+
+async fn run_gemini_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    model: &ModelProfile,
+) -> Result<()> {
+    let base = provider
+        .base_url
+        .as_deref()
+        .unwrap_or("https://generativelanguage.googleapis.com")
+        .trim_end_matches('/');
+    let api_key = provider
+        .resolve_api_key()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            let env_name = provider.api_key_env.as_deref().unwrap_or("(none)");
+            anyhow!("missing API key for provider '{provider_name}' (env: {env_name})")
+        })?;
+    let endpoint = format!(
+        "{base}/v1beta/models/{}:generateContent?key={api_key}",
+        model.slug
+    );
+
+    let body = json!({
+        "contents": [{"parts": [{"text": "Say hello"}]}],
+        "generationConfig": {"maxOutputTokens": 10}
+    });
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!(
+        "  Endpoint: {base}/v1beta/models/{}:generateContent",
+        model.slug
+    );
+    println!(
+        "  API Key:  set ({})",
+        provider.api_key_env.as_deref().unwrap_or("?")
+    );
+    println!("  Model:    {}", model.slug);
+    println!();
+
+    let client = reqwest::Client::builder()
+        .user_agent("roko-cli/0.1")
+        .timeout(Duration::from_millis(
+            provider.timeout_ms.unwrap_or(120_000),
+        ))
+        .build()
+        .context("build provider test client")?;
+
+    let started = Instant::now();
+    let response = client
+        .post(&endpoint)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .context("send provider test request to gemini")?;
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let response_text = response.text().await.context("read response body")?;
+
+    if !status.is_success() {
+        println!(
+            "  Response: {} ({})",
+            status,
+            format_provider_test_duration(elapsed)
+        );
+        println!("  Error:    {response_text}");
+        bail!("provider '{provider_name}' test failed");
+    }
+
+    let response_json: Value =
+        serde_json::from_str(&response_text).context("parse gemini response")?;
+    let content = response_json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let prompt_tokens = response_json["usageMetadata"]["promptTokenCount"]
+        .as_u64()
+        .unwrap_or(0);
+    let output_tokens = response_json["usageMetadata"]["candidatesTokenCount"]
+        .as_u64()
+        .unwrap_or(0);
+
+    println!(
+        "  Response: {} ({})",
+        status,
+        format_provider_test_duration(elapsed)
+    );
+    println!("  Content:  {content}");
+    println!("  Tokens:   input={prompt_tokens}, output={output_tokens}");
+    println!();
+    println!("  \u{2713} Provider '{provider_name}' is working");
+    Ok(())
+}
+
+async fn run_cursor_provider_test(provider_name: &str, provider: &ProviderConfig) -> Result<()> {
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .unwrap_or("http://localhost:3000");
+
+    println!("Testing provider '{provider_name}' ({})...", provider.kind);
+    println!("  Base URL: {base_url}");
+    println!();
+
+    let url = reqwest::Url::parse(base_url)
+        .with_context(|| format!("parse cursor base_url '{base_url}'"))?;
+    let host = url.host_str().unwrap_or("localhost");
+    let port = url
+        .port()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let addr = format!("{host}:{port}");
+
+    let started = Instant::now();
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            let elapsed = started.elapsed();
+            println!(
+                "  TCP:     connected ({})",
+                format_provider_test_duration(elapsed)
+            );
+            println!();
+            println!("  \u{2713} Provider '{provider_name}' is reachable");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let elapsed = started.elapsed();
+            println!(
+                "  TCP:     failed ({}) \u{2014} {e}",
+                format_provider_test_duration(elapsed)
+            );
+            bail!("provider '{provider_name}' test failed: {e}")
+        }
+        Err(_) => {
+            println!("  TCP:     timed out (5s)");
+            bail!("provider '{provider_name}' test failed: connection timed out")
+        }
+    }
+}
+
+async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
+    let config = load_roko_config(workdir)?;
+    let providers = configured_providers(&config);
+    if providers.is_empty() {
+        println!("no providers configured");
+        return Ok(());
+    }
+
+    let mut results: Vec<(String, String, String, String)> = Vec::new();
+    let mut sorted_names: Vec<_> = providers.keys().cloned().collect();
+    sorted_names.sort();
+
+    for name in &sorted_names {
+        let provider = &providers[name];
+        if let Some(env_name) = provider
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if std::env::var(env_name)
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                results.push((
+                    name.clone(),
+                    provider.kind.to_string(),
+                    "SKIPPED (no key)".into(),
+                    "\u{2014}".into(),
+                ));
+                continue;
+            }
+        }
+        let started = Instant::now();
+        match cmd_provider_test(workdir, name).await {
+            Ok(()) => {
+                results.push((
+                    name.clone(),
+                    provider.kind.to_string(),
+                    "\u{2713} OK".into(),
+                    format_provider_test_duration(started.elapsed()),
+                ));
+            }
+            Err(e) => {
+                results.push((
+                    name.clone(),
+                    provider.kind.to_string(),
+                    format!("\u{2717} {e:#}"),
+                    format_provider_test_duration(started.elapsed()),
+                ));
+            }
+        }
+    }
+
+    println!();
+    println!("Provider Test Summary");
+    println!("{}", "\u{2500}".repeat(72));
+    println!(
+        "{:<16} {:<16} {:<28} {}",
+        "Provider", "Kind", "Status", "Latency"
+    );
+    println!("{}", "\u{2500}".repeat(72));
+    for (name, kind, status, latency) in &results {
+        println!("{:<16} {:<16} {:<28} {}", name, kind, status, latency);
+    }
+    println!("{}", "\u{2500}".repeat(72));
+    Ok(())
 }
 
 async fn inspect_provider(
@@ -4571,9 +5226,19 @@ async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
                 cmd_provider_health(&wd)?;
                 Ok(())
             }
-            ConfigProviderCmd::Test { provider, workdir } => {
+            ConfigProviderCmd::Test {
+                provider,
+                all,
+                workdir,
+            } => {
                 let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
-                cmd_provider_test(&wd, &provider).await?;
+                if all {
+                    cmd_provider_test_all(&wd).await?;
+                } else if let Some(provider) = provider {
+                    cmd_provider_test(&wd, &provider).await?;
+                } else {
+                    bail!("provide a provider name or use --all");
+                }
                 Ok(())
             }
         },
@@ -9752,13 +10417,16 @@ fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
+    let mut config = if path.exists() {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))?
+    } else {
+        RokoConfig::default()
+    };
 
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
+    roko_cli::config::merge_global_providers(&mut config);
+    Ok(config)
 }
 
 fn resolve_docker_registry(workdir: &Path, registry: Option<String>) -> Result<String> {
@@ -10972,8 +11640,27 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Config {
-                cmd: ConfigCmd::Providers { cmd: ConfigProviderCmd::Test { provider, .. } }
-            }) if provider == "zai"
+                cmd: ConfigCmd::Providers {
+                    cmd: ConfigProviderCmd::Test { provider: Some(ref p), all: false, .. }
+                }
+            }) if p == "zai"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_config_providers_test_all() {
+        let cli = Cli::try_parse_from(["roko", "config", "providers", "test", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Config {
+                cmd: ConfigCmd::Providers {
+                    cmd: ConfigProviderCmd::Test {
+                        provider: None,
+                        all: true,
+                        ..
+                    }
+                }
+            })
         ));
     }
 

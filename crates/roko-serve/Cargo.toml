@@ -18,7 +18,7 @@ hdc = ["dep:roko-primitives"]
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-agent-server = { path = "../roko-agent-server" }
-roko-chain = { path = "../roko-chain" }
+roko-chain = { path = "../roko-chain", features = ["alloy-backend"] }
 roko-learn = { path = "../roko-learn" }
 roko-neuro = { path = "../roko-neuro" }
 roko-dreams = { path = "../roko-dreams" }
@@ -33,6 +33,8 @@ roko-daimon = { path = "../roko-daimon" }
 roko-runtime = { path = "../roko-runtime" }
 roko-primitives = { path = "../roko-primitives", optional = true }
 
+alloy = { version = "1", features = ["full"] }
+alloy-primitives = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = "1"
 async-trait = { workspace = true }
@@ -58,6 +60,7 @@ utoipa = { version = "5", features = ["macros"] }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 validator = { version = "0.20", features = ["derive"] }
+gethostname = "1.1.0"
 
 [dev-dependencies]
 async-trait = { workspace = true }

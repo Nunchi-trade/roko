@@ -18,6 +18,8 @@ pub enum ApiKeySource {
     EnvVar,
     /// Read from `[serve.auth] api_key` in `roko.toml`.
     Config,
+    /// Read from `~/.roko/credentials.json` (stored by `roko login`).
+    StoredCredential,
 }
 
 impl ApiKeySource {
@@ -29,6 +31,7 @@ impl ApiKeySource {
             Self::CliFlag => "CLI flag (--api-key)",
             Self::EnvVar => "ROKO_API_KEY env var",
             Self::Config => "roko.toml [serve.auth]",
+            Self::StoredCredential => "~/.roko/credentials.json (roko login)",
         }
     }
 }
@@ -48,6 +51,7 @@ pub struct ResolvedApiKey {
 /// 1. Explicit CLI flag (`cli_override`)
 /// 2. `ROKO_API_KEY` environment variable
 /// 3. `config.serve.auth.api_key` from `roko.toml`
+/// 4. Stored credential from `~/.roko/credentials.json` (`roko login`)
 ///
 /// Returns `None` when no key is available from any source.
 #[must_use]
@@ -56,15 +60,26 @@ pub fn resolve_api_key(
     cli_override: Option<&str>,
 ) -> Option<ResolvedApiKey> {
     let env_value = std::env::var(ROKO_API_KEY_ENV).ok();
-    resolve_api_key_inner(config, cli_override, env_value.as_deref())
+    let stored_token = crate::credentials::load_credential()
+        .ok()
+        .flatten()
+        .map(|c| c.token);
+    resolve_api_key_inner(
+        config,
+        cli_override,
+        env_value.as_deref(),
+        stored_token.as_deref(),
+    )
 }
 
-/// Inner implementation that accepts the env-var value as a parameter so
-/// tests can exercise the precedence chain without mutating process state.
+/// Inner implementation that accepts the env-var value and stored credential
+/// as parameters so tests can exercise the precedence chain without mutating
+/// process state or touching the filesystem.
 fn resolve_api_key_inner(
     config: &roko_core::config::ServeAuthConfig,
     cli_override: Option<&str>,
     env_value: Option<&str>,
+    stored_credential: Option<&str>,
 ) -> Option<ResolvedApiKey> {
     // 1. CLI flag takes highest precedence.
     if let Some(key) = cli_override {
@@ -97,6 +112,17 @@ fn resolve_api_key_inner(
         });
     }
 
+    // 4. Stored credential from `roko login`.
+    if let Some(key) = stored_credential {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Some(ResolvedApiKey {
+                key: key.to_string(),
+                source: ApiKeySource::StoredCredential,
+            });
+        }
+    }
+
     None
 }
 
@@ -125,53 +151,77 @@ mod tests {
         ServeAuthConfig {
             enabled: true,
             api_key: api_key.into(),
+            api_keys: Vec::new(),
+            privy_app_id: None,
         }
     }
 
     #[test]
     fn cli_flag_takes_precedence_over_env_and_config() {
-        let resolved =
-            resolve_api_key_inner(&cfg("from-config"), Some("from-cli"), Some("from-env"))
-                .expect("should resolve");
+        let resolved = resolve_api_key_inner(
+            &cfg("from-config"),
+            Some("from-cli"),
+            Some("from-env"),
+            Some("from-stored"),
+        )
+        .expect("should resolve");
         assert_eq!(resolved.key, "from-cli");
         assert_eq!(resolved.source, ApiKeySource::CliFlag);
     }
 
     #[test]
     fn env_var_takes_precedence_over_config() {
-        let resolved = resolve_api_key_inner(&cfg("from-config"), None, Some("from-env"))
-            .expect("should resolve");
+        let resolved = resolve_api_key_inner(
+            &cfg("from-config"),
+            None,
+            Some("from-env"),
+            Some("from-stored"),
+        )
+        .expect("should resolve");
         assert_eq!(resolved.key, "from-env");
         assert_eq!(resolved.source, ApiKeySource::EnvVar);
     }
 
     #[test]
     fn config_key_used_when_no_override() {
-        let resolved =
-            resolve_api_key_inner(&cfg("from-config"), None, None).expect("should resolve");
+        let resolved = resolve_api_key_inner(&cfg("from-config"), None, None, Some("from-stored"))
+            .expect("should resolve");
         assert_eq!(resolved.key, "from-config");
         assert_eq!(resolved.source, ApiKeySource::Config);
     }
 
     #[test]
+    fn stored_credential_used_as_last_resort() {
+        let resolved = resolve_api_key_inner(&cfg(""), None, None, Some("from-stored"))
+            .expect("should resolve");
+        assert_eq!(resolved.key, "from-stored");
+        assert_eq!(resolved.source, ApiKeySource::StoredCredential);
+    }
+
+    #[test]
     fn returns_none_when_no_key_available() {
-        assert!(resolve_api_key_inner(&cfg(""), None, None).is_none());
+        assert!(resolve_api_key_inner(&cfg(""), None, None, None).is_none());
     }
 
     #[test]
     fn empty_cli_flag_falls_through_to_config() {
-        let resolved =
-            resolve_api_key_inner(&cfg("from-config"), Some("  "), None).expect("should resolve");
+        let resolved = resolve_api_key_inner(&cfg("from-config"), Some("  "), None, None)
+            .expect("should resolve");
         assert_eq!(resolved.key, "from-config");
         assert_eq!(resolved.source, ApiKeySource::Config);
     }
 
     #[test]
     fn whitespace_only_env_falls_through_to_config() {
-        let resolved =
-            resolve_api_key_inner(&cfg("from-config"), None, Some("  ")).expect("should resolve");
+        let resolved = resolve_api_key_inner(&cfg("from-config"), None, Some("  "), None)
+            .expect("should resolve");
         assert_eq!(resolved.key, "from-config");
         assert_eq!(resolved.source, ApiKeySource::Config);
+    }
+
+    #[test]
+    fn whitespace_stored_credential_falls_through_to_none() {
+        assert!(resolve_api_key_inner(&cfg(""), None, None, Some("  ")).is_none());
     }
 
     #[test]

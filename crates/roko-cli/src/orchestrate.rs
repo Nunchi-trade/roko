@@ -4630,9 +4630,24 @@ impl PlanRunner {
         }
 
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> =
+            roko_config.effective_models().keys().cloned().collect();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -4665,12 +4680,6 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
-            tracing::warn!(
-                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
-            );
-            RokoConfig::default()
-        });
         let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
         {
             Some(url) => match AlloyChainClient::http(url) {
@@ -4829,9 +4838,24 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(snapshot_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> =
+            roko_config.effective_models().keys().cloned().collect();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -4858,12 +4882,6 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
-            tracing::warn!(
-                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
-            );
-            RokoConfig::default()
-        });
         let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
         {
             Some(url) => match AlloyChainClient::http(url) {
@@ -5024,9 +5042,24 @@ impl PlanRunner {
         let legacy_completed = Self::legacy_completed_tasks_from_snapshot(executor_json);
         let task_trackers = Self::restore_task_trackers(workdir, &legacy_completed);
         let cancel = CancelToken::new();
-        let mut learning = LearningRuntime::open_under(workdir.join(".roko").join("learn"))
-            .await
-            .map_err(|e| anyhow!("init learning runtime: {e}"))?;
+        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
+            tracing::warn!(
+                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
+            );
+            RokoConfig::default()
+        });
+        let learn_root = workdir.join(".roko").join("learn");
+        let configured_model_keys: Vec<String> =
+            roko_config.effective_models().keys().cloned().collect();
+        let mut learning = if configured_model_keys.is_empty() {
+            LearningRuntime::open_under(learn_root)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        } else {
+            LearningRuntime::open_under_with_models(learn_root, configured_model_keys)
+                .await
+                .map_err(|e| anyhow!("init learning runtime: {e}"))?
+        };
         install_episode_distillation_hook(&mut learning, workdir);
         apply_concluded_experiment_overrides(&learning, workdir);
         let mut daimon = DaimonState::load_or_new(daimon_state_path(workdir));
@@ -5053,12 +5086,6 @@ impl PlanRunner {
         let runtime_event_bus = RuntimeEventBus::new(256);
         let runtime_event_rx = runtime_event_bus.subscribe();
         let replan_ledger = ReplanLedger::load(&replan_ledger_path(workdir));
-        let roko_config = load_roko_config(workdir).unwrap_or_else(|err| {
-            tracing::warn!(
-                "[orchestrate] failed to load roko.toml for safety layer whitelist: {err}"
-            );
-            RokoConfig::default()
-        });
         let chain_client: Option<Arc<dyn ChainClient>> = match roko_config.chain.rpc_url.as_deref()
         {
             Some(url) => match AlloyChainClient::http(url) {

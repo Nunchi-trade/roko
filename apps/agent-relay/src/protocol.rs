@@ -108,6 +108,38 @@ pub enum RelayOutboundFrame {
     Pong,
 }
 
+/// Workspace hello frame sent by roko-serve on startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHello {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Public URL of the roko instance (e.g. `https://my-roko.up.railway.app`).
+    pub url: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub owner_wallet: Option<String>,
+    #[serde(default)]
+    pub agents_count: u32,
+}
+
+/// Directory entry for a connected workspace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectedWorkspace {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub owner_wallet: Option<String>,
+    pub agents_count: u32,
+    pub connected_at_ms: u64,
+    pub last_heartbeat_ms: u64,
+}
+
 /// Optional dashboard event stream payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -135,5 +167,15 @@ pub enum RelayEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
         error: String,
+    },
+    WorkspaceConnected {
+        workspace: ConnectedWorkspace,
+    },
+    WorkspaceDisconnected {
+        workspace_id: String,
+    },
+    WorkspaceHeartbeat {
+        workspace_id: String,
+        agents_count: u32,
     },
 }

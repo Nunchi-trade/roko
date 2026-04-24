@@ -73,6 +73,10 @@ if [ -n "${BLOCK_INTERVAL_MS}" ] && ! has_arg "--block-interval-ms" "$@"; then
   MIRAGE_ARGS+=(--block-interval-ms "${BLOCK_INTERVAL_MS}")
 fi
 
+if [ "${MIRAGE_NO_PERSIST:-}" = "1" ] && ! has_arg "--no-persist" "$@"; then
+  MIRAGE_ARGS+=(--no-persist)
+fi
+
 /usr/local/bin/mirage-rs "${MIRAGE_ARGS[@]}" "$@" &
 mirage_pid=$!
 

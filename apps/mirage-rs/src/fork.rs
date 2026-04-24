@@ -1141,11 +1141,16 @@ impl ForkState {
         self.prune_old_blocks();
     }
 
-    /// Evicts blocks older than `MAX_RETAINED_BLOCKS` from both block maps.
+    /// Evicts blocks older than `MAX_RETAINED_BLOCKS` from both block maps,
+    /// along with their associated transactions and receipts.
     pub(crate) fn prune_old_blocks(&mut self) {
         while self.blocks_by_number.len() > Self::MAX_RETAINED_BLOCKS {
             if let Some((_, old)) = self.blocks_by_number.pop_first() {
                 self.blocks_by_hash.remove(&old.hash);
+                for tx_hash in &old.transactions {
+                    self.transactions.remove(tx_hash);
+                    self.receipts.remove(tx_hash);
+                }
             }
         }
     }
@@ -1532,6 +1537,7 @@ fn build_tx_env_call(
     gas_limit: u64,
     nonce: u64,
     chain_id: u64,
+    basefee: u64,
 ) -> Result<TxEnv> {
     build_tx_env_kind(
         caller,
@@ -1541,6 +1547,7 @@ fn build_tx_env_call(
         gas_limit,
         nonce,
         chain_id,
+        basefee,
     )
 }
 
@@ -1552,6 +1559,7 @@ fn build_tx_env_kind(
     gas_limit: u64,
     nonce: u64,
     chain_id: u64,
+    basefee: u64,
 ) -> Result<TxEnv> {
     let exec_gas = gas_limit.max(REVM_TX_GAS_FLOOR);
     TxEnv::builder()
@@ -1562,7 +1570,7 @@ fn build_tx_env_kind(
         .value(value)
         .gas_limit(exec_gas)
         .nonce(nonce)
-        .gas_price(1)
+        .gas_price(u128::from(basefee.max(1)))
         .chain_id(Some(chain_id))
         .build()
         .map_err(|e| MirageError::InvalidParams(e.to_string()))
@@ -1614,6 +1622,7 @@ impl EvmExecutor {
         }
 
         let from_nonce = db.basic(_from)?.map(|i| i.nonce).unwrap_or(0);
+        let basefee = state.next_base_fee_per_gas.min(u64::MAX as u128) as u64;
         let tx = build_tx_env_call(
             _from,
             to,
@@ -1622,6 +1631,7 @@ impl EvmExecutor {
             gas_limit,
             from_nonce,
             state.chain_id,
+            basefee,
         )?;
         let state_chain_id = state.chain_id;
         let built = Context::mainnet()
@@ -1969,6 +1979,7 @@ impl EvmExecutor {
 
         let before_accounts = state.db.dirty.accounts.clone();
         let next_nonce = from_info.nonce;
+        let basefee = state.next_base_fee_per_gas.min(u64::MAX as u128) as u64;
         let tx = build_tx_env_call(
             from,
             contract,
@@ -1977,6 +1988,7 @@ impl EvmExecutor {
             gas_limit,
             next_nonce,
             state.chain_id,
+            basefee,
         )?;
 
         let placeholder = hollow_hybrid(&state.db);
@@ -2032,6 +2044,7 @@ impl EvmExecutor {
 
         let before_accounts = state.db.dirty.accounts.clone();
         let caller_nonce = from_info.nonce;
+        let basefee = state.next_base_fee_per_gas.min(u64::MAX as u128) as u64;
         let tx = build_tx_env_kind(
             from,
             TxKind::Create,
@@ -2040,6 +2053,7 @@ impl EvmExecutor {
             gas_limit,
             caller_nonce,
             state.chain_id,
+            basefee,
         )?;
 
         let placeholder = hollow_hybrid(&state.db);

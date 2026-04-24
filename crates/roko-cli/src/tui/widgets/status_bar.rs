@@ -154,6 +154,7 @@ fn key_hints_for_tab(tab: Tab, has_failures: bool) -> &'static str {
         Tab::Inspect => "\u{2191}\u{2193}:nav  ?:help",
         Tab::Marketplace => "j/k:nav  Enter:detail  n:new  r:refresh  ?:help",
         Tab::Atelier => "j/k:nav  Enter:detail  p:publish  g:gen plan  ?:help",
+        Tab::Learning => "\u{2191}\u{2193}:nav  ?:help",
     }
 }
 

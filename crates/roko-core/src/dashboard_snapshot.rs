@@ -121,6 +121,8 @@ pub enum DashboardEvent {
         prds: Vec<crate::job::PrdSummary>,
         tasks: std::collections::HashMap<String, Vec<crate::job::TaskSummary>>,
     },
+    /// Knowledge entries were refreshed from the neuro store.
+    KnowledgeEntriesUpdated { entries: Vec<KnowledgeBrowseEntry> },
     /// A job execution started.
     JobExecutionStarted {
         job_id: String,
@@ -591,6 +593,39 @@ impl TrendBuckets {
     }
 }
 
+/// Lightweight knowledge-entry summary for the dashboard.
+///
+/// Mirror of the TUI-side `KnowledgeBrowseEntry` that can travel through
+/// `DashboardSnapshot` (and therefore through SSE/WS/REST) without pulling
+/// heavy HDC vectors from `roko_neuro`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeBrowseEntry {
+    /// Entry identifier.
+    #[serde(default)]
+    pub id: String,
+    /// Knowledge category label (e.g. "insight", "heuristic", "pattern").
+    #[serde(default)]
+    pub kind: String,
+    /// Truncated content for preview.
+    #[serde(default)]
+    pub content_preview: String,
+    /// Confidence score 0.0..=1.0.
+    #[serde(default)]
+    pub confidence: f64,
+    /// Tier label (transient, working, consolidated, persistent).
+    #[serde(default)]
+    pub tier: String,
+    /// Topic tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// When the entry was created.
+    #[serde(default = "default_diagnosis_timestamp")]
+    pub created_at: DateTime<Utc>,
+    /// Whether the entry is frozen (cold storage).
+    #[serde(default)]
+    pub frozen: bool,
+}
+
 /// One recent failing gate verdict surfaced in the dashboard.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FailureEntry {
@@ -687,6 +722,18 @@ pub struct DashboardSnapshot {
     /// Adaptive gate threshold state as opaque JSON.
     #[serde(default)]
     pub gate_thresholds_json: String,
+    /// Marketplace jobs for the Marketplace (F8) tab.
+    #[serde(default)]
+    pub marketplace_jobs: Vec<crate::job::MarketplaceJob>,
+    /// PRD summaries for the Atelier (F9) tab.
+    #[serde(default)]
+    pub atelier_prds: Vec<crate::job::PrdSummary>,
+    /// Tasks keyed by PRD slug for the Atelier detail view.
+    #[serde(default)]
+    pub atelier_tasks: HashMap<String, Vec<crate::job::TaskSummary>>,
+    /// Knowledge entries for the Inspect (F7) tab.
+    #[serde(default)]
+    pub knowledge_entries: Vec<KnowledgeBrowseEntry>,
     /// Overall counts.
     pub stats: SnapshotStats,
 }
@@ -843,22 +890,37 @@ impl DashboardSnapshot {
                 }
             }
             DashboardEvent::AgentSpawned { agent_id, role } => {
-                self.stats.agents_active += 1;
-                self.agents.insert(
-                    agent_id.clone(),
-                    AgentState {
-                        agent_id: agent_id.clone(),
-                        role: role.clone(),
-                        active: true,
-                        output_bytes: 0,
-                        model: String::new(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cost_usd: 0.0,
-                        current_task: String::new(),
-                        current_plan: String::new(),
-                    },
-                );
+                // Only increment the counter if this is a genuinely new agent,
+                // or if an existing agent is being re-activated after completion.
+                let entry = self.agents.entry(agent_id.clone());
+                match entry {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let agent = e.get_mut();
+                        if !agent.active {
+                            self.stats.agents_active += 1;
+                        }
+                        agent.active = true;
+                        if !role.is_empty() {
+                            agent.role.clone_from(role);
+                        }
+                        // Preserve accumulated tokens/cost — don't reset.
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        self.stats.agents_active += 1;
+                        e.insert(AgentState {
+                            agent_id: agent_id.clone(),
+                            role: role.clone(),
+                            active: true,
+                            output_bytes: 0,
+                            model: String::new(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cost_usd: 0.0,
+                            current_task: String::new(),
+                            current_plan: String::new(),
+                        });
+                    }
+                }
             }
             DashboardEvent::AgentOutput { agent_id, content } => {
                 if let Some(agent) = self.agents.get_mut(agent_id) {
@@ -1020,12 +1082,17 @@ impl DashboardSnapshot {
                     ts_millis: ts,
                 });
             }
-            // Marketplace/atelier events are consumed by the TUI state layer
-            // directly; the snapshot doesn't need to store them.
-            DashboardEvent::MarketplaceJobsUpdated { .. }
-            | DashboardEvent::AtelierPrdsUpdated { .. }
-            | DashboardEvent::JobExecutionStarted { .. }
-            | DashboardEvent::JobProgress { .. } => {}
+            DashboardEvent::MarketplaceJobsUpdated { jobs } => {
+                self.marketplace_jobs = jobs.clone();
+            }
+            DashboardEvent::AtelierPrdsUpdated { prds, tasks } => {
+                self.atelier_prds = prds.clone();
+                self.atelier_tasks = tasks.clone();
+            }
+            DashboardEvent::KnowledgeEntriesUpdated { entries } => {
+                self.knowledge_entries = entries.clone();
+            }
+            DashboardEvent::JobExecutionStarted { .. } | DashboardEvent::JobProgress { .. } => {}
         }
     }
 

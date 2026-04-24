@@ -96,6 +96,8 @@ fn test_app_with_auth(api_key: &str) -> (tempfile::TempDir, axum::Router) {
     let auth = ServeAuthConfig {
         enabled: true,
         api_key: api_key.to_string(),
+        api_keys: Vec::new(),
+        privy_app_id: None,
     };
     let router = build_router(Arc::clone(&state), &[], auth);
     (dir, router)

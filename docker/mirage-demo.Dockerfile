@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # mirage-rs DEMO container image — includes the static dashboard.
 #

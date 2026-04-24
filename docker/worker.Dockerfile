@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # Roko worker container image.
 #
@@ -8,10 +7,9 @@
 #
 # Build context is the `roko/` workspace root.
 
-ARG BUILDPLATFORM
-ARG TARGETPLATFORM
+ARG BUILDPLATFORM=linux/amd64
 
-FROM --platform=$BUILDPLATFORM rust:1.91-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM rust:1.91-slim-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update \
@@ -23,9 +21,7 @@ RUN apt-get update \
 
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --bin roko && \
+RUN cargo build --release --bin roko && \
     cp target/release/roko /roko
 
 # --- Runtime stage ---

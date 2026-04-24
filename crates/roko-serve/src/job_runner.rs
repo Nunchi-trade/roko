@@ -115,7 +115,7 @@ async fn poll_and_execute(state: &AppState) -> anyhow::Result<()> {
         let job: MarketplaceJob = match serde_json::from_str(&data) {
             Ok(j) => j,
             Err(err) => {
-                warn!(path = %path.display(), error = %err, "failed to parse job file");
+                tracing::debug!(path = %path.display(), error = %err, "failed to parse job file");
                 continue;
             }
         };

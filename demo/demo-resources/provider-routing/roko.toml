@@ -1,0 +1,131 @@
+schema_version = 2
+
+[project]
+name = "provider-routing-demo"
+root = "."
+fresh_base_branch = "main"
+
+[agent]
+default_model = "claude-sonnet"
+effort = "high"
+bare_mode = true
+timeout_ms = 300000
+
+[agent.tier_models]
+mechanical = "claude-haiku"
+focused = "claude-sonnet"
+integrative = "claude-sonnet"
+architectural = "claude-sonnet"
+
+[budget]
+max_cost_per_task = 0.50
+max_cost_per_session = 5.00
+
+[gates]
+clippy_enabled = true
+skip_tests = false
+max_iterations = 3
+
+# ── Providers ─────────────────────────────────────────────────────
+
+[providers.anthropic]
+kind = "anthropic_api"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+timeout_ms = 120000
+
+[providers.moonshot]
+kind = "openai_compat"
+base_url = "https://api.moonshot.ai/v1"
+api_key_env = "MOONSHOT_API_KEY"
+timeout_ms = 180000
+
+[providers.zai]
+kind = "openai_compat"
+base_url = "https://api.z.ai/api/paas/v4"
+api_key_env = "ZAI_API_KEY"
+timeout_ms = 180000
+
+[providers.ollama]
+kind = "openai_compat"
+base_url = "http://localhost:11434/v1"
+timeout_ms = 60000
+
+# ── Models ────────────────────────────────────────────────────────
+
+[models.claude-sonnet]
+provider = "anthropic"
+slug = "claude-sonnet-4-20250514"
+context_window = 200000
+max_output = 64000
+supports_tools = true
+supports_thinking = true
+supports_vision = true
+tool_format = "anthropic_blocks"
+cost_input_per_m = 3.00
+cost_output_per_m = 15.00
+
+[models.claude-haiku]
+provider = "anthropic"
+slug = "claude-haiku-4-5-20251001"
+context_window = 200000
+max_output = 64000
+supports_tools = true
+supports_thinking = true
+tool_format = "anthropic_blocks"
+cost_input_per_m = 0.80
+cost_output_per_m = 4.00
+
+[models.kimi-k2-5]
+provider = "moonshot"
+slug = "kimi-k2.5"
+context_window = 256000
+max_output = 65535
+supports_tools = true
+supports_thinking = true
+supports_vision = true
+supports_partial = true
+tool_format = "openai_json"
+cost_input_per_m = 0.60
+cost_output_per_m = 3.00
+cost_cache_read_per_m = 0.10
+max_tools = 128
+
+[models.glm-5-1]
+provider = "zai"
+slug = "glm-5.1"
+context_window = 200000
+max_output = 131072
+supports_tools = true
+supports_thinking = true
+supports_web_search = true
+supports_mcp_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 1.40
+cost_output_per_m = 4.40
+cost_cache_read_per_m = 0.26
+
+[models.llama3-2]
+provider = "ollama"
+slug = "llama3.2"
+context_window = 128000
+max_output = 4096
+supports_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 0.00
+cost_output_per_m = 0.00
+
+[models.gemma4]
+provider = "ollama"
+slug = "gemma4:26b-claude"
+context_window = 128000
+max_output = 8192
+supports_tools = true
+tool_format = "openai_json"
+cost_input_per_m = 0.00
+cost_output_per_m = 0.00
+
+[routing]
+fast = "claude-haiku"
+standard = "claude-sonnet"
+complex = "claude-sonnet"

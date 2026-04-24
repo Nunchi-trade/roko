@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 #
 # roko-demo container image — bundles the roko-demo orchestrator binary, the
 # demo/ config tree, and the contracts/ Foundry project (pre-built bytecode).
@@ -31,9 +30,7 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --bin roko-demo && \
+RUN cargo build --release --bin roko-demo && \
     cp target/release/roko-demo /roko-demo
 
 # --- Stage 3: runtime ------------------------------------------------------

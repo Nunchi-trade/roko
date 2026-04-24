@@ -14,6 +14,7 @@ import {
 import {
   api,
   apiPost,
+  circuitBreakerState,
   loadInitialRemoteBase,
   logReq,
   logAgent,
@@ -155,9 +156,12 @@ async function connect() {
   } catch (e) {
     state.connected = false;
     chip.className = 'chip err';
-    document.getElementById('conn-label').textContent = 'OFFLINE';
-    logReq('err', 'not connected: ' + e.message + ' · retrying in 5s');
-    setTimeout(connect, 5000);
+    var cb = circuitBreakerState();
+    var retryDelay = cb.open ? Math.max(5000, cb.nextRetryAt - Date.now()) : 5000;
+    var retrySec = Math.round(retryDelay / 1000);
+    document.getElementById('conn-label').textContent = 'OFFLINE · retry ' + retrySec + 's';
+    logReq('err', 'not connected: ' + e.message + ' · retrying in ' + retrySec + 's');
+    setTimeout(connect, retryDelay);
   }
 }
 

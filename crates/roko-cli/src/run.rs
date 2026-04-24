@@ -20,11 +20,13 @@ use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, T
 use roko_agent::{AgentResult, OllamaLlmBackend};
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
+use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, Substrate, Verdict,
+    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, StateHub,
+    Substrate, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
@@ -77,6 +79,10 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
         .map_err(|e| anyhow!("open substrate: {e}"))?;
 
     let ctx = Context::now();
+
+    // Create a local StateHub for emitting DashboardEvents to the event log.
+    let events_path = workdir.join(".roko").join("events.jsonl");
+    let event_hub = StateHub::with_event_log(64, &events_path);
 
     // Seed prompt sections: system role + user prompt + any injected files.
     let mut sections: Vec<Engram> = Vec::with_capacity(2 + config.prompt.files.len());
@@ -150,6 +156,32 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
             .map_err(|e| anyhow!("persist agent trace: {e}"))?;
     }
 
+    // Emit DashboardEvents for the TUI: plan/task start + agent output.
+    let run_plan_id = format!("run-{}", chrono::Utc::now().format("%H%M%S"));
+    event_hub.publish(DashboardEvent::PlanStarted {
+        plan_id: run_plan_id.clone(),
+    });
+    event_hub.publish(DashboardEvent::TaskStarted {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect::<String>(),
+        phase: "implementing".into(),
+    });
+    event_hub.publish(DashboardEvent::AgentSpawned {
+        agent_id: config.agent.command.clone(),
+        role: config.prompt.role.clone(),
+    });
+    if let Ok(text) = final_output_sig.body.as_text() {
+        let preview: String = text.chars().take(200).collect();
+        event_hub.publish(DashboardEvent::AgentOutput {
+            agent_id: config.agent.command.clone(),
+            content: preview,
+        });
+        event_hub.publish(DashboardEvent::TaskOutputAppended {
+            task_id: prompt_text.chars().take(60).collect(),
+            lines: text.lines().take(20).map(String::from).collect(),
+        });
+    }
+
     // Run every configured gate against the working dir.
     let gate_input = build_gate_input(workdir, final_output_sig.id)?;
     substrate
@@ -176,6 +208,16 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
             .map_err(|e| anyhow!("persist verdict: {e}"))?;
         verdict_summary.push((verdict.gate.clone(), verdict.passed));
         verdict_sigs.push(sig);
+    }
+
+    // Emit gate result events for the TUI.
+    for (gate_name, passed) in &verdict_summary {
+        event_hub.publish(DashboardEvent::GateResult {
+            plan_id: run_plan_id.clone(),
+            task_id: prompt_text.chars().take(60).collect(),
+            gate: gate_name.clone(),
+            passed: *passed,
+        });
     }
 
     // Emit the wrap-up Episode signal.
@@ -205,6 +247,46 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     {
         eprintln!("[run] episode logger failed: {err}");
     }
+
+    // Emit completion, episode, and efficiency events for the TUI.
+    let all_passed = verdict_summary.iter().all(|(_, p)| *p);
+    event_hub.publish(DashboardEvent::TaskCompleted {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        outcome: if agent_result.success && all_passed {
+            "success".into()
+        } else {
+            "failed".into()
+        },
+    });
+    event_hub.publish(DashboardEvent::PlanCompleted {
+        plan_id: run_plan_id.clone(),
+        success: agent_result.success && all_passed,
+    });
+    event_hub.publish(DashboardEvent::EpisodeRecorded {
+        agent_id: config.agent.command.clone(),
+        role: config.prompt.role.clone(),
+        episode_id: episode.id.to_hex(),
+        passed: agent_result.success && all_passed,
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "input_tokens".into(),
+        value: f64::from(agent_result.usage.input_tokens),
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id.clone(),
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "output_tokens".into(),
+        value: f64::from(agent_result.usage.output_tokens),
+    });
+    event_hub.publish(DashboardEvent::EfficiencyEvent {
+        plan_id: run_plan_id,
+        task_id: prompt_text.chars().take(60).collect(),
+        metric: "cost_usd".into(),
+        value: f64::from(agent_result.usage.cost_usd),
+    });
 
     let total_signals = substrate
         .len()
@@ -316,6 +398,7 @@ async fn dispatch_agent(
     let mut routing_config = roko_core::config::load_config(workdir)
         .with_context(|| format!("load routing config from {}", workdir.display()))?;
     routing_config.apply_process_env();
+    crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
 
     if has_routing {
@@ -867,9 +950,23 @@ async fn append_episode_log(
             .insert("session_id".to_string(), serde_json::json!(session_id));
     }
 
-    let mut runtime = LearningRuntime::open_under(workdir.join(".roko").join("memory"))
-        .await
-        .map_err(|e| anyhow!("open learning runtime: {e}"))?;
+    let learn_root = workdir.join(".roko").join("learn");
+    let mut model_keys: Vec<String> = load_roko_config_models(workdir);
+    // Ensure the model actually being used is in the cascade router's slug list,
+    // even if it comes from the global config rather than the project config.
+    let current_model = resolved_model(config);
+    if !model_keys.iter().any(|k| k == &current_model) {
+        model_keys.push(current_model);
+    }
+    let mut runtime = if model_keys.is_empty() {
+        LearningRuntime::open_under(learn_root)
+            .await
+            .map_err(|e| anyhow!("open learning runtime: {e}"))?
+    } else {
+        LearningRuntime::open_under_with_models(learn_root, model_keys)
+            .await
+            .map_err(|e| anyhow!("open learning runtime: {e}"))?
+    };
     let distillation_workdir = workdir.to_path_buf();
     runtime.set_episode_completion_hook(move |episode| {
         roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
@@ -1180,6 +1277,22 @@ fn parse_build_system(s: &str) -> Result<BuildSystem, String> {
         "make" => Ok(BuildSystem::Make),
         other => Err(format!("unknown build_system: {other}")),
     }
+}
+
+/// Extract model keys from the project's `roko.toml` for cascade router
+/// initialization. Returns an empty vec if the config is missing or has
+/// no models (which falls back to the hardcoded defaults).
+fn load_roko_config_models(workdir: &Path) -> Vec<String> {
+    let path = workdir.join("roko.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let config = match roko_core::config::RokoConfig::from_toml(&text) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    config.effective_models().keys().cloned().collect()
 }
 
 #[cfg(test)]

@@ -1,0 +1,23 @@
+app = "mirage"
+primary_region = "iad"
+
+[build]
+  image = "ghcr.io/nunchi-trade/mirage:latest"
+
+[http_service]
+  internal_port = 8545
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "30s"
+  path = "/relay/health"
+  method = "GET"
+
+[[mounts]]
+  source = "mirage_data"
+  destination = "/workspace/.roko"
