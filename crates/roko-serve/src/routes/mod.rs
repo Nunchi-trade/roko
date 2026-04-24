@@ -9,9 +9,11 @@ mod aggregator;
 mod auth;
 mod chain;
 pub(crate) mod config;
+mod connectors;
 mod deployments;
 mod diagnosis;
 mod dream;
+mod feeds;
 mod gateway;
 mod heartbeats;
 mod integrations;
@@ -42,6 +44,7 @@ use roko_core::config::ServeAuthConfig;
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
+pub use self::deployments::load_persisted_deployments;
 pub(crate) use self::prds::start_prd_publish_subscriber;
 
 /// Build the complete API router with all route groups and middleware.
@@ -75,6 +78,8 @@ pub fn build_router(
         .merge(dream::routes())
         .merge(gateway::routes())
         .merge(chain::routes())
+        .merge(connectors::routes())
+        .merge(feeds::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
         .merge(team::routes())

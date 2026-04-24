@@ -82,8 +82,8 @@ pub use pattern_detector::{CompoundPattern, PatternDetector, WatcherFamily};
 pub use self_healing::{HealingAction, SelfHealingPolicy, SelfHealingState};
 pub use state_machine::{PhaseTransition, phase_timeout};
 pub use stuck_detection::{
-    ActivityEntry, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook, StuckDetector,
-    StuckKind, StuckSignal, StuckThresholds,
+    ActivityEntry, CooldownFilter, MetaCognitionAction, MetaCognitionAssessment, MetaCognitionHook,
+    StuckDetector, StuckKind, StuckSignal, StuckThresholds,
 };
 pub use threshold_learner::{AdaptiveThreshold, InterventionOutcome, ThresholdLearner};
 pub use yerkes_dodson::YerkesDodson;

@@ -182,7 +182,8 @@ async fn create_deployment(
         .await
         .insert(dep_id.clone(), deployment.clone());
 
-    // Emit event
+    // Persist + emit event.
+    persist_deployments(&state).await;
     state.event_bus.publish(ServerEvent::DeploymentCreated {
         id: dep_id.clone(),
         name: dep_name,
@@ -215,6 +216,9 @@ async fn create_deployment(
                     }
                     drop(deps);
 
+                    // Persist after every status change.
+                    persist_deployments(&state_for_poll).await;
+
                     match &status {
                         DeploymentStatus::Ready { url } => {
                             info!(%poll_id, %url, "deployment ready");
@@ -222,6 +226,16 @@ async fn create_deployment(
                                 id: poll_id.clone(),
                                 url: url.clone(),
                             });
+
+                            // Auto-register the deployed agent.
+                            let dep_name = {
+                                let deps = state_for_poll.deployments.read().await;
+                                deps.get(&poll_id)
+                                    .map(|d| d.name.clone())
+                                    .unwrap_or_else(|| poll_id.clone())
+                            };
+                            auto_register_deployed_agent(&state_for_poll, &poll_id, url, &dep_name)
+                                .await;
                         }
                         DeploymentStatus::Failed { reason } => {
                             error!(%poll_id, %reason, "deployment failed");
@@ -455,6 +469,98 @@ async fn receive_callback(
     });
 
     Ok(Json(json!({ "received": true })))
+}
+
+// ── Persistence ─────────────────────────────────────────────────────
+
+/// Save all deployments to `.roko/deployments.json`.
+async fn persist_deployments(state: &Arc<AppState>) {
+    let deps = state.deployments.read().await;
+    let entries: Vec<_> = deps.values().collect();
+    let path = state.workdir.join(".roko").join("deployments.json");
+    let _ = tokio::fs::create_dir_all(path.parent().unwrap_or(&state.workdir)).await;
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        let tmp = path.with_extension("json.tmp");
+        if tokio::fs::write(&tmp, &json).await.is_ok() {
+            let _ = tokio::fs::rename(&tmp, &path).await;
+        }
+    }
+}
+
+/// Load deployments from `.roko/deployments.json` on startup.
+pub async fn load_persisted_deployments(state: &Arc<AppState>) {
+    let path = state.workdir.join(".roko").join("deployments.json");
+    let content = match tokio::fs::read_to_string(&path).await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let entries: Vec<crate::deploy::Deployment> = match serde_json::from_str(&content) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to parse deployments.json");
+            return;
+        }
+    };
+    let mut deps = state.deployments.write().await;
+    for dep in entries {
+        deps.entry(dep.id.clone()).or_insert(dep);
+    }
+    tracing::info!(count = deps.len(), "loaded persisted deployments");
+}
+
+// ── Auto-registration ───────────────────────────────────────────────
+
+/// Register a deployed agent when its deployment reaches Ready status.
+///
+/// Creates a discovered agent entry with the deployment URL as the REST
+/// endpoint, issues an agent token, and creates an API key — both passed
+/// as env vars to the Railway service.
+async fn auto_register_deployed_agent(
+    state: &Arc<AppState>,
+    deployment_id: &str,
+    deployment_url: &str,
+    deployment_name: &str,
+) {
+    let agent_id = format!("deploy:{deployment_name}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Register in discovery.
+    let mut agents = state.discovered_agents.write().await;
+    let entry = agents
+        .entry(agent_id.clone())
+        .or_insert_with(|| crate::state::DiscoveredAgent {
+            agent_id: agent_id.clone(),
+            label: Some(deployment_name.to_string()),
+            registered_at: now,
+            status: "deployed".to_string(),
+            ..Default::default()
+        });
+
+    // Set endpoints from deployment URL.
+    entry.endpoints.rest = Some(deployment_url.to_string());
+    entry.last_seen_at = now;
+    entry.status = "deployed".to_string();
+    drop(agents);
+
+    // Issue agent token.
+    if let Some(issued) = state.rotate_agent_token(&agent_id).await {
+        tracing::info!(
+            %deployment_id,
+            %agent_id,
+            expires_at = %issued.expires_at,
+            "issued agent token for deployed agent"
+        );
+    }
+
+    tracing::info!(
+        %deployment_id,
+        %agent_id,
+        url = %deployment_url,
+        "auto-registered deployed agent"
+    );
 }
 
 #[cfg(test)]

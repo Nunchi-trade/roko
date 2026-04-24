@@ -284,6 +284,9 @@ async fn run(cli: Cli, upstream: Arc<UpstreamRpc>) -> anyhow::Result<()> {
     // Apply fork snapshot if one was loaded.
     if let Some(ref snap) = loaded_snapshot {
         persist::apply_fork_snapshot(&mut fork, snap.fork.clone());
+        // CLI chain_id overrides the snapshot's — the operator may have
+        // changed the chain ID between restarts (e.g. migrating from 1 to 88888).
+        fork.chain_id = cli.chain_id;
     }
 
     // Prefund the synthetic ERC-8004 bootstrap deployer so contract creation

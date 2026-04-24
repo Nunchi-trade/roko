@@ -44,6 +44,18 @@ pub enum StuckKind {
     EmptyOutput,
     /// Excessive retries on the same task.
     ExcessiveRetries,
+    /// 3+ consecutive REVISE verdicts.
+    ReviewLoop,
+    /// 6+ iterations cycling through the same phases.
+    IterationLoop,
+    /// No output for 180 seconds.
+    SilenceTimeout,
+    /// 3+ consecutive compile failures (broader than `CompileLoop` which checks identical errors).
+    CompileFailThreshold,
+    /// Single task blocking for 300+ seconds.
+    TaskStall,
+    /// Prompt exceeds 80% of context window.
+    ContextPressure,
 }
 
 // ---- StuckSignal ------------------------------------------------------------
@@ -78,6 +90,21 @@ pub struct ActivityEntry {
     pub gate_result: Option<String>,
     /// Iteration number (monotonically increasing).
     pub iteration: u32,
+    /// Free-form activity description (e.g. "compile", "revise", "test").
+    #[serde(default)]
+    pub activity: String,
+    /// Phase label for cycle detection (e.g. "plan", "code", "review").
+    #[serde(default)]
+    pub phase: String,
+    /// Task identifier, for per-task stall detection.
+    #[serde(default)]
+    pub task_id: String,
+    /// Number of prompt tokens used in this turn (for context-pressure detection).
+    #[serde(default)]
+    pub tokens_used: Option<u64>,
+    /// Total context window size for the model (for context-pressure detection).
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 impl ActivityEntry {
@@ -96,14 +123,48 @@ impl ActivityEntry {
             files_changed,
             gate_result,
             iteration,
+            activity: String::new(),
+            phase: String::new(),
+            task_id: String::new(),
+            tokens_used: None,
+            context_window: None,
         }
+    }
+
+    /// Set the activity description.
+    #[must_use]
+    pub fn with_activity(mut self, activity: impl Into<String>) -> Self {
+        self.activity = activity.into();
+        self
+    }
+
+    /// Set the phase label.
+    #[must_use]
+    pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
+        self.phase = phase.into();
+        self
+    }
+
+    /// Set the task identifier.
+    #[must_use]
+    pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = task_id.into();
+        self
+    }
+
+    /// Set token usage and context window for context-pressure detection.
+    #[must_use]
+    pub fn with_token_usage(mut self, tokens_used: u64, context_window: u64) -> Self {
+        self.tokens_used = Some(tokens_used);
+        self.context_window = Some(context_window);
+        self
     }
 }
 
 // ---- StuckDetector config ---------------------------------------------------
 
 /// Configurable thresholds for stuck detection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StuckThresholds {
     /// Number of consecutive identical outputs before firing `OutputLoop`.
     pub output_loop_count: usize,
@@ -117,6 +178,18 @@ pub struct StuckThresholds {
     pub empty_output_count: usize,
     /// Total iteration count before firing `ExcessiveRetries`.
     pub excessive_retry_count: u32,
+    /// Consecutive REVISE verdicts before firing `ReviewLoop`.
+    pub review_loop_threshold: usize,
+    /// Iterations cycling through same phases before firing `IterationLoop`.
+    pub iteration_loop_threshold: usize,
+    /// Milliseconds of silence before firing `SilenceTimeout`.
+    pub silence_timeout_ms: u64,
+    /// Consecutive compile failures before firing `CompileFailThreshold`.
+    pub compile_fail_threshold: usize,
+    /// Milliseconds a single task can block before firing `TaskStall`.
+    pub task_stall_ms: u64,
+    /// Fraction of context window usage that triggers `ContextPressure` (0.0 to 1.0).
+    pub context_pressure_pct: f64,
 }
 
 impl Default for StuckThresholds {
@@ -128,12 +201,21 @@ impl Default for StuckThresholds {
             compile_loop_count: 3,
             empty_output_count: 3,
             excessive_retry_count: 6,
+            review_loop_threshold: 3,
+            iteration_loop_threshold: 6,
+            silence_timeout_ms: 180_000, // 3 minutes
+            compile_fail_threshold: 3,
+            task_stall_ms: 300_000, // 5 minutes
+            context_pressure_pct: 0.80,
         }
     }
 }
 
 impl StuckThresholds {
     /// Create thresholds using the docs-facing names for the built-in heuristics.
+    ///
+    /// New thresholds added after the original six use their defaults. Use the
+    /// struct literal or builder-style setters to customise them.
     #[must_use]
     pub const fn new(
         output_loop: usize,
@@ -150,6 +232,12 @@ impl StuckThresholds {
             compile_loop_count: compile_loop,
             empty_output_count: empty_output,
             excessive_retry_count: excessive_retry,
+            review_loop_threshold: 3,
+            iteration_loop_threshold: 6,
+            silence_timeout_ms: 180_000,
+            compile_fail_threshold: 3,
+            task_stall_ms: 300_000,
+            context_pressure_pct: 0.80,
         }
     }
 
@@ -187,6 +275,42 @@ impl StuckThresholds {
     #[must_use]
     pub const fn excessive_retry(&self) -> u32 {
         self.excessive_retry_count
+    }
+
+    /// Docs-compatible alias for the review-loop threshold.
+    #[must_use]
+    pub const fn review_loop(&self) -> usize {
+        self.review_loop_threshold
+    }
+
+    /// Docs-compatible alias for the iteration-loop threshold.
+    #[must_use]
+    pub const fn iteration_loop(&self) -> usize {
+        self.iteration_loop_threshold
+    }
+
+    /// Docs-compatible alias for the silence-timeout threshold (ms).
+    #[must_use]
+    pub const fn silence_timeout(&self) -> u64 {
+        self.silence_timeout_ms
+    }
+
+    /// Docs-compatible alias for the compile-fail threshold.
+    #[must_use]
+    pub const fn compile_fail(&self) -> usize {
+        self.compile_fail_threshold
+    }
+
+    /// Docs-compatible alias for the task-stall threshold (ms).
+    #[must_use]
+    pub const fn task_stall(&self) -> u64 {
+        self.task_stall_ms
+    }
+
+    /// Docs-compatible alias for the context-pressure threshold (0.0-1.0).
+    #[must_use]
+    pub const fn context_pressure(&self) -> f64 {
+        self.context_pressure_pct
     }
 }
 
@@ -285,6 +409,24 @@ impl StuckDetector {
             signals.push(s);
         }
         if let Some(s) = self.check_no_progress(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_review_loop(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_iteration_loop(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_silence_timeout(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_compile_fail_threshold(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_task_stall(history) {
+            signals.push(s);
+        }
+        if let Some(s) = self.check_context_pressure(history) {
             signals.push(s);
         }
         signals
@@ -530,6 +672,233 @@ impl StuckDetector {
             None
         }
     }
+
+    // ---- Extended heuristics ----
+
+    /// Detect consecutive REVISE verdicts (review loop).
+    ///
+    /// Counts trailing entries whose `activity` field contains "revise" or
+    /// "rejected" (case-insensitive).
+    pub fn check_review_loop(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        let threshold = self.thresholds.review_loop_threshold;
+        if history.len() < threshold {
+            return None;
+        }
+
+        let consecutive = count_consecutive_from_end(history, |e| {
+            let lower = e.activity.to_ascii_lowercase();
+            lower.contains("revise") || lower.contains("rejected")
+        });
+
+        if consecutive >= threshold {
+            Some(StuckSignal {
+                kind: StuckKind::ReviewLoop,
+                confidence: confidence_from_count(consecutive, threshold),
+                duration_ms: None,
+                description: format!("{consecutive} consecutive REVISE verdicts"),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect phase cycling (iteration loop).
+    ///
+    /// Looks at the `phase` field to find the shortest repeating subsequence
+    /// in the trailing entries. Fires when the same phase sequence repeats
+    /// `iteration_loop_threshold` or more times.
+    pub fn check_iteration_loop(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        let threshold = self.thresholds.iteration_loop_threshold;
+        if history.len() < threshold {
+            return None;
+        }
+
+        // Collect non-empty phases from tail.
+        let phases: Vec<&str> = history
+            .iter()
+            .rev()
+            .filter(|e| !e.phase.is_empty())
+            .map(|e| e.phase.as_str())
+            .collect();
+
+        if phases.len() < threshold {
+            return None;
+        }
+
+        // Try cycle lengths 1..=phases.len()/2 and see if the pattern repeats.
+        for cycle_len in 1..=(phases.len() / 2) {
+            let pattern = &phases[..cycle_len];
+            let repeats = phases
+                .chunks(cycle_len)
+                .take_while(|chunk| *chunk == pattern)
+                .count();
+
+            if repeats >= threshold {
+                return Some(StuckSignal {
+                    kind: StuckKind::IterationLoop,
+                    confidence: confidence_from_count(repeats, threshold),
+                    duration_ms: None,
+                    description: format!(
+                        "{repeats} repetitions of phase cycle {:?}",
+                        pattern.iter().rev().copied().collect::<Vec<_>>()
+                    ),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Detect silence (no output for an extended period).
+    ///
+    /// Looks at the gap between the last entry's timestamp and the
+    /// second-to-last entry (or, if only one entry exists, returns `None`).
+    #[allow(clippy::cast_precision_loss)]
+    pub fn check_silence_timeout(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        if history.len() < 2 {
+            return None;
+        }
+
+        let last = history.last()?;
+        let prev = &history[history.len() - 2];
+        let gap = last.timestamp_ms.saturating_sub(prev.timestamp_ms);
+
+        if gap < 0 {
+            return None;
+        }
+
+        #[allow(clippy::cast_sign_loss)]
+        let gap_u64 = gap as u64;
+
+        if gap_u64 >= self.thresholds.silence_timeout_ms {
+            Some(StuckSignal {
+                kind: StuckKind::SilenceTimeout,
+                confidence: (gap_u64 as f64 / self.thresholds.silence_timeout_ms as f64).min(1.0),
+                duration_ms: Some(gap),
+                description: format!("no output for {:.0}s", gap as f64 / 1000.0),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect consecutive compile failures regardless of whether the error is
+    /// identical (broader than `check_compile_loop`).
+    ///
+    /// Counts trailing entries whose `activity` contains "compile" and whose
+    /// `gate_result` starts with "fail", or whose gate result alone indicates
+    /// a compile failure.
+    pub fn check_compile_fail_threshold(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        let threshold = self.thresholds.compile_fail_threshold;
+        if history.len() < threshold {
+            return None;
+        }
+
+        let consecutive = count_consecutive_from_end(history, |e| {
+            let activity_is_compile = e.activity.to_ascii_lowercase().contains("compile");
+            let gate_is_compile_fail = e
+                .gate_result
+                .as_deref()
+                .is_some_and(|r| r.starts_with("fail:compile") || r.starts_with("fail:build"));
+            // Either the activity says compile and gate says fail, or the gate
+            // alone indicates a compile failure.
+            (activity_is_compile
+                && e.gate_result
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("fail")))
+                || gate_is_compile_fail
+        });
+
+        if consecutive >= threshold {
+            Some(StuckSignal {
+                kind: StuckKind::CompileFailThreshold,
+                confidence: confidence_from_count(consecutive, threshold),
+                duration_ms: None,
+                description: format!("{consecutive} consecutive compile failures"),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect a single task blocking for too long.
+    ///
+    /// Groups entries by `task_id` and checks if the most recent task has been
+    /// running longer than `task_stall_ms`.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn check_task_stall(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        if history.len() < 2 {
+            return None;
+        }
+
+        let last = history.last()?;
+        if last.task_id.is_empty() {
+            return None;
+        }
+
+        // Find the first entry with the same task_id.
+        let first_for_task = history.iter().find(|e| e.task_id == last.task_id)?;
+
+        let elapsed = last
+            .timestamp_ms
+            .saturating_sub(first_for_task.timestamp_ms);
+
+        #[allow(clippy::cast_sign_loss)]
+        let elapsed_u64 = elapsed as u64;
+
+        if elapsed_u64 >= self.thresholds.task_stall_ms {
+            Some(StuckSignal {
+                kind: StuckKind::TaskStall,
+                confidence: (elapsed_u64 as f64 / self.thresholds.task_stall_ms as f64).min(1.0),
+                duration_ms: Some(elapsed),
+                description: format!(
+                    "task {} stalled for {:.0}s",
+                    truncate_str(&last.task_id, 16),
+                    elapsed as f64 / 1000.0
+                ),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Detect context-window pressure.
+    ///
+    /// Fires when any entry's `tokens_used / context_window` exceeds
+    /// `context_pressure_pct`.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn check_context_pressure(&self, history: &[ActivityEntry]) -> Option<StuckSignal> {
+        // Check the most recent entry with token data.
+        let entry = history
+            .iter()
+            .rev()
+            .find(|e| e.tokens_used.is_some() && e.context_window.is_some())?;
+
+        let used = entry.tokens_used? as f64;
+        let window = entry.context_window? as f64;
+
+        if window <= 0.0 {
+            return None;
+        }
+
+        let ratio = used / window;
+
+        if ratio >= self.thresholds.context_pressure_pct {
+            Some(StuckSignal {
+                kind: StuckKind::ContextPressure,
+                confidence: ratio.min(1.0),
+                duration_ms: None,
+                description: format!(
+                    "context pressure at {:.0}% ({}/{} tokens)",
+                    ratio * 100.0,
+                    entry.tokens_used.unwrap_or(0),
+                    entry.context_window.unwrap_or(0)
+                ),
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// Meta-cognition decision: keep going, adjust strategy, or escalate.
@@ -687,6 +1056,81 @@ impl MetaCognitionHook {
     }
 }
 
+// ---- CooldownFilter ---------------------------------------------------------
+
+/// Debounce filter that prevents the same [`StuckKind`] from firing too
+/// frequently.
+///
+/// Tracks the timestamp (in milliseconds) of the last intervention for each
+/// kind and suppresses re-fires within a configurable cooldown window
+/// (default: 120 000 ms / 2 minutes).
+#[derive(Debug, Clone)]
+pub struct CooldownFilter {
+    /// Minimum interval between fires for the same kind, in milliseconds.
+    cooldown_ms: u64,
+    /// Last fire timestamp per kind.
+    last_fire: std::collections::HashMap<StuckKind, i64>,
+}
+
+impl Default for CooldownFilter {
+    fn default() -> Self {
+        Self {
+            cooldown_ms: 120_000,
+            last_fire: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl CooldownFilter {
+    /// Create a filter with the default 120-second cooldown.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a filter with a custom cooldown period.
+    #[must_use]
+    pub fn with_cooldown_ms(cooldown_ms: u64) -> Self {
+        Self {
+            cooldown_ms,
+            last_fire: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Returns `true` if the given kind is allowed to fire at `now_ms`.
+    ///
+    /// A kind is allowed if it has never fired, or if the last fire was
+    /// at least `cooldown_ms` ago.
+    #[must_use]
+    pub fn should_fire(&self, kind: &StuckKind, now_ms: i64) -> bool {
+        match self.last_fire.get(kind) {
+            None => true,
+            Some(&last) => {
+                let elapsed = now_ms.saturating_sub(last);
+                #[allow(clippy::cast_sign_loss)]
+                let elapsed_u64 = elapsed as u64;
+                elapsed_u64 >= self.cooldown_ms
+            }
+        }
+    }
+
+    /// Record that the given kind fired at `now_ms`.
+    pub fn record_fire(&mut self, kind: StuckKind, now_ms: i64) {
+        self.last_fire.insert(kind, now_ms);
+    }
+
+    /// Convenience: check and record in one call. Returns `true` if the fire
+    /// was allowed (and records it); `false` if suppressed.
+    pub fn try_fire(&mut self, kind: StuckKind, now_ms: i64) -> bool {
+        if self.should_fire(&kind, now_ms) {
+            self.record_fire(kind, now_ms);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn classify_meta_cognition_action(
     primary_signal: Option<&StuckSignal>,
     iterations_without_progress: usize,
@@ -696,7 +1140,13 @@ fn classify_meta_cognition_action(
 ) -> MetaCognitionAction {
     if matches!(
         primary_signal.map(|signal| signal.kind),
-        Some(StuckKind::GateLoop | StuckKind::CompileLoop | StuckKind::ExcessiveRetries)
+        Some(
+            StuckKind::GateLoop
+                | StuckKind::CompileLoop
+                | StuckKind::ExcessiveRetries
+                | StuckKind::CompileFailThreshold
+                | StuckKind::ReviewLoop
+        )
     ) || repeated_gate_failure_count >= thresholds.gate_loop_count
     {
         return MetaCognitionAction::Escalate;
@@ -706,15 +1156,15 @@ fn classify_meta_cognition_action(
         || repeated_output_count >= thresholds.output_loop_count
         || matches!(
             primary_signal.map(|signal| signal.kind),
-            Some(StuckKind::OutputLoop)
-        )
-        || matches!(
-            primary_signal.map(|signal| signal.kind),
-            Some(StuckKind::EmptyOutput)
-        )
-        || matches!(
-            primary_signal.map(|signal| signal.kind),
-            Some(StuckKind::NoProgress)
+            Some(
+                StuckKind::OutputLoop
+                    | StuckKind::EmptyOutput
+                    | StuckKind::NoProgress
+                    | StuckKind::IterationLoop
+                    | StuckKind::SilenceTimeout
+                    | StuckKind::TaskStall
+                    | StuckKind::ContextPressure
+            )
         )
     {
         return MetaCognitionAction::AdjustStrategy;
@@ -1053,6 +1503,7 @@ mod tests {
             compile_loop_count: 2,
             empty_output_count: 2,
             excessive_retry_count: 3,
+            ..StuckThresholds::default()
         };
         let det = StuckDetector::with_thresholds(thresholds);
         // Two identical outputs should fire with threshold=2.
@@ -1205,5 +1656,349 @@ mod tests {
             docs_signal.kind,
             Kind::Custom("conductor.meta_cognition".into())
         );
+    }
+
+    // ---- ReviewLoop ----
+
+    #[test]
+    fn review_loop_detected() {
+        let history: Vec<ActivityEntry> = (0..3)
+            .map(|i| {
+                ActivityEntry::new(i64::from(i) * 1000, format!("h{i}"), 0, None, 1)
+                    .with_activity("revise")
+            })
+            .collect();
+        let signal = detector().check_review_loop(&history);
+        assert!(signal.is_some());
+        assert_eq!(signal.as_ref().unwrap().kind, StuckKind::ReviewLoop);
+    }
+
+    #[test]
+    fn review_loop_case_insensitive() {
+        let history: Vec<ActivityEntry> = vec![
+            ActivityEntry::new(1000, "h1", 0, None, 1).with_activity("REVISE"),
+            ActivityEntry::new(2000, "h2", 0, None, 2).with_activity("Rejected"),
+            ActivityEntry::new(3000, "h3", 0, None, 3).with_activity("revise"),
+        ];
+        let signal = detector().check_review_loop(&history);
+        assert!(signal.is_some());
+    }
+
+    #[test]
+    fn review_loop_below_threshold() {
+        let history: Vec<ActivityEntry> = (0..2)
+            .map(|i| {
+                ActivityEntry::new(i64::from(i) * 1000, format!("h{i}"), 0, None, 1)
+                    .with_activity("revise")
+            })
+            .collect();
+        let signal = detector().check_review_loop(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- IterationLoop ----
+
+    #[test]
+    fn iteration_loop_detected() {
+        // Phase sequence: [plan, code, review] repeated 6+ times (reversed because
+        // we iterate in reverse).
+        let mut history = Vec::new();
+        let phases = ["review", "code", "plan"];
+        for i in 0..(6 * 3) {
+            let phase = phases[i % 3];
+            history.push(
+                ActivityEntry::new(i as i64 * 1000, format!("h{i}"), 0, None, 1).with_phase(phase),
+            );
+        }
+        let signal = detector().check_iteration_loop(&history);
+        assert!(signal.is_some());
+        assert_eq!(signal.as_ref().unwrap().kind, StuckKind::IterationLoop);
+    }
+
+    #[test]
+    fn iteration_loop_below_threshold() {
+        let mut history = Vec::new();
+        let phases = ["plan", "code", "review"];
+        for i in 0..(2 * 3) {
+            let phase = phases[i % 3];
+            history.push(
+                ActivityEntry::new(i as i64 * 1000, format!("h{i}"), 0, None, 1).with_phase(phase),
+            );
+        }
+        let signal = detector().check_iteration_loop(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- SilenceTimeout ----
+
+    #[test]
+    fn silence_timeout_detected() {
+        let history = vec![
+            ActivityEntry::new(0, "a", 0, None, 1),
+            ActivityEntry::new(200_000, "b", 0, None, 2), // 200s gap > 180s threshold
+        ];
+        let signal = detector().check_silence_timeout(&history);
+        assert!(signal.is_some());
+        assert_eq!(signal.as_ref().unwrap().kind, StuckKind::SilenceTimeout);
+        assert_eq!(signal.as_ref().unwrap().duration_ms, Some(200_000));
+    }
+
+    #[test]
+    fn silence_timeout_below_threshold() {
+        let history = vec![
+            ActivityEntry::new(0, "a", 0, None, 1),
+            ActivityEntry::new(60_000, "b", 0, None, 2), // 60s < 180s
+        ];
+        let signal = detector().check_silence_timeout(&history);
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn silence_timeout_single_entry() {
+        let history = vec![ActivityEntry::new(0, "a", 0, None, 1)];
+        let signal = detector().check_silence_timeout(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- CompileFailThreshold ----
+
+    #[test]
+    fn compile_fail_threshold_detected() {
+        let history: Vec<ActivityEntry> = (0..3)
+            .map(|i| {
+                ActivityEntry::new(
+                    i64::from(i) * 1000,
+                    format!("h{i}"),
+                    0,
+                    Some(format!("fail:compile:E{i}")), // different errors each time
+                    1,
+                )
+                .with_activity("compile")
+            })
+            .collect();
+        let signal = detector().check_compile_fail_threshold(&history);
+        assert!(signal.is_some());
+        assert_eq!(
+            signal.as_ref().unwrap().kind,
+            StuckKind::CompileFailThreshold
+        );
+    }
+
+    #[test]
+    fn compile_fail_threshold_gate_only() {
+        // Gate result alone (without activity field) should also trigger.
+        let history: Vec<ActivityEntry> = (0..3)
+            .map(|i| {
+                ActivityEntry::new(
+                    i64::from(i) * 1000,
+                    format!("h{i}"),
+                    0,
+                    Some(format!("fail:compile:E{i}")),
+                    1,
+                )
+            })
+            .collect();
+        let signal = detector().check_compile_fail_threshold(&history);
+        assert!(signal.is_some());
+    }
+
+    #[test]
+    fn compile_fail_threshold_below() {
+        let history: Vec<ActivityEntry> = (0..2)
+            .map(|i| {
+                ActivityEntry::new(
+                    i64::from(i) * 1000,
+                    format!("h{i}"),
+                    0,
+                    Some(format!("fail:compile:E{i}")),
+                    1,
+                )
+                .with_activity("compile")
+            })
+            .collect();
+        let signal = detector().check_compile_fail_threshold(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- TaskStall ----
+
+    #[test]
+    fn task_stall_detected() {
+        let history = vec![
+            ActivityEntry::new(0, "a", 0, None, 1).with_task_id("task-1"),
+            ActivityEntry::new(100_000, "b", 0, None, 2).with_task_id("task-1"),
+            ActivityEntry::new(350_000, "c", 0, None, 3).with_task_id("task-1"), // 350s > 300s
+        ];
+        let signal = detector().check_task_stall(&history);
+        assert!(signal.is_some());
+        assert_eq!(signal.as_ref().unwrap().kind, StuckKind::TaskStall);
+    }
+
+    #[test]
+    fn task_stall_below_threshold() {
+        let history = vec![
+            ActivityEntry::new(0, "a", 0, None, 1).with_task_id("task-1"),
+            ActivityEntry::new(200_000, "b", 0, None, 2).with_task_id("task-1"),
+        ];
+        let signal = detector().check_task_stall(&history);
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn task_stall_no_task_id() {
+        let history = vec![
+            ActivityEntry::new(0, "a", 0, None, 1),
+            ActivityEntry::new(400_000, "b", 0, None, 2),
+        ];
+        let signal = detector().check_task_stall(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- ContextPressure ----
+
+    #[test]
+    fn context_pressure_detected() {
+        let history =
+            vec![ActivityEntry::new(1000, "a", 1, None, 1).with_token_usage(85_000, 100_000)];
+        let signal = detector().check_context_pressure(&history);
+        assert!(signal.is_some());
+        assert_eq!(signal.as_ref().unwrap().kind, StuckKind::ContextPressure);
+        assert!(signal.as_ref().unwrap().confidence >= 0.85);
+    }
+
+    #[test]
+    fn context_pressure_below_threshold() {
+        let history =
+            vec![ActivityEntry::new(1000, "a", 1, None, 1).with_token_usage(50_000, 100_000)];
+        let signal = detector().check_context_pressure(&history);
+        assert!(signal.is_none());
+    }
+
+    #[test]
+    fn context_pressure_no_token_data() {
+        let history = vec![ActivityEntry::new(1000, "a", 1, None, 1)];
+        let signal = detector().check_context_pressure(&history);
+        assert!(signal.is_none());
+    }
+
+    // ---- CooldownFilter ----
+
+    #[test]
+    fn cooldown_filter_allows_first_fire() {
+        let filter = CooldownFilter::new();
+        assert!(filter.should_fire(&StuckKind::OutputLoop, 1000));
+    }
+
+    #[test]
+    fn cooldown_filter_suppresses_rapid_refire() {
+        let mut filter = CooldownFilter::new();
+        filter.record_fire(StuckKind::OutputLoop, 1000);
+        // 10s later -- still within 120s cooldown.
+        assert!(!filter.should_fire(&StuckKind::OutputLoop, 11_000));
+    }
+
+    #[test]
+    fn cooldown_filter_allows_after_cooldown() {
+        let mut filter = CooldownFilter::new();
+        filter.record_fire(StuckKind::OutputLoop, 1000);
+        // 121s later -- past 120s cooldown.
+        assert!(filter.should_fire(&StuckKind::OutputLoop, 122_000));
+    }
+
+    #[test]
+    fn cooldown_filter_independent_per_kind() {
+        let mut filter = CooldownFilter::new();
+        filter.record_fire(StuckKind::OutputLoop, 1000);
+        // Different kind should still be allowed.
+        assert!(filter.should_fire(&StuckKind::GateLoop, 2000));
+    }
+
+    #[test]
+    fn cooldown_filter_try_fire() {
+        let mut filter = CooldownFilter::with_cooldown_ms(5000);
+        assert!(filter.try_fire(StuckKind::ReviewLoop, 1000));
+        assert!(!filter.try_fire(StuckKind::ReviewLoop, 3000)); // 2s < 5s
+        assert!(filter.try_fire(StuckKind::ReviewLoop, 7000)); // 6s > 5s
+    }
+
+    // ---- check_all includes new detectors ----
+
+    #[test]
+    fn check_all_includes_review_loop() {
+        let history: Vec<ActivityEntry> = (0..4)
+            .map(|i| {
+                ActivityEntry::new(i64::from(i) * 1000, format!("h{i}"), 0, None, 1)
+                    .with_activity("revise")
+            })
+            .collect();
+        let signals = detector().check_all(&history);
+        let kinds: Vec<StuckKind> = signals.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StuckKind::ReviewLoop));
+    }
+
+    #[test]
+    fn check_all_includes_context_pressure() {
+        let history = vec![
+            ActivityEntry::new(1000, "a", 1, None, 1).with_token_usage(90_000, 100_000),
+            ActivityEntry::new(2000, "b", 1, None, 2).with_token_usage(95_000, 100_000),
+        ];
+        let signals = detector().check_all(&history);
+        let kinds: Vec<StuckKind> = signals.iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&StuckKind::ContextPressure));
+    }
+
+    // ---- Serde for new ActivityEntry fields ----
+
+    #[test]
+    fn activity_entry_serde_with_new_fields() {
+        let entry = ActivityEntry::new(1000, "abc", 2, Some("pass".into()), 1)
+            .with_activity("compile")
+            .with_phase("code")
+            .with_task_id("task-42")
+            .with_token_usage(50_000, 100_000);
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let decoded: ActivityEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.activity, "compile");
+        assert_eq!(decoded.phase, "code");
+        assert_eq!(decoded.task_id, "task-42");
+        assert_eq!(decoded.tokens_used, Some(50_000));
+        assert_eq!(decoded.context_window, Some(100_000));
+    }
+
+    #[test]
+    fn activity_entry_serde_backward_compat() {
+        // Old JSON without new fields should deserialize with defaults.
+        let json = r#"{"timestamp_ms":1000,"output_hash":"abc","files_changed":2,"gate_result":"pass","iteration":1}"#;
+        let decoded: ActivityEntry = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(decoded.activity, "");
+        assert_eq!(decoded.phase, "");
+        assert_eq!(decoded.task_id, "");
+        assert!(decoded.tokens_used.is_none());
+        assert!(decoded.context_window.is_none());
+    }
+
+    // ---- New StuckKind serde ----
+
+    #[test]
+    fn new_stuck_kind_serde_roundtrip() {
+        let kinds = [
+            StuckKind::ReviewLoop,
+            StuckKind::IterationLoop,
+            StuckKind::SilenceTimeout,
+            StuckKind::CompileFailThreshold,
+            StuckKind::TaskStall,
+            StuckKind::ContextPressure,
+        ];
+        for kind in &kinds {
+            let signal = StuckSignal {
+                kind: *kind,
+                confidence: 0.9,
+                duration_ms: None,
+                description: "test".into(),
+            };
+            let json = serde_json::to_string(&signal).expect("serialize");
+            let decoded: StuckSignal = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded.kind, *kind);
+        }
     }
 }
