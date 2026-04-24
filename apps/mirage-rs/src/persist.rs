@@ -260,10 +260,33 @@ pub fn chain_context_from_snapshot(
 // Disk I/O
 // ---------------------------------------------------------------------------
 
-/// Reads a snapshot from disk. Returns `Ok(None)` if the file does not exist.
+/// Maximum snapshot file size we'll attempt to load (256 MB).
+/// Snapshots larger than this are almost certainly from an un-pruned chain
+/// and will OOM or take too long to deserialize.
+const MAX_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Reads a snapshot from disk. Returns `Ok(None)` if the file does not exist
+/// or exceeds the size limit.
 pub fn load_snapshot(state_dir: &Path) -> anyhow::Result<Option<MirageSnapshot>> {
     let path = state_dir.join(SNAPSHOT_FILE);
     if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| anyhow::anyhow!("failed to stat snapshot at {}: {e}", path.display()))?;
+    let size_bytes = metadata.len();
+    let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+    tracing::info!(
+        path = %path.display(),
+        size_mb = format!("{size_mb:.1}"),
+        "loading snapshot"
+    );
+    if size_bytes > MAX_SNAPSHOT_BYTES {
+        tracing::warn!(
+            size_mb = format!("{size_mb:.1}"),
+            max_mb = MAX_SNAPSHOT_BYTES / (1024 * 1024),
+            "snapshot too large, starting fresh to avoid OOM"
+        );
         return Ok(None);
     }
     let data = std::fs::read(&path)
@@ -287,6 +310,15 @@ pub fn write_snapshot(snap: &MirageSnapshot, state_dir: &Path) -> anyhow::Result
     let tmp_path = state_dir.join(format!("{SNAPSHOT_FILE}.tmp"));
     let data = serde_json::to_vec(snap)
         .map_err(|e| anyhow::anyhow!("failed to serialise snapshot: {e}"))?;
+    let size_mb = data.len() as f64 / (1024.0 * 1024.0);
+    tracing::debug!(
+        size_mb = format!("{size_mb:.1}"),
+        block = snap.fork.local_block_number,
+        blocks_retained = snap.fork.blocks_by_number.len(),
+        txs = snap.fork.transactions.len(),
+        dirty_accounts = snap.fork.dirty.accounts.len(),
+        "writing snapshot"
+    );
     std::fs::write(&tmp_path, &data)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", tmp_path.display()))?;
     std::fs::rename(&tmp_path, &final_path)
