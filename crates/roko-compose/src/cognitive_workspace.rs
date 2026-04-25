@@ -7,7 +7,8 @@
 use roko_core::{
     CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef, ContextRejectionAudit,
     ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit, InvocationGateOutcome,
-    ModelChoice, PolicyVersionRef, PromptPolicy, RoleProfile, TaskInvocationContract,
+    ModelChoice, PolicyVersionRef, PromptPolicy, PromptSectionAudit, RoleProfile,
+    TaskInvocationContract,
 };
 
 use crate::{
@@ -30,6 +31,8 @@ pub struct CognitiveWorkspaceInput<'a> {
     pub prompt_policy: &'a PromptPolicy,
     /// Resolved context decisions for this dispatch.
     pub resolved_context: Option<&'a ResolvedContext>,
+    /// Prompt section metadata emitted by prompt assembly.
+    pub prompt_sections: Vec<PromptSectionAudit>,
     /// Provider/model choice.
     pub model_choice: ModelChoice,
 }
@@ -67,6 +70,7 @@ pub fn build_cognitive_workspace(input: CognitiveWorkspaceInput<'_>) -> Cognitiv
         &input.role_profile.context_policy,
     )))
     .with_context_audit(included, rejected)
+    .with_prompt_section_audit(input.prompt_sections)
     .with_capability_grants(grants);
     workspace.gate_outcomes = gates;
     workspace
@@ -89,15 +93,31 @@ fn included_context_sections(context: &ResolvedContext) -> Vec<ContextSectionAud
     context
         .injection_manifest()
         .into_iter()
-        .map(|record| ContextSectionAudit {
-            section_name: record.section_name,
-            source_type: record.source_type.to_string(),
-            source_id: record.source_id,
-            purpose: purpose_label(record.purpose).to_string(),
-            scope: scope_audit(record.scope),
-            inclusion_reason: record.inclusion_reason,
-            estimated_tokens: record.estimated_tokens,
-            token_budget: record.token_budget,
+        .map(|record| {
+            let section_id = context_section_id(
+                &record.section_name,
+                record.source_type,
+                record.source_id.as_deref(),
+            );
+            let action_id = context_section_action_id(
+                &record.section_name,
+                record.source_type,
+                record.source_id.as_deref(),
+                record.experiment_id.as_deref(),
+            );
+            ContextSectionAudit {
+                section_id,
+                section_name: record.section_name,
+                action_id,
+                source_type: record.source_type.to_string(),
+                source_id: record.source_id,
+                purpose: purpose_label(record.purpose).to_string(),
+                scope: scope_audit(record.scope),
+                inclusion_reason: record.inclusion_reason,
+                estimated_tokens: record.estimated_tokens,
+                token_budget: record.token_budget,
+                experiment_id: record.experiment_id,
+            }
         })
         .collect()
 }
@@ -106,15 +126,93 @@ fn rejected_context_candidates(rejections: &[ContextRejection]) -> Vec<ContextRe
     rejections
         .iter()
         .map(|rejection| ContextRejectionAudit {
+            section_id: context_section_id(
+                &rejection.section_name,
+                rejection.source_type,
+                rejection.source_id.as_deref(),
+            ),
             section_name: rejection.section_name.clone(),
+            action_id: context_section_action_id(
+                &rejection.section_name,
+                rejection.source_type,
+                rejection.source_id.as_deref(),
+                rejection.experiment_id.as_deref(),
+            ),
             source_type: rejection.source_type.to_string(),
             source_id: rejection.source_id.clone(),
             purpose: purpose_label(rejection.purpose).to_string(),
             scope: scope_audit(rejection.scope.clone()),
             estimated_tokens: rejection.estimated_tokens,
+            experiment_id: rejection.experiment_id.clone(),
             reason: rejection_reason_audit(&rejection.reason),
         })
         .collect()
+}
+
+fn context_section_id(name: &str, source_type: &str, source_id: Option<&str>) -> String {
+    let mut id = format!(
+        "context:{}:{}",
+        normalize_action_part(name),
+        normalize_action_part(source_type)
+    );
+    if let Some(source_id) = source_id.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_id));
+    }
+    id
+}
+
+fn context_section_action_id(
+    name: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    experiment_id: Option<&str>,
+) -> String {
+    let mut id = format!(
+        "context_section:{}:{}",
+        normalize_action_part(name),
+        normalize_action_part(source_type)
+    );
+    if let Some(source_id) = source_id.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_id));
+    }
+    if let Some(experiment_id) = experiment_id.and_then(non_empty) {
+        id.push_str("|experiment:");
+        id.push_str(&normalize_action_part(experiment_id));
+    }
+    id
+}
+
+fn normalize_action_part(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_sep = false;
+    for ch in raw.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('-');
+            last_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn capability_grants(role: &RoleProfile) -> Vec<CapabilityGrant> {
@@ -262,6 +360,7 @@ mod tests {
             role_profile: &role,
             prompt_policy: &prompt,
             resolved_context: Some(&context),
+            prompt_sections: Vec::new(),
             model_choice: ModelChoice::new("codex", "gpt-5.5"),
         });
 
@@ -269,6 +368,10 @@ mod tests {
         let section = &workspace.included_context_sections[0];
         assert_eq!(section.source_type, "file");
         assert_eq!(section.source_id.as_deref(), Some("src/lib.rs:1-20"));
+        assert_eq!(
+            section.action_id,
+            "context_section:source:file:src-lib-rs-1-20"
+        );
         assert_eq!(section.token_budget, Some(100));
         let encoded = serde_json::to_string(&workspace).expect("workspace serializes");
         assert!(!encoded.contains("secret file contents"));
@@ -322,6 +425,7 @@ mod tests {
             role_profile: &role,
             prompt_policy: &prompt,
             resolved_context: Some(&context),
+            prompt_sections: Vec::new(),
             model_choice: ModelChoice::new("codex", "gpt-5.5"),
         });
 

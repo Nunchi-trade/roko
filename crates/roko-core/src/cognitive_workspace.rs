@@ -36,6 +36,9 @@ pub struct CognitiveWorkspace {
     /// Context candidates rejected before prompt assembly.
     #[serde(default)]
     pub rejected_context_candidates: Vec<ContextRejectionAudit>,
+    /// Prompt sections considered during assembly, without raw content.
+    #[serde(default)]
+    pub prompt_sections: Vec<PromptSectionAudit>,
     /// Provider/model selection used for the invocation.
     pub model_choice: ModelChoice,
     /// Tools and higher-level capabilities granted to the invocation.
@@ -47,6 +50,9 @@ pub struct CognitiveWorkspace {
     /// Gate outcomes associated with this invocation.
     #[serde(default)]
     pub gate_outcomes: Vec<InvocationGateOutcome>,
+    /// Structured review verdicts associated with this invocation.
+    #[serde(default)]
+    pub review_verdicts: Vec<InvocationReviewVerdictOutcome>,
     /// Reward observations derived from gates, latency, cost, retries, or review.
     #[serde(default)]
     pub reward_observations: Vec<RewardObservation>,
@@ -75,10 +81,12 @@ impl CognitiveWorkspace {
             context_policy: None,
             included_context_sections: Vec::new(),
             rejected_context_candidates: Vec::new(),
+            prompt_sections: Vec::new(),
             model_choice,
             capability_grants: Vec::new(),
             output_parse_result: None,
             gate_outcomes: Vec::new(),
+            review_verdicts: Vec::new(),
             reward_observations: Vec::new(),
             created_at_ms: chrono::Utc::now().timestamp_millis(),
         }
@@ -100,6 +108,13 @@ impl CognitiveWorkspace {
     ) -> Self {
         self.included_context_sections = included;
         self.rejected_context_candidates = rejected;
+        self
+    }
+
+    /// Attach prompt-section audit rows.
+    #[must_use]
+    pub fn with_prompt_section_audit(mut self, sections: Vec<PromptSectionAudit>) -> Self {
+        self.prompt_sections = sections;
         self
     }
 
@@ -258,8 +273,14 @@ pub struct CapabilityGrant {
 /// Included context section audit row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSectionAudit {
+    /// Stable context section id.
+    #[serde(default)]
+    pub section_id: String,
     /// Included section name.
     pub section_name: String,
+    /// Stable action id for future section-level bandits.
+    #[serde(default)]
+    pub action_id: String,
     /// Stable source type key.
     pub source_type: String,
     /// Stable source identifier when available.
@@ -276,13 +297,22 @@ pub struct ContextSectionAudit {
     /// Section token budget, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<usize>,
+    /// Experiment id that caused this section to be included, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
 }
 
 /// Rejected context candidate audit row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextRejectionAudit {
+    /// Stable context section id.
+    #[serde(default)]
+    pub section_id: String,
     /// Rejected section name.
     pub section_name: String,
+    /// Stable action id for future section-level bandits.
+    #[serde(default)]
+    pub action_id: String,
     /// Stable source type key.
     pub source_type: String,
     /// Stable source identifier when available.
@@ -294,8 +324,53 @@ pub struct ContextRejectionAudit {
     pub scope: ContextScopeAudit,
     /// Estimated section token count.
     pub estimated_tokens: usize,
+    /// Experiment id that caused this section to be considered, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
     /// Structured rejection reason.
     pub reason: ContextRejectionAuditReason,
+}
+
+/// Prompt section audit row emitted by composition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSectionAudit {
+    /// Stable prompt section id.
+    pub section_id: String,
+    /// Human-readable section name.
+    pub section_name: String,
+    /// Stable action id for future section-level bandits.
+    pub action_id: String,
+    /// Whether the section was included in the final prompt.
+    pub included: bool,
+    /// Estimated tokens before final prompt rendering.
+    pub estimated_tokens: usize,
+    /// Tokens used in the final prompt. Dropped sections use zero.
+    pub tokens_used: usize,
+    /// Section token budget, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+    /// Prompt priority label.
+    pub priority: String,
+    /// Prompt cache layer label.
+    pub cache_layer: String,
+    /// Prompt placement label.
+    pub placement: String,
+    /// Context or subsystem bidder label.
+    pub bidder: String,
+    /// Stable source type key, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Stable source identifier, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Compact provenance label, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    /// Experiment id that caused this section to be considered, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
+    /// Structured inclusion or rejection reason.
+    pub reason: String,
 }
 
 /// Serializable context visibility boundary.
@@ -400,6 +475,31 @@ pub struct InvocationGateOutcome {
     pub summary: Option<String>,
 }
 
+/// Structured review verdict attached to an invocation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InvocationReviewVerdictOutcome {
+    /// Stable verdict id.
+    pub verdict_id: String,
+    /// Reviewer role id.
+    pub reviewer_role_id: String,
+    /// Verdict status such as `passed`, `failed`, `needs_retry`, or `needs_replan`.
+    pub status: String,
+    /// Confidence in `[0.0, 1.0]` when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// Blocking finding identifiers or compact summaries.
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
+    /// Non-blocking finding identifiers or compact summaries.
+    #[serde(default)]
+    pub non_blocking_findings: Vec<String>,
+    /// Required next action.
+    pub required_next_action: String,
+    /// Evidence paths or refs.
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
 impl From<&GateExpectation> for InvocationGateOutcome {
     fn from(value: &GateExpectation) -> Self {
         Self {
@@ -444,7 +544,9 @@ mod tests {
         )
         .with_context_audit(
             vec![ContextSectionAudit {
+                section_id: "context:source:src/lib.rs".into(),
                 section_name: "source".into(),
+                action_id: "context_section:source:file:src/lib.rs".into(),
                 source_type: "file".into(),
                 source_id: Some("src/lib.rs".into()),
                 purpose: "source_evidence".into(),
@@ -455,6 +557,7 @@ mod tests {
                 inclusion_reason: "needed public API".into(),
                 estimated_tokens: 42,
                 token_budget: Some(128),
+                experiment_id: None,
             }],
             Vec::new(),
         );

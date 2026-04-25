@@ -137,8 +137,8 @@ pub use chat_types::{
 pub use cognitive_workspace::{
     COGNITIVE_WORKSPACE_SCHEMA_VERSION, CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef,
     ContextRejectionAudit, ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit,
-    InvocationGateOutcome, ModelChoice, OutputParseResult, PolicyVersionRef, RewardObservation,
-    TaskInvocationContract,
+    InvocationGateOutcome, InvocationReviewVerdictOutcome, ModelChoice, OutputParseResult,
+    PolicyVersionRef, PromptSectionAudit, RewardObservation, TaskInvocationContract,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use connector::{

@@ -314,12 +314,18 @@ impl ContextSection {
     /// Create a section with explicit provenance, scope, and inclusion reason.
     #[must_use]
     pub fn scoped(
-        section: PromptSection,
+        mut section: PromptSection,
         source: ContextSource,
         purpose: ContextPurpose,
         scope: ContextScope,
         inclusion_reason: impl Into<String>,
     ) -> Self {
+        let source_type = context_source_type(&source);
+        if let Some(source_id) = context_source_id(&source) {
+            section = section.with_source(source_type, source_id);
+        } else {
+            section.source_type = Some(source_type.to_string());
+        }
         let budget = section.hard_cap.map_or_else(
             ContextInjectionBudget::default,
             ContextInjectionBudget::tokens,
@@ -716,6 +722,8 @@ pub struct ContextRejection {
     pub scope: ContextScope,
     /// Estimated section token count.
     pub estimated_tokens: usize,
+    /// Experiment id associated with the prompt section, if any.
+    pub experiment_id: Option<String>,
     /// Reason the section was rejected.
     pub reason: ContextRejectionReason,
 }
@@ -729,6 +737,7 @@ impl ContextRejection {
             purpose: section.purpose,
             scope: section.scope.clone(),
             estimated_tokens: section.estimated_tokens(),
+            experiment_id: section.section.experiment_id.clone(),
             reason,
         }
     }
@@ -753,6 +762,8 @@ pub struct ContextInjectionRecord {
     pub estimated_tokens: usize,
     /// Section token budget, if any.
     pub token_budget: Option<usize>,
+    /// Experiment id associated with the prompt section, if any.
+    pub experiment_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -827,6 +838,7 @@ impl ResolvedContext {
                 inclusion_reason: section.inclusion_reason.clone(),
                 estimated_tokens: section.estimated_tokens(),
                 token_budget: section.budget.max_tokens,
+                experiment_id: section.section.experiment_id.clone(),
             })
             .collect()
     }

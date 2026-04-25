@@ -23,6 +23,9 @@ use roko_learn::provider_model_outcome::{
     ProviderModelPassRateReport, read_provider_model_outcomes, summarize_provider_model_outcomes,
 };
 use roko_learn::runtime_feedback::read_efficiency_events;
+use roko_learn::section_outcome::{
+    SectionOutcomeReport, read_section_outcomes, summarize_section_outcomes,
+};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -42,6 +45,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/learn/provider-model-pass-rates",
             get(provider_model_pass_rates),
         )
+        .route("/learning/section-outcomes", get(section_outcomes))
+        .route("/learn/section-outcomes", get(section_outcomes))
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
@@ -115,6 +120,17 @@ async fn provider_model_pass_rates(
         &records,
         query.window.unwrap_or(50),
     )))
+}
+
+/// `GET /api/learning/section-outcomes` — prompt/context section outcome summaries.
+async fn section_outcomes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SectionOutcomeReport>, ApiError> {
+    let path = state.workdir.join(".roko/learn/section-outcomes.jsonl");
+    let records = read_section_outcomes(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
+    Ok(Json(summarize_section_outcomes(&records)))
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
@@ -1490,6 +1506,95 @@ mod tests {
         assert_eq!(payload["actions"][0]["successes"], 1);
         assert_eq!(payload["actions"][0]["rolling_successes"], 0);
         assert_eq!(payload["actions"][0]["total_tokens"], 300);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn section_outcomes_exposes_section_level_summary() -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .map_err(|err| anyhow!("failed to create learn dir for section outcome test: {err}"))?;
+        let outcome_path = learn_dir.join("section-outcomes.jsonl");
+        let records = [
+            serde_json::json!({
+                "schema_version": 1,
+                "timestamp": "2026-04-25T10:00:00Z",
+                "workspace_id": "cw-1",
+                "invocation_id": "invoke-1",
+                "task_id": "task-1",
+                "task_type": "implementation",
+                "role_id": "implementer",
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "section_id": "prompt:workspace-map",
+                "section_name": "workspace_map",
+                "action_id": "prompt_section:workspace-map",
+                "section_kind": "prompt",
+                "included": true,
+                "estimated_tokens": 100,
+                "tokens_used": 80,
+                "token_budget": 120,
+                "status": "passed",
+                "gate_outcomes": [{"gate_id": "cargo_test", "outcome": "passed", "required": true}],
+                "review_verdicts": []
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "timestamp": "2026-04-25T10:01:00Z",
+                "workspace_id": "cw-2",
+                "invocation_id": "invoke-2",
+                "task_id": "task-2",
+                "task_type": "implementation",
+                "role_id": "implementer",
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "section_id": "prompt:workspace-map",
+                "section_name": "workspace_map",
+                "action_id": "prompt_section:workspace-map",
+                "section_kind": "prompt",
+                "included": true,
+                "estimated_tokens": 120,
+                "tokens_used": 90,
+                "status": "failed",
+                "gate_outcomes": [{"gate_id": "cargo_test", "outcome": "failed", "required": true}],
+                "review_verdicts": []
+            }),
+        ];
+        tokio::fs::write(&outcome_path, format!("{}\n{}\n", records[0], records[1]))
+            .await
+            .map_err(|err| anyhow!("failed to write section outcome fixture: {err}"))?;
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learning/section-outcomes")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build section-outcomes request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("section-outcomes request failed: {err}"))?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read section-outcomes response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse section-outcomes response body: {err}"))?;
+        assert_eq!(payload["total_records"], 2);
+        assert_eq!(
+            payload["sections"][0]["action_id"],
+            "prompt_section:workspace-map"
+        );
+        assert_eq!(payload["sections"][0]["observations"], 2);
+        assert_eq!(payload["sections"][0]["successes"], 1);
+        assert_eq!(
+            payload["sections"][0]["provider_models"][0],
+            "codex/gpt-5.5"
+        );
         Ok(())
     }
 

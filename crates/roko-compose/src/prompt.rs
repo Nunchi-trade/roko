@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Composer, Context, Engram, Kind, Provenance, Scorer,
+    Body, Budget, Composer, Context, Engram, Kind, PromptSectionAudit, Provenance, Scorer,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,9 @@ pub enum AttentionBidder {
 /// A single labeled fragment of a prompt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSection {
+    /// Stable section identifier. Defaults to `prompt:<normalized name>`.
+    #[serde(default)]
+    pub section_id: String,
     /// Human-readable label (e.g. "role", "task", "`workspace_map`").
     pub name: String,
     /// The section's text content.
@@ -118,21 +121,46 @@ pub struct PromptSection {
     /// Which subsystem is bidding for this section's inclusion.
     #[serde(default)]
     pub bidder: AttentionBidder,
+    /// Stable source type key, if the section was derived from a structured source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Stable source identifier, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Compact provenance label. Raw section content must not be copied here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    /// Experiment id that caused this section to be considered, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
 }
 
 impl PromptSection {
     /// Create a new section with defaults (Normal priority, Plan cache layer, Middle placement).
     #[must_use]
     pub fn new(name: impl Into<String>, content: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            section_id: stable_section_id("prompt", &name, None, None),
+            name,
             content: content.into(),
             priority: SectionPriority::Normal,
             cache_layer: CacheLayer::Plan,
             placement: Placement::Middle,
             hard_cap: None,
             bidder: AttentionBidder::default(),
+            source_type: None,
+            source_id: None,
+            provenance: None,
+            experiment_id: None,
         }
+    }
+
+    /// Override the stable section id.
+    #[must_use]
+    pub fn with_section_id(mut self, section_id: impl Into<String>) -> Self {
+        self.section_id = section_id.into();
+        self
     }
 
     /// Set the priority.
@@ -169,6 +197,97 @@ impl PromptSection {
     pub const fn with_bidder(mut self, bidder: AttentionBidder) -> Self {
         self.bidder = bidder;
         self
+    }
+
+    /// Attach compact source metadata.
+    #[must_use]
+    pub fn with_source(
+        mut self,
+        source_type: impl Into<String>,
+        source_id: impl Into<String>,
+    ) -> Self {
+        self.source_type = Some(source_type.into());
+        self.source_id = Some(source_id.into());
+        if self.section_id.trim().is_empty()
+            || self.section_id == stable_section_id("prompt", &self.name, None, None)
+        {
+            self.section_id = stable_section_id(
+                "prompt",
+                &self.name,
+                self.source_type.as_deref(),
+                self.source_id.as_deref(),
+            );
+        }
+        self
+    }
+
+    /// Attach compact provenance metadata.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    /// Attach an experiment id.
+    #[must_use]
+    pub fn with_experiment_id(mut self, experiment_id: impl Into<String>) -> Self {
+        self.experiment_id = Some(experiment_id.into());
+        self
+    }
+
+    /// Stable action id for future prompt/context bandits.
+    #[must_use]
+    pub fn action_id(&self) -> String {
+        section_action_id(
+            "prompt_section",
+            &self.name,
+            self.source_type.as_deref(),
+            self.source_id.as_deref(),
+            self.experiment_id.as_deref(),
+        )
+    }
+
+    /// Stable section id, deriving one for deserialized legacy sections.
+    #[must_use]
+    pub fn stable_section_id(&self) -> String {
+        if self.section_id.trim().is_empty() {
+            stable_section_id(
+                "prompt",
+                &self.name,
+                self.source_type.as_deref(),
+                self.source_id.as_deref(),
+            )
+        } else {
+            self.section_id.clone()
+        }
+    }
+
+    /// Build a raw-content-free audit row for this section.
+    #[must_use]
+    pub fn audit_row(
+        &self,
+        included: bool,
+        tokens_used: usize,
+        reason: impl Into<String>,
+    ) -> PromptSectionAudit {
+        PromptSectionAudit {
+            section_id: self.stable_section_id(),
+            section_name: self.name.clone(),
+            action_id: self.action_id(),
+            included,
+            estimated_tokens: self.estimated_tokens(),
+            tokens_used,
+            token_budget: self.hard_cap,
+            priority: priority_tag(self.priority).to_string(),
+            cache_layer: cache_tag(self.cache_layer).to_string(),
+            placement: placement_tag(self.placement).to_string(),
+            bidder: bidder_tag(self.bidder).to_string(),
+            source_type: self.source_type.clone(),
+            source_id: self.source_id.clone(),
+            provenance: self.provenance.clone(),
+            experiment_id: self.experiment_id.clone(),
+            reason: reason.into(),
+        }
     }
 
     /// Approximate token count (≈4 bytes per token).
@@ -216,6 +335,8 @@ impl PromptSection {
         Ok(Engram::builder(Kind::PromptSection)
             .body(body)
             .provenance(Provenance::trusted("prompt_section"))
+            .tag("section_id", self.stable_section_id())
+            .tag("action_id", self.action_id())
             .tag("name", &self.name)
             .tag("priority", priority_tag(self.priority))
             .tag("cache_layer", cache_tag(self.cache_layer))
@@ -261,6 +382,78 @@ const fn bidder_tag(bidder: AttentionBidder) -> &'static str {
         AttentionBidder::Research => "research",
         AttentionBidder::TaskContext => "task_context",
         AttentionBidder::Oracles => "oracles",
+    }
+}
+
+const fn placement_tag(placement: Placement) -> &'static str {
+    match placement {
+        Placement::Start => "start",
+        Placement::Middle => "middle",
+        Placement::End => "end",
+    }
+}
+
+fn stable_section_id(
+    kind: &str,
+    name: &str,
+    source_type: Option<&str>,
+    source_id: Option<&str>,
+) -> String {
+    let mut id = format!("{kind}:{}", normalize_action_part(name));
+    if let Some(source_type) = source_type.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_type));
+    }
+    if let Some(source_id) = source_id.and_then(non_empty) {
+        id.push(':');
+        id.push_str(&normalize_action_part(source_id));
+    }
+    id
+}
+
+fn section_action_id(
+    kind: &str,
+    name: &str,
+    source_type: Option<&str>,
+    source_id: Option<&str>,
+    experiment_id: Option<&str>,
+) -> String {
+    let mut id = stable_section_id(kind, name, source_type, source_id);
+    if let Some(experiment_id) = experiment_id.and_then(non_empty) {
+        id.push_str("|experiment:");
+        id.push_str(&normalize_action_part(experiment_id));
+    }
+    id
+}
+
+fn normalize_action_part(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_sep = false;
+    for ch in raw.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('-');
+            last_sep = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
@@ -520,6 +713,10 @@ impl Composer for PromptComposer {
             .iter()
             .map(|(section, _)| section.name.clone())
             .collect::<Vec<_>>();
+        let kept_section_action_ids = kept
+            .iter()
+            .map(|(section, _)| section.action_id())
+            .collect::<Vec<_>>();
         let kept_name_set = kept_section_names
             .iter()
             .cloned()
@@ -528,6 +725,11 @@ impl Composer for PromptComposer {
             .iter()
             .filter(|name| !kept_name_set.contains(*name))
             .cloned()
+            .collect::<Vec<_>>();
+        let dropped_section_action_ids = optional
+            .iter()
+            .filter(|candidate| !kept_name_set.contains(&candidate.section.name))
+            .map(|candidate| candidate.section.action_id())
             .collect::<Vec<_>>();
 
         // Concatenate.
@@ -551,6 +753,11 @@ impl Composer for PromptComposer {
             )
             .tag("kept_section_names", kept_section_names.join(","))
             .tag("dropped_section_names", dropped_section_names.join(","))
+            .tag("kept_section_action_ids", kept_section_action_ids.join(","))
+            .tag(
+                "dropped_section_action_ids",
+                dropped_section_action_ids.join(","),
+            )
             .tag("distinct_bidders", bidder_count(&kept).to_string())
             .tag("auction_total_bid", format!("{:.4}", allocation.total_bid))
             .tag(
@@ -1087,6 +1294,9 @@ pub struct PromptBuild {
     pub sections_kept: usize,
     /// Number of sections dropped by budget pressure.
     pub sections_dropped: usize,
+    /// Raw-content-free section audit rows for kept and dropped sections.
+    #[serde(default)]
+    pub section_metadata: Vec<PromptSectionAudit>,
 }
 
 impl PromptBuild {
@@ -1103,6 +1313,7 @@ impl PromptBuild {
             tokens,
             sections_kept: 0,
             sections_dropped: 0,
+            section_metadata: Vec::new(),
         }
     }
 
@@ -1132,6 +1343,13 @@ impl PromptBuild {
     pub const fn with_section_counts(mut self, kept: usize, dropped: usize) -> Self {
         self.sections_kept = kept;
         self.sections_dropped = dropped;
+        self
+    }
+
+    /// Record raw-content-free section metadata.
+    #[must_use]
+    pub fn with_section_metadata(mut self, metadata: Vec<PromptSectionAudit>) -> Self {
+        self.section_metadata = metadata;
         self
     }
 }
@@ -1443,6 +1661,26 @@ mod tests {
         assert_eq!(out.lineage.len(), 2);
         assert!(out.lineage.contains(&input_ids[0]));
         assert!(out.lineage.contains(&input_ids[1]));
+    }
+
+    #[test]
+    fn prompt_section_records_stable_action_ids_without_content() {
+        let section = PromptSection::new("Workspace Map", "secret prompt text")
+            .with_source("file", "src/lib.rs:1-20")
+            .with_experiment_id("exp-a");
+
+        assert_eq!(
+            section.stable_section_id(),
+            "prompt:workspace-map:file:src-lib-rs-1-20"
+        );
+        assert_eq!(
+            section.action_id(),
+            "prompt_section:workspace-map:file:src-lib-rs-1-20|experiment:exp-a"
+        );
+        let audit = section.audit_row(true, section.estimated_tokens(), "included");
+        let encoded = serde_json::to_string(&audit).expect("audit serializes");
+        assert!(encoded.contains("prompt_section:workspace-map"));
+        assert!(!encoded.contains("secret prompt text"));
     }
 
     #[test]
