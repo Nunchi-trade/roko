@@ -16,6 +16,23 @@ use crate::agent::{AgentRole, ToolPermissions};
 /// Current role/prompt manifest schema version.
 pub const CURRENT_POLICY_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
+/// Repository path for the built-in role manifest shipped with this runtime.
+pub const BUILTIN_ROLE_POLICY_MANIFEST_PATH: &str =
+    "crates/roko-core/src/builtin_roles/core_roles.toml";
+
+/// Built-in manifest-backed roles used by self-hosting flows.
+pub const MANIFEST_BACKED_BUILTIN_ROLE_IDS: [&str; 6] = [
+    "strategist",
+    "implementer",
+    "architect",
+    "auditor",
+    "quick-reviewer",
+    "scribe",
+];
+
+/// TOML source for the built-in role manifest shipped with this runtime.
+pub const BUILTIN_ROLE_POLICY_MANIFEST_TOML: &str = include_str!("builtin_roles/core_roles.toml");
+
 fn default_manifest_schema_version() -> u32 {
     CURRENT_POLICY_MANIFEST_SCHEMA_VERSION
 }
@@ -35,6 +52,15 @@ pub struct RolePolicyManifest {
 }
 
 impl RolePolicyManifest {
+    /// Load and validate the built-in role/prompt manifest bundled with Roko.
+    ///
+    /// This returns a `Result` intentionally: if the bundled manifest is broken,
+    /// callers should fail closed instead of silently falling back to generated
+    /// policy for roles that claim to be manifest-backed.
+    pub fn builtin_manifest() -> Result<Self, ManifestError> {
+        Self::from_toml_str(BUILTIN_ROLE_POLICY_MANIFEST_TOML)
+    }
+
     /// Parse and validate a manifest from TOML text.
     pub fn from_toml_str(text: &str) -> Result<Self, ManifestError> {
         let manifest: Self = toml::from_str(text).map_err(ManifestError::ParseToml)?;
@@ -50,6 +76,43 @@ impl RolePolicyManifest {
             source,
         })?;
         Self::from_toml_str(&text)
+    }
+
+    /// Find a role profile by role id.
+    #[must_use]
+    pub fn role_profile(&self, role_id: &str) -> Option<&RoleProfile> {
+        let role_id = role_id.trim();
+        self.roles
+            .iter()
+            .find(|role| role.role_id.trim() == role_id)
+    }
+
+    /// Find a prompt policy by policy id.
+    #[must_use]
+    pub fn prompt_policy(&self, policy_id: &str) -> Option<&PromptPolicy> {
+        let policy_id = policy_id.trim();
+        self.prompt_policies
+            .iter()
+            .find(|policy| policy.policy_id.trim() == policy_id)
+    }
+
+    /// Resolve a role and its default prompt policy from the same manifest.
+    pub fn role_with_default_prompt_policy(
+        &self,
+        role_id: &str,
+    ) -> Result<(&RoleProfile, &PromptPolicy), ManifestLookupError> {
+        let role = self
+            .role_profile(role_id)
+            .ok_or_else(|| ManifestLookupError::MissingRole {
+                role_id: role_id.trim().to_string(),
+            })?;
+        let policy = self
+            .prompt_policy(&role.default_prompt_policy)
+            .ok_or_else(|| ManifestLookupError::MissingPromptPolicy {
+                role_id: role.role_id.clone(),
+                policy_id: role.default_prompt_policy.clone(),
+            })?;
+        Ok((role, policy))
     }
 
     /// Validate semantic integrity. Invalid manifests fail closed.
@@ -143,6 +206,25 @@ impl RolePolicyManifest {
         }
         manifest
     }
+}
+
+/// Errors while resolving a role inside an already validated manifest.
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestLookupError {
+    /// The requested role id is absent.
+    #[error("manifest does not contain role profile '{role_id}'")]
+    MissingRole {
+        /// Requested role id.
+        role_id: String,
+    },
+    /// The role points at a prompt policy absent from the manifest.
+    #[error("role profile '{role_id}' references missing prompt policy '{policy_id}'")]
+    MissingPromptPolicy {
+        /// Role id whose policy was missing.
+        role_id: String,
+        /// Missing prompt policy id.
+        policy_id: String,
+    },
 }
 
 /// Versioned role profile independent of hardcoded orchestration branches.
@@ -1240,6 +1322,43 @@ source = { kind = "manifest", id = "role" }
                 .sections
                 .iter()
                 .any(|section| section.section_id == "role_identity")
+        );
+    }
+
+    #[test]
+    fn bundled_role_manifest_loads_core_self_hosting_roles() {
+        let manifest = RolePolicyManifest::builtin_manifest().expect("bundled manifest");
+
+        for role_id in MANIFEST_BACKED_BUILTIN_ROLE_IDS {
+            let (role, policy) = manifest
+                .role_with_default_prompt_policy(role_id)
+                .expect("role and prompt policy");
+            assert_eq!(role.role_id, role_id);
+            assert_eq!(role.default_prompt_policy, policy.policy_id);
+            assert_eq!(role.version, "1.0.0");
+            assert!(
+                policy
+                    .sections
+                    .iter()
+                    .any(|section| section.section_id == "role_identity"
+                        && section.source.kind == "manifest"),
+                "{role_id} should source role identity from the manifest"
+            );
+        }
+    }
+
+    #[test]
+    fn broken_role_manifest_fails_closed() {
+        let broken = BUILTIN_ROLE_POLICY_MANIFEST_TOML.replace(
+            "default_prompt_policy = \"roko.builtin.prompt.implementer\"",
+            "default_prompt_policy = \"roko.builtin.prompt.missing\"",
+        );
+
+        let err = RolePolicyManifest::from_toml_str(&broken).expect_err("broken manifest fails");
+        assert!(
+            err.to_string()
+                .contains("references missing prompt policy 'roko.builtin.prompt.missing'"),
+            "{err}"
         );
     }
 }

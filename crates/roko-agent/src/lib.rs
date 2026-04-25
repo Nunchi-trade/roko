@@ -122,7 +122,9 @@ pub use provider::{
 };
 pub use rate_limit::ProviderRateLimiter;
 pub use roko_core::{
-    PromptPolicy, RolePolicyManifest, RoleProfile as ManifestRoleProfile, ToolCapabilityPolicy,
+    BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
+    MANIFEST_BACKED_BUILTIN_ROLE_IDS, PromptPolicy, RolePolicyManifest,
+    RoleProfile as ManifestRoleProfile, ToolCapabilityPolicy,
 };
 pub use safety::{
     AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,

@@ -169,11 +169,12 @@ pub use operating_frequency::{
 };
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
 pub use policy_manifest::{
+    BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
     CURRENT_POLICY_MANIFEST_SCHEMA_VERSION, ContextPolicyRef, FallbackBehavior, GateExpectation,
-    InclusionMode, InclusionRule, ManifestError, ManifestValidationError, OutputFormat,
-    OutputSchemaExpectation, PolicyProvenance, PromptBudgetPolicy, PromptPolicy,
-    PromptPolicySection, PromptSectionSource, RolePolicyManifest, RoleProfile, RoleSafetyPolicy,
-    SectionBudget, ToolCapabilityPolicy,
+    InclusionMode, InclusionRule, MANIFEST_BACKED_BUILTIN_ROLE_IDS, ManifestError,
+    ManifestLookupError, ManifestValidationError, OutputFormat, OutputSchemaExpectation,
+    PolicyProvenance, PromptBudgetPolicy, PromptPolicy, PromptPolicySection, PromptSectionSource,
+    RolePolicyManifest, RoleProfile, RoleSafetyPolicy, SectionBudget, ToolCapabilityPolicy,
 };
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{

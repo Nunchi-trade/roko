@@ -70,9 +70,11 @@ pub use prompt::{
 };
 pub use prompt_hints::prompt_hints_for;
 pub use role_prompts::{
-    DEFAULT_CONVENTIONS_SUFFIX, RolePromptSource, RoleSystemPromptSpec, TaskContext,
-    builtin_prompt_policy_for, builtin_role_policy_manifest_for, builtin_role_profile_for,
-    role_identity_for, role_prompt_source_for, tool_allowlist_instructions,
+    BuiltinRolePolicy, DEFAULT_CONVENTIONS_SUFFIX, MANIFEST_BACKED_CORE_ROLES, RolePromptSource,
+    RoleSystemPromptSpec, TaskContext, builtin_prompt_policy_for,
+    builtin_role_policy_from_manifest, builtin_role_policy_manifest_for, builtin_role_profile_for,
+    manifest_backed_core_roles, role_identity_for, role_prompt_source_for,
+    tool_allowlist_instructions,
 };
 pub use scorer::{ActiveInferenceScorer, GoalDirectedHeuristicScorer, SectionScorer};
 pub use system_prompt_builder::SystemPromptBuilder;

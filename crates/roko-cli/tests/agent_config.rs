@@ -1,4 +1,7 @@
+//! Integration tests for agent role configuration and manifest-backed role loading.
+
 use roko_core::config::{RokoConfig, RoleOverride};
+use roko_core::{AgentRole, OutputFormat};
 
 #[test]
 fn parse_all_keys_happy_path() {
@@ -82,4 +85,32 @@ model = "gpt-5.4-mini"
     assert!(role.routing_overrides.is_none());
     assert!(role.turn_budget_usd.is_none());
     assert!(role.temperament.is_none());
+}
+
+#[test]
+fn self_hosting_roles_resolve_from_builtin_manifests() {
+    for role in [
+        AgentRole::Architect,
+        AgentRole::Implementer,
+        AgentRole::Scribe,
+        AgentRole::Auditor,
+        AgentRole::QuickReviewer,
+    ] {
+        let loaded = roko_compose::builtin_role_policy_from_manifest(role)
+            .expect("built-in manifest validates")
+            .expect("role migrated to manifest");
+
+        assert_eq!(loaded.role_profile.role_id, role.label());
+        assert_eq!(
+            loaded.role_profile.default_prompt_policy,
+            loaded.prompt_policy.policy_id
+        );
+        assert_eq!(loaded.role_profile.version, "1.0.0");
+    }
+
+    let reviewer = roko_compose::builtin_role_profile_for(AgentRole::Auditor);
+    let schema = reviewer.output_schema.expect("reviewer output schema");
+    assert_eq!(schema.schema_id, "roko.review.verdict-v1");
+    assert_eq!(schema.format, OutputFormat::Toml);
+    assert!(schema.required);
 }

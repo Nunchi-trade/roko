@@ -24,7 +24,7 @@ use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use roko_core::error::{Result, RokoError};
-use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
+use roko_core::{AgentRole, Budget, Composer, Context, ManifestError, Scorer};
 use roko_core::{PolicyProvenance, PromptPolicy, PromptSectionSource, RolePolicyManifest};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
@@ -54,6 +54,54 @@ pub struct RolePromptSource {
     pub location: &'static str,
     /// Whether this source is owned by Roko runtime policy rather than a legacy import.
     pub roko_owned: bool,
+}
+
+/// Core built-in roles whose `RoleProfile` and `PromptPolicy` are loaded from
+/// the bundled manifest before falling back to generated compatibility policy.
+pub const MANIFEST_BACKED_CORE_ROLES: [AgentRole; 6] = [
+    AgentRole::Strategist,
+    AgentRole::Implementer,
+    AgentRole::Architect,
+    AgentRole::Auditor,
+    AgentRole::QuickReviewer,
+    AgentRole::Scribe,
+];
+
+/// Loaded manifest policy for one built-in role.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuiltinRolePolicy {
+    /// Versioned role profile.
+    pub role_profile: roko_core::RoleProfile,
+    /// Prompt policy referenced by `role_profile.default_prompt_policy`.
+    pub prompt_policy: PromptPolicy,
+}
+
+/// Return the manifest-backed built-in roles migrated so far.
+#[must_use]
+pub const fn manifest_backed_core_roles() -> &'static [AgentRole] {
+    &MANIFEST_BACKED_CORE_ROLES
+}
+
+/// Load a role from the bundled manifest, returning `None` only for roles that
+/// have not been migrated yet.
+///
+/// Broken manifests return an error so callers can fail closed rather than
+/// silently using legacy generated policy.
+pub fn builtin_role_policy_from_manifest(
+    role: AgentRole,
+) -> std::result::Result<Option<BuiltinRolePolicy>, ManifestError> {
+    let manifest = RolePolicyManifest::builtin_manifest()?;
+    if manifest.role_profile(role.label()).is_none() {
+        return Ok(None);
+    }
+
+    let (role_profile, prompt_policy) = manifest
+        .role_with_default_prompt_policy(role.label())
+        .expect("validated built-in role manifest references existing prompt policy");
+    Ok(Some(BuiltinRolePolicy {
+        role_profile: role_profile.clone(),
+        prompt_policy: prompt_policy.clone(),
+    }))
 }
 
 /// Typed task/domain context for role prompts.
@@ -638,6 +686,12 @@ pub fn role_prompt_source_for(role: AgentRole) -> RolePromptSource {
 /// section ids in the same typed contract future manifest-backed roles will use.
 #[must_use]
 pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
+    if let Some(loaded) = builtin_role_policy_from_manifest(role)
+        .expect("built-in role manifest must validate before runtime prompt policy fallback")
+    {
+        return loaded.prompt_policy;
+    }
+
     let source = role_prompt_source_for(role);
     let mut policy = PromptPolicy::builtin(role);
     policy.provenance = PolicyProvenance {
@@ -660,6 +714,12 @@ pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
 /// Build the manifest role-profile contract for an existing built-in role.
 #[must_use]
 pub fn builtin_role_profile_for(role: AgentRole) -> roko_core::RoleProfile {
+    if let Some(loaded) = builtin_role_policy_from_manifest(role)
+        .expect("built-in role manifest must validate before runtime role profile fallback")
+    {
+        return loaded.role_profile;
+    }
+
     roko_core::RoleProfile::builtin(role)
 }
 
@@ -748,12 +808,64 @@ mod tests {
         assert_eq!(manifest.roles[0].role_id, "implementer");
         assert_eq!(
             manifest.prompt_policies[0].provenance.source_id,
-            "roko.builtin.role.implementer"
+            "roko.builtin.role-manifest.core"
         );
         assert_eq!(
             manifest.prompt_policies[0].sections[0].source.id,
-            "roko.builtin.role.implementer"
+            "roko.builtin.role.implementer.identity"
         );
+        assert_eq!(
+            manifest.prompt_policies[0].sections[0].source.kind,
+            "manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_backed_core_roles_expose_profile_version_and_prompt_policy() {
+        for role in manifest_backed_core_roles() {
+            let loaded = builtin_role_policy_from_manifest(*role)
+                .expect("built-in manifest validates")
+                .expect("core role is manifest backed");
+
+            assert_eq!(loaded.role_profile.role_id, role.label());
+            assert_eq!(loaded.role_profile.version, "1.0.0");
+            assert_eq!(
+                loaded.role_profile.default_prompt_policy,
+                loaded.prompt_policy.policy_id
+            );
+            assert!(
+                loaded
+                    .prompt_policy
+                    .sections
+                    .iter()
+                    .any(|section| section.section_id == "role_identity"
+                        && section.source.kind == "manifest"),
+                "{} should have manifest role identity source",
+                role.label()
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_backed_role_output_and_gate_expectations_are_structured() {
+        let reviewer_roles = [
+            AgentRole::Architect,
+            AgentRole::Auditor,
+            AgentRole::QuickReviewer,
+        ];
+
+        for role in reviewer_roles {
+            let profile = builtin_role_profile_for(role);
+            let schema = profile.output_schema.expect("review output schema");
+            assert_eq!(schema.schema_id, "roko.review.verdict-v1");
+            assert_eq!(schema.format, roko_core::OutputFormat::Toml);
+            assert!(schema.required);
+            assert!(profile.gate_expectations.iter().any(|gate| {
+                gate.gate_id == "structured-review-verdict"
+                    && gate.required
+                    && gate.outcome == "passed"
+            }));
+        }
     }
 
     #[test]

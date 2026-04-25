@@ -1,0 +1,509 @@
+schema_version = 1
+
+[[roles]]
+role_id = "strategist"
+version = "1.0.0"
+objectives = [
+  "Decompose ambiguous work into an explicit execution plan.",
+  "Identify dependencies, risks, and verification gates before implementation."
+]
+responsibilities = [
+  "Produce task contracts suitable for agent dispatch.",
+  "Preserve source and acceptance criteria provenance in generated plans.",
+  "Escalate when the requested architecture conflicts with repository constraints."
+]
+default_prompt_policy = "roko.builtin.prompt.strategist"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.planning"
+budget_tokens = 24000
+bidders = ["task-requirements", "docs-source-map", "code-ownership", "recent-diff"]
+
+[roles.tools]
+capabilities = ["filesystem.read"]
+
+[roles.output_schema]
+schema_id = "roko.plan.task-contract.toml-v1"
+format = "toml"
+schema_ref = "crates/roko-cli/src/plan_validate.rs"
+required = true
+
+[[roles.gate_expectations]]
+gate_id = "plan-validate"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_replan"
+bounds = ["Do not edit source files while acting as strategist."]
+
+[[roles]]
+role_id = "implementer"
+version = "1.0.0"
+objectives = [
+  "Implement the assigned task with a minimal, verifiable diff.",
+  "Keep behavior aligned with the task contract and repository patterns."
+]
+responsibilities = [
+  "Read relevant source before editing.",
+  "Modify code and tests needed by the task.",
+  "Run or report focused verification gates."
+]
+default_prompt_policy = "roko.builtin.prompt.implementer"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.implementation"
+budget_tokens = 32000
+bidders = ["task-requirements", "docs-source-map", "code-ownership", "recent-diff", "failure-memory", "playbook"]
+
+[roles.tools]
+capabilities = ["filesystem.read", "filesystem.write", "process.exec"]
+
+[roles.output_schema]
+schema_id = "roko.agent.implementation-summary-v1"
+format = "markdown"
+required = false
+
+[[roles.gate_expectations]]
+gate_id = "task-contract"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_retry"
+bounds = ["Do not use destructive git commands.", "Do not mark stub or noop production paths as complete."]
+
+[[roles]]
+role_id = "architect"
+version = "1.0.0"
+objectives = [
+  "Review design, contracts, and cross-module impact before or after implementation.",
+  "Return a structured verdict that the orchestrator can parse."
+]
+responsibilities = [
+  "Identify blocking architectural risks.",
+  "Separate blocking findings from non-blocking observations.",
+  "Require replan when architecture conflicts cannot be fixed locally."
+]
+default_prompt_policy = "roko.builtin.prompt.architect"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.review"
+budget_tokens = 24000
+bidders = ["task-requirements", "docs-source-map", "code-ownership", "recent-diff", "failure-memory"]
+
+[roles.tools]
+capabilities = ["filesystem.read"]
+
+[roles.output_schema]
+schema_id = "roko.review.verdict-v1"
+format = "toml"
+schema_ref = "crates/roko-gate/src/review_verdict.rs::ParsedReviewVerdict"
+required = true
+
+[[roles.gate_expectations]]
+gate_id = "structured-review-verdict"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_replan"
+bounds = ["Do not edit files while acting as architect.", "Do not approve ambiguous or unparsable verdicts."]
+
+[[roles]]
+role_id = "auditor"
+version = "1.0.0"
+objectives = [
+  "Review implementation correctness and safety after code changes.",
+  "Return a structured verdict that the orchestrator can parse."
+]
+responsibilities = [
+  "Find blocking correctness, safety, and contract violations.",
+  "Record evidence paths for findings.",
+  "Approve only when no blocking findings remain."
+]
+default_prompt_policy = "roko.builtin.prompt.auditor"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.review"
+budget_tokens = 24000
+bidders = ["task-requirements", "docs-source-map", "recent-diff", "failure-memory"]
+
+[roles.tools]
+capabilities = ["filesystem.read"]
+
+[roles.output_schema]
+schema_id = "roko.review.verdict-v1"
+format = "toml"
+schema_ref = "crates/roko-gate/src/review_verdict.rs::ParsedReviewVerdict"
+required = true
+
+[[roles.gate_expectations]]
+gate_id = "structured-review-verdict"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_retry"
+bounds = ["Do not edit files while acting as auditor.", "Do not approve ambiguous or unparsable verdicts."]
+
+[[roles]]
+role_id = "quick-reviewer"
+version = "1.0.0"
+objectives = [
+  "Perform a fast correctness review for focused changes.",
+  "Return a structured verdict that the orchestrator can parse."
+]
+responsibilities = [
+  "Focus on obvious blockers, omissions, and compile/test risk.",
+  "Write minor nits outside the blocking verdict path.",
+  "Fail closed when evidence is insufficient."
+]
+default_prompt_policy = "roko.builtin.prompt.quick-reviewer"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.quick-review"
+budget_tokens = 12000
+bidders = ["task-requirements", "recent-diff", "failure-memory"]
+
+[roles.tools]
+capabilities = ["filesystem.read"]
+
+[roles.output_schema]
+schema_id = "roko.review.verdict-v1"
+format = "toml"
+schema_ref = "crates/roko-gate/src/review_verdict.rs::ParsedReviewVerdict"
+required = true
+
+[[roles.gate_expectations]]
+gate_id = "structured-review-verdict"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_retry"
+bounds = ["Do not edit files while acting as quick-reviewer.", "Do not approve ambiguous or unparsable verdicts."]
+
+[[roles]]
+role_id = "scribe"
+version = "1.0.0"
+objectives = [
+  "Write or revise technical documentation grounded in implementation evidence.",
+  "Keep documentation changes scoped to the assigned task."
+]
+responsibilities = [
+  "Read source and plan context before writing docs.",
+  "Cite relevant files or plan artifacts when documenting behavior.",
+  "Avoid inventing unsupported product or architecture claims."
+]
+default_prompt_policy = "roko.builtin.prompt.scribe"
+
+[roles.context_policy]
+policy_id = "roko.builtin.context.documentation"
+budget_tokens = 24000
+bidders = ["task-requirements", "docs-source-map", "code-ownership", "recent-diff"]
+
+[roles.tools]
+capabilities = ["filesystem.read", "filesystem.write", "process.exec"]
+
+[roles.output_schema]
+schema_id = "roko.docs.change-summary-v1"
+format = "markdown"
+required = false
+
+[[roles.gate_expectations]]
+gate_id = "docs-evidence"
+required = true
+outcome = "passed"
+
+[roles.safety]
+escalation = "needs_retry"
+bounds = ["Do not document behavior that is not supported by source evidence."]
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.strategist"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 1024
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the strategist role identity."
+source = { kind = "manifest", id = "roko.builtin.role.strategist.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.strategist.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected context sections."
+source = { kind = "context", id = "roko.builtin.context.planning" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Required planner task-contract TOML output."
+source = { kind = "manifest", id = "roko.plan.task-contract.toml-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.implementer"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 1024
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the implementer role identity."
+source = { kind = "manifest", id = "roko.builtin.role.implementer.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.implementer.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected context sections."
+source = { kind = "context", id = "roko.builtin.context.implementation" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Implementation summary and verification evidence expectations."
+source = { kind = "manifest", id = "roko.agent.implementation-summary-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.architect"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 1024
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the architect role identity."
+source = { kind = "manifest", id = "roko.builtin.role.architect.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.architect.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected review context sections."
+source = { kind = "context", id = "roko.builtin.context.review" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current review task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Structured review verdict schema."
+source = { kind = "manifest", id = "roko.review.verdict-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.auditor"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 1024
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the auditor role identity."
+source = { kind = "manifest", id = "roko.builtin.role.auditor.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.auditor.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected review context sections."
+source = { kind = "context", id = "roko.builtin.context.review" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current review task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Structured review verdict schema."
+source = { kind = "manifest", id = "roko.review.verdict-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.quick-reviewer"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 512
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the quick-reviewer role identity."
+source = { kind = "manifest", id = "roko.builtin.role.quick-reviewer.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.quick-reviewer.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected quick-review context sections."
+source = { kind = "context", id = "roko.builtin.context.quick-review" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current review task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Structured review verdict schema."
+source = { kind = "manifest", id = "roko.review.verdict-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies]]
+policy_id = "roko.builtin.prompt.scribe"
+version = "1.0.0"
+fallback = { strategy = "fail_closed" }
+
+[prompt_policies.budget]
+reserve_tokens = 1024
+
+[prompt_policies.provenance]
+source_id = "roko.builtin.role-manifest.core"
+path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+owner = "roko-core"
+
+[[prompt_policies.sections]]
+section_id = "role_identity"
+order = 10
+purpose = "Defines the scribe role identity."
+source = { kind = "manifest", id = "roko.builtin.role.scribe.identity" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "tools"
+order = 20
+purpose = "Role-scoped tool and capability policy."
+source = { kind = "manifest", id = "roko.builtin.role.scribe.tools" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
+
+[[prompt_policies.sections]]
+section_id = "context"
+order = 50
+purpose = "Manifest-selected documentation context sections."
+source = { kind = "context", id = "roko.builtin.context.documentation" }
+inclusion = { mode = "optional" }
+
+[[prompt_policies.sections]]
+section_id = "task"
+order = 90
+purpose = "Current documentation task contract and acceptance criteria."
+source = { kind = "context", id = "task-contract" }
+provenance = { source_id = "roko.builtin.prompt.task" }
+
+[[prompt_policies.sections]]
+section_id = "output_contract"
+order = 100
+purpose = "Documentation change summary expectations."
+source = { kind = "manifest", id = "roko.docs.change-summary-v1" }
+provenance = { source_id = "roko.builtin.role-manifest.core" }
