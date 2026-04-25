@@ -5,7 +5,7 @@
 //! ([`super::state_machine`]) reads and updates `PlanState` as the plan
 //! progresses through phases.
 
-use roko_core::{PlanPhase, Verdict};
+use roko_core::{PlanPhase, TestCount, Verdict};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +55,9 @@ pub struct GateResult {
     pub summary: String,
     /// Wall-clock milliseconds.
     pub duration_ms: u64,
+    /// Structured test counts when this result came from a test gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_count: Option<TestCount>,
 }
 
 impl GateResult {
@@ -67,7 +70,39 @@ impl GateResult {
             passed: verdict.passed,
             summary: verdict.reason.clone(),
             duration_ms: verdict.duration_ms,
+            test_count: verdict.test_count,
         }
+    }
+
+    /// True when a failed test result is mostly passing.
+    ///
+    /// Mostly passing means more than 20 total tests, at least one failed test,
+    /// and a pass rate greater than 90%. This is a signal for targeted retry
+    /// rather than broad replanning.
+    #[must_use]
+    pub fn is_mostly_passing(results: &[Self]) -> bool {
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        let mut ignored = 0u32;
+        let mut saw_failed_test_gate = false;
+
+        for result in results {
+            let Some(count) = result.test_count else {
+                continue;
+            };
+            if !result.passed {
+                saw_failed_test_gate = true;
+            }
+            passed = passed.saturating_add(count.passed);
+            failed = failed.saturating_add(count.failed);
+            ignored = ignored.saturating_add(count.ignored);
+        }
+
+        let total = passed.saturating_add(failed).saturating_add(ignored);
+        saw_failed_test_gate
+            && total > 20
+            && failed > 0
+            && f64::from(passed) / f64::from(total) > 0.9
     }
 }
 
@@ -190,6 +225,7 @@ mod tests {
             passed: true,
             summary: "ok".into(),
             duration_ms: 100,
+            test_count: None,
         });
         ps.gate_results.push(GateResult {
             gate_name: "test".into(),
@@ -197,6 +233,7 @@ mod tests {
             passed: true,
             summary: "ok".into(),
             duration_ms: 200,
+            test_count: None,
         });
         assert!(ps.all_gates_passed());
         assert!(!ps.has_gate_failure());
@@ -211,6 +248,7 @@ mod tests {
             passed: true,
             summary: "ok".into(),
             duration_ms: 100,
+            test_count: None,
         });
         ps.gate_results.push(GateResult {
             gate_name: "test".into(),
@@ -218,6 +256,7 @@ mod tests {
             passed: false,
             summary: "2 failures".into(),
             duration_ms: 500,
+            test_count: None,
         });
         assert!(ps.has_gate_failure());
         assert!(!ps.all_gates_passed());
@@ -232,6 +271,7 @@ mod tests {
             passed: false,
             summary: "fail".into(),
             duration_ms: 0,
+            test_count: None,
         });
         ps.last_error = Some("bad".into());
         assert_eq!(ps.iteration, 1);
@@ -252,6 +292,27 @@ mod tests {
     }
 
     #[test]
+    fn mostly_passing_detects_targeted_test_failure() {
+        let mostly = vec![GateResult::from_verdict(
+            &Verdict::fail("test", "one failing test").with_test_count(TestCount::new(95, 1, 0)),
+            2,
+        )];
+        assert!(GateResult::is_mostly_passing(&mostly));
+
+        let half = vec![GateResult::from_verdict(
+            &Verdict::fail("test", "many failures").with_test_count(TestCount::new(10, 10, 0)),
+            2,
+        )];
+        assert!(!GateResult::is_mostly_passing(&half));
+
+        let passing = vec![GateResult::from_verdict(
+            &Verdict::pass("test").with_test_count(TestCount::new(95, 0, 0)),
+            2,
+        )];
+        assert!(!GateResult::is_mostly_passing(&passing));
+    }
+
+    #[test]
     fn plan_state_serde_roundtrip() {
         let mut ps = PlanState::new("plan-42");
         ps.current_phase = PlanPhase::Implementing;
@@ -264,6 +325,7 @@ mod tests {
             passed: true,
             summary: "ok".into(),
             duration_ms: 42,
+            test_count: None,
         });
         let json = serde_json::to_string(&ps).unwrap();
         let decoded: PlanState = serde_json::from_str(&json).unwrap();

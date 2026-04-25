@@ -90,6 +90,7 @@ use roko_gate::{
     llm_judge_gate::{JudgeOracle, JudgePayload},
     parse_structured_review_verdict,
     payload::{BuildSystem, GatePayload},
+    records_from_classification,
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
     symbol_gate::{SymbolExpectation, SymbolKind, SymbolManifest, Visibility},
@@ -108,6 +109,9 @@ use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
+use roko_learn::error_pattern_store::{
+    ErrorPatternStore, FailurePatternQuery, GateFailureObservation, GateFailureSource,
+};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
@@ -234,6 +238,13 @@ fn gate_ratchet_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("gate-ratchet.json")
+}
+
+fn failure_pattern_store_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("discovered-patterns.json")
 }
 
 fn pre_agent_remediation_log_path(workdir: &Path) -> PathBuf {
@@ -9332,12 +9343,18 @@ impl PlanRunner {
             .as_ref()
             .map(|task| task.tier.clone())
             .unwrap_or_else(|| "focused".to_string());
-        let base_prompt_text = task_def
+        let task_prompt_text = task_def
             .as_ref()
             .map(|task| task.build_prompt(plan_id, &self.workdir))
             .unwrap_or_else(|| {
                 format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
             });
+        let failure_memory = self.failure_pattern_retry_context(plan_id, Some(task_id), None, None);
+        let base_prompt_text = if failure_memory.trim().is_empty() {
+            task_prompt_text
+        } else {
+            format!("{failure_memory}\n\n---\n\n{task_prompt_text}")
+        };
         let base_retry_model = self.task_retry_model(plan_id, task_id);
         let mut retry_model = base_retry_model.clone();
         let mut retry_prompt_override: Option<String> = None;
@@ -10326,6 +10343,13 @@ impl PlanRunner {
                     truncate_output(error_output)
                 )
             });
+        let failure_memory =
+            self.failure_pattern_retry_context(plan_id, Some(task_id), Some(gate), None);
+        let prompt = if failure_memory.trim().is_empty() {
+            prompt
+        } else {
+            format!("{failure_memory}\n\n---\n\n{prompt}")
+        };
 
         match hint {
             Some(hint) => format!(
@@ -12403,6 +12427,76 @@ impl PlanRunner {
         } else {
             sections.join("\n\n---\n\n")
         }
+    }
+
+    fn record_gate_failure_patterns(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        verdicts: &[Verdict],
+    ) {
+        let path = failure_pattern_store_path(&self.workdir);
+        let mut store = ErrorPatternStore::load(&path);
+        let mut observed = 0usize;
+
+        for verdict in verdicts.iter().filter(|verdict| !verdict.passed) {
+            let raw = verdict
+                .error_digest
+                .as_deref()
+                .or(verdict.detail.as_deref())
+                .unwrap_or(&verdict.reason);
+            let classification = verdict
+                .error_digest
+                .as_deref()
+                .and_then(|digest| serde_json::from_str(digest).ok())
+                .unwrap_or_else(|| classify_gate_failure(&verdict.gate, raw));
+            for record in records_from_classification(&classification) {
+                let observation = GateFailureObservation::new(
+                    record.key,
+                    plan_id,
+                    task_id.map(str::to_string),
+                    record.gate,
+                    record.classification,
+                    record.digest,
+                    GateFailureSource::GateClassification,
+                )
+                .with_suggestion(record.suggestion);
+                let _ = store.observe_gate_failure(observation);
+                observed += 1;
+            }
+        }
+
+        if observed > 0
+            && let Err(error) = store.save(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to persist gate failure patterns"
+            );
+        }
+    }
+
+    fn failure_pattern_retry_context(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        gate: Option<&str>,
+        classification: Option<&str>,
+    ) -> String {
+        let store = ErrorPatternStore::load(&failure_pattern_store_path(&self.workdir));
+        store
+            .bounded_summary(
+                FailurePatternQuery {
+                    plan_id: Some(plan_id),
+                    task_id,
+                    gate,
+                    classification,
+                },
+                5,
+                1_600,
+            )
+            .format_for_prompt()
     }
 
     fn summarize_runtime_verdicts(verdicts: &[Verdict]) -> Vec<GateVerdictSummary> {
@@ -15951,6 +16045,12 @@ impl PlanRunner {
         );
 
         if !all_passed {
+            let task_id = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|tracker| tracker.last_impl_task_id.as_deref());
+            self.record_gate_failure_patterns(plan_id, task_id, &verdicts);
+
             if let Some(state) = self.executor.plan_state_mut(plan_id) {
                 state.last_error = Some(Self::format_gate_failure_context(&verdicts));
             }

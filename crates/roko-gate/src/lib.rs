@@ -91,6 +91,7 @@ pub mod compile_errors;
 pub mod composition;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod error_patterns;
 pub mod eval_generator;
 pub mod fact_check;
 pub mod feedback;
@@ -142,6 +143,10 @@ pub use compile_errors::{
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use error_patterns::{
+    FailurePatternRecord, error_key, extract_error_digest, records_from_classification,
+    records_from_parsed_review_verdict,
+};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
