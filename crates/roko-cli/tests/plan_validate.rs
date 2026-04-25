@@ -1,3 +1,5 @@
+//! Integration coverage for `roko plan validate`.
+
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -150,4 +152,96 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
     assert_eq!(assert.get_output().status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("PLAN_007"), "missing PLAN_007: {stdout}");
+}
+
+#[test]
+fn plan_validate_accepts_typed_acceptance_contract() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "contract",
+        r#"
+[meta]
+plan = "contract"
+
+[[task]]
+id = "T1"
+title = "Define a done gate"
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-gate" }]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-gate"
+
+[task.acceptance_contract.no_stub]
+production_paths = ["crates/roko-gate/src"]
+
+[task.acceptance_contract.agent_output]
+schema = "roko.acceptance.agent_output.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.6
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "RT00.done-gate"
+source_ref = "tmp/architecture-plans/08-end-to-end-acceptance.md"
+evidence_ref = "crates/roko-gate/src/acceptance_contract.rs"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("0 diagnostics in 1 plan"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn plan_validate_fails_closed_for_malformed_acceptance_contract() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "bad-contract",
+        r#"
+[meta]
+plan = "bad-contract"
+
+[[task]]
+id = "T1"
+title = "Define a bad done gate"
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-gate" }]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).failure();
+    assert_eq!(assert.get_output().status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("ACCEPT_003"),
+        "missing ACCEPT_003: {stdout}"
+    );
 }

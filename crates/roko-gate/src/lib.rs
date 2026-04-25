@@ -80,6 +80,7 @@
 
 pub mod adaptive_threshold;
 
+pub mod acceptance_contract;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
@@ -119,6 +120,13 @@ pub mod test_gate;
 pub mod verdict_publisher;
 pub mod verify_chain_gate;
 
+pub use acceptance_contract::{
+    AcceptanceContract, AcceptanceDecision, AcceptanceEvidence, AcceptanceIssue, AcceptanceOutcome,
+    GateEvidence, GateRequirement, GateRequirementKind, NoStubEvidence, NoStubRequirement,
+    ParityLedgerEvidenceRow, ParityLedgerRequirement, ParityLedgerRequirementRow, RecoveryEvidence,
+    RecoveryRequirement, RequiredNextAction, ReviewVerdictEvidence, ReviewVerdictRequirement,
+    StructuredAgentOutputRequirement, StructuredOutputEvidence,
+};
 pub use adaptive_threshold::{AdaptiveThresholds, RungStats};
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;

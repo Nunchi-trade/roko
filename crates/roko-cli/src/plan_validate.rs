@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use roko_core::AgentRole;
 use roko_core::config::schema::ModelProfile;
+use roko_gate::AcceptanceContract;
 use roko_orchestrator::detect_cycle_nodes;
 use serde::Serialize;
 use toml::Value;
@@ -78,6 +79,7 @@ struct TaskSnapshot {
     gate_rung: Option<u32>,
     gate_rung_invalid: bool,
     has_verify_steps: bool,
+    acceptance_contract: Option<Value>,
 }
 
 impl TaskSnapshot {
@@ -314,6 +316,41 @@ fn validate_tasks_file(
                 ),
             });
         }
+
+        if let Some(contract_value) = &task.acceptance_contract {
+            match contract_value.clone().try_into::<AcceptanceContract>() {
+                Ok(contract) => {
+                    let decision = contract.validate_contract();
+                    for issue in decision.issues {
+                        diagnostics.push(Diagnostic {
+                            severity: if issue.blocking {
+                                Severity::Error
+                            } else {
+                                Severity::Warning
+                            },
+                            rule_id: issue.code,
+                            plan_id: Some(plan_id.clone()),
+                            task_id: task.task_id.clone(),
+                            message: format!(
+                                "task '{}' has invalid acceptance_contract: {}",
+                                task.label(),
+                                issue.message
+                            ),
+                        });
+                    }
+                }
+                Err(error) => diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    rule_id: "PLAN_012".to_string(),
+                    plan_id: Some(plan_id.clone()),
+                    task_id: task.task_id.clone(),
+                    message: format!(
+                        "task '{}' has malformed acceptance_contract: {error}",
+                        task.label()
+                    ),
+                }),
+            }
+        }
     }
 
     let mut seen_ids = HashSet::new();
@@ -501,6 +538,9 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
             .and_then(|table| table.get("verify"))
             .and_then(Value::as_array)
             .is_some_and(|steps| !steps.is_empty()),
+        acceptance_contract: table
+            .and_then(|table| table.get("acceptance_contract"))
+            .cloned(),
     }
 }
 
