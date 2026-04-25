@@ -12,6 +12,7 @@ use roko_core::AgentRole;
 
 use crate::agent::{Agent, AgentResult};
 use crate::pool::{AgentInstanceId, AgentTask, InstanceStatus, TaskOutcome};
+use crate::session::{WarmReusePolicy, WarmReuseRequest};
 
 // ─── WarmEntry ───────────────────────────────────────────────────────────
 
@@ -21,6 +22,8 @@ pub struct WarmEntry {
     pub agent: Arc<dyn Agent>,
     /// When this entry was added to the warm pool.
     pub spawned_at: Instant,
+    /// Reuse policy and scope for this warm entry.
+    pub reuse_policy: WarmReusePolicy,
 }
 
 // ─── ActiveEntry ─────────────────────────────────────────────────────────
@@ -117,6 +120,7 @@ impl MultiAgentPool {
             self.warm.entry(key).or_insert_with(|| WarmEntry {
                 agent: agent_fn(),
                 spawned_at: now,
+                reuse_policy: WarmReusePolicy::stateless("legacy-warm"),
             });
         }
     }
@@ -133,6 +137,24 @@ impl MultiAgentPool {
         self.warm.entry(key).or_insert(WarmEntry {
             agent,
             spawned_at: Instant::now(),
+            reuse_policy: WarmReusePolicy::stateless("legacy-warm"),
+        });
+    }
+
+    /// Pre-spawn a named warm agent with an explicit checked reuse policy.
+    pub fn pre_spawn_warm_named_with_policy(
+        &mut self,
+        role: AgentRole,
+        instance: impl Into<String>,
+        agent: Arc<dyn Agent>,
+        reuse_policy: WarmReusePolicy,
+    ) {
+        let instance = instance.into();
+        let key = (role, instance);
+        self.warm.entry(key).or_insert(WarmEntry {
+            agent,
+            spawned_at: Instant::now(),
+            reuse_policy,
         });
     }
 
@@ -168,6 +190,38 @@ impl MultiAgentPool {
         let key = (role, instance.to_string());
         let entry = self.warm.remove(&key)?;
         let id = AgentInstanceId::new(role, instance);
+        self.active.insert(
+            id.clone(),
+            ActiveEntry {
+                agent: entry.agent,
+                status: InstanceStatus::Active,
+                last_result: None,
+            },
+        );
+        Some(id)
+    }
+
+    /// Promote a warm agent only when its reuse policy matches the request.
+    ///
+    /// This is the production-safe warm reuse path: callers must supply the
+    /// desired scope and fingerprints, so a session warmed with old context
+    /// cannot bleed into a new task silently.
+    pub fn promote_warm_for(
+        &mut self,
+        role: AgentRole,
+        request: &WarmReuseRequest,
+    ) -> Option<AgentInstanceId> {
+        let now = Instant::now();
+        let key = self
+            .warm
+            .iter()
+            .find(|((warm_role, _), entry)| {
+                *warm_role == role && entry.reuse_policy.allows(request, entry.spawned_at, now)
+            })
+            .map(|(key, _)| key.clone())?;
+
+        let entry = self.warm.remove(&key)?;
+        let id = AgentInstanceId::new(role, key.1);
         self.active.insert(
             id.clone(),
             ActiveEntry {
@@ -449,6 +503,7 @@ impl MultiAgentPool {
             WarmEntry {
                 agent: entry.agent,
                 spawned_at: Instant::now(),
+                reuse_policy: WarmReusePolicy::disabled(),
             },
         );
         true
@@ -904,6 +959,58 @@ mod tests {
         assert_eq!(id.instance, "reviewer-plan7");
         assert!(pool.is_active(&id));
         assert_eq!(pool.warm_count(AgentRole::Auditor), 0);
+    }
+
+    #[test]
+    fn multi_pool_checked_warm_reuse_requires_matching_fingerprints() {
+        let mut pool = MultiAgentPool::new();
+        let policy = WarmReusePolicy::stateless("task-warm")
+            .for_session("session-a")
+            .with_fingerprints(Some("prompt-v1".into()), Some("ctx-v1".into()))
+            .allow_context_carryover(true);
+        pool.pre_spawn_warm_named_with_policy(
+            AgentRole::Implementer,
+            "warm-ctx",
+            mock_ok(),
+            policy,
+        );
+
+        let wrong_context = WarmReuseRequest::session("session-a")
+            .with_fingerprints(Some("prompt-v1".into()), Some("ctx-v2".into()));
+        assert!(
+            pool.promote_warm_for(AgentRole::Implementer, &wrong_context)
+                .is_none(),
+            "old context fingerprint must not match a new task"
+        );
+        assert_eq!(pool.warm_count(AgentRole::Implementer), 1);
+
+        let matching = WarmReuseRequest::session("session-a")
+            .with_fingerprints(Some("prompt-v1".into()), Some("ctx-v1".into()));
+        let id = pool
+            .promote_warm_for(AgentRole::Implementer, &matching)
+            .expect("matching scoped reuse should promote");
+        assert_eq!(id.instance, "warm-ctx");
+        assert_eq!(pool.warm_count(AgentRole::Implementer), 0);
+    }
+
+    #[test]
+    fn multi_pool_recycled_terminal_instance_is_not_implicitly_reusable() {
+        let mut pool = MultiAgentPool::new();
+        let id = AgentInstanceId::new(AgentRole::Implementer, "task-a");
+        assert!(pool.add_active(id.clone(), mock_ok()));
+        let task = AgentTask::new(id.clone(), prompt("x"), ctx());
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let outcome = rt.block_on(pool.run_task(task));
+        assert_eq!(outcome.status, InstanceStatus::Done);
+        assert!(pool.recycle_terminal_to_warm(&id));
+
+        let request = WarmReuseRequest::session("anything");
+        assert!(
+            pool.promote_warm_for(AgentRole::Implementer, &request)
+                .is_none(),
+            "recycled agents require an explicit fresh policy before checked reuse"
+        );
     }
 
     #[test]

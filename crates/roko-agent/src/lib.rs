@@ -73,6 +73,7 @@ pub mod provider;
 pub mod rate_limit;
 pub mod retry;
 pub mod safety;
+pub mod session;
 pub mod streaming;
 pub mod task_runner;
 pub mod testutil;
@@ -124,6 +125,10 @@ pub use safety::{
     AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,
     SafetyHook, SafetyLayer, SafetyViolation, TaintLabel, TaintedString, ViolationSeverity,
     ViolationType, check_capability, delegate,
+};
+pub use session::{
+    AgentInvocationSession, InvocationState, ResumeValidationError, ReuseScope, WarmReusePolicy,
+    WarmReuseRequest, fingerprint_text, validate_resume_request,
 };
 pub use streaming::{StreamAccumulator, StreamChunk};
 pub use task_runner::{

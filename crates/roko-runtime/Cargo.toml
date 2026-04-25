@@ -24,3 +24,6 @@ roko-primitives = { path = "../roko-primitives" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

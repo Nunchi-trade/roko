@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use roko_runtime::{
     cancel::CancelToken,
-    process::{ProcessSupervisor, SpawnConfig},
+    process::{
+        ProcessResumeError, ProcessSessionConfig, ProcessSessionLedger, ProcessSessionState,
+        ProcessSupervisor, SpawnConfig,
+    },
 };
 use tokio::{
     process::Command,
@@ -32,6 +35,19 @@ fn spawn_config(label: &str, grace_period: Duration) -> SpawnConfig {
         grace_period,
         label: label.to_string(),
         ..Default::default()
+    }
+}
+
+fn session_config(path: std::path::PathBuf, suffix: &str) -> ProcessSessionConfig {
+    ProcessSessionConfig {
+        session_id: format!("session-{suffix}"),
+        invocation_id: format!("invocation-{suffix}"),
+        backend_id: "test-backend".to_string(),
+        task_id: Some(format!("task-{suffix}")),
+        reuse_policy_id: Some("test-policy".to_string()),
+        resumable: true,
+        timeout_ms: Some(50),
+        ledger_path: path,
     }
 }
 
@@ -208,4 +224,99 @@ async fn cancellation_token_triggers_shutdown() {
 
     assert!(cancellation.is_cancelled());
     wait_until_process_stops(pid).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wait_timeout_records_resumable_timeout_state() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger_path = tmp.path().join("process-sessions.json");
+    let root = CancelToken::new();
+    let supervisor = ProcessSupervisor::new(root);
+    let mut config = spawn_config("timeout-ledger", scaled_test_duration(50));
+    config.session = Some(session_config(ledger_path.clone(), "timeout"));
+
+    supervisor
+        .spawn(config)
+        .await
+        .expect("spawn should succeed");
+    let completed = supervisor.wait_all(scaled_test_duration(10)).await;
+    assert!(completed.is_empty(), "long-running process should time out");
+
+    let ledger = ProcessSessionLedger::load(&ledger_path).expect("load ledger");
+    let record = ledger
+        .latest_for_session("session-timeout")
+        .expect("session record");
+    assert_eq!(record.state, ProcessSessionState::TimedOut);
+    assert_eq!(record.backend_id, "test-backend");
+    assert!(ledger.validate_resume("session-timeout").is_ok());
+
+    let killed = supervisor.kill_all().await;
+    assert_eq!(killed.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_records_cancelled_state() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger_path = tmp.path().join("process-sessions.json");
+    let root = CancelToken::new();
+    let cancellation = CancelToken::new();
+    let supervisor = ProcessSupervisor::new(root);
+    let mut config = spawn_config("cancel-ledger", scaled_test_duration(50));
+    config.session = Some(session_config(ledger_path.clone(), "cancel"));
+    config.cancellation = Some(cancellation.clone());
+
+    supervisor
+        .spawn(config)
+        .await
+        .expect("spawn should succeed");
+    cancellation.cancel();
+
+    timeout(scaled_test_duration(5_000), async {
+        loop {
+            let ledger = ProcessSessionLedger::load(&ledger_path).expect("load ledger");
+            if ledger
+                .latest_for_session("session-cancel")
+                .is_some_and(|record| record.state == ProcessSessionState::Cancelled)
+            {
+                return;
+            }
+            sleep(scaled_test_duration(25)).await;
+        }
+    })
+    .await
+    .expect("cancelled state should be persisted");
+
+    let ledger = ProcessSessionLedger::load(&ledger_path).expect("load ledger");
+    assert!(ledger.validate_resume("session-cancel").is_ok());
+}
+
+#[test]
+fn resume_validation_rejects_terminal_success() {
+    let mut ledger = ProcessSessionLedger::default();
+    ledger.upsert(roko_runtime::process::ProcessSessionRecord {
+        session_id: "session-done".to_string(),
+        invocation_id: "invocation-done".to_string(),
+        backend_id: "test-backend".to_string(),
+        task_id: None,
+        reuse_policy_id: None,
+        resumable: true,
+        process_id: roko_runtime::process::ProcessId(1),
+        os_pid: None,
+        label: "done".to_string(),
+        program: "true".to_string(),
+        args: Vec::new(),
+        started_at_ms: 1,
+        updated_at_ms: 2,
+        ended_at_ms: Some(2),
+        timeout_ms: None,
+        state: ProcessSessionState::Succeeded,
+        reason: None,
+    });
+
+    assert_eq!(
+        ledger.validate_resume("session-done"),
+        Err(ProcessResumeError::TerminalState(
+            ProcessSessionState::Succeeded
+        ))
+    );
 }

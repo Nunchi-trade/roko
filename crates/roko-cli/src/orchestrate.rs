@@ -29,7 +29,10 @@ use roko_agent::task_runner::{
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
 use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
+use roko_agent::{
+    Agent, AgentInvocationSession, AgentResult, InvocationState, MultiAgentPool, ReuseScope,
+    SafetyLayer, WarmReusePolicy, fingerprint_text,
+};
 use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
 use roko_chain::{ChainClient, ChainWallet};
 use roko_compose::enrichment::{
@@ -775,6 +778,53 @@ fn state_dir(workdir: &Path) -> PathBuf {
 
 fn executor_snapshot_path(workdir: &Path) -> PathBuf {
     state_dir(workdir).join("executor.json")
+}
+
+fn agent_invocation_ledger_path(workdir: &Path) -> PathBuf {
+    state_dir(workdir).join("agent-invocations.jsonl")
+}
+
+fn append_agent_invocation_record(workdir: &Path, record: &AgentInvocationSession) {
+    let path = agent_invocation_ledger_path(workdir);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(path = %parent.display(), error = %err, "failed to create invocation ledger dir");
+        return;
+    }
+    let rendered = match serde_json::to_string(record) {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize agent invocation record");
+            return;
+        }
+    };
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(err) = writeln!(file, "{rendered}") {
+                tracing::warn!(path = %path.display(), error = %err, "failed to write invocation ledger");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "failed to open invocation ledger");
+        }
+    }
+}
+
+fn invocation_state_from_agent_result(result: &AgentResult) -> InvocationState {
+    if result.success {
+        return InvocationState::Succeeded;
+    }
+    let output = result.output.body.as_text().unwrap_or_default();
+    if output.to_ascii_lowercase().contains("timed out") {
+        InvocationState::TimedOut
+    } else {
+        InvocationState::Failed
+    }
 }
 
 /// Persist an executor snapshot via `tmp + rename`.
@@ -14973,6 +15023,40 @@ impl PlanRunner {
             ));
         }
 
+        let started_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let mut invocation_record = AgentInvocationSession {
+            invocation_id: format!("{plan_id}:{task}:{started_at_ms}"),
+            provider_session_id: self.claude_resume_session.clone(),
+            backend_id: self.config.agent.command.clone(),
+            model: selected_model.clone(),
+            role: resolved_dispatch_role_label.clone(),
+            plan_id: Some(plan_id.to_string()),
+            task_id: Some(task.to_string()),
+            prompt_fingerprint: prompt
+                .body
+                .as_text()
+                .map(fingerprint_text)
+                .unwrap_or_else(|_| fingerprint_text(&format!("{:?}", prompt.body))),
+            context_fingerprint: Some(fingerprint_text(&role_instruction)),
+            reuse_policy: WarmReusePolicy {
+                policy_id: "plan-task-dispatch".to_string(),
+                scope: ReuseScope::Task,
+                max_idle_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                plan_id: Some(plan_id.to_string()),
+                task_id: Some(task.to_string()),
+                session_id: self.claude_resume_session.clone(),
+                prompt_policy_fingerprint: Some(fingerprint_text(&role_instruction)),
+                context_fingerprint: Some(fingerprint_text(&role_instruction)),
+                allow_context_carryover: false,
+            },
+            working_dir: Some(exec_dir.clone()),
+            started_at_ms,
+            ended_at_ms: None,
+            timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+            state: InvocationState::InProgress,
+        };
+        append_agent_invocation_record(&self.workdir, &invocation_record);
+
         // ── Run the agent with per-task model selection ─────────────
         let ctx = ctx
             .with_attr("task_id", task)
@@ -15315,6 +15399,11 @@ impl PlanRunner {
             )
         };
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
+        invocation_record.backend_id = backend_id.clone();
+        invocation_record.ended_at_ms =
+            Some(u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0));
+        invocation_record.state = invocation_state_from_agent_result(&result);
+        append_agent_invocation_record(&self.workdir, &invocation_record);
 
         // ── AGT-01: Post-dispatch safety check ─────────────────────
         let post_changed_files = if uses_git {
