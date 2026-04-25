@@ -134,6 +134,11 @@ pub use code_exec::{
     CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
 };
 pub use compile::CompileGate;
+pub use compile_errors::{
+    CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureClassification,
+    classify_error_code, classify_gate_failure, parse_cargo_json, parse_plain_stderr,
+    render_failure_classification,
+};
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};

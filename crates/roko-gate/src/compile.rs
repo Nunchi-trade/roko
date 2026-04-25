@@ -8,6 +8,7 @@
 //! This is the "Rung 1" gate from Mori's 6-rung verification ladder: the
 //! cheapest check that proves the code at least compiles.
 
+use crate::compile_errors::{classify_gate_failure, render_failure_classification};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
 use roko_core::{Context, Engram, Gate, Verdict};
@@ -76,6 +77,14 @@ impl Gate for CompileGate {
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
+        if self.build_system == BuildSystem::Cargo
+            && !self
+                .extra_args
+                .iter()
+                .any(|arg| arg.starts_with("--message-format"))
+        {
+            cmd.arg("--message-format=json");
+        }
         cmd.current_dir(&payload.working_dir);
         cmd.kill_on_drop(true);
 
@@ -115,9 +124,11 @@ impl Gate for CompileGate {
                 .with_detail(detail)
                 .with_duration(elapsed)
         } else {
-            let reason = summarize_errors(&stderr, 3);
+            let reason = summarize_errors(&detail, 3);
+            let classification = classify_gate_failure(&self.name, &detail);
             Verdict::fail(&self.name, reason)
                 .with_detail(detail)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         }
     }

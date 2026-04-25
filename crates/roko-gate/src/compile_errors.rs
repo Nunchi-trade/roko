@@ -33,6 +33,28 @@ pub enum ErrorCategory {
     Other,
 }
 
+/// Gate failure classes used by retries, replanning, and pre-agent remediation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    /// Rust syntax or parsing error.
+    SyntaxError,
+    /// Unresolved import, path, item, or symbol.
+    ImportError,
+    /// Type mismatch, trait bound, or missing member error.
+    TypeError,
+    /// Missing crate dependency or disabled Cargo feature.
+    MissingDependencyOrFeature,
+    /// Borrow checker, lifetime, move, or ownership failure.
+    BorrowOrLifetime,
+    /// A test assertion, snapshot, or expected-output check failed.
+    TestExpectationFailure,
+    /// Toolchain, network, permissions, timeout, or environment failure.
+    ExternalEnvironment,
+    /// The failure was not recognized.
+    Unknown,
+}
+
 /// A single structured compile error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompileError {
@@ -50,6 +72,29 @@ pub struct CompileError {
     pub column: Option<u32>,
     /// Rustc-suggested fix, if available.
     pub suggestion: Option<String>,
+}
+
+/// Structured failure classification for compile/test/lint gate output.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GateFailureClassification {
+    /// Gate that produced the failure, such as `compile:cargo`.
+    pub gate: String,
+    /// Primary class for retry and remediation decisions.
+    pub primary: FailureClass,
+    /// All observed classes in stable order.
+    pub classes: Vec<FailureClass>,
+    /// Structured compiler diagnostics when available.
+    pub compile_errors: Vec<CompileError>,
+    /// Total compiler errors observed.
+    pub error_count: usize,
+    /// Total compiler warnings observed.
+    pub warning_count: usize,
+    /// Whether deterministic `cargo fix` is a reasonable pre-agent attempt.
+    pub cargo_fix_candidate: bool,
+    /// Whether this should fail closed to agent retry or replan.
+    pub agent_retry_needed: bool,
+    /// Short excerpt preserving enough original output for debugging.
+    pub raw_excerpt: String,
 }
 
 /// Summary of all compile errors from a build.
@@ -303,6 +348,127 @@ pub fn parse_plain_stderr(stderr: &str) -> CompileErrorSummary {
     summary
 }
 
+/// Classify raw gate output into a stable failure class.
+#[must_use]
+pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassification {
+    let mut summary = parse_cargo_json(output);
+    if summary.error_count == 0 && summary.warning_count == 0 {
+        summary = parse_plain_stderr(output);
+    }
+
+    let mut classes = Vec::new();
+    let lower = output.to_ascii_lowercase();
+
+    if gate.starts_with("test")
+        && (lower.contains("test result: failed")
+            || lower.contains("assertion failed")
+            || lower.contains("panicked at")
+            || lower.contains("snapshot")
+            || lower.contains("expected")
+            || lower.contains("failed"))
+    {
+        push_unique(&mut classes, FailureClass::TestExpectationFailure);
+    }
+
+    if looks_external_environment_failure(&lower) {
+        push_unique(&mut classes, FailureClass::ExternalEnvironment);
+    }
+
+    if looks_missing_dependency_or_feature(&lower) {
+        push_unique(&mut classes, FailureClass::MissingDependencyOrFeature);
+    }
+
+    for error in &summary.errors {
+        push_unique(&mut classes, failure_class_for_compile_error(error));
+    }
+
+    if classes.is_empty() {
+        push_unique(&mut classes, FailureClass::Unknown);
+    }
+
+    let primary = classes[0].clone();
+    let cargo_fix_candidate = summary.errors.iter().any(|error| {
+        error
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && !matches!(
+                failure_class_for_compile_error(error),
+                FailureClass::MissingDependencyOrFeature
+                    | FailureClass::ExternalEnvironment
+                    | FailureClass::Unknown
+            )
+    });
+
+    GateFailureClassification {
+        gate: gate.to_string(),
+        primary,
+        classes,
+        compile_errors: summary.errors,
+        error_count: summary.error_count,
+        warning_count: summary.warning_count,
+        cargo_fix_candidate,
+        agent_retry_needed: true,
+        raw_excerpt: output.chars().take(2000).collect(),
+    }
+}
+
+/// Render a structured classification as stable pretty JSON.
+#[must_use]
+pub fn render_failure_classification(classification: &GateFailureClassification) -> String {
+    serde_json::to_string_pretty(classification).unwrap_or_else(|_| format!("{classification:?}"))
+}
+
+fn push_unique(classes: &mut Vec<FailureClass>, class: FailureClass) {
+    if !classes.contains(&class) {
+        classes.push(class);
+    }
+}
+
+fn failure_class_for_compile_error(error: &CompileError) -> FailureClass {
+    let lower = error.message.to_ascii_lowercase();
+    if looks_missing_dependency_or_feature(&lower) {
+        return FailureClass::MissingDependencyOrFeature;
+    }
+
+    match error.category {
+        ErrorCategory::Syntax | ErrorCategory::Macro => FailureClass::SyntaxError,
+        ErrorCategory::UnresolvedImport => FailureClass::ImportError,
+        ErrorCategory::TypeMismatch
+        | ErrorCategory::TraitBound
+        | ErrorCategory::MissingMember
+        | ErrorCategory::Visibility => FailureClass::TypeError,
+        ErrorCategory::Lifetime | ErrorCategory::Ownership => FailureClass::BorrowOrLifetime,
+        ErrorCategory::Unused | ErrorCategory::Other => FailureClass::Unknown,
+    }
+}
+
+fn looks_missing_dependency_or_feature(lower: &str) -> bool {
+    lower.contains("unlinked crate")
+        || lower.contains("undeclared crate")
+        || lower.contains("no matching package named")
+        || lower.contains("failed to select a version")
+        || lower.contains("does not have these features")
+        || lower.contains("does not have feature")
+        || lower.contains("package `") && lower.contains("depends on") && lower.contains("feature")
+}
+
+fn looks_external_environment_failure(lower: &str) -> bool {
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("spawn failed")
+        || lower.contains("permission denied")
+        || lower.contains("no such file or directory")
+        || lower.contains("could not download")
+        || lower.contains("failed to download")
+        || lower.contains("failed to get")
+        || lower.contains("temporary failure")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("dns")
+        || lower.contains("network")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +565,66 @@ error[E0308]: mismatched types
             summary.categories.get(&ErrorCategory::TypeMismatch),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn classifies_required_failure_classes() {
+        let syntax = classify_gate_failure("compile:cargo", "error: unexpected token: `}`");
+        assert_eq!(syntax.primary, FailureClass::SyntaxError);
+
+        let import = classify_gate_failure("compile:cargo", "error[E0425]: cannot find value `x`");
+        assert_eq!(import.primary, FailureClass::ImportError);
+
+        let type_error = classify_gate_failure(
+            "compile:cargo",
+            "error[E0308]: expected `u32`, found `String`",
+        );
+        assert_eq!(type_error.primary, FailureClass::TypeError);
+
+        let borrow = classify_gate_failure(
+            "compile:cargo",
+            "error[E0597]: borrowed value does not live long enough",
+        );
+        assert_eq!(borrow.primary, FailureClass::BorrowOrLifetime);
+    }
+
+    #[test]
+    fn classifies_missing_dependency_feature_and_environment() {
+        let dep = classify_gate_failure(
+            "compile:cargo",
+            "error[E0433]: failed to resolve: use of unresolved module or unlinked crate `serde_yaml`",
+        );
+        assert_eq!(dep.primary, FailureClass::MissingDependencyOrFeature);
+
+        let feature = classify_gate_failure(
+            "compile:cargo",
+            "package `roko-cli` depends on `tokio` with feature `missing`, but `tokio` does not have that feature",
+        );
+        assert_eq!(feature.primary, FailureClass::MissingDependencyOrFeature);
+
+        let env = classify_gate_failure("compile:cargo", "spawn failed: No such file or directory");
+        assert_eq!(env.primary, FailureClass::ExternalEnvironment);
+    }
+
+    #[test]
+    fn classifies_test_expectation_failures() {
+        let failure = classify_gate_failure(
+            "test:cargo",
+            "thread 'foo' panicked at assertion failed: left == right\ntest result: FAILED. 9 passed; 1 failed",
+        );
+        assert_eq!(failure.primary, FailureClass::TestExpectationFailure);
+    }
+
+    #[test]
+    fn cargo_fix_candidate_requires_machine_suggestion() {
+        let json_line = r#"{"reason":"compiler-message","message":{"message":"unused import: `foo`","code":{"code":"E0432","explanation":null},"level":"error","spans":[],"children":[{"message":"consider importing this","level":"help"}]}}"#;
+        let classification = classify_gate_failure("compile:cargo", json_line);
+        assert!(classification.cargo_fix_candidate);
+
+        let dep = classify_gate_failure(
+            "compile:cargo",
+            "error[E0433]: use of unresolved module or unlinked crate `missing_crate`",
+        );
+        assert!(!dep.cargo_fix_candidate);
     }
 }

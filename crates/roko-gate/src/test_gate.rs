@@ -8,6 +8,7 @@
 //! Mori reference: `apps/mori/src/orchestrator/gates.rs::test_gate` +
 //! `parse_test_counts`.
 
+use crate::compile_errors::{classify_gate_failure, render_failure_classification};
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
 use roko_core::{Context, Engram, Gate, TestCount, Verdict};
@@ -148,8 +149,10 @@ impl Gate for TestGate {
                 .with_duration(elapsed)
         } else {
             let reason = summarize_test_failures(&combined, 3);
+            let classification = classify_gate_failure(&self.name, &combined);
             Verdict::fail(&self.name, reason)
                 .with_detail(combined)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         };
         if let Some(tc) = counts {

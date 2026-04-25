@@ -6,6 +6,7 @@
 //! short-circuit gate pipeline so cheap lint failures preempt expensive
 //! test runs.
 
+use crate::compile_errors::{classify_gate_failure, render_failure_classification};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
 use roko_core::{Context, Engram, Gate, Verdict};
@@ -131,9 +132,11 @@ impl Gate for ClippyGate {
                 .with_detail(detail)
                 .with_duration(elapsed)
         } else {
-            let reason = summarize_lint_issues(&stderr, 3);
+            let reason = summarize_lint_issues(&detail, 3);
+            let classification = classify_gate_failure(&self.name, &detail);
             Verdict::fail(&self.name, reason)
                 .with_detail(detail)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         }
     }

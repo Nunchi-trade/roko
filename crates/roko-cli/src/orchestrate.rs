@@ -80,10 +80,11 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, ParsedReviewVerdict,
-    ReviewVerdictContext, SearchHit, SearchOracle, ShellGate, TestGate, VerdictPublisher,
+    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, FailureClass, GateRatchet,
+    ParsedReviewVerdict, ReviewVerdictContext, SearchHit, SearchOracle, ShellGate, TestGate,
+    VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
-    feedback_for_agent,
+    classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
     generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
     llm_judge_gate::{JudgeOracle, JudgePayload},
@@ -191,6 +192,7 @@ const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
+const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
 
 /// Whether this domain uses compiled (compile/test/clippy) gates.
 fn domain_uses_compiled_gates(domain: &TaskDomain) -> bool {
@@ -232,6 +234,13 @@ fn gate_ratchet_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("gate-ratchet.json")
+}
+
+fn pre_agent_remediation_log_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("pre-agent-remediation.jsonl")
 }
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
@@ -3251,6 +3260,39 @@ struct TaskTracker {
     gate_failure_count: u32,
     /// Bounded activity history used by stuck detection and meta-cognition.
     activity_history: Vec<ActivityEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreAgentRemediationCommand {
+    program: String,
+    args: Vec<String>,
+    exit_code: Option<i32>,
+    success: bool,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreAgentRemediationRecord {
+    plan_id: String,
+    gate_phase: String,
+    status: String,
+    commands: Vec<PreAgentRemediationCommand>,
+    classification: serde_json::Value,
+    changed_files_before: Vec<String>,
+    changed_files_after: Vec<String>,
+    new_changed_files: Vec<String>,
+    allowed_files: Vec<String>,
+    resolved: bool,
+    agent_retry_needed: bool,
+    reason: String,
+    created_at: String,
+}
+
+impl PreAgentRemediationRecord {
+    fn retry_needed(&self) -> bool {
+        self.agent_retry_needed
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -12690,13 +12732,196 @@ impl PlanRunner {
             gate_results,
         ))
     }
+
+    async fn try_pre_agent_cargo_remediation(
+        &self,
+        plan_id: &str,
+        gate_phase: &str,
+        exec_dir: &Path,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        gate_context: &str,
+    ) -> Option<PreAgentRemediationRecord> {
+        if gate_phase != "compile" && gate_phase != "clippy" {
+            return None;
+        }
+
+        let initial_classification =
+            classify_gate_failure(&format!("{gate_phase}:cargo"), gate_context);
+        let allowed_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+        if allowed_files.is_empty() {
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "skipped_unscoped".to_string(),
+                commands: Vec::new(),
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: Vec::new(),
+                changed_files_after: Vec::new(),
+                new_changed_files: Vec::new(),
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "task has no declared file scope; cargo fix would be too broad".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        if !is_safe_cargo_fix_class(&initial_classification.primary) {
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "skipped_unsafe_class".to_string(),
+                commands: Vec::new(),
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: Vec::new(),
+                changed_files_after: Vec::new(),
+                new_changed_files: Vec::new(),
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "failure class is not safe for deterministic cargo fix".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        let before = self.git_changed_files(exec_dir).await.unwrap_or_default();
+        let package = task_crate_name(task_def).filter(|name| name != "workspace");
+        let mut commands = Vec::new();
+        let fix_args = cargo_fix_args(package.as_deref());
+        let fix = run_pre_agent_command(exec_dir, "cargo", &fix_args).await;
+        let fix_succeeded = fix.success;
+        commands.push(fix);
+
+        if !fix_succeeded {
+            let after = self.git_changed_files(exec_dir).await.unwrap_or_default();
+            let new_changed_files = remediation_new_changed_files(&before, &after);
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "cargo_fix_failed".to_string(),
+                commands,
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: before,
+                changed_files_after: after,
+                new_changed_files,
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "cargo fix exited non-zero; falling through to agent retry".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        let rustfmt_files = scoped_rustfmt_files(exec_dir, &allowed_files);
+        if !rustfmt_files.is_empty() {
+            let rustfmt_args = rustfmt_files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            commands.push(run_pre_agent_command(exec_dir, "rustfmt", &rustfmt_args).await);
+        }
+
+        let check_args = cargo_check_json_args(package.as_deref());
+        let check = run_pre_agent_command(exec_dir, "cargo", &check_args).await;
+        let check_succeeded = check.success;
+        let check_output = format!("{}\n{}", check.stdout_tail, check.stderr_tail);
+        commands.push(check);
+
+        let after = self.git_changed_files(exec_dir).await.unwrap_or_default();
+        let new_changed_files = remediation_new_changed_files(&before, &after);
+        let scope_ok = remediation_scope_ok(plan_id, &new_changed_files, &allowed_files);
+        let classification = classify_gate_failure(&format!("{gate_phase}:cargo"), &check_output);
+        let resolved = check_succeeded && scope_ok;
+        let status = if resolved {
+            "resolved"
+        } else if check_succeeded {
+            "unsafe_scope"
+        } else {
+            "unresolved"
+        };
+        let reason = if resolved {
+            "cargo fix/rustfmt/check resolved the gate before agent retry".to_string()
+        } else if check_succeeded {
+            "cargo check passed, but remediation changed files outside declared scope".to_string()
+        } else {
+            "cargo check still fails after deterministic remediation".to_string()
+        };
+
+        Some(PreAgentRemediationRecord {
+            plan_id: plan_id.to_string(),
+            gate_phase: gate_phase.to_string(),
+            status: status.to_string(),
+            commands,
+            classification: serde_json::to_value(classification).unwrap_or_default(),
+            changed_files_before: before,
+            changed_files_after: after,
+            new_changed_files,
+            allowed_files,
+            resolved,
+            agent_retry_needed: !resolved,
+            reason,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    fn persist_pre_agent_remediation(&mut self, record: &PreAgentRemediationRecord) {
+        self.event_log.append(
+            EventKind::GateResult,
+            serde_json::json!({
+                "plan_id": record.plan_id,
+                "gate": format!("pre-agent-remediation:{}", record.gate_phase),
+                "passed": record.resolved,
+                "status": record.status,
+                "agent_retry_needed": record.retry_needed(),
+                "changed_files": record.new_changed_files,
+            }),
+        );
+
+        let path = pre_agent_remediation_log_path(&self.workdir);
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %err,
+                "failed to create pre-agent remediation log directory"
+            );
+            return;
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(err) = writeln!(
+                    file,
+                    "{}",
+                    serde_json::to_string(record).unwrap_or_else(|_| "{}".to_string())
+                ) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "failed to append pre-agent remediation record"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to open pre-agent remediation log"
+                );
+            }
+        }
+    }
     ///
     /// Uses `TaskDef::build_fix_prompt` to produce a targeted prompt that includes
     /// the original task, the failing phase, and the error output. Selects the model
     /// based on error type: Haiku for compile errors (fast iteration), Sonnet for
     /// test/clippy failures (needs reasoning).
     async fn handle_autofix(&mut self, plan_id: &str) {
-        let gate_context = self
+        let mut gate_context = self
             .task_trackers
             .get(plan_id)
             .and_then(|t| t.last_gate_failure.clone())
@@ -12720,9 +12945,44 @@ impl PlanRunner {
 
         let tracker = self.task_trackers.get(plan_id);
         let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
-        let task_def = tracker.and_then(|t| {
-            last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
-        });
+        let task_def = tracker
+            .and_then(|t| {
+                last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
+            })
+            .cloned();
+
+        if let Ok(exec_dir) = self.ensure_plan_exec_dir(plan_id).await
+            && let Some(record) = self
+                .try_pre_agent_cargo_remediation(
+                    plan_id,
+                    &gate_phase,
+                    &exec_dir,
+                    task_def.as_ref(),
+                    &gate_context,
+                )
+                .await
+        {
+            let record_json =
+                serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string());
+            self.persist_pre_agent_remediation(&record);
+            if record.resolved {
+                tracing::info!(
+                    plan_id = %plan_id,
+                    gate_phase = %gate_phase,
+                    "pre-agent cargo remediation resolved gate failure"
+                );
+                if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                    state.reset_for_retry();
+                }
+                let event = ExecutorEvent::AutoFixDone;
+                self.log_transition(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "pre-agent-remediation", &event, "transitioned");
+                return;
+            }
+
+            gate_context.push_str("\n\n## Pre-Agent Remediation Attempt\n");
+            gate_context.push_str(&record_json);
+        }
 
         let domain = self.current_task_domain(plan_id);
         let fix_tier = if domain
@@ -17438,6 +17698,120 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed
 }
 
+fn cargo_fix_args(package: Option<&str>) -> Vec<String> {
+    let mut args = vec!["fix".to_string()];
+    if let Some(package) = package {
+        args.push("-p".to_string());
+        args.push(package.to_string());
+    } else {
+        args.push("--workspace".to_string());
+    }
+    args.extend([
+        "--all-targets".to_string(),
+        "--allow-dirty".to_string(),
+        "--allow-staged".to_string(),
+    ]);
+    args
+}
+
+fn cargo_check_json_args(package: Option<&str>) -> Vec<String> {
+    let mut args = vec!["check".to_string()];
+    if let Some(package) = package {
+        args.push("-p".to_string());
+        args.push(package.to_string());
+    } else {
+        args.push("--workspace".to_string());
+    }
+    args.extend([
+        "--all-targets".to_string(),
+        "--message-format=json".to_string(),
+    ]);
+    args
+}
+
+fn scoped_rustfmt_files(exec_dir: &Path, allowed_files: &[String]) -> Vec<PathBuf> {
+    allowed_files
+        .iter()
+        .filter(|file| file.ends_with(".rs"))
+        .map(|file| exec_dir.join(file))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn remediation_new_changed_files(before: &[String], after: &[String]) -> Vec<String> {
+    let before = before.iter().collect::<HashSet<_>>();
+    after
+        .iter()
+        .filter(|path| !before.contains(path))
+        .cloned()
+        .collect()
+}
+
+fn remediation_scope_ok(plan_id: &str, changed_files: &[String], allowed_files: &[String]) -> bool {
+    changed_files.iter().all(|path| {
+        is_build_artifact_path(path)
+            || is_plan_enrichment_artifact(plan_id, path)
+            || allowed_files.iter().any(|allowed| {
+                path == allowed
+                    || path.starts_with(&format!("{allowed}/"))
+                    || path.starts_with(&format!("{allowed}\\"))
+            })
+    })
+}
+
+fn is_safe_cargo_fix_class(class: &FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::SyntaxError | FailureClass::ImportError | FailureClass::TypeError
+    )
+}
+
+async fn run_pre_agent_command(
+    exec_dir: &Path,
+    program: &str,
+    args: &[String],
+) -> PreAgentRemediationCommand {
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(exec_dir)
+        .kill_on_drop(true)
+        .output()
+        .await;
+
+    match output {
+        Ok(output) => PreAgentRemediationCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            exit_code: output.status.code(),
+            success: output.status.success(),
+            stdout_tail: tail_chars(
+                &String::from_utf8_lossy(&output.stdout),
+                PRE_AGENT_REMEDIATION_OUTPUT_TAIL,
+            ),
+            stderr_tail: tail_chars(
+                &String::from_utf8_lossy(&output.stderr),
+                PRE_AGENT_REMEDIATION_OUTPUT_TAIL,
+            ),
+        },
+        Err(err) => PreAgentRemediationCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            exit_code: None,
+            success: false,
+            stdout_tail: String::new(),
+            stderr_tail: format!("spawn failed: {err}"),
+        },
+    }
+}
+
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    chars[chars.len() - max_chars..].iter().collect()
+}
+
 fn is_plan_enrichment_artifact(plan_id: &str, path: &str) -> bool {
     let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -20999,6 +21373,70 @@ read_files = [
             Some("workspace".to_string())
         );
         assert_eq!(crate_name_for_path("README.md"), None);
+    }
+
+    #[test]
+    fn pre_agent_remediation_builds_scoped_cargo_commands() {
+        assert_eq!(
+            cargo_fix_args(Some("roko-gate")),
+            vec![
+                "fix",
+                "-p",
+                "roko-gate",
+                "--all-targets",
+                "--allow-dirty",
+                "--allow-staged"
+            ]
+        );
+        assert_eq!(
+            cargo_check_json_args(Some("roko-cli")),
+            vec![
+                "check",
+                "-p",
+                "roko-cli",
+                "--all-targets",
+                "--message-format=json"
+            ]
+        );
+        assert!(cargo_fix_args(None).contains(&"--workspace".to_string()));
+    }
+
+    #[test]
+    fn pre_agent_remediation_tracks_new_and_out_of_scope_changes() {
+        let before = vec![
+            "crates/roko-cli/src/orchestrate.rs".to_string(),
+            "plans/p1/brief.md".to_string(),
+        ];
+        let after = vec![
+            "crates/roko-cli/src/orchestrate.rs".to_string(),
+            "crates/roko-cli/src/run.rs".to_string(),
+            "plans/p1/brief.md".to_string(),
+        ];
+        assert_eq!(
+            remediation_new_changed_files(&before, &after),
+            vec!["crates/roko-cli/src/run.rs".to_string()]
+        );
+
+        let allowed = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        assert!(remediation_scope_ok(
+            "p1",
+            &["crates/roko-cli/src/orchestrate.rs".to_string()],
+            &allowed
+        ));
+        assert!(!remediation_scope_ok(
+            "p1",
+            &["crates/roko-cli/src/run.rs".to_string()],
+            &allowed
+        ));
+        assert!(remediation_scope_ok(
+            "p1",
+            &["target/debug/build/foo".to_string()],
+            &allowed
+        ));
+        assert!(is_safe_cargo_fix_class(&FailureClass::ImportError));
+        assert!(!is_safe_cargo_fix_class(
+            &FailureClass::MissingDependencyOrFeature
+        ));
     }
 
     #[test]
