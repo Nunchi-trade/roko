@@ -228,14 +228,21 @@ impl AcceptanceContract {
         if let Some(review_req) = self.review_verdict.as_ref().filter(|req| req.required) {
             match &evidence.review_verdict {
                 Some(review)
-                    if review.status == AcceptanceOutcome::Passed
+                    if review.reviewer_role_id == review_req.reviewer_role_id
+                        && review.status == AcceptanceOutcome::Passed
                         && review.confidence >= review_req.min_confidence
-                        && review.blocking_findings.is_empty() => {}
+                        && review.blocking_findings.is_empty()
+                        && !review.raw_output_ref.trim().is_empty()
+                        && review.confidence.is_finite()
+                        && review.required_next_action == RequiredNextAction::None => {}
                 Some(review) => issues.push(AcceptanceIssue::blocking(
                     "ACCEPT_026",
                     format!(
-                        "review verdict did not satisfy contract: status={:?}, confidence={}",
-                        review.status, review.confidence
+                        "review verdict did not satisfy contract: status={:?}, confidence={}, reviewer_role_id={}, required_next_action={:?}",
+                        review.status,
+                        review.confidence,
+                        review.reviewer_role_id,
+                        review.required_next_action
                     ),
                 )),
                 None => issues.push(AcceptanceIssue::blocking(
@@ -746,5 +753,41 @@ mod tests {
         let parsed = serde_json::from_str::<AcceptanceEvidence>(raw);
 
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn review_verdict_with_next_action_fails_closed() {
+        let contract = full_contract();
+        let mut evidence = full_evidence();
+        let review = evidence.review_verdict.as_mut().expect("review evidence");
+        review.required_next_action = RequiredNextAction::Retry;
+
+        let decision = contract.validate_evidence(&evidence);
+
+        assert_eq!(decision.outcome, AcceptanceOutcome::Failed);
+        assert!(
+            decision
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ACCEPT_026")
+        );
+    }
+
+    #[test]
+    fn review_verdict_wrong_reviewer_fails_closed() {
+        let contract = full_contract();
+        let mut evidence = full_evidence();
+        let review = evidence.review_verdict.as_mut().expect("review evidence");
+        review.reviewer_role_id = "unexpected-reviewer".to_string();
+
+        let decision = contract.validate_evidence(&evidence);
+
+        assert_eq!(decision.outcome, AcceptanceOutcome::Failed);
+        assert!(
+            decision
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ACCEPT_026")
+        );
     }
 }

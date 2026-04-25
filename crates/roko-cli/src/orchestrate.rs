@@ -80,13 +80,14 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, SearchHit,
-    SearchOracle, ShellGate, TestGate, VerdictPublisher,
+    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, ParsedReviewVerdict,
+    ReviewVerdictContext, SearchHit, SearchOracle, ShellGate, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     feedback_for_agent,
     gate_pipeline::GatePipeline,
     generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
     llm_judge_gate::{JudgeOracle, JudgePayload},
+    parse_structured_review_verdict,
     payload::{BuildSystem, GatePayload},
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
@@ -13025,7 +13026,18 @@ impl PlanRunner {
                 let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let output_text = result.output.body.as_text().unwrap_or_default().to_string();
 
-                let mut approved = parse_review_verdict(&output_text);
+                let parsed_review = parse_structured_review_verdict(
+                    &output_text,
+                    ReviewVerdictContext {
+                        verdict_id: format!("review:{plan_id}:{}", result.output.id),
+                        batch_id: plan_id.to_string(),
+                        task_id: plan_id.to_string(),
+                        reviewer_role_id: AgentRole::Auditor.label().to_string(),
+                        raw_output_ref: result.output.id.to_string(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                let mut approved = parsed_review.passed();
                 let drift_report = self
                     .task_trackers
                     .get(plan_id)
@@ -13036,7 +13048,11 @@ impl PlanRunner {
                     }
                 }
                 tracing::info!(
-                    "[orchestrate] Review {plan_id}: verdict={} drift={}",
+                    "[orchestrate] Review {plan_id}: status={:?} action={:?} confidence={} source={:?} approved={} drift={}",
+                    parsed_review.evidence.status,
+                    parsed_review.evidence.required_next_action,
+                    parsed_review.evidence.confidence,
+                    parsed_review.source,
                     if approved { "approved" } else { "revise" },
                     drift_report
                         .as_ref()
@@ -13050,6 +13066,11 @@ impl PlanRunner {
                         })
                         .unwrap_or_else(|| "n/a".into())
                 );
+                if let Some(error) = &parsed_review.parse_error {
+                    tracing::warn!(
+                        "[orchestrate] Review {plan_id} failed closed while parsing verdict: {error}"
+                    );
+                }
 
                 let mut ep = Episode::new("Auditor", "review").succeeded();
                 ep.usage = Usage {
@@ -13097,7 +13118,7 @@ impl PlanRunner {
                                 report.missing.join(", "),
                                 output_text
                             ),
-                            _ => output_text.clone(),
+                            _ => structured_review_feedback(&parsed_review),
                         });
                         tracker.reset_for_reimpl();
                     }
@@ -13107,9 +13128,14 @@ impl PlanRunner {
                 }
             }
             Err(e) => {
-                // On infrastructure error, auto-approve (don't block pipeline)
-                tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
-                let event = ExecutorEvent::ReviewApproved;
+                tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — rejecting");
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.review_feedback = Some(format!(
+                        "Reviewer dispatch failed before producing a structured verdict: {e}"
+                    ));
+                    tracker.reset_for_reimpl();
+                }
+                let event = ExecutorEvent::ReviewRejected;
                 self.log_transition(plan_id, &event);
                 self.apply_event_and_emit(plan_id, "review", &event, "transitioned");
             }
@@ -18894,32 +18920,47 @@ fn review_drift_report(tasks_file: &TasksFile, output: &str) -> Option<ReviewDri
     })
 }
 
-/// Parse a review verdict from agent output text.
-///
-/// Looks for `verdict = "approve"` / `verdict = "revise"` patterns,
-/// falls back to keyword matching. Returns `true` for approve.
-fn parse_review_verdict(output: &str) -> bool {
-    let lower = output.to_lowercase();
-    // Structured verdict
-    if lower.contains("verdict = \"approve\"") || lower.contains("verdict: approve") {
-        return true;
+/// Render structured review evidence into feedback for the next implementer.
+fn structured_review_feedback(parsed: &ParsedReviewVerdict) -> String {
+    let evidence = &parsed.evidence;
+    let mut lines = vec![
+        "Structured review verdict did not approve this task.".to_string(),
+        format!(
+            "status={:?} confidence={} required_next_action={:?} source={:?}",
+            evidence.status, evidence.confidence, evidence.required_next_action, parsed.source
+        ),
+    ];
+
+    if let Some(error) = &parsed.parse_error {
+        lines.push(format!("parse_error={error}"));
     }
-    if lower.contains("verdict = \"revise\"")
-        || lower.contains("verdict: revise")
-        || lower.contains("verdict = \"reject\"")
-        || lower.contains("verdict: reject")
-    {
-        return false;
+    if !evidence.blocking_findings.is_empty() {
+        lines.push("blocking_findings:".to_string());
+        lines.extend(
+            evidence
+                .blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}")),
+        );
     }
-    // Keyword fallback
-    if lower.contains("approved") || lower.contains("lgtm") || lower.contains("looks good") {
-        return true;
+    if !evidence.non_blocking_findings.is_empty() {
+        lines.push("non_blocking_findings:".to_string());
+        lines.extend(
+            evidence
+                .non_blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}")),
+        );
     }
-    if lower.contains("revise") || lower.contains("reject") || lower.contains("rework") {
-        return false;
+    if !evidence.evidence_refs.is_empty() {
+        lines.push(format!(
+            "evidence_refs: {}",
+            evidence.evidence_refs.join(", ")
+        ));
     }
-    // Default: approve (don't block pipeline on ambiguous output)
-    true
+    lines.push("raw_reviewer_output:".to_string());
+    lines.push(parsed.raw_output.clone());
+    lines.join("\n")
 }
 
 /// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
@@ -20496,21 +20537,45 @@ acceptance = []
     }
 
     #[test]
-    fn parse_review_verdict_structured() {
-        assert!(parse_review_verdict("verdict = \"approve\""));
-        assert!(!parse_review_verdict("verdict = \"revise\""));
-        assert!(parse_review_verdict("verdict: approve"));
-        assert!(!parse_review_verdict("verdict: reject"));
+    fn review_verdict_free_text_fails_closed() {
+        let parsed = parse_structured_review_verdict(
+            "The code looks good, LGTM!",
+            ReviewVerdictContext {
+                verdict_id: "v1".into(),
+                batch_id: "p1".into(),
+                task_id: "p1".into(),
+                reviewer_role_id: "auditor".into(),
+                raw_output_ref: "signal:raw".into(),
+                created_at: "2026-04-25T12:43:56Z".into(),
+            },
+        );
+
+        assert!(!parsed.passed());
+        assert!(structured_review_feedback(&parsed).contains("required_next_action=Human"));
     }
 
     #[test]
-    fn parse_review_verdict_keyword_fallback() {
-        assert!(parse_review_verdict("The code looks good, LGTM!"));
-        assert!(parse_review_verdict("Changes approved."));
-        assert!(!parse_review_verdict("Please revise the implementation."));
-        assert!(!parse_review_verdict("I reject this change due to bugs."));
-        // Ambiguous → default approve
-        assert!(parse_review_verdict("I have some minor comments."));
+    fn review_verdict_structured_json_can_approve() {
+        let parsed = parse_structured_review_verdict(
+            r#"{
+                "status": "passed",
+                "confidence": 0.8,
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+                "required_next_action": "none",
+                "evidence_refs": ["artifact://diff"]
+            }"#,
+            ReviewVerdictContext {
+                verdict_id: "v1".into(),
+                batch_id: "p1".into(),
+                task_id: "p1".into(),
+                reviewer_role_id: "auditor".into(),
+                raw_output_ref: "signal:raw".into(),
+                created_at: "2026-04-25T12:43:56Z".into(),
+            },
+        );
+
+        assert!(parsed.passed(), "{parsed:?}");
     }
 
     #[test]
