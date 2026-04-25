@@ -22,6 +22,7 @@ pub mod attention;
 pub mod auction;
 pub mod budget;
 pub mod budget_predictor;
+pub mod cognitive_workspace;
 pub mod compaction;
 pub mod context_assembler;
 pub mod context_mesh;
@@ -49,6 +50,9 @@ pub use auction::{
 };
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
 pub use budget_predictor::{BudgetPredictor, SectionInfluence, TaskFeatures};
+pub use cognitive_workspace::{
+    CognitiveWorkspaceInput, build_cognitive_workspace, task_contract_from_prompt_context,
+};
 pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_mesh::{ContextMesh, SharedContextEntry};

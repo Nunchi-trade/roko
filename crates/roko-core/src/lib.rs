@@ -59,6 +59,7 @@ pub mod catalyst;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
+pub mod cognitive_workspace;
 pub mod conductor;
 pub mod config;
 /// Connector trait for external system I/O (MCP, API, Database, Blockchain, Feed, Custom).
@@ -132,6 +133,12 @@ pub use chat_types::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
     RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
     ToolCallMessage, ToolChoice, Usage,
+};
+pub use cognitive_workspace::{
+    COGNITIVE_WORKSPACE_SCHEMA_VERSION, CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef,
+    ContextRejectionAudit, ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit,
+    InvocationGateOutcome, ModelChoice, OutputParseResult, PolicyVersionRef, RewardObservation,
+    TaskInvocationContract,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use connector::{

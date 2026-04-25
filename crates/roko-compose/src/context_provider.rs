@@ -433,6 +433,8 @@ pub struct ContextRejection {
     pub section_name: String,
     /// Stable source type key.
     pub source_type: &'static str,
+    /// Stable source identifier when available.
+    pub source_id: Option<String>,
     /// Section purpose.
     pub purpose: ContextPurpose,
     /// Section scope.
@@ -448,6 +450,7 @@ impl ContextRejection {
         Self {
             section_name: section.section.name.clone(),
             source_type: context_source_type(&section.source),
+            source_id: context_source_id(&section.source),
             purpose: section.purpose,
             scope: section.scope.clone(),
             estimated_tokens: section.estimated_tokens(),
@@ -463,6 +466,8 @@ pub struct ContextInjectionRecord {
     pub section_name: String,
     /// Stable source type key.
     pub source_type: &'static str,
+    /// Stable source identifier when available.
+    pub source_id: Option<String>,
     /// Why the section was injected.
     pub purpose: ContextPurpose,
     /// Visibility boundary.
@@ -541,6 +546,7 @@ impl ResolvedContext {
             .map(|section| ContextInjectionRecord {
                 section_name: section.section.name.clone(),
                 source_type: context_source_type(&section.source),
+                source_id: context_source_id(&section.source),
                 purpose: section.purpose,
                 scope: section.scope.clone(),
                 inclusion_reason: section.inclusion_reason.clone(),
@@ -1568,6 +1574,47 @@ const fn context_source_type(source: &ContextSource) -> &'static str {
         ContextSource::Decomposition => "decomposition",
         ContextSource::SiblingTasks => "sibling_tasks",
         ContextSource::Pheromone { .. } => "pheromone",
+    }
+}
+
+/// Convert a context source into a stable provenance id when one exists.
+fn context_source_id(source: &ContextSource) -> Option<String> {
+    match source {
+        ContextSource::KnowledgeEntry {
+            entry_id, source, ..
+        } => Some(
+            source
+                .as_ref()
+                .map_or_else(|| entry_id.clone(), |source| format!("{entry_id}:{source}")),
+        ),
+        ContextSource::Episode {
+            episode_id,
+            plan_id,
+            task_id,
+        } => Some(format!("{plan_id}/{task_id}/{episode_id}")),
+        ContextSource::InlineFile { path, lines } => Some(
+            lines
+                .as_ref()
+                .map_or_else(|| path.clone(), |lines| format!("{path}:{lines}")),
+        ),
+        ContextSource::RecentSignal {
+            signal_id,
+            plan_id,
+            kind,
+        } => Some(format!("{plan_id}/{kind}/{signal_id}")),
+        ContextSource::SymbolSignature { symbol, file } => Some(format!("{file}#{symbol}")),
+        ContextSource::PriorTaskOutput { task_id } => Some(task_id.clone()),
+        ContextSource::Pheromone { kind, source } => Some(format!("{kind}:{source}")),
+        ContextSource::AntiPattern
+        | ContextSource::Verification
+        | ContextSource::TaskBrief
+        | ContextSource::PlanBrief
+        | ContextSource::ResearchMemo
+        | ContextSource::Invariants
+        | ContextSource::CrossPlanContext
+        | ContextSource::PrdExtract
+        | ContextSource::Decomposition
+        | ContextSource::SiblingTasks => None,
     }
 }
 
