@@ -85,9 +85,9 @@ use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     AcceptanceDecision, AcceptanceEvidence, AcceptanceOutcome, ArtifactStore as GateArtifactStore,
     ClippyGate, CompileGate, FailureClass, GateEvidence, GateFailureAction, GateRatchet,
-    NoStubEvidence, ParityLedgerEvidenceRow, ParsedReviewVerdict, RecoveryEvidence,
-    ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle, ShellGate,
-    StructuredOutputEvidence, TestGate, VerdictPublisher,
+    NoStubEvidence, ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict,
+    RecoveryEvidence, ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle,
+    ShellGate, StructuredOutputEvidence, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -11331,7 +11331,7 @@ impl PlanRunner {
             .plan_state(plan_id)
             .map(|state| state.gate_results.as_slice())
             .unwrap_or(&[]);
-        let gates = contract
+        let gates: Vec<GateEvidence> = contract
             .gates
             .iter()
             .map(|requirement| {
@@ -11382,10 +11382,46 @@ impl PlanRunner {
                 requirement
                     .rows
                     .iter()
-                    .map(|row| ParityLedgerEvidenceRow {
-                        requirement_id: row.requirement_id.clone(),
-                        outcome: AcceptanceOutcome::Passed,
-                        evidence_ref: row.evidence_ref.clone(),
+                    .map(|row| {
+                        let test_evidence_refs = row
+                            .test_evidence_refs
+                            .iter()
+                            .filter(|value| !value.trim().is_empty())
+                            .cloned()
+                            .chain(gates.iter().filter_map(|gate| {
+                                (gate.outcome == AcceptanceOutcome::Passed
+                                    && !gate.evidence_ref.trim().is_empty())
+                                .then(|| gate.evidence_ref.clone())
+                            }))
+                            .collect::<Vec<_>>();
+                        let implementation_refs = row
+                            .implementation_refs
+                            .iter()
+                            .filter(|value| !value.trim().is_empty())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let has_implementation_ref =
+                            !implementation_refs.is_empty() || !row.evidence_ref.trim().is_empty();
+                        let verified = !row.source_ref.trim().is_empty()
+                            && has_implementation_ref
+                            && !test_evidence_refs.is_empty();
+                        ParityLedgerEvidenceRow {
+                            requirement_id: row.requirement_id.clone(),
+                            outcome: if verified {
+                                AcceptanceOutcome::Passed
+                            } else {
+                                AcceptanceOutcome::NeedsWork
+                            },
+                            status: if verified {
+                                ParityLedgerStatus::Verified
+                            } else {
+                                ParityLedgerStatus::NeedsWork
+                            },
+                            source_ref: row.source_ref.clone(),
+                            evidence_ref: row.evidence_ref.clone(),
+                            implementation_refs,
+                            test_evidence_refs,
+                        }
                     })
                     .collect::<Vec<_>>()
             })
@@ -11484,7 +11520,11 @@ impl PlanRunner {
                 "task_id": task_id,
                 "requirement_id": row.requirement_id,
                 "outcome": row.outcome,
+                "status": row.status,
+                "source_ref": row.source_ref,
                 "evidence_ref": row.evidence_ref,
+                "implementation_refs": row.implementation_refs,
+                "test_evidence_refs": row.test_evidence_refs,
                 "created_at": chrono::Utc::now().to_rfc3339(),
             });
             writeln!(file, "{record}").with_context(|| format!("write {}", path.display()))?;
@@ -20132,6 +20172,7 @@ where
         "needs_retry" | "retry" => Ok(AcceptanceOutcome::NeedsRetry),
         "needs_replan" | "replan" => Ok(AcceptanceOutcome::NeedsReplan),
         "needs_human" | "human" | "needs-human" => Ok(AcceptanceOutcome::NeedsHuman),
+        "needs_work" | "needs-work" | "work" => Ok(AcceptanceOutcome::NeedsWork),
         other => Err(serde::de::Error::custom(format!(
             "unsupported agent output outcome '{other}'"
         ))),

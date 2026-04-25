@@ -331,3 +331,46 @@ role = "implementer"
         assert!(stdout.contains(rule), "missing {rule}: {stdout}");
     }
 }
+
+#[test]
+fn plan_validate_requires_parity_rows_for_architecture_queue_packets() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "architecture",
+        r#"
+[meta]
+plan = "architecture"
+queue_kind = "architecture_implementation"
+
+[[task]]
+id = "Q1"
+title = "Architecture packet without parity closure"
+role = "implementer"
+files = ["crates/roko-gate/src/acceptance_contract.rs"]
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-gate" }]
+
+[task.context]
+read_files = [
+  { path = "tmp/architecture-plans/06-architecture-implementation.md", why = "source plan" },
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-gate"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet.v1"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).failure();
+    assert_eq!(assert.get_output().status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("PLAN_025"), "missing PLAN_025: {stdout}");
+}

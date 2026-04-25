@@ -124,9 +124,10 @@ pub mod verify_chain_gate;
 pub use acceptance_contract::{
     AcceptanceContract, AcceptanceDecision, AcceptanceEvidence, AcceptanceIssue, AcceptanceOutcome,
     GateEvidence, GateRequirement, GateRequirementKind, NoStubEvidence, NoStubRequirement,
-    ParityLedgerEvidenceRow, ParityLedgerRequirement, ParityLedgerRequirementRow, RecoveryEvidence,
-    RecoveryRequirement, RequiredNextAction, ReviewVerdictEvidence, ReviewVerdictRequirement,
-    StructuredAgentOutputRequirement, StructuredOutputEvidence,
+    ParityLedgerEvidenceRow, ParityLedgerRequirement, ParityLedgerRequirementRow,
+    ParityLedgerStatus, RecoveryEvidence, RecoveryRequirement, RequiredNextAction,
+    ReviewVerdictEvidence, ReviewVerdictRequirement, StructuredAgentOutputRequirement,
+    StructuredOutputEvidence,
 };
 pub use adaptive_threshold::{AdaptiveThresholds, RungStats};
 pub use artifact_store::ArtifactStore;

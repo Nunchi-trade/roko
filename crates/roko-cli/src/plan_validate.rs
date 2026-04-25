@@ -83,6 +83,7 @@ struct TaskSnapshot {
     has_context_read_files: bool,
     has_verify_steps: bool,
     acceptance_contract: Option<Value>,
+    has_required_parity_ledger_rows: bool,
 }
 
 impl TaskSnapshot {
@@ -571,6 +572,7 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
         acceptance_contract: table
             .and_then(|table| table.get("acceptance_contract"))
             .cloned(),
+        has_required_parity_ledger_rows: table.is_some_and(has_required_parity_ledger_rows),
     }
 }
 
@@ -613,6 +615,11 @@ fn validate_architecture_queue_task(
             "PLAN_024",
             "declares no typed acceptance_contract",
         ),
+        (
+            !task.has_required_parity_ledger_rows,
+            "PLAN_025",
+            "declares no required parity ledger rows",
+        ),
     ];
 
     for (missing, rule_id, message) in requirements {
@@ -626,6 +633,23 @@ fn validate_architecture_queue_task(
             });
         }
     }
+}
+
+fn has_required_parity_ledger_rows(table: &toml::map::Map<String, Value>) -> bool {
+    table
+        .get("acceptance_contract")
+        .and_then(Value::as_table)
+        .and_then(|contract| contract.get("parity_ledger"))
+        .and_then(Value::as_table)
+        .filter(|parity| {
+            parity
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        })
+        .and_then(|parity| parity.get("rows"))
+        .and_then(Value::as_array)
+        .is_some_and(|rows| !rows.is_empty())
 }
 
 fn string_field(value: Option<&Value>) -> Option<String> {

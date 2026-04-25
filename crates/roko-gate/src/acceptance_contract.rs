@@ -27,6 +27,8 @@ pub enum AcceptanceOutcome {
     NeedsReplan,
     /// Evidence requires human review or approval.
     NeedsHuman,
+    /// Required evidence is incomplete and the task needs more implementation work.
+    NeedsWork,
 }
 
 /// A typed acceptance contract for one self-hosting task.
@@ -151,11 +153,25 @@ impl AcceptanceContract {
                     "parity ledger row is missing requirement_id",
                 ));
             }
-            if row.evidence_ref.trim().is_empty() {
+            if row.evidence_ref.trim().is_empty()
+                && row
+                    .implementation_refs
+                    .iter()
+                    .all(|value| value.trim().is_empty())
+            {
                 issues.push(AcceptanceIssue::blocking(
                     "ACCEPT_011",
                     format!(
-                        "parity ledger row '{}' is missing evidence_ref",
+                        "parity ledger row '{}' is missing implementation evidence",
+                        row.requirement_id
+                    ),
+                ));
+            }
+            if row.source_ref.trim().is_empty() {
+                issues.push(AcceptanceIssue::blocking(
+                    "ACCEPT_012",
+                    format!(
+                        "parity ledger row '{}' is missing source_ref",
                         row.requirement_id
                     ),
                 ));
@@ -281,12 +297,21 @@ impl AcceptanceContract {
                     .iter()
                     .find(|candidate| candidate.requirement_id == row.requirement_id)
                 {
-                    Some(evidence_row) if evidence_row.outcome == AcceptanceOutcome::Passed => {}
+                    Some(evidence_row)
+                        if evidence_row.outcome == AcceptanceOutcome::Passed
+                            && evidence_row.status == ParityLedgerStatus::Verified
+                            && !evidence_row.effective_source_ref(row).trim().is_empty()
+                            && !evidence_row.implementation_evidence_refs().is_empty()
+                            && !evidence_row.test_evidence_refs.is_empty() => {}
                     Some(evidence_row) => issues.push(AcceptanceIssue::blocking(
                         "ACCEPT_031",
                         format!(
-                            "parity ledger row '{}' did not pass: {:?}",
-                            row.requirement_id, evidence_row.outcome
+                            "parity ledger row '{}' did not close: outcome={:?}, status={:?}, implementation_refs={}, test_evidence_refs={}",
+                            row.requirement_id,
+                            evidence_row.outcome,
+                            evidence_row.status,
+                            evidence_row.implementation_evidence_refs().len(),
+                            evidence_row.test_evidence_refs.len()
                         ),
                     )),
                     None => issues.push(AcceptanceIssue::blocking(
@@ -301,7 +326,7 @@ impl AcceptanceContract {
         }
 
         if issues.iter().any(|issue| issue.blocking) {
-            return decision_from_issues(issues);
+            return decision_from_evidence_issues(issues);
         }
 
         AcceptanceDecision {
@@ -411,8 +436,15 @@ pub struct ParityLedgerRequirementRow {
     pub requirement_id: String,
     /// Source document path or requirement reference.
     pub source_ref: String,
-    /// Evidence artifact path or structured ledger key.
+    /// Legacy implementation evidence artifact path or structured ledger key.
+    #[serde(default)]
     pub evidence_ref: String,
+    /// Implementation evidence artifact paths or structured ledger keys.
+    #[serde(default)]
+    pub implementation_refs: Vec<String>,
+    /// Declared test or gate evidence refs for this requirement, when known at plan time.
+    #[serde(default)]
+    pub test_evidence_refs: Vec<String>,
 }
 
 /// Completed evidence packet for one task/run.
@@ -544,8 +576,58 @@ pub struct ParityLedgerEvidenceRow {
     pub requirement_id: String,
     /// Row outcome.
     pub outcome: AcceptanceOutcome,
-    /// Evidence path or artifact id.
+    /// Row closure status.
+    #[serde(default)]
+    pub status: ParityLedgerStatus,
+    /// Source document path or requirement reference.
+    #[serde(default)]
+    pub source_ref: String,
+    /// Legacy implementation evidence path or artifact id.
+    #[serde(default)]
     pub evidence_ref: String,
+    /// Implementation evidence paths or artifact ids.
+    #[serde(default)]
+    pub implementation_refs: Vec<String>,
+    /// Test or gate evidence paths or artifact ids.
+    #[serde(default)]
+    pub test_evidence_refs: Vec<String>,
+}
+
+impl ParityLedgerEvidenceRow {
+    /// Implementation evidence refs, including the legacy `evidence_ref` field.
+    #[must_use]
+    pub fn implementation_evidence_refs(&self) -> Vec<&str> {
+        self.implementation_refs
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(self.evidence_ref.as_str()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
+    fn effective_source_ref<'a>(&'a self, requirement: &'a ParityLedgerRequirementRow) -> &'a str {
+        if self.source_ref.trim().is_empty() {
+            &requirement.source_ref
+        } else {
+            &self.source_ref
+        }
+    }
+}
+
+/// Closure state for a doc parity ledger row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParityLedgerStatus {
+    /// Implementation evidence exists but runtime evidence has not closed it.
+    Implemented,
+    /// Implementation and test/gate evidence both exist.
+    #[default]
+    Verified,
+    /// Completion is blocked by missing external state.
+    Blocked,
+    /// More work is required before this doc requirement can close.
+    NeedsWork,
 }
 
 /// Done-gate validation decision.
@@ -590,6 +672,23 @@ impl AcceptanceIssue {
 fn decision_from_issues(issues: Vec<AcceptanceIssue>) -> AcceptanceDecision {
     let outcome = if issues.iter().any(|issue| issue.blocking) {
         AcceptanceOutcome::Failed
+    } else {
+        AcceptanceOutcome::Passed
+    };
+    AcceptanceDecision { outcome, issues }
+}
+
+fn decision_from_evidence_issues(issues: Vec<AcceptanceIssue>) -> AcceptanceDecision {
+    let outcome = if issues.iter().any(|issue| issue.blocking) {
+        if issues
+            .iter()
+            .filter(|issue| issue.blocking)
+            .all(|issue| matches!(issue.code.as_str(), "ACCEPT_031" | "ACCEPT_032"))
+        {
+            AcceptanceOutcome::NeedsWork
+        } else {
+            AcceptanceOutcome::Failed
+        }
     } else {
         AcceptanceOutcome::Passed
     };
@@ -646,6 +745,8 @@ mod tests {
                     requirement_id: "RT00.done-gate".to_string(),
                     source_ref: "tmp/architecture-plans/08-end-to-end-acceptance.md".to_string(),
                     evidence_ref: "crates/roko-gate/src/acceptance_contract.rs".to_string(),
+                    implementation_refs: Vec::new(),
+                    test_evidence_refs: Vec::new(),
                 }],
             }),
         }
@@ -698,7 +799,11 @@ mod tests {
             parity_ledger_rows: vec![ParityLedgerEvidenceRow {
                 requirement_id: "RT00.done-gate".to_string(),
                 outcome: AcceptanceOutcome::Passed,
+                status: ParityLedgerStatus::Verified,
+                source_ref: "tmp/architecture-plans/08-end-to-end-acceptance.md".to_string(),
                 evidence_ref: "crates/roko-gate/src/acceptance_contract.rs".to_string(),
+                implementation_refs: Vec::new(),
+                test_evidence_refs: vec![".roko/runs/test.log".to_string()],
             }],
         }
     }
@@ -789,5 +894,55 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "ACCEPT_026")
         );
+    }
+
+    #[test]
+    fn missing_parity_test_evidence_needs_work() {
+        let contract = full_contract();
+        let mut evidence = full_evidence();
+        evidence.parity_ledger_rows[0].test_evidence_refs.clear();
+
+        let decision = contract.validate_evidence(&evidence);
+
+        assert_eq!(decision.outcome, AcceptanceOutcome::NeedsWork);
+        assert!(
+            decision
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ACCEPT_031")
+        );
+    }
+
+    #[test]
+    fn parity_row_status_must_be_verified() {
+        let contract = full_contract();
+        let mut evidence = full_evidence();
+        evidence.parity_ledger_rows[0].status = ParityLedgerStatus::NeedsWork;
+
+        let decision = contract.validate_evidence(&evidence);
+
+        assert_eq!(decision.outcome, AcceptanceOutcome::NeedsWork);
+        assert!(
+            decision
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains("status=NeedsWork"))
+        );
+    }
+
+    #[test]
+    fn parity_requirement_accepts_structured_implementation_refs() {
+        let mut contract = full_contract();
+        let row = &mut contract
+            .parity_ledger
+            .as_mut()
+            .expect("parity requirement")
+            .rows[0];
+        row.evidence_ref.clear();
+        row.implementation_refs = vec!["crates/roko-gate/src/acceptance_contract.rs".to_string()];
+
+        let decision = contract.validate_contract();
+
+        assert!(decision.passed(), "{decision:?}");
     }
 }

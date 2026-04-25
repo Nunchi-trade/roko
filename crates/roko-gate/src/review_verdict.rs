@@ -329,6 +329,7 @@ where
         "needs_retry" | "retry" => Ok(AcceptanceOutcome::NeedsRetry),
         "needs_replan" | "replan" => Ok(AcceptanceOutcome::NeedsReplan),
         "needs_human" | "human" | "needs-human" => Ok(AcceptanceOutcome::NeedsHuman),
+        "needs_work" | "needs-work" | "work" => Ok(AcceptanceOutcome::NeedsWork),
         other => Err(serde::de::Error::custom(format!(
             "unsupported review status '{other}'"
         ))),
