@@ -374,3 +374,135 @@ schema = "roko.architecture_packet.v1"
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(stdout.contains("PLAN_025"), "missing PLAN_025: {stdout}");
 }
+
+#[test]
+fn plan_validate_requires_complete_architecture_deferral_metadata() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "architecture",
+        r#"
+[meta]
+plan = "architecture"
+queue_kind = "architecture_implementation"
+
+[[task]]
+id = "Q1"
+title = "Deferred advanced packet"
+role = "implementer"
+files = ["plans/architecture-core-queue/tasks.toml"]
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+
+[task.context]
+read_files = [
+  { path = "docs/08-chain/INDEX.md", why = "advanced source inventory" },
+]
+
+[task.deferral]
+rationale = "Advanced surface must wait for trustworthy execution."
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-cli"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.6
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH-DEFER"
+source_ref = "docs/08-chain/INDEX.md"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).failure();
+    assert_eq!(assert.get_output().status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(stdout.contains("PLAN_026"), "missing PLAN_026: {stdout}");
+    assert!(
+        stdout.contains("deferral.prerequisite_runtime_policy_gates"),
+        "missing prerequisite field diagnostic: {stdout}"
+    );
+}
+
+#[test]
+fn plan_validate_accepts_complete_architecture_deferral_metadata() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "architecture",
+        r#"
+[meta]
+plan = "architecture"
+queue_kind = "architecture_implementation"
+
+[[task]]
+id = "Q1"
+title = "Deferred advanced packet"
+role = "implementer"
+files = ["plans/architecture-core-queue/tasks.toml"]
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+
+[task.context]
+read_files = [
+  { path = "docs/08-chain/INDEX.md", why = "advanced source inventory" },
+]
+
+[task.deferral]
+rationale = "Advanced surface must wait for trustworthy execution."
+prerequisite_runtime_policy_gates = ["structured verdicts pass"]
+acceptance_gates = ["cargo check -p roko-cli"]
+risk_notes = ["Do not ship behavior before runtime gates are durable."]
+parity_requirements = ["ARCH-DEFER"]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-cli"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.6
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH-DEFER"
+source_ref = "docs/08-chain/INDEX.md"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("0 diagnostics in 1 plan"),
+        "unexpected stdout: {stdout}"
+    );
+}

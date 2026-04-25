@@ -2,7 +2,7 @@
 plan = "architecture-core-queue"
 queue_kind = "architecture_implementation"
 iteration = 1
-total = 18
+total = 24
 done = 0
 status = "ready"
 max_parallel = 2
@@ -853,7 +853,7 @@ files = [
     "crates/roko-serve/src/routes/agents.rs",
     "plans/architecture-defi-critical-path/tasks.toml",
 ]
-depends_on = ["Q10-knowledge-lifecycle-amac", "Q13-gates-evals-arenas", "Q08-gateway-request-pipeline"]
+depends_on = ["Q10-knowledge-lifecycle-amac", "Q13-gates-evals-arenas", "Q08-gateway-request-pipeline", "Q16-dashboard-projections"]
 verify = [
     { phase = "compile", command = "cargo check -p roko-chain -p roko-serve -p roko-learn -p roko-agent", fail_msg = "chain, serve, learning, and agent DeFi support must compile" },
     { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "chain tests must build" },
@@ -1154,3 +1154,544 @@ replan = true
 requirement_id = "ARCH06.meta-lineage-recursive-safety"
 source_ref = "tmp/architecture-plans/06-architecture-implementation.md#phase-i-meta-layer"
 evidence_ref = "crates/roko-serve/src/routes/meta.rs"
+
+[[task]]
+id = "Q19-chain-contract-deployment-deferral"
+title = "Defer chain contracts and deployment until execution gates are durable"
+description = "Capture Korai chain contracts, deployment, chain witness, and simulator-to-live migration as future work gated by self-hosting, dashboard projections, and chain foundation evidence."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-chain/src",
+    "crates/roko-serve/src/routes/chain.rs",
+    "crates/roko-demo/src/deploy.rs",
+    "plans/architecture-core-queue/tasks.toml",
+]
+depends_on = ["Q14-chain-registries-defi-foundation", "Q16-dashboard-projections"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-chain -p roko-serve -p roko-demo", fail_msg = "chain contract/deployment packet crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "chain library tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/08-chain/00-vision-and-framing.md", why = "chain plugin deferral rationale and substrate/bus boundary" },
+    { path = "docs/08-chain/01-korai-chain-spec.md", why = "Korai deployment and chain parameter source" },
+    { path = "docs/08-chain/15-chainwitness-event-watching.md", why = "future chain witness source" },
+    { path = "docs/08-chain/18-mirage-rs-evm-simulator.md", why = "simulation and migration evidence source" },
+    { path = "docs/08-chain/24-current-status-and-6-contracts.md", why = "six contract inventory and Tier 6 dependency source" },
+]
+symbols = ["ChainClient", "ChainWallet", "AlloyChainClient", "chain_status"]
+anti_patterns = [
+    "Do not require live chain configuration for ordinary self-hosting execution.",
+    "Do not treat simulator success as live-chain deployment evidence without differential gates.",
+]
+
+[task.deferral]
+rationale = "Korai contracts and live deployment are advanced surfaces; they must wait until typed output, review verdicts, failure recovery, and dashboard projections are reliable enough to inspect irreversible effects."
+prerequisite_runtime_policy_gates = [
+    "Q01-Q13 trustworthy execution kernel packets complete",
+    "Q14 chain foundation packet complete without introducing mandatory chain runtime paths",
+    "Q16 dashboard projections expose chain status and degraded/unavailable states",
+]
+acceptance_gates = [
+    "cargo check -p roko-chain -p roko-serve -p roko-demo",
+    "cargo test -p roko-chain --lib --no-run",
+    "simulation-to-live migration evidence records differential outcomes and blocked risks",
+]
+risk_notes = [
+    "Live chain transactions are financially and operationally irreversible.",
+    "Simulator confidence must be explicit; unsupported mainnet conditions fail closed.",
+    "Chain configuration must remain optional for non-chain agents.",
+]
+parity_requirements = [
+    "ARCH06.chain-contract-deployment-deferral",
+    "CHAIN24.six-contracts-tier6",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain -p roko-serve -p roko-demo"
+
+[[task.acceptance_contract.gates]]
+id = "chain-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.chain-contract-deployment-deferral"
+source_ref = "docs/08-chain/24-current-status-and-6-contracts.md#tier-6-dependencies"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+
+[[task]]
+id = "Q20-agent-job-marketplace-economy-deferral"
+title = "Defer agent job marketplace, escrow, and hiring models"
+description = "Capture Spore/Sparrow job marketplace, escrow, random assignment, blind auctions, Vickrey reputation adjustment, and direct hire as future packets gated by chain deployment and verified work-output evidence."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-chain/src/marketplace.rs",
+    "crates/roko-chain/src/identity_economy_markets.rs",
+    "crates/roko-serve/src/routes/jobs.rs",
+    "crates/roko-agent-server/src/features/tasks.rs",
+    "crates/roko-demo/src/scenarios/job_board.rs",
+]
+depends_on = ["Q13-gates-evals-arenas", "Q16-dashboard-projections", "Q19-chain-contract-deployment-deferral"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-chain -p roko-agent-server -p roko-serve -p roko-demo", fail_msg = "marketplace economy crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "marketplace chain tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/08-chain/10-spore-job-market.md", why = "job marketplace lifecycle and escrow source" },
+    { path = "docs/08-chain/11-sparrow-power-of-two-choices.md", why = "future assignment mechanism source" },
+    { path = "docs/08-chain/12-three-hiring-models.md", why = "random, auction, and direct hire source" },
+    { path = "docs/08-chain/13-vickrey-reputation-auction.md", why = "reputation-adjusted auction source" },
+    { path = "docs/14-identity-economy/12-three-hiring-models.md", why = "identity economy market requirements and status" },
+]
+symbols = ["Marketplace", "BountySpec", "SparrowBid", "MarketplaceJob"]
+anti_patterns = [
+    "Do not let marketplace jobs bypass typed gate verdicts and work-proof evidence.",
+    "Do not add escrow paths that can settle without structured deliverable validation.",
+]
+
+[task.deferral]
+rationale = "The job marketplace prices and routes agent labor, so it must wait until gate verdicts, validation registries, and dashboard projections can prove work quality and explain failures."
+prerequisite_runtime_policy_gates = [
+    "Q13 gates/evals/arenas complete with typed gate attempts",
+    "Q16 projections can expose marketplace job state and degraded data sources",
+    "Q19 live chain/deployment packet has deployment or simulator confidence evidence",
+]
+acceptance_gates = [
+    "cargo check -p roko-chain -p roko-agent-server -p roko-serve -p roko-demo",
+    "cargo test -p roko-chain --lib --no-run",
+    "job settlement requires structured gate and validation-registry evidence",
+]
+risk_notes = [
+    "Escrow and settlement can reward invalid work if gates are weak.",
+    "Auction and direct-hire mechanisms can centralize work without collusion detection.",
+    "Marketplace projections must not mask partial chain/indexer failures.",
+]
+parity_requirements = [
+    "ARCH06.agent-job-marketplace-economy-deferral",
+    "CHAIN10.spore-job-market",
+    "IDECON12.three-hiring-models",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain -p roko-agent-server -p roko-serve -p roko-demo"
+
+[[task.acceptance_contract.gates]]
+id = "chain-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.agent-job-marketplace-economy-deferral"
+source_ref = "docs/08-chain/10-spore-job-market.md#current-status-and-gaps"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+
+[[task]]
+id = "Q21-payments-token-budget-deferral"
+title = "Defer x402 payments, KORAI demurrage, and agent funding loops"
+description = "Capture x402 micropayments, ERC-3009 transfers, KORAI/DAEJI demurrage, funding sources, and budget guardrails as future packets gated by model routing, auth, projections, and chain deployment evidence."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-chain/src/x402.rs",
+    "crates/roko-chain/src/korai_token.rs",
+    "crates/roko-serve/src/routes/subscriptions.rs",
+    "crates/roko-serve/src/routes/gateway.rs",
+    "crates/roko-core/src/demurrage.rs",
+]
+depends_on = ["Q09-model-routing-auth-secrets", "Q16-dashboard-projections", "Q19-chain-contract-deployment-deferral"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-chain -p roko-serve -p roko-core", fail_msg = "payment and funding crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "chain payment tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/08-chain/02-korai-token-economics.md", why = "KORAI/DAEJI token and demurrage source" },
+    { path = "docs/08-chain/20-x402-micropayments.md", why = "x402 payment source" },
+    { path = "docs/14-identity-economy/08-x402-micropayments.md", why = "identity economy x402 requirements" },
+    { path = "docs/14-identity-economy/10-korai-tokenomics.md", why = "tokenomics and fee flow source" },
+    { path = "docs/17-lifecycle/04-funding-and-budgets.md", why = "agent budget guardrails and funding source" },
+]
+symbols = ["X402Receipt", "KoraiToken", "Budget", "ProviderStatus"]
+anti_patterns = [
+    "Do not add payment-required runtime paths before auth scopes and budget projections are stable.",
+    "Do not let token demurrage or payment settlement mutate agent budgets without auditable events.",
+]
+
+[task.deferral]
+rationale = "Payments and funding loops affect costs and access control; they must wait until model routing, auth scopes, budget telemetry, and chain deployment gates are inspectable."
+prerequisite_runtime_policy_gates = [
+    "Q09 provider routing/auth/secret gates complete",
+    "Q16 projections expose provider cost and payment degradation states",
+    "Q19 chain deployment packet supplies live or simulator confidence evidence",
+]
+acceptance_gates = [
+    "cargo check -p roko-chain -p roko-serve -p roko-core",
+    "cargo test -p roko-chain --lib --no-run",
+    "payment events persist budget deltas with source, receipt, and rollback evidence",
+]
+risk_notes = [
+    "Payment middleware can accidentally make local/self-hosting workflows unavailable.",
+    "Budget self-funding loops can spend indefinitely without hard guardrails.",
+    "Token demurrage must be deterministic and explainable across projections.",
+]
+parity_requirements = [
+    "ARCH06.payments-token-budget-deferral",
+    "CHAIN20.x402-micropayments",
+    "LIFECYCLE04.funding-and-budgets",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain -p roko-serve -p roko-core"
+
+[[task.acceptance_contract.gates]]
+id = "chain-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.payments-token-budget-deferral"
+source_ref = "docs/17-lifecycle/04-funding-and-budgets.md#funding-sources-chain-domain"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+
+[[task]]
+id = "Q22-knowledge-market-futures-isfr-deferral"
+title = "Defer knowledge marketplace, futures, and ISFR clearing"
+description = "Capture knowledge marketplace listings, prediction-backed verification, knowledge futures, LMSR markets, ISFR fact submission, and QP clearing as future packets gated by A-MAC, learning feedback, chain deployment, and payments evidence."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-chain/src/futures_market.rs",
+    "crates/roko-chain/src/isfr.rs",
+    "crates/roko-chain/src/identity_economy_markets.rs",
+    "crates/roko-neuro/src",
+    "crates/roko-learn/src",
+]
+depends_on = ["Q10-knowledge-lifecycle-amac", "Q11-learning-feedback-neuro", "Q13-gates-evals-arenas", "Q19-chain-contract-deployment-deferral", "Q21-payments-token-budget-deferral"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-chain -p roko-neuro -p roko-learn", fail_msg = "knowledge economy crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "knowledge market chain tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/14-identity-economy/05-knowledge-marketplace.md", why = "knowledge marketplace source" },
+    { path = "docs/14-identity-economy/14-knowledge-futures-market.md", why = "knowledge futures and LMSR source" },
+    { path = "docs/08-chain/21-isfr-clearing-settlement.md", why = "ISFR and clearing source" },
+    { path = "docs/08-chain/23-knowledge-futures-market.md", why = "chain knowledge futures source" },
+    { path = "docs/06-neuro/11-antiknowledge-challenge.md", why = "knowledge admission and anti-knowledge risk source" },
+]
+symbols = ["LmsrMarketMaker", "IsfrSubmission", "ClearingCertificate", "KnowledgeFuture"]
+anti_patterns = [
+    "Do not admit purchased knowledge into Neuro without quarantine, validation, and A-MAC admission evidence.",
+    "Do not resolve futures or ISFR claims from untyped review text.",
+]
+
+[task.deferral]
+rationale = "Knowledge markets monetize memory and predictions; they must wait until A-MAC admission, gate outcomes, payment receipts, and chain settlement evidence are durable."
+prerequisite_runtime_policy_gates = [
+    "Q10 A-MAC and knowledge lifecycle complete",
+    "Q11 learning feedback records reward observations from gates",
+    "Q21 payment and budget packet complete with auditable receipts",
+]
+acceptance_gates = [
+    "cargo check -p roko-chain -p roko-neuro -p roko-learn",
+    "cargo test -p roko-chain --lib --no-run",
+    "market admission records quarantine, validation, sandbox, and adoption outcomes",
+]
+risk_notes = [
+    "Low-quality purchased knowledge can poison future context assembly.",
+    "Prediction markets can amplify manipulation if resolution oracles are weak.",
+    "ISFR clearing must expose mathematical certificate failures as blocked outcomes.",
+]
+parity_requirements = [
+    "ARCH06.knowledge-market-futures-isfr-deferral",
+    "IDECON05.knowledge-marketplace",
+    "IDECON14.knowledge-futures-market",
+    "CHAIN21.isfr-clearing-settlement",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-chain -p roko-neuro -p roko-learn"
+
+[[task.acceptance_contract.gates]]
+id = "chain-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.knowledge-market-futures-isfr-deferral"
+source_ref = "docs/14-identity-economy/14-knowledge-futures-market.md#implementation-status"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+
+[[task]]
+id = "Q23-global-mesh-pheromone-chain-deferral"
+title = "Defer global mesh, ERC-8004 discovery, and chain pheromones"
+description = "Capture global pheromone publication, ERC-8004 discovery, mesh-to-chain promotion, and cross-collective trust gradients as future packets gated by relay, groups, pheromone storage, and chain deployment evidence."
+role = "implementer"
+status = "ready"
+tier = "integrative"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-neuro/src/pheromone.rs",
+    "crates/roko-runtime/src/event_bus.rs",
+    "crates/roko-serve/src/relay.rs",
+    "crates/roko-chain/src/agent_registry.rs",
+    "crates/roko-agent-server/src/registration.rs",
+]
+depends_on = ["Q07-relay-feed-subscriptions", "Q12-pheromones-dreams", "Q15-groups-coordination", "Q19-chain-contract-deployment-deferral"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-neuro -p roko-runtime -p roko-serve -p roko-chain -p roko-agent-server", fail_msg = "mesh and pheromone crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-chain --lib --no-run", fail_msg = "chain identity tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/13-coordination/05-pheromone-scope.md", why = "local/mesh/global pheromone source" },
+    { path = "docs/13-coordination/06-agent-mesh-sync.md", why = "ERC-8004 discovery and mesh transport source" },
+    { path = "docs/08-chain/06-erc-8004-registries.md", why = "on-chain registry source" },
+    { path = "docs/08-chain/07-4-tier-gossip-architecture.md", why = "chain gossip tier source" },
+    { path = "docs/08-chain/08-eight-gossip-topics.md", why = "gossip topic source" },
+]
+symbols = ["Pheromone", "EventBus", "RegistrationService", "AgentRegistry"]
+anti_patterns = [
+    "Do not publish local or group-scoped signals globally without explicit promotion policy.",
+    "Do not make ERC-8004 discovery mandatory for local relay operation.",
+]
+
+[task.deferral]
+rationale = "Global coordination changes trust scope and permanence; it must wait until local/mesh scopes, relay replay, group authorization, and chain identity are structurally enforced."
+prerequisite_runtime_policy_gates = [
+    "Q07 relay replay/backpressure complete",
+    "Q12 local pheromone storage and promotion triggers complete",
+    "Q15 group membership and scope checks complete",
+    "Q19 chain identity/deployment evidence available",
+]
+acceptance_gates = [
+    "cargo check -p roko-neuro -p roko-runtime -p roko-serve -p roko-chain -p roko-agent-server",
+    "cargo test -p roko-chain --lib --no-run",
+    "scope promotion records source, authorization, confidence discount, and rollback path",
+]
+risk_notes = [
+    "Global signals are permanent and can leak private group context.",
+    "ERC-8004 cache staleness can route agents to invalid or malicious peers.",
+    "Cross-collective trust gradients must degrade gracefully during partitions.",
+]
+parity_requirements = [
+    "ARCH06.global-mesh-pheromone-chain-deferral",
+    "COORD05.pheromone-scope",
+    "COORD06.agent-mesh-sync",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-neuro -p roko-runtime -p roko-serve -p roko-chain -p roko-agent-server"
+
+[[task.acceptance_contract.gates]]
+id = "chain-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-chain --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.global-mesh-pheromone-chain-deferral"
+source_ref = "docs/13-coordination/05-pheromone-scope.md#global-scope-the-ecosystems-public-pheromone-field"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"
+
+[[task]]
+id = "Q24-portal-marketplace-brain-export-deferral"
+title = "Defer portal marketplace, brain export, and advanced product surfaces"
+description = "Capture browser portal, agent marketplace, brain dump/export, commerce listings, and public product surfaces as future packets gated by stable projections, authoring, meta-agent safety, marketplace economy, and knowledge-market evidence."
+role = "implementer"
+status = "ready"
+tier = "focused"
+model_hint = "claude-sonnet-4-6"
+files = [
+    "crates/roko-serve/src/routes/projections.rs",
+    "crates/roko-serve/src/routes/templates.rs",
+    "crates/roko-core/src/lineage.rs",
+    "crates/roko-neuro/src",
+    "plans/architecture-core-queue/tasks.toml",
+]
+depends_on = ["Q16-dashboard-projections", "Q17-visual-composition-authoring", "Q18-meta-lineage-recursive-safety", "Q20-agent-job-marketplace-economy-deferral", "Q22-knowledge-market-futures-isfr-deferral"]
+verify = [
+    { phase = "compile", command = "cargo check -p roko-serve -p roko-core -p roko-neuro", fail_msg = "portal and marketplace projection crates must compile before implementation begins" },
+    { phase = "test", command = "cargo test -p roko-serve --lib --no-run", fail_msg = "serve tests must build before implementation begins" },
+]
+
+[task.context]
+read_files = [
+    { path = "docs/12-interfaces/13-web-portal.md", why = "deferred portal source and backend boundary" },
+    { path = "docs/12-interfaces/22-statehub-projection-layer.md", why = "projection contract source" },
+    { path = "docs/VISION-RUN-ANYWHERE.md", why = "agent marketplace, brain export, and phase sequencing source" },
+    { path = "docs/USE-CASES.md", why = "vision-tier marketplace and brain export use case source" },
+    { path = "docs/14-identity-economy/06-commerce-bazaar.md", why = "commerce marketplace source" },
+]
+symbols = ["build_parity_matrix", "routes::projections", "AgentTemplate", "Lineage"]
+anti_patterns = [
+    "Do not build dashboard/product surfaces that force unstable backend contracts.",
+    "Do not export or sell agent state without lineage, validation, and safety boundaries.",
+]
+
+[task.deferral]
+rationale = "Public product and marketplace surfaces should consume stable Roko projections; they must not drive backend contracts before execution, authoring, meta-agent safety, and knowledge economy evidence are trustworthy."
+prerequisite_runtime_policy_gates = [
+    "Q16 dashboard projections stable across web/TUI/CLI consumers",
+    "Q17 authoring backend validation and deploy endpoints complete",
+    "Q18 meta-agent lineage and recursive safety complete",
+    "Q20 and Q22 economy packets complete enough to expose verified marketplace data",
+]
+acceptance_gates = [
+    "cargo check -p roko-serve -p roko-core -p roko-neuro",
+    "cargo test -p roko-serve --lib --no-run",
+    "portal data comes only from stable projections with parity rows and unavailable/degraded states",
+]
+risk_notes = [
+    "Product-first implementation can freeze immature backend contracts.",
+    "Brain export can leak secrets, lineage, or unsafe prompt policy without admission rules.",
+    "Marketplace listings need verified evidence, not self-reported quality claims.",
+]
+parity_requirements = [
+    "ARCH06.portal-marketplace-brain-export-deferral",
+    "INTERFACE13.web-portal",
+    "VISION.agent-marketplace-brain-export",
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-serve -p roko-core -p roko-neuro"
+
+[[task.acceptance_contract.gates]]
+id = "serve-lib-tests-build"
+kind = "test"
+command = "cargo test -p roko-serve --lib --no-run"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet_result.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.65
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+replan = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH06.portal-marketplace-brain-export-deferral"
+source_ref = "docs/VISION-RUN-ANYWHERE.md#8-agent-marketplace-and-skills-economy"
+evidence_ref = "plans/architecture-core-queue/tasks.toml"

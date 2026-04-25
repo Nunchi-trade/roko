@@ -84,6 +84,7 @@ struct TaskSnapshot {
     has_verify_steps: bool,
     acceptance_contract: Option<Value>,
     has_required_parity_ledger_rows: bool,
+    deferral_missing_fields: Vec<&'static str>,
 }
 
 impl TaskSnapshot {
@@ -573,6 +574,11 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
             .and_then(|table| table.get("acceptance_contract"))
             .cloned(),
         has_required_parity_ledger_rows: table.is_some_and(has_required_parity_ledger_rows),
+        deferral_missing_fields: table
+            .and_then(|table| table.get("deferral"))
+            .and_then(Value::as_table)
+            .map(deferral_missing_fields)
+            .unwrap_or_default(),
     }
 }
 
@@ -633,6 +639,19 @@ fn validate_architecture_queue_task(
             });
         }
     }
+
+    for field in &task.deferral_missing_fields {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            rule_id: "PLAN_026".to_string(),
+            plan_id: Some(plan_id.to_string()),
+            task_id: task.task_id.clone(),
+            message: format!(
+                "architecture queue task '{}' has incomplete deferral metadata: missing {field}",
+                task.label()
+            ),
+        });
+    }
 }
 
 fn has_required_parity_ledger_rows(table: &toml::map::Map<String, Value>) -> bool {
@@ -650,6 +669,45 @@ fn has_required_parity_ledger_rows(table: &toml::map::Map<String, Value>) -> boo
         .and_then(|parity| parity.get("rows"))
         .and_then(Value::as_array)
         .is_some_and(|rows| !rows.is_empty())
+}
+
+fn deferral_missing_fields(table: &toml::map::Map<String, Value>) -> Vec<&'static str> {
+    let string_array_present = |field: &str| {
+        table
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|value| !value.trim().is_empty()))
+            })
+    };
+
+    let mut missing = Vec::new();
+    if !table
+        .get("rationale")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        missing.push("deferral.rationale");
+    }
+    for field in [
+        "prerequisite_runtime_policy_gates",
+        "acceptance_gates",
+        "risk_notes",
+        "parity_requirements",
+    ] {
+        if !string_array_present(field) {
+            missing.push(match field {
+                "prerequisite_runtime_policy_gates" => "deferral.prerequisite_runtime_policy_gates",
+                "acceptance_gates" => "deferral.acceptance_gates",
+                "risk_notes" => "deferral.risk_notes",
+                "parity_requirements" => "deferral.parity_requirements",
+                _ => unreachable!("checked field list is exhaustive"),
+            });
+        }
+    }
+    missing
 }
 
 fn string_field(value: Option<&Value>) -> Option<String> {
