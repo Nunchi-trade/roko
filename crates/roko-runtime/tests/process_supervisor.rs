@@ -5,8 +5,8 @@ use std::time::Duration;
 use roko_runtime::{
     cancel::CancelToken,
     process::{
-        ProcessResumeError, ProcessSessionConfig, ProcessSessionLedger, ProcessSessionState,
-        ProcessSupervisor, SpawnConfig,
+        ProcessResumeError, ProcessResumePolicy, ProcessSessionConfig, ProcessSessionLedger,
+        ProcessSessionState, ProcessSupervisor, SpawnConfig,
     },
 };
 use tokio::{
@@ -319,4 +319,103 @@ fn resume_validation_rejects_terminal_success() {
             ProcessSessionState::Succeeded
         ))
     );
+}
+
+#[test]
+fn resume_validation_rejects_incompatible_backend_and_stale_state() {
+    let mut ledger = ProcessSessionLedger::default();
+    ledger.upsert(roko_runtime::process::ProcessSessionRecord {
+        session_id: "session-live".to_string(),
+        invocation_id: "invocation-live".to_string(),
+        backend_id: "backend-a".to_string(),
+        task_id: Some("task-a".to_string()),
+        reuse_policy_id: None,
+        resumable: true,
+        process_id: roko_runtime::process::ProcessId(7),
+        os_pid: None,
+        label: "live".to_string(),
+        program: "sleep".to_string(),
+        args: Vec::new(),
+        started_at_ms: 10,
+        updated_at_ms: 100,
+        ended_at_ms: None,
+        timeout_ms: Some(1_000),
+        state: ProcessSessionState::Started,
+        reason: None,
+    });
+
+    let backend_policy = ProcessResumePolicy {
+        expected_backend_id: Some("backend-b".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        ledger.validate_resume_with_policy("session-live", &backend_policy),
+        Err(ProcessResumeError::BackendMismatch {
+            expected: "backend-b".to_string(),
+            actual: "backend-a".to_string(),
+        })
+    );
+
+    let stale_policy = ProcessResumePolicy {
+        max_staleness_ms: Some(50),
+        now_ms: Some(200),
+        ..Default::default()
+    };
+    assert_eq!(
+        ledger.validate_resume_with_policy("session-live", &stale_policy),
+        Err(ProcessResumeError::Stale {
+            max_staleness_ms: 50,
+            age_ms: 100,
+        })
+    );
+}
+
+#[test]
+fn process_session_summary_counts_terminal_resumable_and_stale_records() {
+    let mut ledger = ProcessSessionLedger::default();
+    for (idx, state) in [
+        ProcessSessionState::Started,
+        ProcessSessionState::TimedOut,
+        ProcessSessionState::Cancelled,
+        ProcessSessionState::Failed,
+        ProcessSessionState::Succeeded,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ledger.upsert(roko_runtime::process::ProcessSessionRecord {
+            session_id: format!("session-{idx}"),
+            invocation_id: format!("invocation-{idx}"),
+            backend_id: "backend".to_string(),
+            task_id: None,
+            reuse_policy_id: None,
+            resumable: true,
+            process_id: roko_runtime::process::ProcessId(idx as u64),
+            os_pid: None,
+            label: format!("record-{idx}"),
+            program: "test".to_string(),
+            args: Vec::new(),
+            started_at_ms: 1,
+            updated_at_ms: if state == ProcessSessionState::Started {
+                10
+            } else {
+                100
+            },
+            ended_at_ms: state.is_terminal().then_some(100),
+            timeout_ms: None,
+            state,
+            reason: None,
+        });
+    }
+
+    let summary = ledger.state_summary(Some(50), 100);
+    assert_eq!(summary.total, 5);
+    assert_eq!(summary.started, 1);
+    assert_eq!(summary.timed_out, 1);
+    assert_eq!(summary.cancelled, 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(summary.resumable, 3);
+    assert_eq!(summary.stale, 1);
+    assert_eq!(summary.latest_updated_at_ms, Some(100));
 }

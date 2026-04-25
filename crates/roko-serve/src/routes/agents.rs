@@ -26,7 +26,9 @@ use roko_chain::alloy_impl::AlloyChainWallet;
 use roko_core::HeartbeatPayload;
 use roko_core::config::schema::{ModelProfile, RokoConfig};
 use roko_learn::provider_health::HealthState;
-use roko_runtime::process::{ProcessId, SpawnConfig};
+use roko_runtime::process::{
+    ProcessId, ProcessSessionConfig, SpawnConfig, default_process_session_ledger_path,
+};
 
 use crate::error::ApiError;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
@@ -795,6 +797,16 @@ async fn start_agent(
         program: roko_bin.to_string_lossy().into_owned(),
         args,
         working_dir: Some(state.workdir.clone()),
+        session: Some(ProcessSessionConfig {
+            session_id: format!("agent:{agent_id}"),
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+            backend_id: "roko-agent-sidecar".to_string(),
+            task_id: Some(agent_id.clone()),
+            reuse_policy_id: Some("serve-agent-sidecar".to_string()),
+            resumable: true,
+            timeout_ms: None,
+            ledger_path: default_process_session_ledger_path(&state.workdir),
+        }),
         label: agent_id.clone(),
         ..Default::default()
     };

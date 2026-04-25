@@ -9130,6 +9130,15 @@ async fn cmd_status(
         .and_then(|days| days.last().map(|(_, cost)| *cost));
     let cost_by_model = costs_log.cost_by_model().await.unwrap_or_default();
     let cost_by_plan = costs_log.cost_by_plan().await.unwrap_or_default();
+    let runtime_config = load_layered(&workdir)
+        .map(|resolved| resolved.config.runtime)
+        .unwrap_or_else(|_| Config::default().runtime);
+    let process_ledger_path = runtime_config.process_session_ledger_path(&workdir);
+    let process_status = roko_cli::status::collect_session_status_with_process_ledger(
+        &workdir,
+        &process_ledger_path,
+        Some(runtime_config.resume_max_staleness_ms()),
+    );
 
     if cli.json {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -9203,6 +9212,8 @@ async fn cmd_status(
             cfactor: cfactor_snapshot,
             total_cost_usd,
             today_cost_usd,
+            process_session_ledger: process_status.process_session_ledger,
+            process_sessions: process_status.process_sessions,
         };
 
         // Build enriched JSON with gate verdicts, workspace info, and signal counts.
@@ -9272,6 +9283,21 @@ async fn cmd_status(
         "workspace: {} agent pid(s), {} plan(s) in executor snapshot",
         running_agents, active_plans
     );
+    if let Some(summary) = process_status.process_sessions.as_ref() {
+        println!(
+            "process sessions: total={} started={} timed_out={} cancelled={} failed={} resumable={} stale={}",
+            summary.total,
+            summary.started,
+            summary.timed_out,
+            summary.cancelled,
+            summary.failed,
+            summary.resumable,
+            summary.stale
+        );
+        if let Some(path) = process_status.process_session_ledger.as_ref() {
+            println!("  ledger: {}", path.display());
+        }
+    }
 
     let mut episodes = substrate
         .query(&Query::of_kind(Kind::Episode), &ctx)

@@ -4,7 +4,7 @@
 //! sets a token budget for prompt composition, and lists the gates to run
 //! on the agent's output.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,9 @@ pub struct Config {
     /// Executor runtime settings.
     #[serde(default)]
     pub executor: ExecutorConfig,
+    /// Durable runtime/control-plane settings.
+    #[serde(default)]
+    pub runtime: RuntimeControlConfig,
     /// Cost budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
@@ -81,6 +84,7 @@ impl Default for Config {
             repos: Vec::new(),
             gates: vec![GateConfig::default_shell_true()],
             executor: ExecutorConfig::default(),
+            runtime: RuntimeControlConfig::default(),
             budget: BudgetConfig::default(),
             providers: HashMap::new(),
             models: HashMap::new(),
@@ -399,6 +403,63 @@ impl Default for BudgetConfig {
             max_task_usd: Self::default_max_task(),
             max_session_usd: Self::default_max_session(),
             warn_at_percent: Self::default_warn_pct(),
+        }
+    }
+}
+
+/// Durable runtime/control-plane configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeControlConfig {
+    /// Path to the process-session ledger. Relative paths resolve from the workspace root.
+    #[serde(default = "RuntimeControlConfig::default_process_session_ledger")]
+    pub process_session_ledger: PathBuf,
+    /// Maximum age for resumable process-session metadata before resume fails closed.
+    #[serde(default = "RuntimeControlConfig::default_resume_max_staleness_secs")]
+    pub resume_max_staleness_secs: u64,
+}
+
+impl RuntimeControlConfig {
+    fn default_process_session_ledger() -> PathBuf {
+        PathBuf::from(".roko/state/process-sessions.json")
+    }
+
+    const fn default_resume_max_staleness_secs() -> u64 {
+        24 * 60 * 60
+    }
+
+    /// Resolve the configured ledger path against a workspace root.
+    #[must_use]
+    pub fn process_session_ledger_path(&self, workdir: &Path) -> PathBuf {
+        if self.process_session_ledger.is_absolute() {
+            self.process_session_ledger.clone()
+        } else {
+            workdir.join(&self.process_session_ledger)
+        }
+    }
+
+    /// Return the resume staleness window in milliseconds.
+    #[must_use]
+    pub const fn resume_max_staleness_ms(&self) -> u64 {
+        self.resume_max_staleness_secs.saturating_mul(1_000)
+    }
+
+    /// Validate runtime control-plane settings.
+    pub fn validate(&self) -> Result<()> {
+        if self.process_session_ledger.as_os_str().is_empty() {
+            bail!("runtime.process_session_ledger must not be empty");
+        }
+        if self.resume_max_staleness_secs == 0 {
+            bail!("runtime.resume_max_staleness_secs must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+impl Default for RuntimeControlConfig {
+    fn default() -> Self {
+        Self {
+            process_session_ledger: Self::default_process_session_ledger(),
+            resume_max_staleness_secs: Self::default_resume_max_staleness_secs(),
         }
     }
 }
@@ -918,6 +979,9 @@ pub struct ConfigLayer {
     /// Executor settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<ExecutorLayer>,
+    /// Runtime/control-plane settings overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeControlLayer>,
     /// Provider registry overrides keyed by provider name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<HashMap<String, ProviderLayer>>,
@@ -991,6 +1055,12 @@ impl ConfigLayer {
                 None => e,
             });
         }
+        if let Some(runtime) = overlay.runtime {
+            self.runtime = Some(match self.runtime {
+                Some(base) => base.merge(runtime),
+                None => runtime,
+            });
+        }
         if let Some(overlay_providers) = overlay.providers {
             let mut providers = self.providers.unwrap_or_default();
             for (name, layer) in overlay_providers {
@@ -1034,6 +1104,7 @@ impl ConfigLayer {
             && self.prompt.is_none()
             && self.gates.is_none()
             && self.executor.is_none()
+            && self.runtime.is_none()
             && self.providers.is_none()
             && self.models.is_none()
             && self.serve.is_none()
@@ -1122,6 +1193,10 @@ impl ConfigLayer {
             }
             None => ExecutorConfig::default(),
         };
+        let runtime = match self.runtime {
+            Some(runtime) => runtime.resolve()?,
+            None => RuntimeControlConfig::default(),
+        };
         let providers = match self.providers {
             Some(providers) => providers
                 .into_iter()
@@ -1177,6 +1252,7 @@ impl ConfigLayer {
             repos: self.repos.unwrap_or_default(),
             gates,
             executor,
+            runtime,
             budget: BudgetConfig::default(),
             providers,
             models,
@@ -2259,6 +2335,47 @@ pub struct ExecutorLayer {
     pub speculative_threshold_multiplier: Option<f64>,
 }
 
+/// Partial `RuntimeControlConfig` — every field optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RuntimeControlLayer {
+    /// Path to the process-session ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_session_ledger: Option<PathBuf>,
+    /// Maximum process-session metadata age before resume fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_max_staleness_secs: Option<u64>,
+}
+
+impl RuntimeControlLayer {
+    /// Merge another layer on top — `overlay` wins.
+    #[must_use]
+    pub fn merge(self, overlay: Self) -> Self {
+        Self {
+            process_session_ledger: overlay
+                .process_session_ledger
+                .or(self.process_session_ledger),
+            resume_max_staleness_secs: overlay
+                .resume_max_staleness_secs
+                .or(self.resume_max_staleness_secs),
+        }
+    }
+
+    /// Resolve into a validated [`RuntimeControlConfig`].
+    pub fn resolve(self) -> Result<RuntimeControlConfig> {
+        let defaults = RuntimeControlConfig::default();
+        let config = RuntimeControlConfig {
+            process_session_ledger: self
+                .process_session_ledger
+                .unwrap_or(defaults.process_session_ledger),
+            resume_max_staleness_secs: self
+                .resume_max_staleness_secs
+                .unwrap_or(defaults.resume_max_staleness_secs),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 /// Partial `ServeConfig` — every field optional.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServeLayer {
@@ -3131,6 +3248,48 @@ use_worktrees = true
             ]
         );
         assert!(cfg.serve.deploy.webhooks.is_empty());
+    }
+
+    #[test]
+    fn layer_resolve_uses_runtime_control_overrides() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[runtime]
+process_session_ledger = ".roko/state/custom-process-sessions.json"
+resume_max_staleness_secs = 3600
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert_eq!(
+            cfg.runtime.process_session_ledger,
+            PathBuf::from(".roko/state/custom-process-sessions.json")
+        );
+        assert_eq!(cfg.runtime.resume_max_staleness_secs, 3600);
+        assert_eq!(cfg.runtime.resume_max_staleness_ms(), 3_600_000);
+        assert_eq!(
+            cfg.runtime
+                .process_session_ledger_path(Path::new("/workspace")),
+            PathBuf::from("/workspace/.roko/state/custom-process-sessions.json")
+        );
+    }
+
+    #[test]
+    fn runtime_control_rejects_zero_staleness_window() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[runtime]
+resume_max_staleness_secs = 0
+"#,
+        )
+        .unwrap();
+
+        let err = layer.resolve().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("runtime.resume_max_staleness_secs must be greater than zero")
+        );
     }
 
     #[test]
