@@ -141,6 +141,8 @@ pub mod post_gate_reflection;
 pub mod prediction;
 pub mod prompt_experiment;
 pub mod provider_health;
+/// Provider/model pass-rate outcome telemetry for future routing bandits.
+pub mod provider_model_outcome;
 pub mod quality_judge;
 pub mod regression;
 /// Typed reinforcement signal categories for the learning pipeline (AS-11).

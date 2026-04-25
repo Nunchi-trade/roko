@@ -19,6 +19,9 @@ use roko_learn::cascade_router::CascadeStage;
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
+use roko_learn::provider_model_outcome::{
+    ProviderModelPassRateReport, read_provider_model_outcomes, summarize_provider_model_outcomes,
+};
 use roko_learn::runtime_feedback::read_efficiency_events;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -31,6 +34,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/learning/cascade", get(cascade))
         .route("/learning/cost-tiers", get(cost_tiers))
         .route("/learn/cost-tiers", get(cost_tiers))
+        .route(
+            "/learning/provider-model-pass-rates",
+            get(provider_model_pass_rates),
+        )
+        .route(
+            "/learn/provider-model-pass-rates",
+            get(provider_model_pass_rates),
+        )
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
@@ -87,6 +98,23 @@ async fn cost_tiers(
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     let snapshot = read_cascade_snapshot(&path).await?;
     Ok(Json(build_cost_tier_response(snapshot)))
+}
+
+/// `GET /api/learning/provider-model-pass-rates` — rolling pass-rate summaries.
+async fn provider_model_pass_rates(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProviderModelPassRateQuery>,
+) -> Result<Json<ProviderModelPassRateReport>, ApiError> {
+    let path = state
+        .workdir
+        .join(".roko/learn/provider-model-outcomes.jsonl");
+    let records = read_provider_model_outcomes(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
+    Ok(Json(summarize_provider_model_outcomes(
+        &records,
+        query.window.unwrap_or(50),
+    )))
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
@@ -866,6 +894,12 @@ struct CFactorTrendQuery {
     window: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProviderModelPassRateQuery {
+    #[serde(default)]
+    window: Option<usize>,
+}
+
 /// Task-level efficiency summary derived from the JSONL event stream.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1382,6 +1416,80 @@ mod tests {
         let thresholds_payload: Value = serde_json::from_slice(&thresholds_body)
             .map_err(|err| anyhow!("failed to parse gate-thresholds alias response body: {err}"))?;
         assert_eq!(thresholds_payload["hello"], "world");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_model_pass_rates_exposes_rolling_outcome_summary()
+    -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .map_err(|err| anyhow!("failed to create learn dir for provider model test: {err}"))?;
+        let outcome_path = learn_dir.join("provider-model-outcomes.jsonl");
+        let records = [
+            serde_json::json!({
+                "schema_version": 1,
+                "timestamp": "2026-04-25T10:00:00Z",
+                "action_id": "provider:zai|model:glm-5.1",
+                "provider": "zai",
+                "model": "glm-5.1",
+                "task_id": "task-1",
+                "task_type": "implementation",
+                "role_id": "implementer",
+                "status": "passed",
+                "gate_outcomes": [{"gate_name": "cargo_test", "passed": true}],
+                "retry_count": 0,
+                "usage": {"total_tokens": 100, "cost_usd": 0.1, "latency_ms": 1000}
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "timestamp": "2026-04-25T10:01:00Z",
+                "action_id": "provider:zai|model:glm-5.1",
+                "provider": "zai",
+                "model": "glm-5.1",
+                "task_id": "task-2",
+                "task_type": "implementation",
+                "role_id": "implementer",
+                "status": "failed",
+                "gate_outcomes": [{"gate_name": "cargo_test", "passed": false}],
+                "retry_count": 1,
+                "usage": {"total_tokens": 200, "cost_usd": 0.2, "latency_ms": 2000}
+            }),
+        ];
+        tokio::fs::write(&outcome_path, format!("{}\n{}\n", records[0], records[1]))
+            .await
+            .map_err(|err| anyhow!("failed to write outcome fixture: {err}"))?;
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learning/provider-model-pass-rates?window=1")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build pass-rate request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("pass-rate request failed: {err}"))?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read pass-rate response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse pass-rate response body: {err}"))?;
+        assert_eq!(payload["total_records"], 2);
+        assert_eq!(payload["window_size"], 1);
+        assert_eq!(
+            payload["actions"][0]["action_id"],
+            "provider:zai|model:glm-5.1"
+        );
+        assert_eq!(payload["actions"][0]["observations"], 2);
+        assert_eq!(payload["actions"][0]["successes"], 1);
+        assert_eq!(payload["actions"][0]["rolling_successes"], 0);
+        assert_eq!(payload["actions"][0]["total_tokens"], 300);
         Ok(())
     }
 

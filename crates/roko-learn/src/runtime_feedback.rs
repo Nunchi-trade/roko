@@ -40,6 +40,10 @@ use crate::post_gate_reflection::{
 };
 use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use crate::provider_health::ProviderHealthTracker;
+use crate::provider_model_outcome::{
+    ProviderModelOutcomeRecord, ProviderModelOutcomeStore, ProviderModelPassRateReport,
+    read_provider_model_outcomes, summarize_provider_model_outcomes,
+};
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
 use crate::section_effect::SectionEffectivenessRegistry;
 use crate::skill_library::{SkillLibrary, SkillLibraryError, TemplatePatternGenerator};
@@ -119,6 +123,8 @@ pub struct LearningPaths {
     pub section_effects_json: PathBuf,
     /// Structured post-gate reflection records and candidates.
     pub post_gate_reflections_json: PathBuf,
+    /// Append-only provider/model outcome telemetry for future bandits.
+    pub provider_model_outcomes_jsonl: PathBuf,
 }
 
 impl LearningPaths {
@@ -143,6 +149,7 @@ impl LearningPaths {
             local_rewards_json: root.join("local-rewards.json"),
             section_effects_json: root.join("section-effects.json"),
             post_gate_reflections_json: root.join("post-gate-reflections.json"),
+            provider_model_outcomes_jsonl: root.join("provider-model-outcomes.jsonl"),
             root,
         }
     }
@@ -313,6 +320,8 @@ pub struct LearningUpdate {
     pub reflection_recorded: ApplyStatus,
     /// Whether a reflection-derived playbook candidate was updated.
     pub reflection_candidate_updated: ApplyStatus,
+    /// Whether a provider/model outcome record was persisted.
+    pub provider_model_outcome_recorded: ApplyStatus,
 }
 
 /// Errors produced by [`LearningRuntime`].
@@ -354,6 +363,7 @@ pub struct LearningRuntime {
     experiment_store: parking_lot::Mutex<ExperimentStore>,
     local_rewards: parking_lot::Mutex<HashMap<String, LocalRewardFunction>>,
     section_effectiveness: parking_lot::Mutex<SectionEffectivenessRegistry>,
+    provider_model_outcomes: ProviderModelOutcomeStore,
     episode_completion_hook: Option<EpisodeCompletionHook>,
 }
 
@@ -397,6 +407,8 @@ impl LearningRuntime {
         let local_rewards = load_local_rewards(&paths.local_rewards_json);
         let section_effectiveness =
             SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
+        let provider_model_outcomes =
+            ProviderModelOutcomeStore::open_creating(&paths.provider_model_outcomes_jsonl).await?;
 
         sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
 
@@ -421,6 +433,7 @@ impl LearningRuntime {
             experiment_store: parking_lot::Mutex::new(experiment_store),
             local_rewards: parking_lot::Mutex::new(local_rewards),
             section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
+            provider_model_outcomes,
             episode_completion_hook: None,
         })
     }
@@ -462,6 +475,8 @@ impl LearningRuntime {
         let local_rewards = load_local_rewards(&paths.local_rewards_json);
         let section_effectiveness =
             SectionEffectivenessRegistry::load_or_new(&paths.section_effects_json);
+        let provider_model_outcomes =
+            ProviderModelOutcomeStore::open_creating(&paths.provider_model_outcomes_jsonl).await?;
 
         sync_experiment_winner_artifact(&paths.experiment_winners_json, &experiment_store)?;
 
@@ -486,6 +501,7 @@ impl LearningRuntime {
             experiment_store: parking_lot::Mutex::new(experiment_store),
             local_rewards: parking_lot::Mutex::new(local_rewards),
             section_effectiveness: parking_lot::Mutex::new(section_effectiveness),
+            provider_model_outcomes,
             episode_completion_hook: None,
         })
     }
@@ -734,6 +750,34 @@ impl LearningRuntime {
         read_efficiency_events(&self.paths.efficiency_jsonl).await
     }
 
+    /// Read all persisted provider/model outcome telemetry records.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read.
+    pub async fn read_provider_model_outcomes(
+        &self,
+    ) -> Result<Vec<ProviderModelOutcomeRecord>, LearningRuntimeError> {
+        read_provider_model_outcomes(&self.paths.provider_model_outcomes_jsonl)
+            .await
+            .map_err(LearningRuntimeError::Io)
+    }
+
+    /// Return rolling provider/model pass-rate summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the outcome log cannot be opened or read.
+    pub async fn provider_model_pass_rates(
+        &self,
+        window_size: usize,
+    ) -> Result<ProviderModelPassRateReport, LearningRuntimeError> {
+        let records = self.read_provider_model_outcomes().await?;
+        Ok(summarize_provider_model_outcomes(&records, window_size))
+    }
+
     /// Read the latest persisted C-Factor snapshot, if one exists.
     ///
     /// # Errors
@@ -866,6 +910,8 @@ impl LearningRuntime {
             }
         }
 
+        let provider_for_outcome = input.provider.clone();
+
         if let Some(provider) = input.provider {
             if input.episode.success {
                 self.provider_health.record_success(&provider);
@@ -873,6 +919,14 @@ impl LearningRuntime {
                 self.provider_health.record_failure(&provider);
             }
             update.provider_updated = ApplyStatus::Applied;
+        }
+
+        if let Some(outcome) = ProviderModelOutcomeRecord::from_episode(
+            &input.episode,
+            provider_for_outcome.as_deref(),
+        ) {
+            self.provider_model_outcomes.append(&outcome).await?;
+            update.provider_model_outcome_recorded = ApplyStatus::Applied;
         }
 
         if let Some(playbook_id) = input.playbook_id {
@@ -1917,8 +1971,17 @@ mod tests {
         assert_eq!(update.episode_logged, ApplyStatus::Applied);
         assert_eq!(update.cost_logged, ApplyStatus::Applied);
         assert_eq!(update.provider_updated, ApplyStatus::Applied);
+        assert_eq!(update.provider_model_outcome_recorded, ApplyStatus::Applied);
         assert!(update.extracted_skill_id.is_some());
         assert_eq!(runtime.costs_db().len(), 1);
+        let pass_rates = runtime.provider_model_pass_rates(25).await.unwrap();
+        assert_eq!(pass_rates.total_records, 1);
+        assert_eq!(
+            pass_rates.actions[0].action_id,
+            "provider:anthropic|model:claude-opus-4-6"
+        );
+        assert_eq!(pass_rates.actions[0].successes, 1);
+        assert_eq!(pass_rates.actions[0].task_types, vec!["bugfix"]);
 
         let episodes_jsonl = std::fs::read_to_string(&runtime.paths().episodes_jsonl).unwrap();
         let persisted: Episode = serde_json::from_str(episodes_jsonl.lines().next().unwrap())
