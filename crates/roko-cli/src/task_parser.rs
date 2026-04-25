@@ -12,6 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use roko_core::{OperatingFrequency, TaskDomain};
+use roko_gate::AcceptanceContract;
 use roko_orchestrator::{ReplanStrategy, detect_cycle_nodes};
 use roko_std::denied_tools_for_role;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -84,6 +85,9 @@ pub struct TaskDef {
     pub max_retries: u32,
     /// Free-form acceptance criteria (legacy format, strings).
     pub acceptance: Vec<String>,
+    /// Typed done-gate contract for self-hosting tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_contract: Option<AcceptanceContract>,
     /// Work domain — controls gate selection and git policy.
     pub domain: Option<TaskDomain>,
 }
@@ -141,6 +145,8 @@ struct TaskDefSerde {
     #[serde(default)]
     pub acceptance: Vec<String>,
     #[serde(default)]
+    pub acceptance_contract: Option<AcceptanceContract>,
+    #[serde(default)]
     pub domain: Option<TaskDomain>,
 }
 
@@ -169,6 +175,7 @@ impl From<TaskDefSerde> for TaskDef {
             timeout_secs: raw.timeout_secs,
             max_retries: raw.max_retries,
             acceptance: raw.acceptance,
+            acceptance_contract: raw.acceptance_contract,
             domain: raw.domain,
         };
         task.apply_role_tool_defaults();
@@ -1099,6 +1106,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         assert_eq!(task.effective_model("fallback", None), "claude-haiku-4-5");
@@ -1143,6 +1151,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         assert_eq!(task.operating_frequency(), OperatingFrequency::Gamma);
@@ -1173,6 +1182,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         assert_eq!(reactive.operating_frequency(), OperatingFrequency::Gamma);
@@ -1200,6 +1210,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         assert_eq!(reflective.operating_frequency(), OperatingFrequency::Delta);
@@ -1227,6 +1238,7 @@ command = "cargo check -p roko-cli"
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         assert_eq!(
@@ -1550,6 +1562,7 @@ depends_on = []
                 timeout_secs: 600,
                 max_retries: 3,
                 acceptance: vec![],
+                acceptance_contract: None,
                 domain: None,
             });
         }
@@ -1617,6 +1630,7 @@ depends_on = ["other-plan:T3"]
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         let original = "Original task prompt";
@@ -1653,6 +1667,7 @@ depends_on = ["other-plan:T3"]
             timeout_secs: 600,
             max_retries: 3,
             acceptance: vec![],
+            acceptance_contract: None,
             domain: None,
         };
         let original = "Original prompt";

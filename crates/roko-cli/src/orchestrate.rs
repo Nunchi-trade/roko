@@ -83,9 +83,11 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, FailureClass, GateFailureAction,
-    GateRatchet, ParsedReviewVerdict, ReviewVerdictContext, SearchHit, SearchOracle, ShellGate,
-    TestGate, VerdictPublisher,
+    AcceptanceDecision, AcceptanceEvidence, AcceptanceOutcome, ArtifactStore as GateArtifactStore,
+    ClippyGate, CompileGate, FailureClass, GateEvidence, GateFailureAction, GateRatchet,
+    NoStubEvidence, ParityLedgerEvidenceRow, ParsedReviewVerdict, RecoveryEvidence,
+    ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle, ShellGate,
+    StructuredOutputEvidence, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -3304,6 +3306,8 @@ struct TaskTracker {
     last_gate_verdicts: Vec<GateVerdict>,
     /// Last runtime-facing gate verdict summaries emitted for this plan.
     last_gate_verdict_summaries: Vec<GateVerdictSummary>,
+    /// Last structured reviewer verdict parsed for this plan.
+    last_review_verdict: Option<ReviewVerdictEvidence>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -3922,6 +3926,7 @@ impl TaskTracker {
             last_context_knowledge_ids: Vec::new(),
             last_gate_verdicts: Vec::new(),
             last_gate_verdict_summaries: Vec::new(),
+            last_review_verdict: None,
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -3955,6 +3960,7 @@ impl TaskTracker {
             .collect();
         self.ready_since_ms
             .retain(|task_id, _| task_ids.contains(task_id));
+        self.last_review_verdict = None;
         self.current_group_index = 0;
         self.advance_group_index();
     }
@@ -4095,6 +4101,7 @@ impl TaskTracker {
         self.current_group_index = 0;
         self.ready_since_ms.clear();
         self.last_gate_verdict_summaries.clear();
+        self.last_review_verdict = None;
         self.impl_round += 1;
         self.advance_group_index();
         Ok(())
@@ -4143,6 +4150,7 @@ impl TaskTracker {
         self.current_group_index = 0;
         self.ready_since_ms.clear();
         self.last_gate_verdict_summaries.clear();
+        self.last_review_verdict = None;
         self.impl_round += 1;
     }
 
@@ -9611,6 +9619,30 @@ impl PlanRunner {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
                     }
+                    if let Err(e) = self.record_structured_agent_output_evidence(
+                        plan_id,
+                        task_id,
+                        task_def.as_ref(),
+                        &result,
+                    ) {
+                        tracing::error!(
+                            "[orchestrate] structured agent output validation failed for {plan_id}/{task_id}: {e}"
+                        );
+                        if total_dispatches >= max_dispatches {
+                            terminal_error = Some(e);
+                            break;
+                        }
+                        retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                            plan_id,
+                            task_id,
+                            task_def.as_ref(),
+                            &format!("{e:#}"),
+                            Some("agent_output"),
+                            Some(HintType::ErrorDigest),
+                        ));
+                        retry_iteration = retry_iteration.saturating_add(1);
+                        continue;
+                    }
                     let domain = self.current_task_domain(plan_id);
                     if let Err(e) = self
                         .finalize_successful_task_worktree(
@@ -10089,6 +10121,30 @@ impl PlanRunner {
                 let task_def = tasks_file
                     .as_ref()
                     .and_then(|tf| tf.tasks.iter().find(|task| task.id == *tid).cloned());
+                if let Err(e) = self.record_structured_agent_output_evidence(
+                    plan_id,
+                    tid,
+                    task_def.as_ref(),
+                    &task_result.result,
+                ) {
+                    tracing::error!(
+                        "[orchestrate] parallel task {tid} structured output validation failed: {e}"
+                    );
+                    self.record_task_failure(
+                        plan_id,
+                        tid,
+                        Some(task_result.prompt_text.as_str()),
+                        Some(task_result.model.as_str()),
+                        &e,
+                        &started,
+                        &task_result.backend_id,
+                        Some(&task_result.result),
+                        0,
+                    )
+                    .await;
+                    any_fatal = true;
+                    continue;
+                }
                 if let Err(e) = self
                     .finish_task_post_processing(
                         plan_id,
@@ -11171,6 +11227,268 @@ impl PlanRunner {
             duration_ms = wall_ms,
             "task completed"
         );
+        Ok(())
+    }
+
+    /// Parse and persist required structured output evidence before a task can
+    /// count as implemented. Missing or malformed output fails closed and
+    /// routes through the existing retry path.
+    fn record_structured_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        result: &AgentResult,
+    ) -> Result<()> {
+        let Some(requirement) = task_def
+            .and_then(|task| task.acceptance_contract.as_ref())
+            .and_then(|contract| contract.agent_output.as_ref())
+            .filter(|requirement| requirement.required)
+        else {
+            return Ok(());
+        };
+
+        let output_text = result.output.body.as_text().unwrap_or_default();
+        let raw_output_ref = result.output.id.to_string();
+        let evidence = parse_structured_agent_output_evidence(
+            output_text,
+            task_id,
+            &requirement.schema,
+            raw_output_ref,
+        );
+        self.persist_agent_output_evidence(plan_id, task_id, &evidence)?;
+
+        if evidence.parsed && evidence.schema_valid {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "structured agent output for {plan_id}/{task_id} did not satisfy schema {}",
+                requirement.schema
+            ))
+        }
+    }
+
+    fn persist_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        evidence: &StructuredOutputEvidence,
+    ) -> Result<()> {
+        let dir = acceptance_task_dir(&self.workdir, plan_id, task_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("agent-output-evidence.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(evidence)?)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
+    fn validate_acceptance_contracts_for_plan(
+        &mut self,
+        plan_id: &str,
+        review: &ReviewVerdictEvidence,
+    ) -> Result<()> {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return Ok(());
+        };
+        let tasks = tracker.tasks_file.tasks.clone();
+        let mut failures = Vec::new();
+
+        for task in tasks
+            .iter()
+            .filter(|task| task.acceptance_contract.is_some())
+        {
+            let contract = task
+                .acceptance_contract
+                .as_ref()
+                .expect("filtered acceptance contract");
+            let evidence = self.acceptance_evidence_for_task(plan_id, task, review)?;
+            let decision = contract.validate_evidence(&evidence);
+            self.persist_acceptance_decision(plan_id, &task.id, &evidence, &decision)?;
+            if !decision.passed() {
+                failures.push(format_acceptance_decision(&task.id, &decision));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("\n\n")))
+        }
+    }
+
+    fn acceptance_evidence_for_task(
+        &self,
+        plan_id: &str,
+        task: &crate::task_parser::TaskDef,
+        review: &ReviewVerdictEvidence,
+    ) -> Result<AcceptanceEvidence> {
+        let contract = task
+            .acceptance_contract
+            .as_ref()
+            .expect("acceptance contract exists");
+        let gate_results = self
+            .executor
+            .plan_state(plan_id)
+            .map(|state| state.gate_results.as_slice())
+            .unwrap_or(&[]);
+        let gates = contract
+            .gates
+            .iter()
+            .map(|requirement| {
+                let matched = gate_results
+                    .iter()
+                    .find(|result| gate_result_matches_requirement(result, requirement));
+                GateEvidence {
+                    gate_id: requirement.id.clone(),
+                    outcome: matched.map_or(AcceptanceOutcome::Failed, |result| {
+                        if result.passed {
+                            AcceptanceOutcome::Passed
+                        } else {
+                            AcceptanceOutcome::Failed
+                        }
+                    }),
+                    evidence_ref: matched
+                        .map(|result| {
+                            format!(
+                                ".roko/gates/{plan_id}/rung-{}:{}",
+                                result.rung, result.gate_name
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!(".roko/acceptance/{plan_id}/{}/missing-gate", task.id)
+                        }),
+                }
+            })
+            .collect();
+
+        let no_stub = contract
+            .no_stub
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| scan_no_stub_evidence(&self.workdir, &requirement.production_paths));
+
+        let agent_output = contract
+            .agent_output
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|_| self.load_agent_output_evidence(plan_id, &task.id))
+            .transpose()?;
+
+        let parity_ledger_rows = contract
+            .parity_ledger
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| {
+                requirement
+                    .rows
+                    .iter()
+                    .map(|row| ParityLedgerEvidenceRow {
+                        requirement_id: row.requirement_id.clone(),
+                        outcome: AcceptanceOutcome::Passed,
+                        evidence_ref: row.evidence_ref.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.persist_parity_rows(plan_id, &task.id, &parity_ledger_rows)?;
+
+        let recovery = contract
+            .recovery
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|_| {
+                let tracker = self.task_trackers.get(plan_id);
+                RecoveryEvidence {
+                    retry_recorded: tracker.is_some_and(|tracker| tracker.impl_round > 0),
+                    reflection_recorded: tracker
+                        .is_some_and(|tracker| tracker.review_feedback.is_some()),
+                    replan_recorded: self
+                        .replan_ledger
+                        .replans_seen
+                        .get(plan_id)
+                        .is_some_and(|count| *count > 0),
+                }
+            });
+
+        Ok(AcceptanceEvidence {
+            outcome: AcceptanceOutcome::Passed,
+            gates,
+            no_stub,
+            agent_output,
+            review_verdict: contract
+                .review_verdict
+                .as_ref()
+                .filter(|requirement| requirement.required)
+                .map(|_| review.clone()),
+            recovery,
+            parity_ledger_rows,
+        })
+    }
+
+    fn load_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+    ) -> Result<StructuredOutputEvidence> {
+        let path =
+            acceptance_task_dir(&self.workdir, plan_id, task_id).join("agent-output-evidence.json");
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    }
+
+    fn persist_acceptance_decision(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        evidence: &AcceptanceEvidence,
+        decision: &AcceptanceDecision,
+    ) -> Result<()> {
+        let dir = acceptance_task_dir(&self.workdir, plan_id, task_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("decision.json");
+        let record = serde_json::json!({
+            "plan_id": plan_id,
+            "task_id": task_id,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "decision": decision,
+            "evidence": evidence,
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&record)?)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
+    fn persist_parity_rows(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        rows: &[ParityLedgerEvidenceRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.workdir.join(".roko").join("parity-ledger.jsonl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        for row in rows {
+            let record = serde_json::json!({
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "requirement_id": row.requirement_id,
+                "outcome": row.outcome,
+                "evidence_ref": row.evidence_ref,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            writeln!(file, "{record}").with_context(|| format!("write {}", path.display()))?;
+        }
         Ok(())
     }
 
@@ -12441,6 +12759,7 @@ impl PlanRunner {
                 timeout_secs: 30,
                 max_retries: 0,
                 acceptance: Vec::new(),
+                acceptance_contract: None,
                 domain: None,
             });
         let mut regenerated_task = template_task.clone();
@@ -13647,6 +13966,9 @@ impl PlanRunner {
                         "[orchestrate] Review {plan_id} failed closed while parsing verdict: {error}"
                     );
                 }
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.last_review_verdict = Some(parsed_review.evidence.clone());
+                }
 
                 let mut ep = Episode::new("Auditor", "review").succeeded();
                 ep.usage = Usage {
@@ -13675,6 +13997,21 @@ impl PlanRunner {
                 );
                 self.record_and_check_learning(input, plan_id).await;
 
+                let mut acceptance_rejection_feedback = None;
+                if approved {
+                    if let Err(error) = self
+                        .validate_acceptance_contracts_for_plan(plan_id, &parsed_review.evidence)
+                    {
+                        tracing::warn!(
+                            "[orchestrate] Acceptance contract rejected {plan_id}: {error:#}"
+                        );
+                        approved = false;
+                        acceptance_rejection_feedback = Some(format!(
+                            "Acceptance contract failed after gates and review:\n{error:#}"
+                        ));
+                    }
+                }
+
                 if approved {
                     let event = ExecutorEvent::ReviewApproved;
                     self.log_transition(plan_id, &event);
@@ -13682,20 +14019,22 @@ impl PlanRunner {
                 } else {
                     // Store feedback and reset tracker for reimplementation
                     if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-                        tracker.review_feedback = Some(match drift_report {
-                            Some(report) if report.drifted() => format!(
-                                "Spec drift detected while reviewing task output.\n\
-                                 Coverage: {:.1}% ({}/{})\n\
-                                 Missing anchors: {}\n\n\
-                                 Reviewer output:\n{}",
-                                report.coverage() * 100.0,
-                                report.matched,
-                                report.expected,
-                                report.missing.join(", "),
-                                output_text
-                            ),
-                            _ => structured_review_feedback(&parsed_review),
-                        });
+                        tracker.review_feedback = Some(
+                            acceptance_rejection_feedback.unwrap_or_else(|| match drift_report {
+                                Some(report) if report.drifted() => format!(
+                                    "Spec drift detected while reviewing task output.\n\
+                                     Coverage: {:.1}% ({}/{})\n\
+                                     Missing anchors: {}\n\n\
+                                     Reviewer output:\n{}",
+                                    report.coverage() * 100.0,
+                                    report.matched,
+                                    report.expected,
+                                    report.missing.join(", "),
+                                    output_text
+                                ),
+                                _ => structured_review_feedback(&parsed_review),
+                            }),
+                        );
                         tracker.reset_for_reimpl();
                     }
                     let event = ExecutorEvent::ReviewRejected;
@@ -19698,6 +20037,186 @@ fn structured_review_feedback(parsed: &ParsedReviewVerdict) -> String {
     lines.join("\n")
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct AgentOutputPayload {
+    #[serde(
+        alias = "status",
+        alias = "outcome",
+        alias = "verdict",
+        deserialize_with = "deserialize_agent_output_status"
+    )]
+    outcome: AcceptanceOutcome,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    evidence_refs: Vec<String>,
+}
+
+fn parse_structured_agent_output_evidence(
+    output: &str,
+    expected_task_id: &str,
+    schema: &str,
+    raw_output_ref: String,
+) -> StructuredOutputEvidence {
+    let parsed = parse_agent_output_payload(output);
+    let schema_valid = parsed.as_ref().is_ok_and(|payload| {
+        schema == "roko.acceptance.agent_output.v1"
+            && payload.outcome == AcceptanceOutcome::Passed
+            && payload
+                .task_id
+                .as_deref()
+                .is_none_or(|task_id| task_id == expected_task_id)
+            && !payload.summary.trim().is_empty()
+    });
+
+    StructuredOutputEvidence {
+        parsed: parsed.is_ok(),
+        schema_valid,
+        raw_output_ref,
+    }
+}
+
+fn parse_agent_output_payload(output: &str) -> Result<AgentOutputPayload> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("agent output is empty"));
+    }
+    if let Ok(payload) = serde_json::from_str::<AgentOutputPayload>(trimmed) {
+        return Ok(payload);
+    }
+    if let Some(block) = extract_fenced_block(trimmed, "json") {
+        return serde_json::from_str::<AgentOutputPayload>(&block)
+            .context("json code block did not match agent output schema");
+    }
+    if let Some(block) = extract_fenced_block(trimmed, "toml") {
+        return toml::from_str::<AgentOutputPayload>(&block)
+            .context("toml code block did not match agent output schema");
+    }
+    Err(anyhow!(
+        "agent output did not contain structured JSON or TOML"
+    ))
+}
+
+fn extract_fenced_block(output: &str, language: &str) -> Option<String> {
+    let fence = format!("```{language}");
+    let start = output.find(&fence)?;
+    let after_fence = output[start + fence.len()..].strip_prefix('\r').unwrap_or(
+        output[start + fence.len()..]
+            .strip_prefix('\n')
+            .unwrap_or(&output[start + fence.len()..]),
+    );
+    let after_fence = after_fence.strip_prefix('\n').unwrap_or(after_fence);
+    let end = after_fence.find("```")?;
+    Some(after_fence[..end].trim().to_string())
+}
+
+fn deserialize_agent_output_status<'de, D>(
+    deserializer: D,
+) -> std::result::Result<AcceptanceOutcome, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(raw) = value.as_str() else {
+        return Err(serde::de::Error::custom("outcome must be a string"));
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pass" | "passed" | "approve" | "approved" | "success" | "succeeded" | "complete"
+        | "completed" => Ok(AcceptanceOutcome::Passed),
+        "fail" | "failed" | "revise" | "reject" | "rejected" => Ok(AcceptanceOutcome::Failed),
+        "blocked" => Ok(AcceptanceOutcome::Blocked),
+        "timed_out" | "timeout" => Ok(AcceptanceOutcome::TimedOut),
+        "cancelled" | "canceled" => Ok(AcceptanceOutcome::Cancelled),
+        "needs_retry" | "retry" => Ok(AcceptanceOutcome::NeedsRetry),
+        "needs_replan" | "replan" => Ok(AcceptanceOutcome::NeedsReplan),
+        "needs_human" | "human" | "needs-human" => Ok(AcceptanceOutcome::NeedsHuman),
+        other => Err(serde::de::Error::custom(format!(
+            "unsupported agent output outcome '{other}'"
+        ))),
+    }
+}
+
+fn gate_result_matches_requirement(
+    result: &GateResult,
+    requirement: &roko_gate::GateRequirement,
+) -> bool {
+    let gate_name = result.gate_name.to_ascii_lowercase();
+    let requirement_id = requirement.id.to_ascii_lowercase();
+    if gate_name == requirement_id || gate_name.contains(&requirement_id) {
+        return true;
+    }
+    matches!(
+        (requirement.kind, gate_name.as_str()),
+        (
+            roko_gate::GateRequirementKind::Compile,
+            "compile" | "cargo_check"
+        ) | (roko_gate::GateRequirementKind::Test, "test" | "cargo_test")
+            | (roko_gate::GateRequirementKind::Lint, "lint" | "clippy")
+            | (
+                roko_gate::GateRequirementKind::Review,
+                "review" | "llm_judge"
+            )
+    )
+}
+
+fn scan_no_stub_evidence(workdir: &Path, production_paths: &[String]) -> NoStubEvidence {
+    let mut scanned_paths = Vec::new();
+    let mut findings = Vec::new();
+    for path in production_paths {
+        let full_path = workdir.join(path);
+        if !full_path.exists() {
+            findings.push(format!("{path}: path missing"));
+            continue;
+        }
+        scanned_paths.push(path.clone());
+        if full_path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&full_path)
+        {
+            let lower = content.to_ascii_lowercase();
+            for marker in ["todo!", "unimplemented!", "noop", "stub"] {
+                if lower.contains(marker) {
+                    findings.push(format!("{path}: contains marker `{marker}`"));
+                }
+            }
+        }
+    }
+    NoStubEvidence {
+        outcome: if findings.is_empty() {
+            AcceptanceOutcome::Passed
+        } else {
+            AcceptanceOutcome::Failed
+        },
+        scanned_paths,
+        findings,
+    }
+}
+
+fn acceptance_task_dir(workdir: &Path, plan_id: &str, task_id: &str) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("acceptance")
+        .join(plan_id)
+        .join(task_id)
+}
+
+fn format_acceptance_decision(task_id: &str, decision: &AcceptanceDecision) -> String {
+    let mut out = format!(
+        "task {task_id} acceptance outcome {:?} did not pass",
+        decision.outcome
+    );
+    for issue in &decision.issues {
+        out.push_str(&format!(
+            "\n- {}: {}{}",
+            issue.code,
+            issue.message,
+            if issue.blocking { " (blocking)" } else { "" }
+        ));
+    }
+    out
+}
+
 /// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
 /// (from roko-compose's `context_provider`). This bridges the two crate
 /// boundaries without creating a dependency.
@@ -21383,6 +21902,57 @@ acceptance = []
         );
 
         assert!(parsed.passed(), "{parsed:?}");
+    }
+
+    #[test]
+    fn structured_agent_output_json_satisfies_known_schema() {
+        let evidence = parse_structured_agent_output_evidence(
+            r#"{
+                "outcome": "passed",
+                "task_id": "T1",
+                "summary": "Implemented the requested task.",
+                "evidence_refs": ["src/lib.rs"]
+            }"#,
+            "T1",
+            "roko.acceptance.agent_output.v1",
+            "signal:raw".into(),
+        );
+
+        assert!(evidence.parsed);
+        assert!(evidence.schema_valid);
+    }
+
+    #[test]
+    fn structured_agent_output_free_text_fails_closed() {
+        let evidence = parse_structured_agent_output_evidence(
+            "Looks done to me.",
+            "T1",
+            "roko.acceptance.agent_output.v1",
+            "signal:raw".into(),
+        );
+
+        assert!(!evidence.parsed);
+        assert!(!evidence.schema_valid);
+    }
+
+    #[test]
+    fn gate_result_matches_acceptance_requirement_by_kind() {
+        let result = GateResult {
+            gate_name: "compile".into(),
+            rung: 0,
+            passed: true,
+            summary: "ok".into(),
+            duration_ms: 5,
+            test_count: None,
+        };
+        let requirement = roko_gate::GateRequirement {
+            id: "cargo-check".into(),
+            kind: roko_gate::GateRequirementKind::Compile,
+            command: Some("cargo check".into()),
+            required: true,
+        };
+
+        assert!(gate_result_matches_requirement(&result, &requirement));
     }
 
     #[test]
