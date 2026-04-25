@@ -245,3 +245,89 @@ kind = "compile"
         "missing ACCEPT_003: {stdout}"
     );
 }
+
+#[test]
+fn plan_validate_accepts_architecture_queue_packets() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "architecture",
+        r#"
+[meta]
+plan = "architecture"
+queue_kind = "architecture_implementation"
+
+[[task]]
+id = "Q1"
+title = "Implement one architecture packet"
+role = "implementer"
+files = ["crates/roko-core/src/config/schema.rs"]
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-core" }]
+
+[task.context]
+read_files = [
+  { path = "tmp/architecture-plans/06-architecture-implementation.md", why = "source plan" },
+]
+
+[task.acceptance_contract]
+version = 1
+
+[[task.acceptance_contract.gates]]
+id = "compile"
+kind = "compile"
+command = "cargo check -p roko-core"
+
+[task.acceptance_contract.agent_output]
+schema = "roko.architecture_packet.v1"
+
+[task.acceptance_contract.review_verdict]
+reviewer_role_id = "quick-reviewer"
+min_confidence = 0.6
+
+[task.acceptance_contract.recovery]
+retry = true
+reflection = true
+
+[task.acceptance_contract.parity_ledger]
+
+[[task.acceptance_contract.parity_ledger.rows]]
+requirement_id = "ARCH-Q1"
+source_ref = "tmp/architecture-plans/06-architecture-implementation.md"
+evidence_ref = "crates/roko-core/src/config/schema.rs"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("0 diagnostics in 1 plan"),
+        "unexpected stdout: {stdout}"
+    );
+}
+
+#[test]
+fn plan_validate_fails_closed_for_incomplete_architecture_queue_packets() {
+    let temp = TempDir::new().unwrap();
+    write_plan(
+        temp.path(),
+        "architecture",
+        r#"
+[meta]
+plan = "architecture"
+queue_kind = "architecture_implementation"
+
+[[task]]
+id = "Q1"
+title = "Incomplete architecture packet"
+role = "implementer"
+"#,
+    );
+
+    let assert = run_validate(&temp, &["plans"]).failure();
+    assert_eq!(assert.get_output().status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for rule in ["PLAN_020", "PLAN_021", "PLAN_022", "PLAN_023", "PLAN_024"] {
+        assert!(stdout.contains(rule), "missing {rule}: {stdout}");
+    }
+}

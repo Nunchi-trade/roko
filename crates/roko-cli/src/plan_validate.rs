@@ -76,8 +76,11 @@ struct TaskSnapshot {
     role: Option<String>,
     model: Option<String>,
     depends_on: Vec<String>,
+    has_depends_on_field: bool,
     gate_rung: Option<u32>,
     gate_rung_invalid: bool,
+    has_files: bool,
+    has_context_read_files: bool,
     has_verify_steps: bool,
     acceptance_contract: Option<Value>,
 }
@@ -244,6 +247,10 @@ fn validate_tasks_file(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or(fallback_plan_id);
+    let is_architecture_queue = parsed
+        .get("meta")
+        .and_then(Value::as_table)
+        .is_some_and(is_architecture_queue_meta);
 
     let mut diagnostics = Vec::new();
     let tasks = parsed
@@ -350,6 +357,10 @@ fn validate_tasks_file(
                     ),
                 }),
             }
+        }
+
+        if is_architecture_queue {
+            validate_architecture_queue_task(&mut diagnostics, &plan_id, task);
         }
     }
 
@@ -516,6 +527,7 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
         model: table.and_then(|table| {
             string_field(table.get("model")).or_else(|| string_field(table.get("model_hint")))
         }),
+        has_depends_on_field: table.is_some_and(|table| table.contains_key("depends_on")),
         depends_on: table
             .and_then(|table| table.get("depends_on"))
             .and_then(Value::as_array)
@@ -534,6 +546,24 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
                 .and_then(Value::as_integer)
                 .and_then(|value| u32::try_from(value).ok())
                 .is_none(),
+        has_files: table
+            .and_then(|table| table.get("files"))
+            .or_else(|| table.and_then(|table| table.get("write_files")))
+            .and_then(Value::as_array)
+            .is_some_and(|files| files.iter().any(|file| string_field(Some(file)).is_some())),
+        has_context_read_files: table
+            .and_then(|table| table.get("context"))
+            .and_then(Value::as_table)
+            .and_then(|context| context.get("read_files"))
+            .and_then(Value::as_array)
+            .is_some_and(|files| {
+                files.iter().any(|file| {
+                    file.as_table()
+                        .and_then(|table| table.get("path"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|path| !path.trim().is_empty())
+                })
+            }),
         has_verify_steps: table
             .and_then(|table| table.get("verify"))
             .and_then(Value::as_array)
@@ -541,6 +571,60 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
         acceptance_contract: table
             .and_then(|table| table.get("acceptance_contract"))
             .cloned(),
+    }
+}
+
+fn is_architecture_queue_meta(meta: &toml::map::Map<String, Value>) -> bool {
+    ["queue_kind", "queue_schema", "kind"].iter().any(|field| {
+        meta.get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim() == "architecture_implementation")
+    })
+}
+
+fn validate_architecture_queue_task(
+    diagnostics: &mut Vec<Diagnostic>,
+    plan_id: &str,
+    task: &TaskSnapshot,
+) {
+    let requirements = [
+        (
+            !task.has_depends_on_field,
+            "PLAN_020",
+            "declares no depends_on array for dependency metadata",
+        ),
+        (
+            !task.has_context_read_files,
+            "PLAN_021",
+            "declares no context.read_files source docs",
+        ),
+        (
+            !task.has_files,
+            "PLAN_022",
+            "declares no files list for likely crates/artifacts",
+        ),
+        (
+            !task.has_verify_steps,
+            "PLAN_023",
+            "declares no executable verify steps",
+        ),
+        (
+            task.acceptance_contract.is_none(),
+            "PLAN_024",
+            "declares no typed acceptance_contract",
+        ),
+    ];
+
+    for (missing, rule_id, message) in requirements {
+        if missing {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                rule_id: rule_id.to_string(),
+                plan_id: Some(plan_id.to_string()),
+                task_id: task.task_id.clone(),
+                message: format!("architecture queue task '{}' {message}", task.label()),
+            });
+        }
     }
 }
 
