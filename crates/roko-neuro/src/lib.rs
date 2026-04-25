@@ -1322,6 +1322,8 @@ pub trait NeuroStore: Sized {
     fn gc(&mut self, min_confidence: f64) -> Result<usize>;
 }
 
+/// Evidence-based admission control for durable knowledge.
+pub mod admission;
 pub mod context;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
@@ -1335,6 +1337,14 @@ pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
+pub use admission::{
+    AdmissionGateOutcome, DEFAULT_KNOWLEDGE_ADMISSION_DECISIONS_FILE,
+    DEFAULT_KNOWLEDGE_CANDIDATES_FILE, DEFAULT_MIN_ADMISSION_CONFIDENCE,
+    DEFAULT_MIN_ANTI_KNOWLEDGE_CONFIDENCE, EvidencePolarity, KnowledgeAdmissionDecision,
+    KnowledgeAdmissionOutcome, KnowledgeAdmissionPolicy, KnowledgeAdmissionReason,
+    KnowledgeAdmissionStore, KnowledgeCandidateRecord, KnowledgeEvidence, KnowledgeEvidenceSource,
+    KnowledgeScope,
+};
 pub use context::{
     ContextAssembler, ContextChunk, ContextSource, EpisodeStore, PadState, ReadFileSpec, TaskInput,
     VerifySpec,
