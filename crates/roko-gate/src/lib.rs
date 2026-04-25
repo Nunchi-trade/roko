@@ -136,9 +136,9 @@ pub use code_exec::{
 };
 pub use compile::CompileGate;
 pub use compile_errors::{
-    CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureClassification,
-    classify_error_code, classify_gate_failure, parse_cargo_json, parse_plain_stderr,
-    render_failure_classification,
+    CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureAction,
+    GateFailureClassification, classify_error_code, classify_gate_failure, parse_cargo_json,
+    parse_plain_stderr, render_failure_classification,
 };
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};

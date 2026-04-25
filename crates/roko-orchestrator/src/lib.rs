@@ -84,4 +84,6 @@ pub use repair::{
     FailureContext, RepairAction, RepairConfig, RepairDecision, RepairEngine, RepairLevel,
     StabilityMetric,
 };
-pub use replan::{ReplanResult, ReplanStrategy};
+pub use replan::{
+    FailureDisposition, PlanRevisionEvidence, PlanRevisionRequest, ReplanResult, ReplanStrategy,
+};

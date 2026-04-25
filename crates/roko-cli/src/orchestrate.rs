@@ -83,9 +83,9 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, FailureClass, GateRatchet,
-    ParsedReviewVerdict, ReviewVerdictContext, SearchHit, SearchOracle, ShellGate, TestGate,
-    VerdictPublisher,
+    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, FailureClass, GateFailureAction,
+    GateRatchet, ParsedReviewVerdict, ReviewVerdictContext, SearchHit, SearchOracle, ShellGate,
+    TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -147,8 +147,9 @@ use roko_orchestrator::worktree::{
 use roko_orchestrator::{
     CURRENT_SCHEMA_VERSION, DagConfig, EventKind, EventLog, EventLogSnapshot, ExecutorAction,
     ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
-    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanState, PostMergeRunner,
-    ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
+    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanRevisionEvidence,
+    PlanRevisionRequest, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy, UnifiedTaskDag,
+    discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
@@ -3360,6 +3361,8 @@ impl PreAgentRemediationRecord {
 struct ReplanLedger {
     seen_failure_keys: HashSet<String>,
     replans_seen: HashMap<String, u32>,
+    #[serde(default)]
+    revision_requests: Vec<PlanRevisionRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3377,6 +3380,9 @@ enum PlanRevisionOutcome {
     RegenerationFailed,
     Disabled,
     NotEligible,
+    Retry,
+    Blocked,
+    HumanNeeded,
 }
 
 #[derive(Debug, Clone)]
@@ -5449,6 +5455,7 @@ impl PlanRunner {
     fn format_plan_revision_prompt(
         task_id: &str,
         reason: &PlanRevisionReason,
+        request: &PlanRevisionRequest,
         failing_verdicts: &[GateVerdictSummary],
         log_tail: &str,
     ) -> String {
@@ -5461,24 +5468,91 @@ impl PlanRunner {
             .iter()
             .map(|verdict| match verdict.details.as_deref() {
                 Some(details) if !details.is_empty() => {
-                    format!(
+                    let mut line = format!(
                         "- {}: passed={}, details={details}",
                         verdict.gate, verdict.passed
-                    )
+                    );
+                    if let Some(classification) = verdict.classification.as_deref() {
+                        line.push_str(&format!(", classification={classification}"));
+                    }
+                    if !verdict.failure_pattern_ids.is_empty() {
+                        line.push_str(&format!(", patterns={:?}", verdict.failure_pattern_ids));
+                    }
+                    line
                 }
                 _ => format!("- {}: passed={}", verdict.gate, verdict.passed),
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let blocking_findings = if request.blocking_findings.is_empty() {
+            "none".to_string()
+        } else {
+            request
+                .blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         format!(
             "## Previous plan failed at task `{task_id}`\n\n\
+             Request id: {}\n\
+             Required next action: {}\n\
              Reason: {reason_line}.\n\
+             Failure pattern ids: {:?}\n\
+             Blocking findings:\n\
+             {blocking_findings}\n\n\
              Failing gates:\n\
              {gates}\n\n\
              Log tail (last 40 lines):\n```\n{log_tail}\n```\n\n\
              Design the revised plan to address this specific failure mode first. \
-             Do not just re-propose the same task shape."
+             Do not just re-propose the same task shape.",
+            request.request_id, request.disposition, request.failure_pattern_ids
         )
+    }
+
+    fn gate_failure_next_action(
+        attempts: u32,
+        attempt_limit: u32,
+        failing_verdicts: &[GateVerdictSummary],
+    ) -> GateFailureAction {
+        let has_class = |needle: &str| {
+            failing_verdicts
+                .iter()
+                .any(|verdict| verdict.classification.as_deref() == Some(needle))
+        };
+        if has_class("role_tool_permission") {
+            GateFailureAction::NeedsHuman
+        } else if has_class("external_environment") {
+            GateFailureAction::Blocked
+        } else if has_class("unsafe_stub_or_pass_behavior")
+            || has_class("prompt_context_insufficiency")
+            || has_class("architectural_conflict_requires_replan")
+            || attempts >= attempt_limit
+        {
+            GateFailureAction::NeedsReplan
+        } else {
+            GateFailureAction::Retry
+        }
+    }
+
+    fn plan_revision_request_from_gate_failure(
+        plan_id: &str,
+        task_id: &str,
+        attempts: u32,
+        failing_verdicts: &[GateVerdictSummary],
+    ) -> PlanRevisionRequest {
+        let evidence = failing_verdicts
+            .iter()
+            .map(|verdict| {
+                PlanRevisionEvidence::gate(verdict.gate.clone())
+                    .with_classification(verdict.classification.clone())
+                    .with_failure_pattern_ids(verdict.failure_pattern_ids.clone())
+                    .with_blocking_findings(verdict.blocking_findings.clone())
+                    .with_detail(verdict.details.clone())
+            })
+            .collect();
+        PlanRevisionRequest::gate_failure_limit(plan_id, task_id, attempts, evidence)
     }
 
     fn plan_revision_failure_hash(
@@ -5505,6 +5579,7 @@ impl PlanRunner {
         reason: &PlanRevisionReason,
         failing_verdicts: &[GateVerdictSummary],
         log_tail: &str,
+        request: PlanRevisionRequest,
     ) -> Result<PlanRevisionClaim> {
         let failure_hash = Self::plan_revision_failure_hash(reason, failing_verdicts, log_tail);
         let dedupe_key = Self::plan_revision_dedupe_key(plan_id, task_id, &failure_hash);
@@ -5528,6 +5603,7 @@ impl PlanRunner {
         self.replan_ledger
             .replans_seen
             .insert(plan_id.to_string(), seen.saturating_add(1));
+        self.replan_ledger.revision_requests.push(request);
         self.replan_ledger
             .save(&replan_ledger_path(&self.workdir))?;
         Ok(PlanRevisionClaim::Trigger { dedupe_key })
@@ -5535,10 +5611,6 @@ impl PlanRunner {
 
     fn build_gate_failure_plan_revision(&self, plan_id: &str, task_id: &str) -> Option<RokoEvent> {
         let tracker = self.task_trackers.get(plan_id)?;
-        if tracker.gate_failure_count < self.gate_failure_replan_attempt_limit() {
-            return None;
-        }
-
         let failing_verdicts = tracker
             .last_gate_verdict_summaries
             .iter()
@@ -5551,12 +5623,21 @@ impl PlanRunner {
 
         let failure_context = tracker.last_gate_failure.clone().unwrap_or_default();
         let log_tail = self.task_log_tail(task_id, &failure_context, 40);
+        let attempts = tracker.gate_failure_count;
+        let request = Self::plan_revision_request_from_gate_failure(
+            plan_id,
+            task_id,
+            attempts,
+            &failing_verdicts,
+        );
         Some(RokoEvent::PlanRevision {
+            request_id: request.request_id,
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
-            reason: PlanRevisionReason::GateFailureLimit {
-                attempts: tracker.gate_failure_count,
-            },
+            reason: PlanRevisionReason::GateFailureLimit { attempts },
+            required_next_action: request.disposition.to_string(),
+            failure_pattern_ids: request.failure_pattern_ids,
+            blocking_findings: request.blocking_findings,
             failing_verdicts,
             log_tail,
             issued_at: chrono::Utc::now(),
@@ -5595,9 +5676,19 @@ impl PlanRunner {
                 log_tail,
                 ..
             } => {
+                let attempts = match &reason {
+                    PlanRevisionReason::GateFailureLimit { attempts } => *attempts,
+                };
+                let request = Self::plan_revision_request_from_gate_failure(
+                    &plan_id,
+                    &task_id,
+                    attempts,
+                    &failing_verdicts,
+                );
                 let failure_summary = Self::format_plan_revision_prompt(
                     &task_id,
                     &reason,
+                    &request,
                     &failing_verdicts,
                     &log_tail,
                 );
@@ -5637,6 +5728,30 @@ impl PlanRunner {
             return PlanRevisionOutcome::Disabled;
         }
 
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return PlanRevisionOutcome::NotEligible;
+        };
+        let failing_verdicts = tracker
+            .last_gate_verdict_summaries
+            .iter()
+            .filter(|verdict| !verdict.passed)
+            .cloned()
+            .collect::<Vec<_>>();
+        if failing_verdicts.is_empty() {
+            return PlanRevisionOutcome::NotEligible;
+        }
+        let next_action = Self::gate_failure_next_action(
+            tracker.gate_failure_count,
+            self.gate_failure_replan_attempt_limit(),
+            &failing_verdicts,
+        );
+        match next_action {
+            GateFailureAction::Retry => return PlanRevisionOutcome::Retry,
+            GateFailureAction::Blocked => return PlanRevisionOutcome::Blocked,
+            GateFailureAction::NeedsHuman => return PlanRevisionOutcome::HumanNeeded,
+            GateFailureAction::NeedsReplan => {}
+        }
+
         let Some(event) = self.build_gate_failure_plan_revision(plan_id, task_id) else {
             return PlanRevisionOutcome::NotEligible;
         };
@@ -5650,8 +5765,24 @@ impl PlanRunner {
         else {
             return PlanRevisionOutcome::NotEligible;
         };
+        let attempts = match reason {
+            PlanRevisionReason::GateFailureLimit { attempts } => *attempts,
+        };
+        let request = Self::plan_revision_request_from_gate_failure(
+            plan_id,
+            task_id,
+            attempts,
+            failing_verdicts,
+        );
 
-        match self.claim_plan_revision(plan_id, task_id, reason, failing_verdicts, log_tail) {
+        match self.claim_plan_revision(
+            plan_id,
+            task_id,
+            reason,
+            failing_verdicts,
+            log_tail,
+            request,
+        ) {
             Ok(PlanRevisionClaim::Duplicate { dedupe_key }) => {
                 tracing::info!(
                     plan_id,
@@ -12484,23 +12615,18 @@ impl PlanRunner {
         plan_id: &str,
         task_id: Option<&str>,
         verdicts: &[Verdict],
-    ) {
+    ) -> Vec<String> {
         let path = failure_pattern_store_path(&self.workdir);
         let mut store = ErrorPatternStore::load(&path);
         let mut observed = 0usize;
+        let mut pattern_ids = Vec::new();
 
         for verdict in verdicts.iter().filter(|verdict| !verdict.passed) {
-            let raw = verdict
-                .error_digest
-                .as_deref()
-                .or(verdict.detail.as_deref())
-                .unwrap_or(&verdict.reason);
-            let classification = verdict
-                .error_digest
-                .as_deref()
-                .and_then(|digest| serde_json::from_str(digest).ok())
-                .unwrap_or_else(|| classify_gate_failure(&verdict.gate, raw));
+            let classification = Self::classify_runtime_verdict(verdict);
             for record in records_from_classification(&classification) {
+                if !pattern_ids.contains(&record.key) {
+                    pattern_ids.push(record.key.clone());
+                }
                 let observation = GateFailureObservation::new(
                     record.key,
                     plan_id,
@@ -12525,6 +12651,39 @@ impl PlanRunner {
                 "failed to persist gate failure patterns"
             );
         }
+        pattern_ids
+    }
+
+    fn classify_runtime_verdict(verdict: &Verdict) -> roko_gate::GateFailureClassification {
+        let raw = verdict
+            .error_digest
+            .as_deref()
+            .or(verdict.detail.as_deref())
+            .unwrap_or(&verdict.reason);
+        verdict
+            .error_digest
+            .as_deref()
+            .and_then(|digest| serde_json::from_str(digest).ok())
+            .unwrap_or_else(|| classify_gate_failure(&verdict.gate, raw))
+    }
+
+    fn failure_pattern_ids_from_classification(
+        classification: &roko_gate::GateFailureClassification,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        for record in records_from_classification(classification) {
+            if !ids.contains(&record.key) {
+                ids.push(record.key);
+            }
+        }
+        ids
+    }
+
+    fn failure_class_label(class: &FailureClass) -> String {
+        serde_json::to_value(class)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{class:?}"))
     }
 
     fn failure_pattern_retry_context(
@@ -12553,6 +12712,16 @@ impl PlanRunner {
         verdicts
             .iter()
             .map(|verdict| {
+                let (classification, failure_pattern_ids, blocking_findings) = if verdict.passed {
+                    (None, Vec::new(), Vec::new())
+                } else {
+                    let gate_classification = Self::classify_runtime_verdict(verdict);
+                    (
+                        Some(Self::failure_class_label(&gate_classification.primary)),
+                        Self::failure_pattern_ids_from_classification(&gate_classification),
+                        gate_classification.blocking_findings,
+                    )
+                };
                 let details = verdict
                     .error_digest
                     .clone()
@@ -12561,6 +12730,9 @@ impl PlanRunner {
                 GateVerdictSummary {
                     gate: verdict.gate.clone(),
                     passed: verdict.passed,
+                    classification,
+                    failure_pattern_ids,
+                    blocking_findings,
                     details,
                 }
             })
@@ -20056,6 +20228,9 @@ acceptance = []
         tracker.last_gate_verdict_summaries = vec![GateVerdictSummary {
             gate: "compile".to_string(),
             passed: false,
+            classification: Some("type_error".to_string()),
+            failure_pattern_ids: vec![format!("compile::{detail}")],
+            blocking_findings: Vec::new(),
             details: Some(detail.to_string()),
         }];
     }
@@ -20271,6 +20446,75 @@ acceptance = []
         let ledger_json =
             std::fs::read_to_string(replan_ledger_path(tmp.path())).expect("read replans ledger");
         assert!(ledger_json.contains("\"plan-1\": 2"));
+        let ledger: ReplanLedger = serde_json::from_str(&ledger_json).expect("parse replan ledger");
+        assert_eq!(ledger.revision_requests.len(), 2);
+        assert_eq!(
+            ledger.revision_requests[0].failure_pattern_ids,
+            vec!["compile::E0425 first failure".to_string()]
+        );
+        assert_eq!(
+            ledger.revision_requests[0].disposition.to_string(),
+            "needs_replan"
+        );
+    }
+
+    #[test]
+    fn gate_failure_next_action_distinguishes_retry_replan_blocked_and_human() {
+        let retry = vec![GateVerdictSummary {
+            gate: "compile".into(),
+            passed: false,
+            classification: Some("type_error".into()),
+            failure_pattern_ids: vec!["E0308::src/lib.rs".into()],
+            blocking_findings: Vec::new(),
+            details: Some("E0308".into()),
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(1, 3, &retry),
+            GateFailureAction::Retry
+        );
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &retry),
+            GateFailureAction::NeedsReplan
+        );
+
+        let replan = vec![GateVerdictSummary {
+            gate: "review".into(),
+            passed: false,
+            classification: Some("architectural_conflict_requires_replan".into()),
+            failure_pattern_ids: vec!["arch::plan-shape".into()],
+            blocking_findings: vec!["failure requires plan shape or dependency revision".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(1, 3, &replan),
+            GateFailureAction::NeedsReplan
+        );
+
+        let blocked = vec![GateVerdictSummary {
+            gate: "compile".into(),
+            passed: false,
+            classification: Some("external_environment".into()),
+            failure_pattern_ids: Vec::new(),
+            blocking_findings: vec!["external environment must recover before retry".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &blocked),
+            GateFailureAction::Blocked
+        );
+
+        let human = vec![GateVerdictSummary {
+            gate: "tool".into(),
+            passed: false,
+            classification: Some("role_tool_permission".into()),
+            failure_pattern_ids: Vec::new(),
+            blocking_findings: vec!["required role/tool permission is unavailable".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &human),
+            GateFailureAction::NeedsHuman
+        );
     }
 
     #[test]

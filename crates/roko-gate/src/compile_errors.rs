@@ -51,8 +51,31 @@ pub enum FailureClass {
     TestExpectationFailure,
     /// Toolchain, network, permissions, timeout, or environment failure.
     ExternalEnvironment,
+    /// Gate evidence suggests a stub, fake pass, or unsafe no-op production path.
+    UnsafeStubOrPassBehavior,
+    /// The agent likely lacked enough task/context information to continue safely.
+    PromptContextInsufficiency,
+    /// The failure is caused by missing role, tool, or filesystem permission.
+    RoleToolPermission,
+    /// The requested task conflicts with the current architecture or plan shape.
+    ArchitecturalConflictRequiresReplan,
     /// The failure was not recognized.
     Unknown,
+}
+
+/// Structured next action recommended by a gate failure classification.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailureAction {
+    /// Retry or deterministic remediation is still appropriate.
+    #[default]
+    Retry,
+    /// The plan should be revised before rerunning the same task.
+    NeedsReplan,
+    /// Execution is blocked by an external/environmental condition.
+    Blocked,
+    /// Human input is required before continuing.
+    NeedsHuman,
 }
 
 /// A single structured compile error.
@@ -93,6 +116,15 @@ pub struct GateFailureClassification {
     pub cargo_fix_candidate: bool,
     /// Whether this should fail closed to agent retry or replan.
     pub agent_retry_needed: bool,
+    /// Structured action the orchestrator should take next.
+    #[serde(default)]
+    pub recommended_action: GateFailureAction,
+    /// Whether the failure is plan-shaped rather than retry-shaped.
+    #[serde(default)]
+    pub replan_candidate: bool,
+    /// Blocking findings to preserve in retry/replan records.
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
     /// Short excerpt preserving enough original output for debugging.
     pub raw_excerpt: String,
 }
@@ -374,6 +406,25 @@ pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassificat
         push_unique(&mut classes, FailureClass::ExternalEnvironment);
     }
 
+    if looks_unsafe_stub_or_pass_behavior(&lower) {
+        push_unique(&mut classes, FailureClass::UnsafeStubOrPassBehavior);
+    }
+
+    if looks_prompt_context_insufficient(&lower) {
+        push_unique(&mut classes, FailureClass::PromptContextInsufficiency);
+    }
+
+    if looks_role_tool_permission_issue(&lower) {
+        push_unique(&mut classes, FailureClass::RoleToolPermission);
+    }
+
+    if looks_architectural_conflict(&lower) {
+        push_unique(
+            &mut classes,
+            FailureClass::ArchitecturalConflictRequiresReplan,
+        );
+    }
+
     if looks_missing_dependency_or_feature(&lower) {
         push_unique(&mut classes, FailureClass::MissingDependencyOrFeature);
     }
@@ -399,6 +450,27 @@ pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassificat
                     | FailureClass::Unknown
             )
     });
+    let replan_candidate = classes.iter().any(|class| {
+        matches!(
+            class,
+            FailureClass::UnsafeStubOrPassBehavior
+                | FailureClass::PromptContextInsufficiency
+                | FailureClass::ArchitecturalConflictRequiresReplan
+        )
+    });
+    let recommended_action = if replan_candidate {
+        GateFailureAction::NeedsReplan
+    } else if classes.contains(&FailureClass::ExternalEnvironment) {
+        GateFailureAction::Blocked
+    } else if classes.contains(&FailureClass::RoleToolPermission) {
+        GateFailureAction::NeedsHuman
+    } else {
+        GateFailureAction::Retry
+    };
+    let blocking_findings = classes
+        .iter()
+        .filter_map(blocking_finding_for_class)
+        .collect();
 
     GateFailureClassification {
         gate: gate.to_string(),
@@ -409,6 +481,9 @@ pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassificat
         warning_count: summary.warning_count,
         cargo_fix_candidate,
         agent_retry_needed: true,
+        recommended_action,
+        replan_candidate,
+        blocking_findings,
         raw_excerpt: output.chars().take(2000).collect(),
     }
 }
@@ -467,6 +542,55 @@ fn looks_external_environment_failure(lower: &str) -> bool {
         || lower.contains("connection reset")
         || lower.contains("dns")
         || lower.contains("network")
+}
+
+fn looks_unsafe_stub_or_pass_behavior(lower: &str) -> bool {
+    ((lower.contains("stub") || lower.contains("noop") || lower.contains("no-op"))
+        && (lower.contains("production") || lower.contains("gate") || lower.contains("pass")))
+        || lower.contains("fake pass")
+        || lower.contains("stub-pass")
+}
+
+fn looks_prompt_context_insufficient(lower: &str) -> bool {
+    lower.contains("prompt/context insufficiency")
+        || lower.contains("context insufficiency")
+        || lower.contains("insufficient context")
+        || lower.contains("missing context")
+}
+
+fn looks_role_tool_permission_issue(lower: &str) -> bool {
+    lower.contains("role/tool permission")
+        || lower.contains("tool permission")
+        || lower.contains("permission issue")
+        || lower.contains("not allowed to use tool")
+}
+
+fn looks_architectural_conflict(lower: &str) -> bool {
+    lower.contains("architectural conflict")
+        || lower.contains("requires replan")
+        || lower.contains("needs replan")
+        || lower.contains("cannot be solved by retry")
+}
+
+fn blocking_finding_for_class(class: &FailureClass) -> Option<String> {
+    match class {
+        FailureClass::UnsafeStubOrPassBehavior => {
+            Some("gate evidence indicates unsafe stub/pass behavior".to_string())
+        }
+        FailureClass::PromptContextInsufficiency => {
+            Some("retry lacks required prompt/context evidence".to_string())
+        }
+        FailureClass::RoleToolPermission => {
+            Some("required role/tool permission is unavailable".to_string())
+        }
+        FailureClass::ArchitecturalConflictRequiresReplan => {
+            Some("failure requires plan shape or dependency revision".to_string())
+        }
+        FailureClass::ExternalEnvironment => {
+            Some("external environment must recover before retry".to_string())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +737,30 @@ error[E0308]: mismatched types
             "thread 'foo' panicked at assertion failed: left == right\ntest result: FAILED. 9 passed; 1 failed",
         );
         assert_eq!(failure.primary, FailureClass::TestExpectationFailure);
+        assert_eq!(failure.recommended_action, GateFailureAction::Retry);
+        assert!(!failure.replan_candidate);
+    }
+
+    #[test]
+    fn classifies_replan_and_human_needed_failures() {
+        let replan = classify_gate_failure(
+            "review:structured",
+            "architectural conflict: cannot be solved by retry without changing the plan shape",
+        );
+        assert_eq!(
+            replan.primary,
+            FailureClass::ArchitecturalConflictRequiresReplan
+        );
+        assert_eq!(replan.recommended_action, GateFailureAction::NeedsReplan);
+        assert!(replan.replan_candidate);
+        assert!(!replan.blocking_findings.is_empty());
+
+        let human = classify_gate_failure(
+            "tool:dispatch",
+            "role/tool permission issue: not allowed to use tool git",
+        );
+        assert_eq!(human.primary, FailureClass::RoleToolPermission);
+        assert_eq!(human.recommended_action, GateFailureAction::NeedsHuman);
     }
 
     #[test]
