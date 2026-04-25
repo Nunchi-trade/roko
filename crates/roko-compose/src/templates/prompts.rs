@@ -1,8 +1,7 @@
 //! Prompt templates for enrichment steps.
 //!
-//! Ported from `apps/mori/src/support_enrich/prompts.rs`. Each step has a
-//! system prompt constant and a function that builds the user message from
-//! input file contents.
+//! Each step has a Roko-owned system prompt constant and a function that builds
+//! the user message from input file contents.
 //!
 //! Anti-pattern #8: **no `std::fs` in this module**. All file content arrives
 //! via function parameters.

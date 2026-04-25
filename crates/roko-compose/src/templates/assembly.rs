@@ -9,9 +9,7 @@
 //! - U-shaped placement ordering (Start → Middle → End)
 //! - Metadata tracking (sections kept/dropped, token count, strategy)
 //!
-//! Ports Mori's prompt assembly logic from `prompts.rs` (the per-role
-//! `*_prompt()` functions that concatenate sections under budget) into a
-//! reusable, I/O-free assembler.
+//! Roko-owned reusable prompt assembler for role sections.
 
 use super::RolePromptTemplate;
 use super::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};

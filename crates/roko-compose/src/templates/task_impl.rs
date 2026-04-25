@@ -1,6 +1,6 @@
 //! Per-task implementer prompt template.
 //!
-//! Ports Mori's `task_implementer_prompt` into a typed, I/O-free API.
+//! Roko-owned task implementer prompt template.
 //! Unlike the plan-wide [`ImplementerTemplate`](super::ImplementerTemplate),
 //! this template is scoped to a single task: it includes assignment details,
 //! file context, sibling task awareness for parallel execution, and per-task

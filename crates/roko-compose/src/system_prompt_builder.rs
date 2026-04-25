@@ -26,8 +26,7 @@
 //!
 //! # Design
 //!
-//! Inspired by the dynamic prompt generation pipeline in
-//! `mori-agents/17-dynamic-prompt-generation.md` section 3. The key insight:
+//! Inspired by earlier dynamic prompt-generation design work. The key insight:
 //! system prompts matter enormously (3-4x quality gap per the `--bare`
 //! experiment), AND they should be task-specific, not one-size-fits-all.
 //!

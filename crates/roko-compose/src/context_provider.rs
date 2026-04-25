@@ -1,6 +1,6 @@
 //! Demand-driven, tier-aware context provider for agent task prompts.
 //!
-//! Instead of mori's approach (13-artifact enrichment pipeline dumped into every
+//! Instead of the legacy approach (13-artifact enrichment pipeline dumped into every
 //! prompt at fixed per-role budgets), this module assembles context *on demand*
 //! based on the model tier the task will run on:
 //!

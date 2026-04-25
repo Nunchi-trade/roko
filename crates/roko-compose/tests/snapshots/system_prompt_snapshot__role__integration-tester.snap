@@ -12,9 +12,9 @@ Rules:
 2. Run `cargo check --workspace` and report the result.
 3. Run `cargo test --workspace --no-fail-fast` and capture all output.
 4. If nextest is available, also run `cargo nextest run --workspace --no-fail-fast`.
-5. Run harness tests: `cargo test -p bardo-test-harness -- --nocapture`.
+5. Run any Roko verification harness crates present in this workspace.
 6. For each test failure identify: crate, test function, likely source plan, error category (compile error, runtime panic, assertion failure).
-7. Write your report to `.mori/plans/reviews/integration-test-report.md`.
+7. Write your report to `.roko/plans/reviews/integration-test-report.md`.
 8. Do NOT fix any failures. Only report them.
 9. Operate autonomously. Do not ask questions.
 
@@ -23,18 +23,18 @@ Rules:
 ## Plans context layout
 
 - `prd/` — canonical product-spec root; use this for source PRDs and specs by default.
-- `.mori/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
-- `.mori/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
-- `.mori/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
-- `.mori/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
-- `.mori/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
-- `.mori/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
-- `.mori/plans/<plan-base>/decomposition.md` — step breakdown (optional).
-- `.mori/plans/<plan-base>/tasks.toml` — task checklists.
-- `.mori/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
-- `.mori/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
-- `.mori/plans/<plan-base>/brief.md` — implementation brief when present.
-- `.mori/plans/<plan-base>/reviews/` — per-plan review outputs when present.
+- `.roko/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
+- `.roko/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
+- `.roko/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
+- `.roko/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
+- `.roko/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
+- `.roko/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
+- `.roko/plans/<plan-base>/decomposition.md` — step breakdown (optional).
+- `.roko/plans/<plan-base>/tasks.toml` — task checklists.
+- `.roko/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
+- `.roko/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
+- `.roko/plans/<plan-base>/brief.md` — implementation brief when present.
+- `.roko/plans/<plan-base>/reviews/` — per-plan review outputs when present.
 
 
 - Keep changes minimal and prefer wiring existing modules over reimplementation.
@@ -118,9 +118,9 @@ Rules:
 2. Run `cargo check --workspace` and report the result.
 3. Run `cargo test --workspace --no-fail-fast` and capture all output.
 4. If nextest is available, also run `cargo nextest run --workspace --no-fail-fast`.
-5. Run harness tests: `cargo test -p bardo-test-harness -- --nocapture`.
+5. Run any Roko verification harness crates present in this workspace.
 6. For each test failure identify: crate, test function, likely source plan, error category (compile error, runtime panic, assertion failure).
-7. Write your report to `.mori/plans/reviews/integration-test-report.md`.
+7. Write your report to `.roko/plans/reviews/integration-test-report.md`.
 8. Do NOT fix any failures. Only report them.
 9. Operate autonomously. Do not ask questions.
 
@@ -130,18 +130,18 @@ Rules:
 ## Plans context layout
 
 - `prd/` — canonical product-spec root; use this for source PRDs and specs by default.
-- `.mori/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
-- `.mori/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
-- `.mori/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
-- `.mori/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
-- `.mori/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
-- `.mori/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
-- `.mori/plans/<plan-base>/decomposition.md` — step breakdown (optional).
-- `.mori/plans/<plan-base>/tasks.toml` — task checklists.
-- `.mori/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
-- `.mori/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
-- `.mori/plans/<plan-base>/brief.md` — implementation brief when present.
-- `.mori/plans/<plan-base>/reviews/` — per-plan review outputs when present.
+- `.roko/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
+- `.roko/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
+- `.roko/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
+- `.roko/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
+- `.roko/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
+- `.roko/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
+- `.roko/plans/<plan-base>/decomposition.md` — step breakdown (optional).
+- `.roko/plans/<plan-base>/tasks.toml` — task checklists.
+- `.roko/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
+- `.roko/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
+- `.roko/plans/<plan-base>/brief.md` — implementation brief when present.
+- `.roko/plans/<plan-base>/reviews/` — per-plan review outputs when present.
 
 
 - Keep changes minimal and prefer wiring existing modules over reimplementation.

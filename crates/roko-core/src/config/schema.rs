@@ -4394,7 +4394,7 @@ args = ["--print", "--output-format", "stream-json", "--dangerously-skip-permiss
 timeout_ms = 300000
 env = [
   ["ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"],
-  ["ANTHROPIC_API_KEY", "mori-local-gateway"],
+  ["ANTHROPIC_API_KEY", "roko-local-gateway"],
 ]
 "#;
         let cfg = RokoConfig::from_toml(toml).expect("parse");

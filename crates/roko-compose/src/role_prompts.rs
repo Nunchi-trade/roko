@@ -41,6 +41,20 @@ const DEFAULT_ANTI_PATTERNS: [&str; 3] = [
     "Do not push branches directly.",
 ];
 
+/// Runtime source metadata for a built-in role prompt.
+///
+/// This is deliberately small and static: callers can record where role text
+/// came from without inspecting prompt bytes or relying on historical comments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePromptSource {
+    /// Stable source identifier for logs and workspace audit records.
+    pub source_id: &'static str,
+    /// Module or manifest path that owns the runtime prompt content.
+    pub location: &'static str,
+    /// Whether this source is owned by Roko runtime policy rather than a legacy import.
+    pub roko_owned: bool,
+}
+
 /// Typed task/domain context for role prompts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskContext {
@@ -545,6 +559,78 @@ pub fn role_identity_for(role: AgentRole) -> String {
     }
 }
 
+/// Resolve prompt source metadata for a built-in role.
+#[must_use]
+pub fn role_prompt_source_for(role: AgentRole) -> RolePromptSource {
+    match role {
+        AgentRole::Strategist => RolePromptSource {
+            source_id: "roko.builtin.role.strategist",
+            location: "crates/roko-compose/src/templates/strategist.rs",
+            roko_owned: true,
+        },
+        AgentRole::Implementer => RolePromptSource {
+            source_id: "roko.builtin.role.implementer",
+            location: "crates/roko-compose/src/templates/implementer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Architect => RolePromptSource {
+            source_id: "roko.builtin.role.architect",
+            location: "crates/roko-compose/src/templates/reviewer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Auditor => RolePromptSource {
+            source_id: "roko.builtin.role.auditor",
+            location: "crates/roko-compose/src/templates/reviewer.rs",
+            roko_owned: true,
+        },
+        AgentRole::QuickReviewer => RolePromptSource {
+            source_id: "roko.builtin.role.quick-reviewer",
+            location: "crates/roko-compose/src/templates/quick.rs",
+            roko_owned: true,
+        },
+        AgentRole::Scribe => RolePromptSource {
+            source_id: "roko.builtin.role.scribe",
+            location: "crates/roko-compose/src/templates/scribe.rs",
+            roko_owned: true,
+        },
+        AgentRole::Critic => RolePromptSource {
+            source_id: "roko.builtin.role.critic",
+            location: "crates/roko-compose/src/templates/scribe.rs",
+            roko_owned: true,
+        },
+        AgentRole::AutoFixer => RolePromptSource {
+            source_id: "roko.builtin.role.auto-fixer",
+            location: "crates/roko-compose/src/templates/quick.rs",
+            roko_owned: true,
+        },
+        AgentRole::IntegrationTester => RolePromptSource {
+            source_id: "roko.builtin.role.integration-tester",
+            location: "crates/roko-compose/src/templates/integration.rs",
+            roko_owned: true,
+        },
+        AgentRole::Refactorer => RolePromptSource {
+            source_id: "roko.builtin.role.refactorer",
+            location: "crates/roko-compose/src/templates/refactorer.rs",
+            roko_owned: true,
+        },
+        AgentRole::Researcher => RolePromptSource {
+            source_id: "roko.builtin.role.researcher",
+            location: "crates/roko-compose/src/templates/researcher.rs",
+            roko_owned: true,
+        },
+        AgentRole::Conductor => RolePromptSource {
+            source_id: "roko.builtin.role.conductor",
+            location: "crates/roko-compose/src/templates/conductor.rs",
+            roko_owned: true,
+        },
+        other => RolePromptSource {
+            source_id: "roko.builtin.role.generic",
+            location: other.label(),
+            roko_owned: true,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +658,51 @@ mod tests {
         assert!(ids.iter().all(|id| !id.trim().is_empty()));
         let unique: HashSet<String> = ids.into_iter().collect();
         assert_eq!(unique.len(), roles.len());
+    }
+
+    #[test]
+    fn built_in_role_prompt_sources_are_roko_owned() {
+        let roles = std::iter::once(AgentRole::Conductor).chain(AgentRole::ALL_AGENTS);
+        for role in roles {
+            let source = role_prompt_source_for(role);
+            assert!(
+                source.roko_owned,
+                "{} source is not Roko-owned",
+                role.label()
+            );
+            assert!(
+                source.source_id.starts_with("roko.builtin.role."),
+                "{} source id should be Roko-owned: {}",
+                role.label(),
+                source.source_id
+            );
+            assert!(
+                !source.location.contains("mori") && !source.location.contains("bardo"),
+                "{} source location leaks legacy project name: {}",
+                role.label(),
+                source.location
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_runtime_role_prompts_do_not_emit_legacy_project_tokens() {
+        let roles = std::iter::once(AgentRole::Conductor).chain(AgentRole::ALL_AGENTS);
+        for role in roles {
+            let spec = RoleSystemPromptSpec::new(
+                role,
+                TaskContext::new("Check prompt provenance.").with_plan_id("RT10"),
+                "Read,Edit,Bash",
+            );
+            let prompt = spec.build().to_lowercase();
+            for forbidden in [".mori", "bardo", "mori"] {
+                assert!(
+                    !prompt.contains(forbidden),
+                    "{} prompt leaked forbidden token {forbidden:?}",
+                    role.label()
+                );
+            }
+        }
     }
 
     #[test]

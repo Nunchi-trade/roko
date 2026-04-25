@@ -13,7 +13,7 @@ use super::step::LlmBackend;
 /// Configuration for an enrichment run.
 ///
 /// No `Default` impl — callers must be explicit about every field.
-/// Ported from Mori `EnrichContext` (lines 39-58).
+/// Roko-owned enrichment run context.
 #[allow(clippy::struct_excessive_bools)]
 pub struct EnrichmentConfig {
     /// Project root directory. Plan artifacts live under
@@ -23,7 +23,7 @@ pub struct EnrichmentConfig {
     /// LLM backend selector (Claude, Codex, Cursor).
     pub backend: LlmBackend,
 
-    /// Gateway URL (if routing through bardo-gateway).
+    /// Gateway URL (if routing through a model gateway).
     pub gateway_url: Option<String>,
 
     /// Gateway API key.

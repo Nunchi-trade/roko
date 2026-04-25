@@ -70,8 +70,8 @@ pub use prompt::{
 };
 pub use prompt_hints::prompt_hints_for;
 pub use role_prompts::{
-    DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
-    tool_allowlist_instructions,
+    DEFAULT_CONVENTIONS_SUFFIX, RolePromptSource, RoleSystemPromptSpec, TaskContext,
+    role_identity_for, role_prompt_source_for, tool_allowlist_instructions,
 };
 pub use scorer::{ActiveInferenceScorer, GoalDirectedHeuristicScorer, SectionScorer};
 pub use system_prompt_builder::SystemPromptBuilder;

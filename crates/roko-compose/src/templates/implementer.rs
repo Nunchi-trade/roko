@@ -1,7 +1,6 @@
 //! Implementer prompt template.
 //!
-//! Ports Mori's `implementer_sections` + `implementer_prompt` into a typed,
-//! I/O-free API. The most context-heavy template in the set.
+//! Roko-owned implementer prompt template with typed, I/O-free inputs.
 
 use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, TaskEnhancements, format_enhancements, truncate};
@@ -251,7 +250,7 @@ mod tests {
         assert_eq!(sections[3].cache_layer, CacheLayer::Plan); // tasks
         assert_eq!(sections[6].cache_layer, CacheLayer::Volatile); // registry
 
-        // Hard caps match Mori
+        // Hard caps match the built-in Roko cold-start budget.
         assert_eq!(sections[1].hard_cap, Some(50_000)); // plan_spec
         assert_eq!(sections[4].hard_cap, Some(20_000)); // workspace_map
         assert_eq!(sections[5].hard_cap, Some(5_000)); // preflight

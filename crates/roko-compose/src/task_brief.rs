@@ -8,7 +8,7 @@
 //! 3. **How**: Existing patterns in the codebase to follow, sibling task
 //!    context (what runs before/after).
 //!
-//! This replaces mori's approach of dumping the full plan brief into every
+//! This replaces the legacy approach of dumping the full plan brief into every
 //! task prompt. Instead, each task gets only the *slice* of the plan that's
 //! relevant to it.
 //!

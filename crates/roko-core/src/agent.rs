@@ -640,7 +640,7 @@ pub enum AgentRole {
     CoverageTracker,
     /// Manages plan lifecycle state transitions.
     PlanLifecycleManager,
-    /// Tests cross-system flows (mori↔bardo↔golem).
+    /// Tests cross-system flows across Roko runtime boundaries.
     CrossSystemTester,
     /// Diagnoses errors into actionable root causes.
     ErrorDiagnoser,

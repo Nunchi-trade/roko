@@ -1,8 +1,9 @@
 //! Integration tester prompt template.
 //!
-//! Ports Mori's `integration_tester_prompt` into a typed, I/O-free API.
-//! The integration tester runs workspace-wide tests after batch merges
-//! and reports failures without fixing them.
+//! Roko-owned integration tester prompt template.
+//!
+//! The integration tester runs workspace-wide tests after batch merges and
+//! reports failures without fixing them.
 
 use super::common::budget_for;
 use super::{RolePromptTemplate, truncate};
@@ -43,10 +44,10 @@ before widening to full plan prose.\n\
 2. Run `cargo check --workspace` and report the result.\n\
 3. Run `cargo test --workspace --no-fail-fast` and capture all output.\n\
 4. If nextest is available, also run `cargo nextest run --workspace --no-fail-fast`.\n\
-5. Run harness tests: `cargo test -p bardo-test-harness -- --nocapture`.\n\
+5. Run any Roko verification harness crates present in this workspace.\n\
 6. For each test failure identify: crate, test function, likely source plan, \
 error category (compile error, runtime panic, assertion failure).\n\
-7. Write your report to `.mori/plans/reviews/integration-test-report.md`.\n\
+7. Write your report to `.roko/plans/reviews/integration-test-report.md`.\n\
 8. Do NOT fix any failures. Only report them.\n\
 9. Operate autonomously. Do not ask questions.";
 
@@ -145,7 +146,7 @@ before widening to full plan prose.\n\
 3. Run `cargo check --workspace` and report the result.\n\
 4. Run `cargo test --workspace --no-fail-fast` and capture all output.\n\
 5. If nextest is available, run `cargo nextest run --workspace --no-fail-fast`.\n\
-6. Run `cargo test -p bardo-test-harness -- --nocapture` for end-to-end harness tests.\n\
+6. Run any Roko verification harness crates present in this workspace.\n\
 7. For each test failure:\n\
    - Identify which crate and test function failed\n\
    - Check `git log --oneline -5` to identify which plan's merge likely caused it\n\

@@ -96,7 +96,7 @@ pub trait RolePromptTemplate {
 /// Truncate `s` to at most `max_chars`, cutting at the last newline boundary
 /// before the limit. Appends a truncation marker.
 ///
-/// Port of Mori's `truncate()` helper (prompts.rs:744).
+/// Truncate from the head while preserving newline boundaries.
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();
@@ -116,7 +116,7 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 
 /// Truncate from the *tail* — keeps the last `max_chars` of `s`.
 ///
-/// Port of Mori's `truncate_tail()` helper (prompts.rs:760).
+/// Truncate from the tail while preserving newline boundaries.
 pub fn truncate_tail(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();

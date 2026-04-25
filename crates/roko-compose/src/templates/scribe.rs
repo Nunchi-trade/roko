@@ -1,8 +1,7 @@
 //! Scribe prompt template.
 //!
-//! Ports Mori's `scribe_prompt` + `doc_revision_prompt` + `critic_prompt`
-//! into a single template. The Critic is treated as a scribe-variant (same
-//! section set, different role identity).
+//! Roko-owned scribe, doc revision, and critic prompt templates. The Critic is
+//! treated as a scribe-variant (same section set, different role identity).
 
 use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, truncate};
