@@ -57,11 +57,12 @@ pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_mesh::{ContextMesh, SharedContextEntry};
 pub use context_provider::{
-    ContextBidder, ContextBudgets, ContextCandidate, ContextInjectionBudget,
+    ContextBidder, ContextBidderRegistry, ContextBudgets, ContextCandidate, ContextInjectionBudget,
     ContextInjectionPolicy, ContextInjectionRecord, ContextProvider, ContextPurpose,
     ContextRejection, ContextRejectionReason, ContextRequest, ContextScope, ContextSection,
-    ContextSource, ContextTier, PlanArtifacts, PriorTaskOutput, ReadFileSpec, ResolvedContext,
-    SiblingTask, TaskInput, VerifySpec, is_local_model, pheromone_context,
+    ContextSource, ContextTier, DocsSourceMapBidder, PlanArtifacts, PriorTaskOutput, ReadFileSpec,
+    RecentFailurePatternsBidder, ResolvedContext, RolePromptPolicyBidder, SiblingTask, TaskInput,
+    TaskRequirementsBidder, VerifySpec, is_local_model, pheromone_context,
 };
 pub use conventions::{ProjectConventions, detect_conventions};
 pub use foraging::{

@@ -23,7 +23,8 @@ use crate::ContextChunk;
 use crate::prompt::{AttentionBidder, CacheLayer, Placement, PromptSection, SectionPriority};
 use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
-use roko_core::{Body, Engram, Kind, OperatingFrequency};
+use roko_core::{Body, Engram, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile};
+use roko_learn::error_pattern_store::{ErrorPatternStore, FailurePatternQuery};
 pub use roko_neuro::{ContextSource, ReadFileSpec, TaskInput, VerifySpec};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -371,12 +372,286 @@ pub struct ContextRequest {
     pub task_id: String,
     /// Files the current task intends to modify.
     pub task_files: Vec<String>,
+    /// Full task contract when available.
+    pub task: Option<TaskInput>,
+    /// Plan artifacts visible to context bidders.
+    pub plan_artifacts: Option<PlanArtifacts>,
+    /// Same-plan sibling task summaries.
+    pub siblings: Vec<SiblingTask>,
+    /// Completed dependency outputs.
+    pub prior_outputs: Vec<PriorTaskOutput>,
+    /// Selected role profile, when dispatch has already resolved it.
+    pub role_profile: Option<RoleProfile>,
+    /// Selected prompt policy, when dispatch has already resolved it.
+    pub prompt_policy: Option<PromptPolicy>,
 }
 
 /// Seam for future context bidders.
-pub trait ContextBidder {
+pub trait ContextBidder: Send + Sync {
+    /// Stable bidder identifier used by context policies and audits.
+    fn bidder_id(&self) -> &'static str;
+
     /// Propose context candidates for this request.
-    fn propose_context(&self, request: &ContextRequest) -> Vec<ContextCandidate>;
+    fn propose_context(
+        &self,
+        provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate>;
+}
+
+/// Composable registry for deterministic cold-start context bidders.
+#[derive(Default)]
+pub struct ContextBidderRegistry {
+    bidders: Vec<Box<dyn ContextBidder>>,
+}
+
+impl ContextBidderRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bidders: Vec::new(),
+        }
+    }
+
+    /// Create the deterministic cold-start registry used before adaptive learning.
+    #[must_use]
+    pub fn cold_start() -> Self {
+        Self::new()
+            .with_bidder(TaskRequirementsBidder)
+            .with_bidder(DocsSourceMapBidder)
+            .with_bidder(RecentFailurePatternsBidder)
+            .with_bidder(RolePromptPolicyBidder)
+    }
+
+    /// Register one bidder.
+    pub fn register<B>(&mut self, bidder: B)
+    where
+        B: ContextBidder + 'static,
+    {
+        self.bidders.push(Box::new(bidder));
+    }
+
+    /// Builder-style bidder registration.
+    #[must_use]
+    pub fn with_bidder<B>(mut self, bidder: B) -> Self
+    where
+        B: ContextBidder + 'static,
+    {
+        self.register(bidder);
+        self
+    }
+
+    /// Gather candidates in registration order.
+    #[must_use]
+    pub fn propose_context(
+        &self,
+        provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate> {
+        let mut candidates = Vec::new();
+        for bidder in &self.bidders {
+            let before = candidates.len();
+            candidates.extend(bidder.propose_context(provider, request));
+            for candidate in &mut candidates[before..] {
+                candidate.section.inclusion_reason = format!(
+                    "{} via {}",
+                    candidate.section.inclusion_reason,
+                    bidder.bidder_id()
+                );
+            }
+        }
+        candidates
+    }
+}
+
+/// Static bidder for task-declared source, safety, and verification requirements.
+pub struct TaskRequirementsBidder;
+
+impl ContextBidder for TaskRequirementsBidder {
+    fn bidder_id(&self) -> &'static str {
+        "task-requirements"
+    }
+
+    fn propose_context(
+        &self,
+        provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate> {
+        let Some(task) = request.task.as_ref() else {
+            return Vec::new();
+        };
+        let mut sections = Vec::new();
+        provider.add_surgical_context(
+            &mut sections,
+            task,
+            &ContextScope::task(&request.plan_id, &request.task_id),
+            request.budget_tokens,
+        );
+        sections
+            .into_iter()
+            .map(|section| ContextCandidate {
+                section,
+                relevance: 1.0,
+                bidder: AttentionBidder::TaskContext,
+            })
+            .collect()
+    }
+}
+
+/// Static bidder for plan docs, task briefs, source maps, and dependency context.
+pub struct DocsSourceMapBidder;
+
+impl ContextBidder for DocsSourceMapBidder {
+    fn bidder_id(&self) -> &'static str {
+        "docs-source-map"
+    }
+
+    fn propose_context(
+        &self,
+        provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate> {
+        let (Some(task), Some(plan_artifacts)) =
+            (request.task.as_ref(), request.plan_artifacts.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut sections = Vec::new();
+        let task_scope = ContextScope::task(&request.plan_id, &request.task_id);
+        if request.tier == ContextTier::Focused || request.tier == ContextTier::Full {
+            provider.add_focused_context(
+                &mut sections,
+                task,
+                plan_artifacts,
+                &request.siblings,
+                &request.prior_outputs,
+                &task_scope,
+                request.budget_tokens,
+            );
+        }
+        if request.tier == ContextTier::Full {
+            add_full_context(&mut sections, plan_artifacts, request.budget_tokens);
+        }
+        sections
+            .into_iter()
+            .map(|section| {
+                let relevance = match section.purpose {
+                    ContextPurpose::TaskGuidance | ContextPurpose::PlanOrientation => 0.75,
+                    ContextPurpose::DependencyMemory => 0.85,
+                    ContextPurpose::SafetyConstraint => 0.9,
+                    _ => 0.65,
+                };
+                ContextCandidate {
+                    section,
+                    relevance,
+                    bidder: AttentionBidder::TaskContext,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Static bidder for RT03 gate failure pattern memory, when present on disk.
+pub struct RecentFailurePatternsBidder;
+
+impl ContextBidder for RecentFailurePatternsBidder {
+    fn bidder_id(&self) -> &'static str {
+        "recent-failure-patterns"
+    }
+
+    fn propose_context(
+        &self,
+        provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate> {
+        let path = provider.failure_pattern_store_path();
+        if !path.exists() {
+            return Vec::new();
+        }
+
+        let store = ErrorPatternStore::load(&path);
+        let summary = store.bounded_summary(
+            FailurePatternQuery {
+                plan_id: Some(&request.plan_id),
+                task_id: Some(&request.task_id),
+                gate: None,
+                classification: None,
+            },
+            5,
+            1_600,
+        );
+        let content = summary.format_for_prompt();
+        if content.trim().is_empty() {
+            return Vec::new();
+        }
+
+        vec![ContextCandidate {
+            section: ContextSection::scoped(
+                PromptSection::new("recent_failure_patterns", content)
+                    .with_priority(SectionPriority::High)
+                    .with_cache_layer(CacheLayer::Volatile)
+                    .with_placement(Placement::End)
+                    .with_hard_cap(1_800),
+                ContextSource::KnowledgeEntry {
+                    entry_id: format!("failure-patterns:{}:{}", request.plan_id, request.task_id),
+                    kind: "failure_pattern".to_string(),
+                    source: Some(path.display().to_string()),
+                },
+                ContextPurpose::SafetyConstraint,
+                ContextScope::task(&request.plan_id, &request.task_id),
+                "recent unresolved gate failure patterns matched this task",
+            ),
+            relevance: 0.9,
+            bidder: AttentionBidder::TaskContext,
+        }]
+    }
+}
+
+/// Static bidder for selected role/profile and prompt-policy requirements.
+pub struct RolePromptPolicyBidder;
+
+impl ContextBidder for RolePromptPolicyBidder {
+    fn bidder_id(&self) -> &'static str {
+        "role-prompt-policy"
+    }
+
+    fn propose_context(
+        &self,
+        _provider: &ContextProvider,
+        request: &ContextRequest,
+    ) -> Vec<ContextCandidate> {
+        let Some(role) = request.role_profile.as_ref() else {
+            return Vec::new();
+        };
+        let prompt = request.prompt_policy.as_ref();
+        let content = role_prompt_policy_context(role, prompt);
+        if content.trim().is_empty() {
+            return Vec::new();
+        }
+
+        vec![ContextCandidate {
+            section: ContextSection::scoped(
+                PromptSection::new("role_prompt_policy_requirements", content)
+                    .with_priority(SectionPriority::Normal)
+                    .with_cache_layer(CacheLayer::Role)
+                    .with_placement(Placement::Start)
+                    .with_hard_cap(1_200),
+                ContextSource::KnowledgeEntry {
+                    entry_id: format!("role-policy:{}@{}", role.role_id, role.version),
+                    kind: "role_policy".to_string(),
+                    source: prompt.map(|policy| {
+                        format!("prompt-policy:{}@{}", policy.policy_id, policy.version)
+                    }),
+                },
+                ContextPurpose::TaskGuidance,
+                ContextScope::task(&request.plan_id, &request.task_id),
+                "selected role and prompt policy declare dispatch requirements",
+            ),
+            relevance: 0.7,
+            bidder: AttentionBidder::TaskContext,
+        }]
+    }
 }
 
 /// Context selection policy.
@@ -820,6 +1095,13 @@ impl ContextProvider {
         self
     }
 
+    fn failure_pattern_store_path(&self) -> PathBuf {
+        self.workdir
+            .join(".roko")
+            .join("learn")
+            .join("discovered-patterns.json")
+    }
+
     /// Resolve context for a task at the given operating frequency.
     ///
     /// This is the main entry point — called from `dispatch_agent` in
@@ -832,6 +1114,31 @@ impl ContextProvider {
         plan_artifacts: &PlanArtifacts,
         siblings: &[SiblingTask],
         prior_outputs: &[PriorTaskOutput],
+    ) -> ResolvedContext {
+        self.resolve_with_policies(
+            frequency,
+            task,
+            model_slug,
+            plan_artifacts,
+            siblings,
+            prior_outputs,
+            None,
+            None,
+        )
+    }
+
+    /// Resolve context with already-selected role and prompt policies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_with_policies(
+        &self,
+        frequency: OperatingFrequency,
+        task: &TaskInput,
+        model_slug: &str,
+        plan_artifacts: &PlanArtifacts,
+        siblings: &[SiblingTask],
+        prior_outputs: &[PriorTaskOutput],
+        role_profile: Option<&RoleProfile>,
+        prompt_policy: Option<&PromptPolicy>,
     ) -> ResolvedContext {
         let tier = ContextTier::from_task_and_model(&task.tier, model_slug);
         let budget = self.budgets.for_frequency(frequency);
@@ -847,54 +1154,32 @@ impl ContextProvider {
             };
         }
 
-        let mut sections = Vec::new();
-        let task_scope = ContextScope::task(&plan_artifacts.plan_id, &task.id);
+        let request = ContextRequest {
+            tier,
+            budget_tokens: budget,
+            plan_id: plan_artifacts.plan_id.clone(),
+            task_id: task.id.clone(),
+            task_files: task.files.clone(),
+            task: Some(task.clone()),
+            plan_artifacts: Some(plan_artifacts.clone()),
+            siblings: siblings.to_vec(),
+            prior_outputs: prior_outputs.to_vec(),
+            role_profile: role_profile.cloned(),
+            prompt_policy: prompt_policy.cloned(),
+        };
+        let registry = ContextBidderRegistry::cold_start();
+        let mut candidates = registry.propose_context(self, &request);
 
-        // ── Tier 1: Surgical (always included) ─────────────────────
-        self.add_surgical_context(&mut sections, task, &task_scope, budget);
-
-        // ── Tier 2: Focused (Sonnet+) ──────────────────────────────
-        if tier == ContextTier::Focused || tier == ContextTier::Full {
-            self.add_focused_context(
-                &mut sections,
-                task,
-                plan_artifacts,
-                siblings,
-                prior_outputs,
-                &task_scope,
-                budget,
+        // ── Rolling-average demotion ────────────────────────────────
+        for candidate in &mut candidates {
+            self.apply_average_based_demotions(
+                std::slice::from_mut(&mut candidate.section),
+                &task.tier,
             );
         }
 
-        // ── Tier 3: Full (Opus) ────────────────────────────────────
-        if tier == ContextTier::Full {
-            add_full_context(&mut sections, plan_artifacts, budget);
-        }
-
-        // ── Rolling-average demotion ────────────────────────────────
-        self.apply_average_based_demotions(&mut sections, &task.tier);
-
         // ── Policy and budget enforcement ──────────────────────────
-        let selection = self.select_sections(sections, budget, ContextInjectionPolicy::default());
-        let ContextSelection {
-            included: sections,
-            rejected: rejected_sections,
-        } = selection;
-
-        let total_tokens_estimate = sections.iter().map(ContextSection::estimated_tokens).sum();
-        let total_rejected_tokens_estimate = rejected_sections
-            .iter()
-            .map(|section| section.estimated_tokens)
-            .sum();
-
-        ResolvedContext {
-            sections,
-            rejected_sections,
-            tier,
-            total_tokens_estimate,
-            total_rejected_tokens_estimate,
-            budget_tokens: budget,
-        }
+        self.select_candidates(&request, candidates, ContextInjectionPolicy::default())
     }
 
     /// Demote `Normal` sections to `Low` when their rolling reference rate is too small.
@@ -1718,6 +2003,62 @@ fn render_signal_body(signal: &Engram) -> String {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
+fn role_prompt_policy_context(role: &RoleProfile, prompt: Option<&PromptPolicy>) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "## Role and prompt policy requirements");
+    let _ = writeln!(out, "- Role: {}@{}", role.role_id, role.version);
+    let _ = writeln!(out, "- Context policy: {}", role.context_policy.policy_id);
+    if let Some(budget) = role.context_policy.budget_tokens {
+        let _ = writeln!(out, "- Context budget: {budget} tokens");
+    }
+    if !role.context_policy.bidders.is_empty() {
+        let _ = writeln!(
+            out,
+            "- Context bidders: {}",
+            role.context_policy.bidders.join(", ")
+        );
+    }
+    if let Some(schema) = &role.output_schema {
+        let required = if schema.required {
+            "required"
+        } else {
+            "optional"
+        };
+        let _ = writeln!(out, "- Output schema: {} ({required})", schema.schema_id);
+    }
+
+    if let Some(prompt) = prompt {
+        let _ = writeln!(
+            out,
+            "- Prompt policy: {}@{}",
+            prompt.policy_id, prompt.version
+        );
+        let mut required_context_sections = prompt
+            .sections
+            .iter()
+            .filter(|section| {
+                section.inclusion.mode == InclusionMode::Required
+                    && section.source.kind == "context"
+            })
+            .collect::<Vec<_>>();
+        required_context_sections.sort_by_key(|section| section.order);
+        if !required_context_sections.is_empty() {
+            let _ = writeln!(out, "### Required context sections");
+            for section in required_context_sections {
+                let _ = writeln!(
+                    out,
+                    "- {} from {}: {}",
+                    section.section_id, section.source.id, section.purpose
+                );
+            }
+        }
+    }
+
+    out
+}
+
 /// Extract lines from content given a range like "40-80" or "10-".
 fn extract_line_range(content: &str, range: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
@@ -1777,7 +2118,60 @@ fn scope_text_to_files(text: &str, files: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roko_core::OperatingFrequency;
+    use roko_core::{AgentRole, OperatingFrequency};
+
+    struct FixtureBidder {
+        id: &'static str,
+        section_name: &'static str,
+        content: String,
+        priority: SectionPriority,
+    }
+
+    impl FixtureBidder {
+        fn new(id: &'static str, section_name: &'static str) -> Self {
+            Self {
+                id,
+                section_name,
+                content: section_name.to_string(),
+                priority: SectionPriority::Normal,
+            }
+        }
+
+        fn with_content(mut self, content: impl Into<String>) -> Self {
+            self.content = content.into();
+            self
+        }
+
+        const fn with_priority(mut self, priority: SectionPriority) -> Self {
+            self.priority = priority;
+            self
+        }
+    }
+
+    impl ContextBidder for FixtureBidder {
+        fn bidder_id(&self) -> &'static str {
+            self.id
+        }
+
+        fn propose_context(
+            &self,
+            _provider: &ContextProvider,
+            request: &ContextRequest,
+        ) -> Vec<ContextCandidate> {
+            vec![ContextCandidate {
+                section: ContextSection::scoped(
+                    PromptSection::new(self.section_name, &self.content)
+                        .with_priority(self.priority),
+                    ContextSource::Verification,
+                    ContextPurpose::Verification,
+                    ContextScope::task(&request.plan_id, &request.task_id),
+                    "fixture bidder",
+                ),
+                relevance: 1.0,
+                bidder: AttentionBidder::TaskContext,
+            }]
+        }
+    }
 
     fn test_section(
         section: PromptSection,
@@ -1800,6 +2194,12 @@ mod tests {
             plan_id: "plan-test".into(),
             task_id: "task-test".into(),
             task_files: vec!["src/lib.rs".into()],
+            task: None,
+            plan_artifacts: None,
+            siblings: Vec::new(),
+            prior_outputs: Vec::new(),
+            role_profile: None,
+            prompt_policy: None,
         }
     }
 
@@ -2057,6 +2457,121 @@ mod tests {
         let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
         assert_eq!(extract_line_range(content, "2-4"), "line 2\nline 3\nline 4");
         assert_eq!(extract_line_range(content, "3-"), "line 3\nline 4\nline 5");
+    }
+
+    #[test]
+    fn bidder_registry_combines_candidates_in_registration_order() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let request = test_request(10_000);
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(FixtureBidder::new("first-bidder", "first"))
+            .with_bidder(FixtureBidder::new("second-bidder", "second"));
+
+        let candidates = registry.propose_context(&provider, &request);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].section.section.name, "first");
+        assert_eq!(candidates[1].section.section.name, "second");
+        assert!(
+            candidates[0]
+                .section
+                .inclusion_reason
+                .contains("via first-bidder")
+        );
+        assert!(
+            candidates[1]
+                .section
+                .inclusion_reason
+                .contains("via second-bidder")
+        );
+    }
+
+    #[test]
+    fn bidder_registry_selection_records_budget_rejections() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let request = test_request(80);
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(
+                FixtureBidder::new("large-low", "large_low")
+                    .with_content("x".repeat(2_000))
+                    .with_priority(SectionPriority::Low),
+            )
+            .with_bidder(
+                FixtureBidder::new("small-high", "small_high")
+                    .with_content("important")
+                    .with_priority(SectionPriority::High),
+            );
+
+        let resolved = provider.select_candidates(
+            &request,
+            registry.propose_context(&provider, &request),
+            ContextInjectionPolicy::default(),
+        );
+
+        assert!(
+            resolved
+                .sections
+                .iter()
+                .any(|s| s.section.name == "small_high")
+        );
+        assert!(
+            resolved
+                .rejected_sections
+                .iter()
+                .any(|rejection| rejection.section_name == "large_low"
+                    && matches!(
+                        rejection.reason,
+                        ContextRejectionReason::BudgetExceeded { budget_tokens: 80 }
+                    ))
+        );
+    }
+
+    #[test]
+    fn cold_start_static_bidders_emit_structured_provenance() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pattern_path = tmp
+            .path()
+            .join(".roko")
+            .join("learn")
+            .join("discovered-patterns.json");
+        let mut store = ErrorPatternStore::load(&pattern_path);
+        store.append(
+            "error[E0432]: unresolved import",
+            "compile",
+            "plan-test",
+            Some("check module paths before retry"),
+        );
+        store.save(&pattern_path).expect("save pattern store");
+
+        let provider = ContextProvider::new(tmp.path().to_path_buf());
+        let role = crate::builtin_role_profile_for(AgentRole::Implementer);
+        let prompt = crate::builtin_prompt_policy_for(AgentRole::Implementer);
+        let mut request = test_request(10_000);
+        request.role_profile = Some(role);
+        request.prompt_policy = Some(prompt);
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(RecentFailurePatternsBidder)
+            .with_bidder(RolePromptPolicyBidder);
+
+        let resolved = provider.select_candidates(
+            &request,
+            registry.propose_context(&provider, &request),
+            ContextInjectionPolicy::default(),
+        );
+        let manifest = resolved.injection_manifest();
+
+        assert!(manifest.iter().any(|record| {
+            record
+                .source_id
+                .as_deref()
+                .is_some_and(|id| id.contains("failure-patterns:plan-test:task-test"))
+        }));
+        assert!(manifest.iter().any(|record| {
+            record
+                .source_id
+                .as_deref()
+                .is_some_and(|id| id.contains("role-policy:implementer"))
+        }));
     }
 
     #[test]

@@ -222,6 +222,12 @@ mod tests {
             plan_id: "P1".into(),
             task_id: "T1".into(),
             task_files: vec!["src/lib.rs".into()],
+            task: None,
+            plan_artifacts: None,
+            siblings: Vec::new(),
+            prior_outputs: Vec::new(),
+            role_profile: None,
+            prompt_policy: None,
         };
         let context = provider.select_candidates(
             &request,
@@ -278,6 +284,12 @@ mod tests {
             plan_id: "P1".into(),
             task_id: "T1".into(),
             task_files: Vec::new(),
+            task: None,
+            plan_artifacts: None,
+            siblings: Vec::new(),
+            prior_outputs: Vec::new(),
+            role_profile: None,
+            prompt_policy: None,
         };
         let context = provider.select_candidates(
             &request,
