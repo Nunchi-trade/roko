@@ -60,7 +60,8 @@ pub use context_provider::{
     ContextBidder, ContextBidderRegistry, ContextBudgets, ContextCandidate, ContextInjectionBudget,
     ContextInjectionPolicy, ContextInjectionRecord, ContextProvider, ContextPurpose,
     ContextRejection, ContextRejectionReason, ContextRequest, ContextScope, ContextSection,
-    ContextSource, ContextTier, DocsSourceMapBidder, PlanArtifacts, PriorTaskOutput, ReadFileSpec,
+    ContextSource, ContextTier, DocsSourceMapBidder, LearningAttentionConfig,
+    LearningContextBidder, LearningPosterior, PlanArtifacts, PriorTaskOutput, ReadFileSpec,
     RecentFailurePatternsBidder, ResolvedContext, RolePromptPolicyBidder, SiblingTask, TaskInput,
     TaskRequirementsBidder, VerifySpec, is_local_model, pheromone_context,
 };

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::{ContextPolicyRef, GateExpectation, PromptPolicy, RoleProfile, Task};
 
@@ -300,6 +301,9 @@ pub struct ContextSectionAudit {
     /// Experiment id that caused this section to be included, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_id: Option<String>,
+    /// Structured selector or bidder decision metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decision_metadata: BTreeMap<String, String>,
 }
 
 /// Rejected context candidate audit row.
@@ -327,6 +331,9 @@ pub struct ContextRejectionAudit {
     /// Experiment id that caused this section to be considered, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_id: Option<String>,
+    /// Structured selector or bidder decision metadata.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decision_metadata: BTreeMap<String, String>,
     /// Structured rejection reason.
     pub reason: ContextRejectionAuditReason,
 }
@@ -558,6 +565,7 @@ mod tests {
                 estimated_tokens: 42,
                 token_budget: Some(128),
                 experiment_id: None,
+                decision_metadata: BTreeMap::new(),
             }],
             Vec::new(),
         );

@@ -117,6 +117,7 @@ fn included_context_sections(context: &ResolvedContext) -> Vec<ContextSectionAud
                 estimated_tokens: record.estimated_tokens,
                 token_budget: record.token_budget,
                 experiment_id: record.experiment_id,
+                decision_metadata: record.decision_metadata,
             }
         })
         .collect()
@@ -144,6 +145,7 @@ fn rejected_context_candidates(rejections: &[ContextRejection]) -> Vec<ContextRe
             scope: scope_audit(rejection.scope.clone()),
             estimated_tokens: rejection.estimated_tokens,
             experiment_id: rejection.experiment_id.clone(),
+            decision_metadata: rejection.decision_metadata.clone(),
             reason: rejection_reason_audit(&rejection.reason),
         })
         .collect()
@@ -340,7 +342,9 @@ mod tests {
                     ContextPurpose::SourceEvidence,
                     ContextScope::task("P1", "T1"),
                     "inspect public API",
-                ),
+                )
+                .with_decision_metadata("learning.decision", "posterior_bias")
+                .with_decision_metadata("learning.lift_microunits", "42000"),
                 relevance: 1.0,
                 bidder: crate::AttentionBidder::CodeIntelligence,
             }],
@@ -373,6 +377,20 @@ mod tests {
             "context_section:source:file:src-lib-rs-1-20"
         );
         assert_eq!(section.token_budget, Some(100));
+        assert_eq!(
+            section
+                .decision_metadata
+                .get("learning.decision")
+                .map(String::as_str),
+            Some("posterior_bias")
+        );
+        assert_eq!(
+            section
+                .decision_metadata
+                .get("learning.lift_microunits")
+                .map(String::as_str),
+            Some("42000")
+        );
         let encoded = serde_json::to_string(&workspace).expect("workspace serializes");
         assert!(!encoded.contains("secret file contents"));
         assert!(encoded.contains("inspect public API"));

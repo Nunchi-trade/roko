@@ -16,7 +16,7 @@
 //! complexity, because they can't reliably use tools and have smaller context
 //! windows.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::ContextChunk;
@@ -25,6 +25,9 @@ use crate::symbol_resolver::SymbolResolver;
 use crate::task_brief::TaskBriefGenerator;
 use roko_core::{Body, Engram, InclusionMode, Kind, OperatingFrequency, PromptPolicy, RoleProfile};
 use roko_learn::error_pattern_store::{ErrorPatternStore, FailurePatternQuery};
+use roko_learn::section_effect::{
+    DEFAULT_SECTION_EFFECTS_PATH, SectionEffect, SectionEffectivenessRegistry,
+};
 pub use roko_neuro::{ContextSource, ReadFileSpec, TaskInput, VerifySpec};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -308,6 +311,8 @@ pub struct ContextSection {
     pub inclusion_reason: String,
     /// Budget envelope for this section before prompt rendering.
     pub budget: ContextInjectionBudget,
+    /// Structured decision metadata persisted into cognitive workspace audits.
+    pub decision_metadata: BTreeMap<String, String>,
 }
 
 impl ContextSection {
@@ -337,7 +342,19 @@ impl ContextSection {
             scope,
             inclusion_reason: inclusion_reason.into(),
             budget,
+            decision_metadata: BTreeMap::new(),
         }
+    }
+
+    /// Attach selector or bidder decision metadata.
+    #[must_use]
+    pub fn with_decision_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.decision_metadata.insert(key.into(), value.into());
+        self
     }
 
     /// Set the section-level token budget.
@@ -363,6 +380,275 @@ pub struct ContextCandidate {
     pub relevance: f32,
     /// Subsystem that proposed the candidate.
     pub bidder: AttentionBidder,
+}
+
+/// Guardrails for learned context-selection influence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LearningAttentionConfig {
+    /// Whether learned attention controls may influence candidate ranking.
+    pub enabled: bool,
+    /// Minimum included observations before a section can influence selection.
+    pub min_included_trials: u64,
+    /// Minimum excluded observations before a section can influence selection.
+    pub min_excluded_trials: u64,
+    /// Maximum share of the dispatch context budget that learned boosts may affect.
+    pub max_budget_share: f32,
+    /// Maximum number of section priority promotions in one dispatch.
+    pub max_priority_promotions: usize,
+    /// Maximum relevance delta learned controls may add to one candidate.
+    pub max_relevance_boost: f32,
+    /// Maximum observations used in posterior calculations, acting as a recency cap
+    /// for count-only telemetry snapshots.
+    pub recency_window_observations: u64,
+}
+
+impl Default for LearningAttentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_included_trials: 20,
+            min_excluded_trials: 5,
+            max_budget_share: 0.25,
+            max_priority_promotions: 3,
+            max_relevance_boost: 0.20,
+            recency_window_observations: 100,
+        }
+    }
+}
+
+/// Posterior snapshot used to explain a learned attention decision.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LearningPosterior {
+    /// Section name used for lookup.
+    pub section_name: String,
+    /// Role id used for lookup.
+    pub role_id: String,
+    /// Included-trial posterior mean.
+    pub included_mean: f64,
+    /// Excluded-trial posterior mean.
+    pub excluded_mean: f64,
+    /// Included minus excluded posterior mean.
+    pub lift: f64,
+    /// Included observations available before recency capping.
+    pub included_trials: u64,
+    /// Excluded observations available before recency capping.
+    pub excluded_trials: u64,
+    /// Whether the configured evidence threshold was met.
+    pub evidence_sufficient: bool,
+}
+
+/// Conservative learned attention control for context candidates.
+///
+/// This does not rewrite global policy. It reads the section-effectiveness
+/// snapshot from RT15, computes bounded Beta posterior means, and annotates each
+/// candidate with auditable decision metadata. Influence is disabled for
+/// cold-start, missing-role, low-evidence, or over-budget-share cases.
+#[derive(Clone, Debug)]
+pub struct LearningContextBidder {
+    registry: SectionEffectivenessRegistry,
+    config: LearningAttentionConfig,
+}
+
+impl LearningContextBidder {
+    /// Create a bidder from an in-memory section-effectiveness snapshot.
+    #[must_use]
+    pub fn new(registry: SectionEffectivenessRegistry, config: LearningAttentionConfig) -> Self {
+        Self { registry, config }
+    }
+
+    /// Load a section-effectiveness snapshot from disk, falling back to an
+    /// empty cold-start registry when telemetry is missing or invalid.
+    #[must_use]
+    pub fn load_or_new(path: &Path, config: LearningAttentionConfig) -> Self {
+        Self::new(SectionEffectivenessRegistry::load_or_new(path), config)
+    }
+
+    /// Create a disabled bidder that only records fallback reasons.
+    #[must_use]
+    pub fn disabled(registry: SectionEffectivenessRegistry) -> Self {
+        Self::new(
+            registry,
+            LearningAttentionConfig {
+                enabled: false,
+                ..LearningAttentionConfig::default()
+            },
+        )
+    }
+
+    /// Apply learned, bounded attention controls to candidate relevance and priority.
+    #[must_use]
+    pub fn apply(
+        &self,
+        request: &ContextRequest,
+        candidates: Vec<ContextCandidate>,
+    ) -> Vec<ContextCandidate> {
+        if candidates.is_empty() {
+            return candidates;
+        }
+
+        let Some(role_id) = request
+            .role_profile
+            .as_ref()
+            .map(|role| role.role_id.as_str())
+        else {
+            return candidates
+                .into_iter()
+                .map(|candidate| self.annotate_fallback(candidate, "missing_role_profile", None))
+                .collect();
+        };
+
+        if !self.config.enabled {
+            return candidates
+                .into_iter()
+                .map(|candidate| self.annotate_fallback(candidate, "disabled", Some(role_id)))
+                .collect();
+        }
+
+        let max_boost_tokens =
+            ((request.budget_tokens as f32) * self.config.max_budget_share).floor() as usize;
+        let mut used_boost_tokens = 0usize;
+        let mut promotions = 0usize;
+
+        candidates
+            .into_iter()
+            .map(|candidate| {
+                let section_name = candidate.section.section.name.clone();
+                let Some(effect) = self.registry.get(&section_name, role_id) else {
+                    return self.annotate_fallback(candidate, "no_section_effect", Some(role_id));
+                };
+
+                let posterior = self.posterior(effect, role_id);
+                if !posterior.evidence_sufficient {
+                    return self.annotate_posterior(candidate, &posterior, "insufficient_evidence");
+                }
+
+                if posterior.lift <= 0.0 {
+                    return self.annotate_posterior(candidate, &posterior, "non_positive_lift");
+                }
+
+                let estimated_tokens = candidate.section.estimated_tokens();
+                if used_boost_tokens.saturating_add(estimated_tokens) > max_boost_tokens {
+                    return self.annotate_posterior(candidate, &posterior, "max_budget_share");
+                }
+
+                used_boost_tokens = used_boost_tokens.saturating_add(estimated_tokens);
+                let relevance_boost =
+                    (posterior.lift as f32 * 0.5).clamp(0.0, self.config.max_relevance_boost);
+                let mut adjusted = candidate;
+                adjusted.relevance = (adjusted.relevance + relevance_boost).clamp(0.0, 1.0);
+
+                let mut decision = "posterior_bias";
+                if promotions < self.config.max_priority_promotions
+                    && adjusted.section.section.priority != SectionPriority::Critical
+                {
+                    adjusted.section.section.priority =
+                        promote_priority(adjusted.section.section.priority);
+                    promotions += 1;
+                    decision = "posterior_bias_priority_promoted";
+                }
+
+                adjusted = self.annotate_posterior(adjusted, &posterior, decision);
+                adjusted.section.decision_metadata.insert(
+                    "learning.relevance_boost_microunits".to_string(),
+                    microunits_f32(relevance_boost).to_string(),
+                );
+                adjusted
+            })
+            .collect()
+    }
+
+    fn posterior(&self, effect: &SectionEffect, role_id: &str) -> LearningPosterior {
+        let included_trials = effect.included_trials;
+        let excluded_trials = effect.excluded_trials;
+        let included_scale =
+            observation_scale(included_trials, self.config.recency_window_observations);
+        let excluded_scale =
+            observation_scale(excluded_trials, self.config.recency_window_observations);
+        let included_passes = effect.included_passes as f64 * included_scale;
+        let included_failures = effect
+            .included_trials
+            .saturating_sub(effect.included_passes) as f64
+            * included_scale;
+        let excluded_passes = effect.excluded_passes as f64 * excluded_scale;
+        let excluded_failures = effect
+            .excluded_trials
+            .saturating_sub(effect.excluded_passes) as f64
+            * excluded_scale;
+        let included_mean = beta_mean(included_passes, included_failures);
+        let excluded_mean = beta_mean(excluded_passes, excluded_failures);
+        let evidence_sufficient = included_trials >= self.config.min_included_trials
+            && excluded_trials >= self.config.min_excluded_trials;
+
+        LearningPosterior {
+            section_name: effect.section_name.clone(),
+            role_id: role_id.to_string(),
+            included_mean,
+            excluded_mean,
+            lift: included_mean - excluded_mean,
+            included_trials,
+            excluded_trials,
+            evidence_sufficient,
+        }
+    }
+
+    fn annotate_fallback(
+        &self,
+        candidate: ContextCandidate,
+        decision: &str,
+        role_id: Option<&str>,
+    ) -> ContextCandidate {
+        let mut candidate = candidate;
+        candidate.section.decision_metadata.insert(
+            "learning.bidder".to_string(),
+            "learning-context".to_string(),
+        );
+        candidate
+            .section
+            .decision_metadata
+            .insert("learning.decision".to_string(), decision.to_string());
+        if let Some(role_id) = role_id {
+            candidate
+                .section
+                .decision_metadata
+                .insert("learning.role_id".to_string(), role_id.to_string());
+        }
+        candidate
+    }
+
+    fn annotate_posterior(
+        &self,
+        candidate: ContextCandidate,
+        posterior: &LearningPosterior,
+        decision: &str,
+    ) -> ContextCandidate {
+        let mut candidate = self.annotate_fallback(candidate, decision, Some(&posterior.role_id));
+        let meta = &mut candidate.section.decision_metadata;
+        meta.insert(
+            "learning.included_trials".to_string(),
+            posterior.included_trials.to_string(),
+        );
+        meta.insert(
+            "learning.excluded_trials".to_string(),
+            posterior.excluded_trials.to_string(),
+        );
+        meta.insert(
+            "learning.included_mean_microunits".to_string(),
+            microunits_f64(posterior.included_mean).to_string(),
+        );
+        meta.insert(
+            "learning.excluded_mean_microunits".to_string(),
+            microunits_f64(posterior.excluded_mean).to_string(),
+        );
+        meta.insert(
+            "learning.lift_microunits".to_string(),
+            signed_microunits(posterior.lift).to_string(),
+        );
+        meta.insert(
+            "learning.evidence_sufficient".to_string(),
+            posterior.evidence_sufficient.to_string(),
+        );
+        candidate
+    }
 }
 
 /// Request object future context bidders can use without depending on orchestration internals.
@@ -409,6 +695,7 @@ pub trait ContextBidder: Send + Sync {
 #[derive(Default)]
 pub struct ContextBidderRegistry {
     bidders: Vec<Box<dyn ContextBidder>>,
+    learning_bidder: Option<LearningContextBidder>,
 }
 
 impl ContextBidderRegistry {
@@ -417,6 +704,7 @@ impl ContextBidderRegistry {
     pub const fn new() -> Self {
         Self {
             bidders: Vec::new(),
+            learning_bidder: None,
         }
     }
 
@@ -428,6 +716,12 @@ impl ContextBidderRegistry {
             .with_bidder(DocsSourceMapBidder)
             .with_bidder(RecentFailurePatternsBidder)
             .with_bidder(RolePromptPolicyBidder)
+    }
+
+    /// Create the cold-start registry with learned attention controls attached.
+    #[must_use]
+    pub fn cold_start_with_learning(learning_bidder: LearningContextBidder) -> Self {
+        Self::cold_start().with_learning_bidder(learning_bidder)
     }
 
     /// Register one bidder.
@@ -445,6 +739,13 @@ impl ContextBidderRegistry {
         B: ContextBidder + 'static,
     {
         self.register(bidder);
+        self
+    }
+
+    /// Attach learned attention controls applied after static bidders propose candidates.
+    #[must_use]
+    pub fn with_learning_bidder(mut self, bidder: LearningContextBidder) -> Self {
+        self.learning_bidder = Some(bidder);
         self
     }
 
@@ -467,8 +768,47 @@ impl ContextBidderRegistry {
                 );
             }
         }
-        candidates
+        if let Some(learning_bidder) = &self.learning_bidder {
+            learning_bidder.apply(request, candidates)
+        } else {
+            candidates
+        }
     }
+}
+
+const fn promote_priority(priority: SectionPriority) -> SectionPriority {
+    match priority {
+        SectionPriority::Critical => SectionPriority::Critical,
+        SectionPriority::High => SectionPriority::Critical,
+        SectionPriority::Normal => SectionPriority::High,
+        SectionPriority::Low => SectionPriority::Normal,
+    }
+}
+
+fn observation_scale(trials: u64, cap: u64) -> f64 {
+    if trials == 0 || cap == 0 || trials <= cap {
+        1.0
+    } else {
+        cap as f64 / trials as f64
+    }
+}
+
+fn beta_mean(successes: f64, failures: f64) -> f64 {
+    let alpha = 1.0 + successes;
+    let beta = 1.0 + failures;
+    alpha / (alpha + beta)
+}
+
+fn microunits_f64(value: f64) -> u32 {
+    (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+}
+
+fn microunits_f32(value: f32) -> u32 {
+    (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
+}
+
+fn signed_microunits(value: f64) -> i32 {
+    (value.clamp(-1.0, 1.0) * 1_000_000.0).round() as i32
 }
 
 /// Static bidder for task-declared source, safety, and verification requirements.
@@ -724,6 +1064,8 @@ pub struct ContextRejection {
     pub estimated_tokens: usize,
     /// Experiment id associated with the prompt section, if any.
     pub experiment_id: Option<String>,
+    /// Structured selector or bidder decision metadata.
+    pub decision_metadata: BTreeMap<String, String>,
     /// Reason the section was rejected.
     pub reason: ContextRejectionReason,
 }
@@ -738,6 +1080,7 @@ impl ContextRejection {
             scope: section.scope.clone(),
             estimated_tokens: section.estimated_tokens(),
             experiment_id: section.section.experiment_id.clone(),
+            decision_metadata: section.decision_metadata.clone(),
             reason,
         }
     }
@@ -764,6 +1107,8 @@ pub struct ContextInjectionRecord {
     pub token_budget: Option<usize>,
     /// Experiment id associated with the prompt section, if any.
     pub experiment_id: Option<String>,
+    /// Structured selector or bidder decision metadata.
+    pub decision_metadata: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -839,6 +1184,7 @@ impl ResolvedContext {
                 estimated_tokens: section.estimated_tokens(),
                 token_budget: section.budget.max_tokens,
                 experiment_id: section.section.experiment_id.clone(),
+                decision_metadata: section.decision_metadata.clone(),
             })
             .collect()
     }
@@ -1067,6 +1413,8 @@ pub struct ContextProvider {
     brief_generator: TaskBriefGenerator,
     /// Rolling averages of context reference rates, loaded from `.roko/learn/`.
     context_average_tracker: ContextAverageTracker,
+    /// Guardrails for learned section-effectiveness attention controls.
+    learning_attention_config: LearningAttentionConfig,
     /// Recent pheromone signals available for enrichment.
     pheromone_signals: Vec<Engram>,
 }
@@ -1089,6 +1437,7 @@ impl ContextProvider {
             symbol_resolver,
             brief_generator,
             context_average_tracker,
+            learning_attention_config: LearningAttentionConfig::default(),
             pheromone_signals: Vec::new(),
         }
     }
@@ -1097,6 +1446,20 @@ impl ContextProvider {
     #[must_use]
     pub const fn with_budgets(mut self, budgets: ContextBudgets) -> Self {
         self.budgets = budgets;
+        self
+    }
+
+    /// Override learned attention guardrails.
+    #[must_use]
+    pub const fn with_learning_attention_config(mut self, config: LearningAttentionConfig) -> Self {
+        self.learning_attention_config = config;
+        self
+    }
+
+    /// Disable learned context-selection influence while retaining audit fallback metadata.
+    #[must_use]
+    pub const fn without_learning_attention(mut self) -> Self {
+        self.learning_attention_config.enabled = false;
         self
     }
 
@@ -1112,6 +1475,10 @@ impl ContextProvider {
             .join(".roko")
             .join("learn")
             .join("discovered-patterns.json")
+    }
+
+    fn section_effects_path(&self) -> PathBuf {
+        self.workdir.join(DEFAULT_SECTION_EFFECTS_PATH)
     }
 
     /// Resolve context for a task at the given operating frequency.
@@ -1179,7 +1546,11 @@ impl ContextProvider {
             role_profile: role_profile.cloned(),
             prompt_policy: prompt_policy.cloned(),
         };
-        let registry = ContextBidderRegistry::cold_start();
+        let registry =
+            ContextBidderRegistry::cold_start_with_learning(LearningContextBidder::load_or_new(
+                &self.section_effects_path(),
+                self.learning_attention_config,
+            ));
         let mut candidates = registry.propose_context(self, &request);
 
         // ── Rolling-average demotion ────────────────────────────────
@@ -2584,6 +2955,183 @@ mod tests {
                 .as_deref()
                 .is_some_and(|id| id.contains("role-policy:implementer"))
         }));
+    }
+
+    #[test]
+    fn learning_bidder_cold_start_records_no_effect_without_changing_order() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let mut request = test_request(10_000);
+        request.role_profile = Some(crate::builtin_role_profile_for(AgentRole::Implementer));
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(FixtureBidder::new("first-bidder", "first"))
+            .with_bidder(FixtureBidder::new("second-bidder", "second"))
+            .with_learning_bidder(LearningContextBidder::new(
+                SectionEffectivenessRegistry::new(),
+                LearningAttentionConfig::default(),
+            ));
+
+        let candidates = registry.propose_context(&provider, &request);
+
+        assert_eq!(candidates[0].section.section.name, "first");
+        assert_eq!(candidates[1].section.section.name, "second");
+        assert_eq!(
+            candidates[0].section.section.priority,
+            SectionPriority::Normal
+        );
+        assert_eq!(
+            candidates[0]
+                .section
+                .decision_metadata
+                .get("learning.decision")
+                .map(String::as_str),
+            Some("no_section_effect")
+        );
+    }
+
+    #[test]
+    fn learning_bidder_ignores_low_evidence_observations() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let role = crate::builtin_role_profile_for(AgentRole::Implementer);
+        let role_id = role.role_id.clone();
+        let mut request = test_request(10_000);
+        request.role_profile = Some(role);
+        let mut effects = SectionEffectivenessRegistry::new();
+        effects.record_outcome("learned", &role_id, true, true);
+        effects.record_outcome("learned", &role_id, false, false);
+
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(
+                FixtureBidder::new("fixture", "learned").with_priority(SectionPriority::Low),
+            )
+            .with_learning_bidder(LearningContextBidder::new(
+                effects,
+                LearningAttentionConfig::default(),
+            ));
+
+        let candidates = registry.propose_context(&provider, &request);
+
+        assert_eq!(candidates[0].section.section.priority, SectionPriority::Low);
+        assert_eq!(
+            candidates[0]
+                .section
+                .decision_metadata
+                .get("learning.decision")
+                .map(String::as_str),
+            Some("insufficient_evidence")
+        );
+        assert_eq!(
+            candidates[0]
+                .section
+                .decision_metadata
+                .get("learning.evidence_sufficient")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn learning_bidder_posterior_bias_can_affect_budget_selection() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let role = crate::builtin_role_profile_for(AgentRole::Implementer);
+        let role_id = role.role_id.clone();
+        let mut request = test_request(350);
+        request.role_profile = Some(role);
+        let mut effects = SectionEffectivenessRegistry::new();
+        for _ in 0..30 {
+            effects.record_outcome("learned", &role_id, true, true);
+        }
+        for _ in 0..5 {
+            effects.record_outcome("learned", &role_id, true, false);
+        }
+        effects.record_outcome("learned", &role_id, false, true);
+        for _ in 0..9 {
+            effects.record_outcome("learned", &role_id, false, false);
+        }
+
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(
+                FixtureBidder::new("learned-bidder", "learned")
+                    .with_content("x".repeat(1_200))
+                    .with_priority(SectionPriority::Low),
+            )
+            .with_bidder(
+                FixtureBidder::new("plain-bidder", "plain")
+                    .with_content("y".repeat(1_200))
+                    .with_priority(SectionPriority::Low),
+            )
+            .with_learning_bidder(LearningContextBidder::new(
+                effects,
+                LearningAttentionConfig {
+                    max_budget_share: 1.0,
+                    ..LearningAttentionConfig::default()
+                },
+            ));
+
+        let resolved = provider.select_candidates(
+            &request,
+            registry.propose_context(&provider, &request),
+            ContextInjectionPolicy::default(),
+        );
+
+        assert!(
+            resolved
+                .sections
+                .iter()
+                .any(|s| s.section.name == "learned")
+        );
+        assert!(
+            resolved
+                .rejected_sections
+                .iter()
+                .any(|rejection| rejection.section_name == "plain")
+        );
+        let learned = resolved
+            .sections
+            .iter()
+            .find(|section| section.section.name == "learned")
+            .expect("learned section retained");
+        assert_eq!(learned.section.priority, SectionPriority::Normal);
+        assert_eq!(
+            learned
+                .decision_metadata
+                .get("learning.decision")
+                .map(String::as_str),
+            Some("posterior_bias_priority_promoted")
+        );
+    }
+
+    #[test]
+    fn learning_bidder_disabled_falls_back_without_influence() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let role = crate::builtin_role_profile_for(AgentRole::Implementer);
+        let role_id = role.role_id.clone();
+        let mut request = test_request(10_000);
+        request.role_profile = Some(role);
+        let mut effects = SectionEffectivenessRegistry::new();
+        for _ in 0..30 {
+            effects.record_outcome("learned", &role_id, true, true);
+        }
+        for _ in 0..10 {
+            effects.record_outcome("learned", &role_id, false, false);
+        }
+
+        let registry = ContextBidderRegistry::new()
+            .with_bidder(
+                FixtureBidder::new("fixture", "learned").with_priority(SectionPriority::Low),
+            )
+            .with_learning_bidder(LearningContextBidder::disabled(effects));
+
+        let candidates = registry.propose_context(&provider, &request);
+
+        assert_eq!(candidates[0].section.section.priority, SectionPriority::Low);
+        assert_eq!(
+            candidates[0]
+                .section
+                .decision_metadata
+                .get("learning.decision")
+                .map(String::as_str),
+            Some("disabled")
+        );
     }
 
     #[test]

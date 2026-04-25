@@ -707,6 +707,7 @@ mod tests {
                 estimated_tokens: 42,
                 token_budget: Some(128),
                 experiment_id: None,
+                decision_metadata: std::collections::BTreeMap::new(),
             });
         workspace.gate_outcomes.push(InvocationGateOutcome {
             gate_id: "cargo_test".into(),
