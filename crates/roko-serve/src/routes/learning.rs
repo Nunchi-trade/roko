@@ -16,6 +16,7 @@ use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::aggregate::{CFactorBucket, cfactor_trend as aggregate_cfactor_trend};
 use roko_learn::cascade_router::CascadeStage;
+use roko_learn::contextual_bandit::{PolicyUpdateCandidate, read_policy_update_candidates};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
@@ -47,6 +48,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/learning/section-outcomes", get(section_outcomes))
         .route("/learn/section-outcomes", get(section_outcomes))
+        .route("/learning/policy-updates", get(policy_updates))
+        .route("/learn/policy-updates", get(policy_updates))
         .route("/learn/cascade", get(cascade))
         .route("/learn/experiments", get(experiments))
         .route("/learning/experiments", get(experiments))
@@ -131,6 +134,17 @@ async fn section_outcomes(
         .await
         .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
     Ok(Json(summarize_section_outcomes(&records)))
+}
+
+/// `GET /api/learning/policy-updates` — candidate bandit policy updates.
+async fn policy_updates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PolicyUpdateCandidate>>, ApiError> {
+    let path = state.workdir.join(".roko/learn/policy-updates.jsonl");
+    let records = read_policy_update_candidates(&path)
+        .await
+        .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
+    Ok(Json(records))
 }
 
 /// `GET /api/learn/experiments` — summarize `.roko/learn/experiments.json`.
@@ -1594,6 +1608,74 @@ mod tests {
         assert_eq!(
             payload["sections"][0]["provider_models"][0],
             "codex/gpt-5.5"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn policy_updates_exposes_candidate_records() -> Result<(), Box<dyn Error>> {
+        let (dir, state) = test_state()?;
+        let learn_dir = dir.path().join(".roko").join("learn");
+        tokio::fs::create_dir_all(&learn_dir)
+            .await
+            .map_err(|err| anyhow!("failed to create learn dir for policy update test: {err}"))?;
+        let update_path = learn_dir.join("policy-updates.jsonl");
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "update_id": "policy-update:contextual-bandit-routing:1:2",
+            "policy_id": "contextual-bandit.routing",
+            "policy_version": "0.1.0",
+            "decision_kind": "provider_model_routing",
+            "action_id": "provider:zai|model:glm-5.1",
+            "context_key": "provider_model_routing|task:implementation|surface:roko-learn|role:implementer|gate:0-0|retry:0",
+            "evidence_window": "last_20_observations",
+            "reward_summary": {
+                "observations": 20,
+                "successes": 18,
+                "mean_reward": 0.91,
+                "baseline_mean_reward": 0.82,
+                "reward_lift": 0.09,
+                "avg_latency_ms": 1200.0,
+                "avg_cost_usd": 0.04
+            },
+            "safety_bounds": {
+                "min_observations_for_rate": 20,
+                "allow_exploration": true
+            },
+            "admission_status": "candidate",
+            "rollback_path": "remove candidate provider:zai|model:glm-5.1 from policy contextual-bandit.routing",
+            "created_at": "2026-04-25T10:00:00Z"
+        });
+        tokio::fs::write(&update_path, format!("{record}\n"))
+            .await
+            .map_err(|err| anyhow!("failed to write policy update fixture: {err}"))?;
+
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/learning/policy-updates")
+                    .body(Body::empty())
+                    .map_err(|err| anyhow!("failed to build policy-updates request: {err}"))?,
+            )
+            .await
+            .map_err(|err| anyhow!("policy-updates request failed: {err}"))?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| anyhow!("failed to read policy-updates response body: {err}"))?;
+        let payload: Value = serde_json::from_slice(&body)
+            .map_err(|err| anyhow!("failed to parse policy-updates response body: {err}"))?;
+        assert_eq!(payload.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            payload[0]["admission_status"],
+            serde_json::json!("candidate")
+        );
+        assert_eq!(
+            payload[0]["reward_summary"]["reward_lift"],
+            serde_json::json!(0.09)
         );
         Ok(())
     }

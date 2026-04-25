@@ -100,6 +100,8 @@ pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
 pub mod context_pack_cache;
+/// Conservative contextual bandits for routing, prompt/context, bidder, and reviewer decisions.
+pub mod contextual_bandit;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
