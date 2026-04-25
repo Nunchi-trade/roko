@@ -92,6 +92,7 @@ pub mod namespace;
 pub mod obs;
 pub mod operating_frequency;
 pub mod phase;
+pub mod policy_manifest;
 pub mod polyglot;
 pub mod prediction;
 pub mod project;
@@ -167,6 +168,13 @@ pub use operating_frequency::{
     OperatingFrequencyScheduler,
 };
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
+pub use policy_manifest::{
+    CURRENT_POLICY_MANIFEST_SCHEMA_VERSION, ContextPolicyRef, FallbackBehavior, GateExpectation,
+    InclusionMode, InclusionRule, ManifestError, ManifestValidationError, OutputFormat,
+    OutputSchemaExpectation, PolicyProvenance, PromptBudgetPolicy, PromptPolicy,
+    PromptPolicySection, PromptSectionSource, RolePolicyManifest, RoleProfile, RoleSafetyPolicy,
+    SectionBudget, ToolCapabilityPolicy,
+};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{
     AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,

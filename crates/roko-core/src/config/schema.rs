@@ -276,6 +276,7 @@ impl RokoConfig {
         let _ = writeln!(out, "default_effort = \"{}\"", cfg.agent.default_effort);
         let _ = writeln!(out, "temperament = \"{}\"", cfg.agent.temperament);
         let _ = writeln!(out, "context_limit_k = {}", cfg.agent.context_limit_k);
+        let _ = writeln!(out, "# policy_manifests = [\".roko/roles/manifest.toml\"]");
         let _ = writeln!(out, "bare_mode = {}\n", cfg.agent.bare_mode);
 
         let _ = writeln!(out, "# Per-role overrides (repeat for each role):");
@@ -1972,6 +1973,9 @@ pub struct AgentConfig {
     /// Per-role overrides keyed by role label (e.g. `"implementer"`, `"architect"`).
     #[serde(default)]
     pub roles: HashMap<String, RoleOverride>,
+    /// RoleProfile/PromptPolicy manifest paths loaded before agent dispatch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_manifests: Vec<String>,
 
     /// Configuration for the Data LLM used in CaMeL dual-LLM isolation.
     ///
@@ -2059,6 +2063,7 @@ impl Default for AgentConfig {
             tier_models: HashMap::new(),
             fallback_model: None,
             roles: HashMap::new(),
+            policy_manifests: Vec::new(),
             data_llm: None,
             mode: AgentMode::default(),
             extensions: Vec::new(),
@@ -5418,6 +5423,23 @@ model = "opus"
         assert!(imp.thresholds.is_none());
         assert!(imp.routing_overrides.is_none());
         assert!(imp.turn_budget_usd.is_none());
+    }
+
+    #[test]
+    fn agent_policy_manifest_paths_parse() {
+        let toml = r#"
+[agent]
+policy_manifests = [".roko/roles/core.toml", ".roko/roles/review.toml"]
+"#;
+        let cfg = RokoConfig::from_toml(toml).expect("parse");
+
+        assert_eq!(
+            cfg.agent.policy_manifests,
+            vec![
+                ".roko/roles/core.toml".to_string(),
+                ".roko/roles/review.toml".to_string()
+            ]
+        );
     }
 
     #[test]

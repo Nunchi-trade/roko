@@ -121,6 +121,9 @@ pub use provider::{
     with_scoped_safety_layer,
 };
 pub use rate_limit::ProviderRateLimiter;
+pub use roko_core::{
+    PromptPolicy, RolePolicyManifest, RoleProfile as ManifestRoleProfile, ToolCapabilityPolicy,
+};
 pub use safety::{
     AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,
     SafetyHook, SafetyLayer, SafetyViolation, TaintLabel, TaintedString, ViolationSeverity,

@@ -25,6 +25,7 @@ use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use roko_core::error::{Result, RokoError};
 use roko_core::{AgentRole, Budget, Composer, Context, Scorer};
+use roko_core::{PolicyProvenance, PromptPolicy, PromptSectionSource, RolePolicyManifest};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
@@ -631,6 +632,56 @@ pub fn role_prompt_source_for(role: AgentRole) -> RolePromptSource {
     }
 }
 
+/// Build the manifest prompt-policy contract for an existing built-in role.
+///
+/// RT11 keeps current prompt rendering in code, but records the source and
+/// section ids in the same typed contract future manifest-backed roles will use.
+#[must_use]
+pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
+    let source = role_prompt_source_for(role);
+    let mut policy = PromptPolicy::builtin(role);
+    policy.provenance = PolicyProvenance {
+        source_id: source.source_id.to_string(),
+        path: Some(source.location.to_string()),
+        owner: Some("roko-compose".to_string()),
+        generated_by: Some("RoleSystemPromptSpec".to_string()),
+    };
+    if let Some(section) = policy
+        .sections
+        .iter_mut()
+        .find(|section| section.section_id == "role_identity")
+    {
+        section.source = PromptSectionSource::builtin(source.source_id);
+        section.provenance = policy.provenance.clone();
+    }
+    policy
+}
+
+/// Build the manifest role-profile contract for an existing built-in role.
+#[must_use]
+pub fn builtin_role_profile_for(role: AgentRole) -> roko_core::RoleProfile {
+    roko_core::RoleProfile::builtin(role)
+}
+
+/// Build a manifest compatibility view for existing built-in roles.
+#[must_use]
+pub fn builtin_role_policy_manifest_for(
+    roles: impl IntoIterator<Item = AgentRole>,
+) -> RolePolicyManifest {
+    let mut manifest = RolePolicyManifest {
+        schema_version: roko_core::CURRENT_POLICY_MANIFEST_SCHEMA_VERSION,
+        roles: Vec::new(),
+        prompt_policies: Vec::new(),
+    };
+    for role in roles {
+        manifest.roles.push(builtin_role_profile_for(role));
+        manifest
+            .prompt_policies
+            .push(builtin_prompt_policy_for(role));
+    }
+    manifest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +734,26 @@ mod tests {
                 source.location
             );
         }
+    }
+
+    #[test]
+    fn built_in_manifest_contracts_validate() {
+        let manifest = builtin_role_policy_manifest_for([
+            AgentRole::Implementer,
+            AgentRole::Architect,
+            AgentRole::QuickReviewer,
+        ]);
+
+        manifest.validate().expect("built-in manifest contracts");
+        assert_eq!(manifest.roles[0].role_id, "implementer");
+        assert_eq!(
+            manifest.prompt_policies[0].provenance.source_id,
+            "roko.builtin.role.implementer"
+        );
+        assert_eq!(
+            manifest.prompt_policies[0].sections[0].source.id,
+            "roko.builtin.role.implementer"
+        );
     }
 
     #[test]
