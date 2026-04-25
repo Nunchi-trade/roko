@@ -163,6 +163,135 @@ impl ContextAverageTracker {
 
 // ─── Resolved context ──────────────────────────────────────────────────────
 
+/// Why a context section is being considered for prompt injection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextPurpose {
+    /// Source code or symbol evidence needed for the current task.
+    SourceEvidence,
+    /// Task-local brief or acceptance guidance.
+    TaskGuidance,
+    /// Constraint that prevents unsafe or known-bad behavior.
+    SafetyConstraint,
+    /// Verification commands or gate expectations.
+    Verification,
+    /// Completed dependency output or other cross-task memory.
+    DependencyMemory,
+    /// Plan-level orientation, sibling awareness, or decomposition.
+    PlanOrientation,
+    /// Context that crosses plan boundaries.
+    CrossPlanMemory,
+    /// Research or external domain evidence.
+    ResearchEvidence,
+    /// Ambient coordination signal from the execution field.
+    AmbientSignal,
+}
+
+/// Visibility boundary for a context section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextScope {
+    /// Only valid for one task in one plan.
+    Task {
+        /// Plan identifier.
+        plan_id: String,
+        /// Task identifier.
+        task_id: String,
+    },
+    /// Valid for any task in one plan.
+    Plan {
+        /// Plan identifier.
+        plan_id: String,
+    },
+    /// Context from another task. Requires an explicit reason.
+    CrossTask {
+        /// Plan identifier that owns the task output.
+        plan_id: String,
+        /// Task identifier, when known.
+        task_id: Option<String>,
+        /// Why crossing the task boundary is allowed.
+        reason: String,
+    },
+    /// Context from other plans. Requires an explicit reason.
+    CrossPlan {
+        /// Why crossing the plan boundary is allowed.
+        reason: String,
+    },
+    /// Globally visible context. Requires an explicit reason.
+    Global {
+        /// Why global visibility is allowed.
+        reason: String,
+    },
+}
+
+impl ContextScope {
+    /// Create a task-local scope.
+    #[must_use]
+    pub fn task(plan_id: impl Into<String>, task_id: impl Into<String>) -> Self {
+        Self::Task {
+            plan_id: plan_id.into(),
+            task_id: task_id.into(),
+        }
+    }
+
+    /// Create a plan-local scope.
+    #[must_use]
+    pub fn plan(plan_id: impl Into<String>) -> Self {
+        Self::Plan {
+            plan_id: plan_id.into(),
+        }
+    }
+
+    /// Create a cross-task scope.
+    #[must_use]
+    pub fn cross_task(
+        plan_id: impl Into<String>,
+        task_id: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::CrossTask {
+            plan_id: plan_id.into(),
+            task_id,
+            reason: reason.into(),
+        }
+    }
+
+    /// Create a cross-plan scope.
+    #[must_use]
+    pub fn cross_plan(reason: impl Into<String>) -> Self {
+        Self::CrossPlan {
+            reason: reason.into(),
+        }
+    }
+
+    fn missing_required_reason(&self) -> bool {
+        match self {
+            Self::CrossTask { reason, .. }
+            | Self::CrossPlan { reason }
+            | Self::Global { reason } => reason.trim().is_empty(),
+            Self::Task { .. } | Self::Plan { .. } => false,
+        }
+    }
+}
+
+/// Per-section budget metadata used by the selector before prompt rendering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextInjectionBudget {
+    /// Maximum tokens this section may consume before it is rejected.
+    pub max_tokens: Option<usize>,
+    /// Maximum estimated input cost in micro-USD, for future model-aware policies.
+    pub max_cost_microusd: Option<u64>,
+}
+
+impl ContextInjectionBudget {
+    /// Token-only budget metadata.
+    #[must_use]
+    pub const fn tokens(max_tokens: usize) -> Self {
+        Self {
+            max_tokens: Some(max_tokens),
+            max_cost_microusd: None,
+        }
+    }
+}
+
 /// A resolved context section ready for injection into the prompt.
 #[derive(Clone, Debug)]
 pub struct ContextSection {
@@ -170,9 +299,47 @@ pub struct ContextSection {
     pub section: PromptSection,
     /// Where this context came from (for attribution/feedback).
     pub source: ContextSource,
+    /// Why this context belongs in the prompt.
+    pub purpose: ContextPurpose,
+    /// The visibility boundary for this context.
+    pub scope: ContextScope,
+    /// Human-readable reason this section was included.
+    pub inclusion_reason: String,
+    /// Budget envelope for this section before prompt rendering.
+    pub budget: ContextInjectionBudget,
 }
 
 impl ContextSection {
+    /// Create a section with explicit provenance, scope, and inclusion reason.
+    #[must_use]
+    pub fn scoped(
+        section: PromptSection,
+        source: ContextSource,
+        purpose: ContextPurpose,
+        scope: ContextScope,
+        inclusion_reason: impl Into<String>,
+    ) -> Self {
+        let budget = section.hard_cap.map_or_else(
+            ContextInjectionBudget::default,
+            ContextInjectionBudget::tokens,
+        );
+        Self {
+            section,
+            source,
+            purpose,
+            scope,
+            inclusion_reason: inclusion_reason.into(),
+            budget,
+        }
+    }
+
+    /// Set the section-level token budget.
+    #[must_use]
+    pub const fn with_token_budget(mut self, max_tokens: usize) -> Self {
+        self.budget.max_tokens = Some(max_tokens);
+        self
+    }
+
     /// Estimated token count.
     #[must_use]
     pub fn estimated_tokens(&self) -> usize {
@@ -180,15 +347,153 @@ impl ContextSection {
     }
 }
 
+/// A candidate offered by a context bidder before policy selection.
+#[derive(Clone, Debug)]
+pub struct ContextCandidate {
+    /// Proposed context section.
+    pub section: ContextSection,
+    /// Bidder's normalized relevance estimate in `[0.0, 1.0]`.
+    pub relevance: f32,
+    /// Subsystem that proposed the candidate.
+    pub bidder: AttentionBidder,
+}
+
+/// Request object future context bidders can use without depending on orchestration internals.
+#[derive(Clone, Debug)]
+pub struct ContextRequest {
+    /// Context tier requested for the dispatch.
+    pub tier: ContextTier,
+    /// Token budget available for selected context.
+    pub budget_tokens: usize,
+    /// Current plan identifier.
+    pub plan_id: String,
+    /// Current task identifier.
+    pub task_id: String,
+    /// Files the current task intends to modify.
+    pub task_files: Vec<String>,
+}
+
+/// Seam for future context bidders.
+pub trait ContextBidder {
+    /// Propose context candidates for this request.
+    fn propose_context(&self, request: &ContextRequest) -> Vec<ContextCandidate>;
+}
+
+/// Context selection policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextInjectionPolicy {
+    /// Hard maximum for any single section after prompt hard caps are applied.
+    pub max_section_tokens: usize,
+    /// Minimum candidate relevance required for inclusion.
+    pub min_relevance: f32,
+    /// Whether cross-task, cross-plan, and global scopes require a reason.
+    pub require_scope_reason: bool,
+}
+
+impl Default for ContextInjectionPolicy {
+    fn default() -> Self {
+        Self {
+            max_section_tokens: 8_000,
+            min_relevance: 0.0,
+            require_scope_reason: true,
+        }
+    }
+}
+
+/// Why a context candidate or section was rejected.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContextRejectionReason {
+    /// Candidate relevance was below policy floor.
+    Irrelevant {
+        /// Candidate relevance score.
+        relevance: f32,
+        /// Required relevance floor.
+        min_relevance: f32,
+    },
+    /// Section exceeded the policy or section token ceiling.
+    Oversized {
+        /// Estimated section tokens.
+        estimated_tokens: usize,
+        /// Maximum allowed tokens.
+        max_tokens: usize,
+    },
+    /// Cross-task, cross-plan, or global context omitted an explicit reason.
+    MissingScopeReason,
+    /// Section was dropped to fit the dispatch budget.
+    BudgetExceeded {
+        /// Dispatch context budget.
+        budget_tokens: usize,
+    },
+}
+
+/// Visible audit record for a rejected context section.
+#[derive(Clone, Debug)]
+pub struct ContextRejection {
+    /// Rejected section name.
+    pub section_name: String,
+    /// Stable source type key.
+    pub source_type: &'static str,
+    /// Section purpose.
+    pub purpose: ContextPurpose,
+    /// Section scope.
+    pub scope: ContextScope,
+    /// Estimated section token count.
+    pub estimated_tokens: usize,
+    /// Reason the section was rejected.
+    pub reason: ContextRejectionReason,
+}
+
+impl ContextRejection {
+    fn from_section(section: &ContextSection, reason: ContextRejectionReason) -> Self {
+        Self {
+            section_name: section.section.name.clone(),
+            source_type: context_source_type(&section.source),
+            purpose: section.purpose,
+            scope: section.scope.clone(),
+            estimated_tokens: section.estimated_tokens(),
+            reason,
+        }
+    }
+}
+
+/// Audit row for an included context section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextInjectionRecord {
+    /// Included section name.
+    pub section_name: String,
+    /// Stable source type key.
+    pub source_type: &'static str,
+    /// Why the section was injected.
+    pub purpose: ContextPurpose,
+    /// Visibility boundary.
+    pub scope: ContextScope,
+    /// Human-readable inclusion reason.
+    pub inclusion_reason: String,
+    /// Estimated section tokens.
+    pub estimated_tokens: usize,
+    /// Section token budget, if any.
+    pub token_budget: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct ContextSelection {
+    included: Vec<ContextSection>,
+    rejected: Vec<ContextRejection>,
+}
+
 /// The fully resolved context for a single task dispatch.
 #[derive(Clone, Debug)]
 pub struct ResolvedContext {
     /// Ordered list of context sections (by priority then cache layer).
     pub sections: Vec<ContextSection>,
+    /// Sections considered and rejected by policy or budget.
+    pub rejected_sections: Vec<ContextRejection>,
     /// Which tier was used.
     pub tier: ContextTier,
     /// Total estimated token count across all sections.
     pub total_tokens_estimate: usize,
+    /// Total estimated token count across rejected sections.
+    pub total_rejected_tokens_estimate: usize,
     /// Token budget that was applied.
     pub budget_tokens: usize,
 }
@@ -226,6 +531,23 @@ impl ResolvedContext {
     #[must_use]
     pub fn sources(&self) -> Vec<&ContextSource> {
         self.sections.iter().map(|s| &s.source).collect()
+    }
+
+    /// Structured audit manifest for included context sections.
+    #[must_use]
+    pub fn injection_manifest(&self) -> Vec<ContextInjectionRecord> {
+        self.sections
+            .iter()
+            .map(|section| ContextInjectionRecord {
+                section_name: section.section.name.clone(),
+                source_type: context_source_type(&section.source),
+                purpose: section.purpose,
+                scope: section.scope.clone(),
+                inclusion_reason: section.inclusion_reason.clone(),
+                estimated_tokens: section.estimated_tokens(),
+                token_budget: section.budget.max_tokens,
+            })
+            .collect()
     }
 }
 
@@ -511,16 +833,19 @@ impl ContextProvider {
         if budget == 0 {
             return ResolvedContext {
                 sections: Vec::new(),
+                rejected_sections: Vec::new(),
                 tier,
                 total_tokens_estimate: 0,
+                total_rejected_tokens_estimate: 0,
                 budget_tokens: budget,
             };
         }
 
         let mut sections = Vec::new();
+        let task_scope = ContextScope::task(&plan_artifacts.plan_id, &task.id);
 
         // ── Tier 1: Surgical (always included) ─────────────────────
-        self.add_surgical_context(&mut sections, task, budget);
+        self.add_surgical_context(&mut sections, task, &task_scope, budget);
 
         // ── Tier 2: Focused (Sonnet+) ──────────────────────────────
         if tier == ContextTier::Focused || tier == ContextTier::Full {
@@ -530,6 +855,7 @@ impl ContextProvider {
                 plan_artifacts,
                 siblings,
                 prior_outputs,
+                &task_scope,
                 budget,
             );
         }
@@ -542,15 +868,25 @@ impl ContextProvider {
         // ── Rolling-average demotion ────────────────────────────────
         self.apply_average_based_demotions(&mut sections, &task.tier);
 
-        // ── Budget enforcement: drop lowest-priority sections ──────
-        let sections = self.enforce_budget(sections, budget);
+        // ── Policy and budget enforcement ──────────────────────────
+        let selection = self.select_sections(sections, budget, ContextInjectionPolicy::default());
+        let ContextSelection {
+            included: sections,
+            rejected: rejected_sections,
+        } = selection;
 
         let total_tokens_estimate = sections.iter().map(ContextSection::estimated_tokens).sum();
+        let total_rejected_tokens_estimate = rejected_sections
+            .iter()
+            .map(|section| section.estimated_tokens)
+            .sum();
 
         ResolvedContext {
             sections,
+            rejected_sections,
             tier,
             total_tokens_estimate,
+            total_rejected_tokens_estimate,
             budget_tokens: budget,
         }
     }
@@ -584,26 +920,32 @@ impl ContextProvider {
         &self,
         sections: &mut Vec<ContextSection>,
         task: &TaskInput,
+        task_scope: &ContextScope,
         _budget: usize,
     ) {
         // 1. Inline file contents
-        self.add_inline_files(sections, task);
+        self.add_inline_files(sections, task, task_scope);
 
         // 2. Resolved symbol signatures
-        self.add_symbol_signatures(sections, task);
+        self.add_symbol_signatures(sections, task, task_scope);
 
         // 3. Anti-patterns
-        add_anti_patterns(sections, task);
+        add_anti_patterns(sections, task, task_scope);
 
         // 4. Prior failures
-        add_prior_failures(sections, task);
+        add_prior_failures(sections, task, task_scope);
 
         // 5. Verification commands
-        add_verification(sections, task);
+        add_verification(sections, task, task_scope);
     }
 
     /// Add inline file contents as context sections.
-    fn add_inline_files(&self, sections: &mut Vec<ContextSection>, task: &TaskInput) {
+    fn add_inline_files(
+        &self,
+        sections: &mut Vec<ContextSection>,
+        task: &TaskInput,
+        task_scope: &ContextScope,
+    ) {
         for rf in &task.read_files {
             let full_path = self.workdir.join(&rf.path);
             if !full_path.exists() {
@@ -638,21 +980,29 @@ impl ContextProvider {
                 lines_to_show,
             );
 
-            sections.push(ContextSection {
-                section: PromptSection::new(&label, &formatted)
+            sections.push(ContextSection::scoped(
+                PromptSection::new(&label, &formatted)
                     .with_priority(SectionPriority::High)
                     .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle),
-                source: ContextSource::InlineFile {
+                ContextSource::InlineFile {
                     path: rf.path.clone(),
                     lines: rf.lines.clone(),
                 },
-            });
+                ContextPurpose::SourceEvidence,
+                task_scope.clone(),
+                format!("task read_files requested `{}`: {}", rf.path, rf.why),
+            ));
         }
     }
 
     /// Add resolved symbol signatures as context sections.
-    fn add_symbol_signatures(&self, sections: &mut Vec<ContextSection>, task: &TaskInput) {
+    fn add_symbol_signatures(
+        &self,
+        sections: &mut Vec<ContextSection>,
+        task: &TaskInput,
+        task_scope: &ContextScope,
+    ) {
         use std::fmt::Write;
 
         if !task.symbols.is_empty() {
@@ -667,23 +1017,30 @@ impl ContextProvider {
                     );
                 }
 
-                sections.push(ContextSection {
-                    section: PromptSection::new("symbols", &content)
+                sections.push(ContextSection::scoped(
+                    PromptSection::new("symbols", &content)
                         .with_priority(SectionPriority::High)
                         .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::SymbolSignature {
+                    ContextSource::SymbolSignature {
                         symbol: task.symbols.join(", "),
                         file: resolved.first().map(|r| r.file.clone()).unwrap_or_default(),
                     },
-                });
+                    ContextPurpose::SourceEvidence,
+                    task_scope.clone(),
+                    "task symbols requested for implementation context",
+                ));
             }
         }
     }
 }
 
 /// Add anti-patterns as context sections.
-fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
+fn add_anti_patterns(
+    sections: &mut Vec<ContextSection>,
+    task: &TaskInput,
+    task_scope: &ContextScope,
+) {
     if !task.anti_patterns.is_empty() {
         let content = task
             .anti_patterns
@@ -693,18 +1050,25 @@ fn add_anti_patterns(sections: &mut Vec<ContextSection>, task: &TaskInput) {
             .join("\n");
         let formatted = format!("## Do NOT\n{content}");
 
-        sections.push(ContextSection {
-            section: PromptSection::new("anti_patterns", &formatted)
+        sections.push(ContextSection::scoped(
+            PromptSection::new("anti_patterns", &formatted)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
-            source: ContextSource::AntiPattern,
-        });
+            ContextSource::AntiPattern,
+            ContextPurpose::SafetyConstraint,
+            task_scope.clone(),
+            "task declared anti-patterns that constrain implementation",
+        ));
     }
 }
 
 /// Add prior failures as context sections.
-fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
+fn add_prior_failures(
+    sections: &mut Vec<ContextSection>,
+    task: &TaskInput,
+    task_scope: &ContextScope,
+) {
     if !task.prior_failures.is_empty() {
         let content = task
             .prior_failures
@@ -715,18 +1079,25 @@ fn add_prior_failures(sections: &mut Vec<ContextSection>, task: &TaskInput) {
             .join("\n\n");
         let formatted = format!("## Prior failures (learn from these)\n{content}");
 
-        sections.push(ContextSection {
-            section: PromptSection::new("prior_failures", &formatted)
+        sections.push(ContextSection::scoped(
+            PromptSection::new("prior_failures", &formatted)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Volatile)
                 .with_placement(Placement::End),
-            source: ContextSource::AntiPattern, // reusing for failures
-        });
+            ContextSource::AntiPattern, // reusing for failures
+            ContextPurpose::SafetyConstraint,
+            task_scope.clone(),
+            "task retry includes prior failures to avoid repeating them",
+        ));
     }
 }
 
 /// Add verification commands or acceptance criteria as context sections.
-fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
+fn add_verification(
+    sections: &mut Vec<ContextSection>,
+    task: &TaskInput,
+    task_scope: &ContextScope,
+) {
     if !task.verify_commands.is_empty() {
         let content = task
             .verify_commands
@@ -740,13 +1111,16 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
         let formatted =
             format!("## Verification (these commands must pass after your changes)\n{content}");
 
-        sections.push(ContextSection {
-            section: PromptSection::new("verification", &formatted)
+        sections.push(ContextSection::scoped(
+            PromptSection::new("verification", &formatted)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
-            source: ContextSource::Verification,
-        });
+            ContextSource::Verification,
+            ContextPurpose::Verification,
+            task_scope.clone(),
+            "task verify commands define required gates",
+        ));
     } else if !task.acceptance.is_empty() {
         let content = task
             .acceptance
@@ -756,13 +1130,16 @@ fn add_verification(sections: &mut Vec<ContextSection>, task: &TaskInput) {
             .join("\n");
         let formatted = format!("## Acceptance criteria\n{content}");
 
-        sections.push(ContextSection {
-            section: PromptSection::new("acceptance", &formatted)
+        sections.push(ContextSection::scoped(
+            PromptSection::new("acceptance", &formatted)
                 .with_priority(SectionPriority::High)
                 .with_cache_layer(CacheLayer::Plan)
                 .with_placement(Placement::End),
-            source: ContextSource::Verification,
-        });
+            ContextSource::Verification,
+            ContextPurpose::Verification,
+            task_scope.clone(),
+            "task acceptance criteria define required outcome",
+        ));
     }
 }
 
@@ -799,6 +1176,7 @@ impl ContextProvider {
         plan_artifacts: &PlanArtifacts,
         siblings: &[SiblingTask],
         prior_outputs: &[PriorTaskOutput],
+        task_scope: &ContextScope,
         _budget: usize,
     ) {
         // 1. Active pheromone field summary.
@@ -810,14 +1188,17 @@ impl ContextProvider {
             .brief_generator
             .generate(task, plan_doc.as_deref(), siblings);
         if !brief.is_empty() {
-            sections.push(ContextSection {
-                section: PromptSection::new("task_brief", &brief)
+            sections.push(ContextSection::scoped(
+                PromptSection::new("task_brief", &brief)
                     .with_priority(SectionPriority::Normal)
                     .with_cache_layer(CacheLayer::Plan)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(3_000),
-                source: ContextSource::TaskBrief,
-            });
+                ContextSource::TaskBrief,
+                ContextPurpose::TaskGuidance,
+                task_scope.clone(),
+                "focused context includes task-scoped brief",
+            ));
         }
 
         // 3. Sibling tasks (just IDs + titles for orientation)
@@ -843,14 +1224,17 @@ impl ContextProvider {
                 .join("\n");
             let formatted = format!("## Sibling tasks in this plan\n{content}");
 
-            sections.push(ContextSection {
-                section: PromptSection::new("siblings", &formatted)
+            sections.push(ContextSection::scoped(
+                PromptSection::new("siblings", &formatted)
                     .with_priority(SectionPriority::Low)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(1_500),
-                source: ContextSource::SiblingTasks,
-            });
+                ContextSource::SiblingTasks,
+                ContextPurpose::PlanOrientation,
+                ContextScope::plan(&plan_artifacts.plan_id),
+                "focused context includes sibling task orientation within the same plan",
+            ));
         }
 
         // 4. Prior task outputs (from completed dependencies)
@@ -866,34 +1250,45 @@ impl ContextProvider {
                 .join("\n\n");
             let formatted = format!("## Completed dependency outputs\n{content}");
 
-            sections.push(ContextSection {
-                section: PromptSection::new("prior_outputs", &formatted)
+            let task_ids = relevant_outputs
+                .iter()
+                .map(|o| o.task_id.clone())
+                .collect::<Vec<_>>()
+                .join(",");
+            sections.push(ContextSection::scoped(
+                PromptSection::new("prior_outputs", &formatted)
                     .with_priority(SectionPriority::Normal)
                     .with_cache_layer(CacheLayer::Volatile)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(4_000),
-                source: ContextSource::PriorTaskOutput {
-                    task_id: relevant_outputs
-                        .iter()
-                        .map(|o| o.task_id.clone())
-                        .collect::<Vec<_>>()
-                        .join(","),
+                ContextSource::PriorTaskOutput {
+                    task_id: task_ids.clone(),
                 },
-            });
+                ContextPurpose::DependencyMemory,
+                ContextScope::cross_task(
+                    &plan_artifacts.plan_id,
+                    Some(task_ids),
+                    "current task depends on these completed outputs",
+                ),
+                "focused context includes outputs from declared dependencies",
+            ));
         }
 
         // 5. PRD extract (scoped: only paragraphs mentioning this task's files)
         if let Some(prd) = plan_artifacts.prd_extract() {
             let scoped = scope_text_to_files(&prd, &task.files);
             if !scoped.is_empty() {
-                sections.push(ContextSection {
-                    section: PromptSection::new("prd_extract", format!("## PRD context\n{scoped}"))
+                sections.push(ContextSection::scoped(
+                    PromptSection::new("prd_extract", format!("## PRD context\n{scoped}"))
                         .with_priority(SectionPriority::Low)
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle)
                         .with_hard_cap(2_000),
-                    source: ContextSource::PrdExtract,
-                });
+                    ContextSource::PrdExtract,
+                    ContextPurpose::TaskGuidance,
+                    task_scope.clone(),
+                    "PRD extract was scoped to files touched by the task",
+                ));
             }
         }
     }
@@ -906,53 +1301,135 @@ impl ContextProvider {
 
         for (index, chunk) in pheromones.into_iter().enumerate() {
             let priority = pheromone_priority(&chunk);
-            sections.push(ContextSection {
-                section: PromptSection::new(format!("pheromone_signal_{index}"), chunk.content)
+            sections.push(ContextSection::scoped(
+                PromptSection::new(format!("pheromone_signal_{index}"), chunk.content)
                     .with_priority(priority)
                     .with_cache_layer(CacheLayer::Workspace)
                     .with_placement(Placement::Middle)
                     .with_hard_cap(800),
-                source: ContextSource::RecentSignal {
+                ContextSource::RecentSignal {
                     signal_id: format!("pheromone-{scope}-{index}"),
                     plan_id: scope.to_string(),
                     kind: "pheromone".to_string(),
                 },
-            });
+                ContextPurpose::AmbientSignal,
+                ContextScope::plan(scope),
+                "coordination signal matched the requested plan scope",
+            ));
         }
     }
 
     // ── Budget enforcement ─────────────────────────────────────────────
 
+    /// Select bidder-proposed candidates under the given policy and budget.
+    #[must_use]
+    pub fn select_candidates(
+        &self,
+        request: &ContextRequest,
+        candidates: Vec<ContextCandidate>,
+        policy: ContextInjectionPolicy,
+    ) -> ResolvedContext {
+        let budget = request.budget_tokens;
+        let mut sections = Vec::new();
+        let mut rejected_sections = Vec::new();
+
+        for candidate in candidates {
+            let mut section = candidate.section;
+            section.section = section.section.with_bidder(candidate.bidder);
+            if candidate.relevance < policy.min_relevance {
+                rejected_sections.push(ContextRejection::from_section(
+                    &section,
+                    ContextRejectionReason::Irrelevant {
+                        relevance: candidate.relevance,
+                        min_relevance: policy.min_relevance,
+                    },
+                ));
+            } else {
+                sections.push(section);
+            }
+        }
+
+        let selection = self.select_sections(sections, budget, policy);
+        rejected_sections.extend(selection.rejected);
+        let sections = selection.included;
+        let total_tokens_estimate = sections.iter().map(ContextSection::estimated_tokens).sum();
+        let total_rejected_tokens_estimate = rejected_sections
+            .iter()
+            .map(|section| section.estimated_tokens)
+            .sum();
+
+        ResolvedContext {
+            sections,
+            rejected_sections,
+            tier: request.tier,
+            total_tokens_estimate,
+            total_rejected_tokens_estimate,
+            budget_tokens: budget,
+        }
+    }
+
     /// Drop lowest-priority sections until total fits within budget.
     /// Within the same priority level, drop largest sections first.
     #[allow(clippy::unused_self)] // method form for test ergonomics
-    fn enforce_budget(
+    fn select_sections(
         &self,
         mut sections: Vec<ContextSection>,
         budget: usize,
-    ) -> Vec<ContextSection> {
+        policy: ContextInjectionPolicy,
+    ) -> ContextSelection {
         // First, enforce per-section hard caps
         for section in &mut sections {
             section.section = section.section.clone().enforce_hard_cap();
         }
 
-        let total: usize = sections.iter().map(ContextSection::estimated_tokens).sum();
+        let mut included = Vec::with_capacity(sections.len());
+        let mut rejected = Vec::new();
+        for section in sections {
+            if policy.require_scope_reason && section.scope.missing_required_reason() {
+                rejected.push(ContextRejection::from_section(
+                    &section,
+                    ContextRejectionReason::MissingScopeReason,
+                ));
+                continue;
+            }
+
+            let section_limit = section
+                .budget
+                .max_tokens
+                .unwrap_or(policy.max_section_tokens)
+                .min(policy.max_section_tokens);
+            let estimated_tokens = section.estimated_tokens();
+            if estimated_tokens > section_limit {
+                rejected.push(ContextRejection::from_section(
+                    &section,
+                    ContextRejectionReason::Oversized {
+                        estimated_tokens,
+                        max_tokens: section_limit,
+                    },
+                ));
+                continue;
+            }
+
+            included.push(section);
+        }
+
+        let total: usize = included.iter().map(ContextSection::estimated_tokens).sum();
         if total <= budget {
-            return sections;
+            return ContextSelection { included, rejected };
         }
 
         // Sort by priority ascending (lowest first = dropped first),
         // then by size descending (within same priority, drop biggest first)
-        sections.sort_by(|a, b| {
+        included.sort_by(|a, b| {
             (a.section.priority as u8)
                 .cmp(&(b.section.priority as u8))
                 .then(b.estimated_tokens().cmp(&a.estimated_tokens()))
         });
 
-        let mut running_total: usize = sections.iter().map(ContextSection::estimated_tokens).sum();
+        let mut running_total: usize = included.iter().map(ContextSection::estimated_tokens).sum();
         let mut to_drop = Vec::new();
 
-        for (i, section) in sections.iter().enumerate() {
+        for (i, section) in included.iter().enumerate() {
             if running_total <= budget {
                 break;
             }
@@ -967,10 +1444,23 @@ impl ContextProvider {
         // Remove dropped sections (reverse order to preserve indices)
         to_drop.reverse();
         for i in to_drop {
-            sections.remove(i);
+            let section = included.remove(i);
+            rejected.push(ContextRejection::from_section(
+                &section,
+                ContextRejectionReason::BudgetExceeded {
+                    budget_tokens: budget,
+                },
+            ));
         }
 
-        sections
+        ContextSelection { included, rejected }
+    }
+
+    /// Legacy budget-only selection helper for existing callers and tests.
+    #[cfg(test)]
+    fn enforce_budget(&self, sections: Vec<ContextSection>, budget: usize) -> Vec<ContextSection> {
+        self.select_sections(sections, budget, ContextInjectionPolicy::default())
+            .included
     }
 }
 
@@ -984,62 +1474,77 @@ fn add_full_context(
 ) {
     // 1. Plan-level brief (full, not scoped)
     if let Some(brief) = plan_artifacts.plan_brief() {
-        sections.push(ContextSection {
-            section: PromptSection::new("plan_brief", format!("## Plan brief\n{brief}"))
+        sections.push(ContextSection::scoped(
+            PromptSection::new("plan_brief", format!("## Plan brief\n{brief}"))
                 .with_priority(SectionPriority::Normal)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(6_000),
-            source: ContextSource::PlanBrief,
-        });
+            ContextSource::PlanBrief,
+            ContextPurpose::PlanOrientation,
+            ContextScope::plan(&plan_artifacts.plan_id),
+            "full context includes plan-level brief",
+        ));
     }
 
     // 2. Research memo
     if let Some(research) = plan_artifacts.research_memo() {
-        sections.push(ContextSection {
-            section: PromptSection::new("research", format!("## Research memo\n{research}"))
+        sections.push(ContextSection::scoped(
+            PromptSection::new("research", format!("## Research memo\n{research}"))
                 .with_priority(SectionPriority::Low)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(4_000),
-            source: ContextSource::ResearchMemo,
-        });
+            ContextSource::ResearchMemo,
+            ContextPurpose::ResearchEvidence,
+            ContextScope::plan(&plan_artifacts.plan_id),
+            "full context includes research memo for architectural work",
+        ));
     }
 
     // 3. Invariants / rubric
     if let Some(rubric) = plan_artifacts.invariants() {
-        sections.push(ContextSection {
-            section: PromptSection::new("invariants", format!("## Invariants & rubric\n{rubric}"))
+        sections.push(ContextSection::scoped(
+            PromptSection::new("invariants", format!("## Invariants & rubric\n{rubric}"))
                 .with_priority(SectionPriority::Normal)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
-            source: ContextSource::Invariants,
-        });
+            ContextSource::Invariants,
+            ContextPurpose::SafetyConstraint,
+            ContextScope::plan(&plan_artifacts.plan_id),
+            "full context includes plan invariants and rubric",
+        ));
     }
 
     // 4. Cross-plan context
     if let Some(cross) = plan_artifacts.cross_plan_context() {
-        sections.push(ContextSection {
-            section: PromptSection::new("cross_plan", format!("## Cross-plan context\n{cross}"))
+        sections.push(ContextSection::scoped(
+            PromptSection::new("cross_plan", format!("## Cross-plan context\n{cross}"))
                 .with_priority(SectionPriority::Low)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
-            source: ContextSource::CrossPlanContext,
-        });
+            ContextSource::CrossPlanContext,
+            ContextPurpose::CrossPlanMemory,
+            ContextScope::cross_plan("plan artifact explicitly provides cross-plan context"),
+            "full context includes cross-plan context artifact",
+        ));
     }
 
     // 5. Decomposition
     if let Some(decomp) = plan_artifacts.decomposition() {
-        sections.push(ContextSection {
-            section: PromptSection::new("decomposition", format!("## Decomposition\n{decomp}"))
+        sections.push(ContextSection::scoped(
+            PromptSection::new("decomposition", format!("## Decomposition\n{decomp}"))
                 .with_priority(SectionPriority::Low)
                 .with_cache_layer(CacheLayer::Workspace)
                 .with_placement(Placement::Middle)
                 .with_hard_cap(3_000),
-            source: ContextSource::Decomposition,
-        });
+            ContextSource::Decomposition,
+            ContextPurpose::PlanOrientation,
+            ContextScope::plan(&plan_artifacts.plan_id),
+            "full context includes decomposition artifact",
+        ));
     }
 }
 
@@ -1227,6 +1732,30 @@ mod tests {
     use super::*;
     use roko_core::OperatingFrequency;
 
+    fn test_section(
+        section: PromptSection,
+        source: ContextSource,
+        purpose: ContextPurpose,
+    ) -> ContextSection {
+        ContextSection::scoped(
+            section,
+            source,
+            purpose,
+            ContextScope::task("plan-test", "task-test"),
+            "test fixture",
+        )
+    }
+
+    fn test_request(budget_tokens: usize) -> ContextRequest {
+        ContextRequest {
+            tier: ContextTier::Focused,
+            budget_tokens,
+            plan_id: "plan-test".into(),
+            task_id: "task-test".into(),
+            task_files: vec!["src/lib.rs".into()],
+        }
+    }
+
     #[test]
     fn context_tier_from_task_and_model() {
         assert_eq!(
@@ -1351,16 +1880,18 @@ mod tests {
         );
 
         let mut sections = vec![
-            ContextSection {
-                section: PromptSection::new("task_brief", "brief content")
+            test_section(
+                PromptSection::new("task_brief", "brief content")
                     .with_priority(SectionPriority::Normal),
-                source: ContextSource::TaskBrief,
-            },
-            ContextSection {
-                section: PromptSection::new("verification", "verify content")
+                ContextSource::TaskBrief,
+                ContextPurpose::TaskGuidance,
+            ),
+            test_section(
+                PromptSection::new("verification", "verify content")
                     .with_priority(SectionPriority::High),
-                source: ContextSource::Verification,
-            },
+                ContextSource::Verification,
+                ContextPurpose::Verification,
+            ),
         ];
 
         provider.apply_average_based_demotions(&mut sections, "integrative");
@@ -1487,21 +2018,22 @@ mod tests {
         let provider = ContextProvider::new(workdir);
 
         let sections = vec![
-            ContextSection {
-                section: PromptSection::new("critical", &"x".repeat(400))
+            test_section(
+                PromptSection::new("critical", &"x".repeat(400))
                     .with_priority(SectionPriority::Critical),
-                source: ContextSource::Verification,
-            },
-            ContextSection {
-                section: PromptSection::new("high", &"y".repeat(400))
-                    .with_priority(SectionPriority::High),
-                source: ContextSource::AntiPattern,
-            },
-            ContextSection {
-                section: PromptSection::new("low", &"z".repeat(4000))
-                    .with_priority(SectionPriority::Low),
-                source: ContextSource::ResearchMemo,
-            },
+                ContextSource::Verification,
+                ContextPurpose::Verification,
+            ),
+            test_section(
+                PromptSection::new("high", &"y".repeat(400)).with_priority(SectionPriority::High),
+                ContextSource::AntiPattern,
+                ContextPurpose::SafetyConstraint,
+            ),
+            test_section(
+                PromptSection::new("low", &"z".repeat(4000)).with_priority(SectionPriority::Low),
+                ContextSource::ResearchMemo,
+                ContextPurpose::ResearchEvidence,
+            ),
         ];
 
         // Budget = 300 tokens (~1200 bytes). The low section alone is ~1000 tokens.
@@ -1519,11 +2051,12 @@ mod tests {
         let workdir = PathBuf::from("/tmp/test");
         let provider = ContextProvider::new(workdir);
 
-        let sections = vec![ContextSection {
-            section: PromptSection::new("critical_big", &"x".repeat(8000))
+        let sections = vec![test_section(
+            PromptSection::new("critical_big", &"x".repeat(8000))
                 .with_priority(SectionPriority::Critical),
-            source: ContextSource::Verification,
-        }];
+            ContextSource::Verification,
+            ContextPurpose::Verification,
+        )];
 
         // Budget is tiny but critical sections survive
         let result = provider.enforce_budget(sections, 10);
@@ -1532,30 +2065,164 @@ mod tests {
     }
 
     #[test]
+    fn context_selection_rejects_oversized_sections_visibly() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let oversized = test_section(
+            PromptSection::new("huge_context", &"x".repeat(2_000)),
+            ContextSource::ResearchMemo,
+            ContextPurpose::ResearchEvidence,
+        );
+
+        let resolved = provider.select_candidates(
+            &test_request(10_000),
+            vec![ContextCandidate {
+                section: oversized,
+                relevance: 1.0,
+                bidder: AttentionBidder::Research,
+            }],
+            ContextInjectionPolicy {
+                max_section_tokens: 100,
+                min_relevance: 0.0,
+                require_scope_reason: true,
+            },
+        );
+
+        assert!(resolved.sections.is_empty());
+        assert_eq!(resolved.rejected_sections.len(), 1);
+        assert_eq!(
+            resolved.rejected_sections[0].reason,
+            ContextRejectionReason::Oversized {
+                estimated_tokens: 500,
+                max_tokens: 100,
+            }
+        );
+        assert_eq!(resolved.total_rejected_tokens_estimate, 500);
+    }
+
+    #[test]
+    fn context_selection_rejects_cross_task_context_without_reason() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let unscoped = ContextSection::scoped(
+            PromptSection::new("dependency_output", "completed output"),
+            ContextSource::PriorTaskOutput {
+                task_id: "T0".into(),
+            },
+            ContextPurpose::DependencyMemory,
+            ContextScope::cross_task("plan-test", Some("T0".into()), ""),
+            "test fixture",
+        );
+
+        let resolved = provider.select_candidates(
+            &test_request(10_000),
+            vec![ContextCandidate {
+                section: unscoped,
+                relevance: 1.0,
+                bidder: AttentionBidder::IterationMemory,
+            }],
+            ContextInjectionPolicy::default(),
+        );
+
+        assert!(resolved.sections.is_empty());
+        assert_eq!(
+            resolved.rejected_sections[0].reason,
+            ContextRejectionReason::MissingScopeReason
+        );
+    }
+
+    #[test]
+    fn context_selection_rejects_irrelevant_candidates() {
+        let provider = ContextProvider::new(PathBuf::from("/tmp/test"));
+        let candidate = test_section(
+            PromptSection::new("distant_research", "mostly unrelated"),
+            ContextSource::ResearchMemo,
+            ContextPurpose::ResearchEvidence,
+        );
+
+        let resolved = provider.select_candidates(
+            &test_request(10_000),
+            vec![ContextCandidate {
+                section: candidate,
+                relevance: 0.2,
+                bidder: AttentionBidder::Research,
+            }],
+            ContextInjectionPolicy {
+                max_section_tokens: 8_000,
+                min_relevance: 0.5,
+                require_scope_reason: true,
+            },
+        );
+
+        assert!(resolved.sections.is_empty());
+        assert_eq!(
+            resolved.rejected_sections[0].reason,
+            ContextRejectionReason::Irrelevant {
+                relevance: 0.2,
+                min_relevance: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn injection_manifest_retains_provenance_scope_budget_and_reason() {
+        let section = ContextSection::scoped(
+            PromptSection::new("file:src/lib.rs", "fn main() {}").with_hard_cap(50),
+            ContextSource::InlineFile {
+                path: "src/lib.rs".into(),
+                lines: Some("1-20".into()),
+            },
+            ContextPurpose::SourceEvidence,
+            ContextScope::task("plan-test", "T1"),
+            "task read_files requested `src/lib.rs`: inspect public API",
+        );
+        let resolved = ResolvedContext {
+            sections: vec![section],
+            rejected_sections: Vec::new(),
+            tier: ContextTier::Focused,
+            total_tokens_estimate: 3,
+            total_rejected_tokens_estimate: 0,
+            budget_tokens: 12_000,
+        };
+
+        let manifest = resolved.injection_manifest();
+
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest[0].source_type, "file");
+        assert_eq!(manifest[0].purpose, ContextPurpose::SourceEvidence);
+        assert_eq!(manifest[0].scope, ContextScope::task("plan-test", "T1"));
+        assert_eq!(manifest[0].token_budget, Some(50));
+        assert!(manifest[0].inclusion_reason.contains("inspect public API"));
+    }
+
+    #[test]
     fn resolved_context_into_prompt_sections_sorts_by_cache_layer() {
         let resolved = ResolvedContext {
             sections: vec![
-                ContextSection {
-                    section: PromptSection::new("task", "task content")
+                test_section(
+                    PromptSection::new("task", "task content")
                         .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::End),
-                    source: ContextSource::Verification,
-                },
-                ContextSection {
-                    section: PromptSection::new("session", "session content")
+                    ContextSource::Verification,
+                    ContextPurpose::Verification,
+                ),
+                test_section(
+                    PromptSection::new("session", "session content")
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::PlanBrief,
-                },
-                ContextSection {
-                    section: PromptSection::new("system", "system content")
+                    ContextSource::PlanBrief,
+                    ContextPurpose::PlanOrientation,
+                ),
+                test_section(
+                    PromptSection::new("system", "system content")
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Start),
-                    source: ContextSource::AntiPattern,
-                },
+                    ContextSource::AntiPattern,
+                    ContextPurpose::SafetyConstraint,
+                ),
             ],
+            rejected_sections: Vec::new(),
             tier: ContextTier::Full,
             total_tokens_estimate: 30,
+            total_rejected_tokens_estimate: 0,
             budget_tokens: 24_000,
         };
 
@@ -1572,28 +2239,33 @@ mod tests {
     fn resolved_context_maps_sources_to_attention_bidders() {
         let resolved = ResolvedContext {
             sections: vec![
-                ContextSection {
-                    section: PromptSection::new("knowledge", "knowledge"),
-                    source: ContextSource::KnowledgeEntry {
+                test_section(
+                    PromptSection::new("knowledge", "knowledge"),
+                    ContextSource::KnowledgeEntry {
                         entry_id: "k1".into(),
                         kind: "heuristic".into(),
                         source: Some("neuro".into()),
                     },
-                },
-                ContextSection {
-                    section: PromptSection::new("file", "file"),
-                    source: ContextSource::InlineFile {
+                    ContextPurpose::ResearchEvidence,
+                ),
+                test_section(
+                    PromptSection::new("file", "file"),
+                    ContextSource::InlineFile {
                         path: "src/lib.rs".into(),
                         lines: None,
                     },
-                },
-                ContextSection {
-                    section: PromptSection::new("research", "research"),
-                    source: ContextSource::ResearchMemo,
-                },
+                    ContextPurpose::SourceEvidence,
+                ),
+                test_section(
+                    PromptSection::new("research", "research"),
+                    ContextSource::ResearchMemo,
+                    ContextPurpose::ResearchEvidence,
+                ),
             ],
+            rejected_sections: Vec::new(),
             tier: ContextTier::Focused,
             total_tokens_estimate: 12,
+            total_rejected_tokens_estimate: 0,
             budget_tokens: 12_000,
         };
 
@@ -1619,39 +2291,45 @@ mod tests {
     fn resolved_context_attention_curve_positions_high_value_at_edges() {
         let resolved = ResolvedContext {
             sections: vec![
-                ContextSection {
-                    section: PromptSection::new("critical", "critical context")
+                test_section(
+                    PromptSection::new("critical", "critical context")
                         .with_priority(SectionPriority::Critical)
                         .with_cache_layer(CacheLayer::Plan)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::Verification,
-                },
-                ContextSection {
-                    section: PromptSection::new("high", "high value")
+                    ContextSource::Verification,
+                    ContextPurpose::Verification,
+                ),
+                test_section(
+                    PromptSection::new("high", "high value")
                         .with_priority(SectionPriority::High)
                         .with_cache_layer(CacheLayer::Volatile)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::PriorTaskOutput {
+                    ContextSource::PriorTaskOutput {
                         task_id: "T1".into(),
                     },
-                },
-                ContextSection {
-                    section: PromptSection::new("normal", "normal value")
+                    ContextPurpose::DependencyMemory,
+                ),
+                test_section(
+                    PromptSection::new("normal", "normal value")
                         .with_priority(SectionPriority::Normal)
                         .with_cache_layer(CacheLayer::Workspace)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::PlanBrief,
-                },
-                ContextSection {
-                    section: PromptSection::new("low", "low value")
+                    ContextSource::PlanBrief,
+                    ContextPurpose::PlanOrientation,
+                ),
+                test_section(
+                    PromptSection::new("low", "low value")
                         .with_priority(SectionPriority::Low)
                         .with_cache_layer(CacheLayer::Role)
                         .with_placement(Placement::Middle),
-                    source: ContextSource::ResearchMemo,
-                },
+                    ContextSource::ResearchMemo,
+                    ContextPurpose::ResearchEvidence,
+                ),
             ],
+            rejected_sections: Vec::new(),
             tier: ContextTier::Full,
             total_tokens_estimate: 12,
+            total_rejected_tokens_estimate: 0,
             budget_tokens: 24_000,
         };
 
