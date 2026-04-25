@@ -85,6 +85,60 @@ pub fn projection_policies() -> Vec<ProjectionCatalogEntry> {
             },
         },
         ProjectionCatalogEntry {
+            name: "agent_state".into(),
+            version: 1,
+            policy: InvalidationPolicy {
+                max_age_secs: 5,
+                incremental: true,
+                invalidation_triggers: vec![
+                    "agent_spawned".into(),
+                    "agent_output".into(),
+                    "agent_completed".into(),
+                ],
+            },
+        },
+        ProjectionCatalogEntry {
+            name: "plan_state".into(),
+            version: 1,
+            policy: InvalidationPolicy {
+                max_age_secs: 5,
+                incremental: true,
+                invalidation_triggers: vec![
+                    "plan_started".into(),
+                    "plan_completed".into(),
+                    "task_started".into(),
+                    "task_completed".into(),
+                    "task_phase_changed".into(),
+                    "phase_transition".into(),
+                ],
+            },
+        },
+        ProjectionCatalogEntry {
+            name: "gate_state".into(),
+            version: 1,
+            policy: InvalidationPolicy {
+                max_age_secs: 10,
+                incremental: true,
+                invalidation_triggers: vec!["gate_result".into(), "gate_thresholds_updated".into()],
+            },
+        },
+        ProjectionCatalogEntry {
+            name: "learning_policy_state".into(),
+            version: 1,
+            policy: InvalidationPolicy {
+                max_age_secs: 30,
+                incremental: true,
+                invalidation_triggers: vec![
+                    "experiment_winners_updated".into(),
+                    "cfactor_trend_updated".into(),
+                    "efficiency_event".into(),
+                    "episode_recorded".into(),
+                    "cascade_router_updated".into(),
+                    "gate_thresholds_updated".into(),
+                ],
+            },
+        },
+        ProjectionCatalogEntry {
             name: "cohort_health".into(),
             version: 1,
             policy: InvalidationPolicy {
@@ -206,6 +260,10 @@ pub fn projection_version(name: &str) -> Option<u32> {
     // Normalise aliases.
     let canonical = match name {
         "dashboard_snapshot" => "dashboard",
+        "agents" | "agent_trails" => "agent_state",
+        "plans" | "plans_list" => "plan_state",
+        "gates" | "gate_pipeline" => "gate_state",
+        "learning" | "learning_policy" => "learning_policy_state",
         "jobs" => "marketplace_jobs",
         "atelier" => "prds",
         "knowledge_entries" => "knowledge",
@@ -249,6 +307,14 @@ mod tests {
         assert_eq!(projection_version("jobs"), Some(2));
         assert_eq!(projection_version("dashboard"), Some(1));
         assert_eq!(projection_version("dashboard_snapshot"), Some(1));
+        assert_eq!(projection_version("agent_state"), Some(1));
+        assert_eq!(projection_version("agent_trails"), Some(1));
+        assert_eq!(projection_version("plan_state"), Some(1));
+        assert_eq!(projection_version("plans_list"), Some(1));
+        assert_eq!(projection_version("gate_state"), Some(1));
+        assert_eq!(projection_version("gate_pipeline"), Some(1));
+        assert_eq!(projection_version("learning_policy_state"), Some(1));
+        assert_eq!(projection_version("learning_policy"), Some(1));
         assert_eq!(projection_version("atelier"), Some(1));
         assert_eq!(projection_version("knowledge_entries"), Some(1));
         assert_eq!(projection_version("nonexistent"), None);

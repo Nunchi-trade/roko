@@ -103,11 +103,17 @@ async fn stream_projection(
 }
 
 fn projection_state_frame(name: &str, cursor: u64, state: Value) -> Value {
+    let canonical_name = canonical_projection_name(name);
     let cursor = format!("0x{cursor:x}");
+    let version = crate::projection_contract::projection_version(canonical_name).unwrap_or(1);
     json!({
         "name": name,
+        "canonical_name": canonical_name,
+        "version": version,
         "channel": format!("projection:{name}"),
         "cursor": cursor,
+        "computed_at": chrono::Utc::now().to_rfc3339(),
+        "recovered": false,
         "freshness": {
             "state": "live",
             "cursor": cursor,
@@ -132,6 +138,107 @@ fn projection_state_value(
 ) -> Result<Value, ApiError> {
     let value = match name {
         "dashboard" | "dashboard_snapshot" => json!(snapshot),
+        "agent_state" | "agents" => json!({
+            "items": snapshot
+                .agents
+                .values()
+                .filter(|agent| agent_matches_filter(agent.agent_id.as_str(), query.filter.as_deref()))
+                .take(query.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "stats": {
+                "active": snapshot.stats.agents_active,
+                "total_known": snapshot.agents.len(),
+                "cost_usd_total": snapshot.stats.cost_usd_total,
+            },
+            "availability": collection_availability(snapshot.agents.is_empty(), "no_agent_state"),
+        }),
+        "plan_state" | "plans" => json!({
+            "plans": snapshot
+                .plans
+                .values()
+                .filter(|plan| plan_matches_filter(plan.plan_id.as_str(), query.filter.as_deref()))
+                .take(query.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "tasks": snapshot
+                .tasks
+                .values()
+                .filter(|task| task_matches_filter(task, query.filter.as_deref()))
+                .take(query.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "stats": {
+                "plans_active": snapshot.stats.plans_active,
+                "plans_completed": snapshot.stats.plans_completed,
+                "plans_failed": snapshot.stats.plans_failed,
+                "tasks_active": snapshot.stats.tasks_active,
+                "tasks_completed": snapshot.stats.tasks_completed,
+                "tasks_failed": snapshot.stats.tasks_failed,
+            },
+            "availability": collection_availability(
+                snapshot.plans.is_empty() && snapshot.tasks.is_empty(),
+                "no_plan_state",
+            ),
+        }),
+        "gate_state" | "gates" => json!({
+            "gates": snapshot
+                .gates
+                .iter()
+                .filter(|gate| gate_matches_filter(gate, query.filter.as_deref()))
+                .take(query.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "trends": snapshot.gate_trends,
+            "recent_failures": snapshot.gate_recent_failures,
+            "thresholds": json_blob_state(
+                snapshot.gate_thresholds_json.as_str(),
+                "gate_thresholds_not_loaded",
+                "/api/learning/gate-thresholds",
+            ),
+            "stats": {
+                "passed": snapshot.stats.gates_passed,
+                "failed": snapshot.stats.gates_failed,
+            },
+            "availability": collection_availability(snapshot.gates.is_empty(), "no_gate_state"),
+        }),
+        "learning_policy_state" | "learning" | "learning_policy" => json!({
+            "experiment_winners": {
+                "state": if snapshot.experiment_winners.is_empty() { "empty" } else { "available" },
+                "items": snapshot.experiment_winners,
+            },
+            "cascade_router": json_blob_state(
+                snapshot.cascade_router_json.as_str(),
+                "cascade_router_not_loaded",
+                "/api/learning/cascade-router",
+            ),
+            "gate_thresholds": json_blob_state(
+                snapshot.gate_thresholds_json.as_str(),
+                "gate_thresholds_not_loaded",
+                "/api/learning/gate-thresholds",
+            ),
+            "efficiency_trend": {
+                "state": if snapshot.efficiency_trend.is_empty() { "empty" } else { "available" },
+                "items": snapshot.efficiency_trend,
+            },
+            "cfactor_trend": {
+                "state": if snapshot.cfactor_trend.is_empty() { "empty" } else { "available" },
+                "items": snapshot.cfactor_trend,
+            },
+            "episodes": {
+                "state": if snapshot.episodes.is_empty() { "empty" } else { "available" },
+                "items": snapshot.episodes.iter().cloned().collect::<Vec<_>>(),
+            },
+            "policy_updates": {
+                "state": "unavailable_in_statehub",
+                "reason": "policy update candidates are persisted in the learning store and exposed through a stable endpoint instead of private prompt/context internals",
+                "endpoint": "/api/learning/policy-updates",
+            },
+            "stats": {
+                "episodes_total": snapshot.stats.episodes_total,
+                "cost_usd_total": snapshot.stats.cost_usd_total,
+            },
+        }),
         "cohort_health" => json!({
             "stats": snapshot.stats,
             "agent_topology": snapshot.agent_topology,
@@ -210,6 +317,43 @@ fn projection_state_value(
 fn projection_accepts_event(name: &str, query: &ProjectionQuery, event: &DashboardEvent) -> bool {
     match name {
         "dashboard" | "dashboard_snapshot" => true,
+        "agent_state" | "agents" => match event {
+            DashboardEvent::AgentSpawned { agent_id, .. }
+            | DashboardEvent::AgentOutput { agent_id, .. }
+            | DashboardEvent::AgentCompleted { agent_id } => {
+                agent_matches_filter(agent_id, query.filter.as_deref())
+            }
+            _ => false,
+        },
+        "plan_state" | "plans" => match event {
+            DashboardEvent::PlanStarted { plan_id }
+            | DashboardEvent::PlanCompleted { plan_id, .. }
+            | DashboardEvent::PhaseTransition { plan_id, .. } => {
+                plan_matches_filter(plan_id, query.filter.as_deref())
+            }
+            DashboardEvent::TaskStarted { plan_id, .. }
+            | DashboardEvent::TaskCompleted { plan_id, .. }
+            | DashboardEvent::TaskPhaseChanged { plan_id, .. } => {
+                plan_matches_filter(plan_id, query.filter.as_deref())
+            }
+            _ => false,
+        },
+        "gate_state" | "gates" => match event {
+            DashboardEvent::GateResult { plan_id, .. } => {
+                plan_matches_filter(plan_id, query.filter.as_deref())
+            }
+            DashboardEvent::GateThresholdsUpdated { .. } => true,
+            _ => false,
+        },
+        "learning_policy_state" | "learning" | "learning_policy" => matches!(
+            event,
+            DashboardEvent::ExperimentWinnersUpdated { .. }
+                | DashboardEvent::CFactorTrendUpdated { .. }
+                | DashboardEvent::EfficiencyEvent { .. }
+                | DashboardEvent::EpisodeRecorded { .. }
+                | DashboardEvent::CascadeRouterUpdated { .. }
+                | DashboardEvent::GateThresholdsUpdated { .. }
+        ),
         "cohort_health" => matches!(
             event,
             DashboardEvent::PlanStarted { .. }
@@ -262,6 +406,55 @@ fn projection_accepts_event(name: &str, query: &ProjectionQuery, event: &Dashboa
             _ => false,
         },
         _ => false,
+    }
+}
+
+fn canonical_projection_name(name: &str) -> &str {
+    match name {
+        "dashboard_snapshot" => "dashboard",
+        "agents" | "agent_trails" => "agent_state",
+        "plans" | "plans_list" => "plan_state",
+        "gates" | "gate_pipeline" => "gate_state",
+        "learning" | "learning_policy" => "learning_policy_state",
+        "jobs" => "marketplace_jobs",
+        "atelier" => "prds",
+        "knowledge_entries" => "knowledge",
+        _ => name,
+    }
+}
+
+fn collection_availability(empty: bool, empty_reason: &str) -> Value {
+    if empty {
+        json!({
+            "state": "empty",
+            "reason": empty_reason,
+        })
+    } else {
+        json!({ "state": "available" })
+    }
+}
+
+fn json_blob_state(raw: &str, missing_reason: &str, fallback_endpoint: &str) -> Value {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return json!({
+            "state": "missing",
+            "reason": missing_reason,
+            "endpoint": fallback_endpoint,
+        });
+    }
+
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) => json!({
+            "state": "available",
+            "value": value,
+        }),
+        Err(error) => json!({
+            "state": "invalid",
+            "reason": error.to_string(),
+            "raw": raw,
+            "endpoint": fallback_endpoint,
+        }),
     }
 }
 
