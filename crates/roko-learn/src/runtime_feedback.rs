@@ -35,6 +35,9 @@ use crate::pattern_discovery::{
 };
 use crate::playbook::PlaybookStore;
 use crate::playbook_rules::PlaybookRules;
+use crate::post_gate_reflection::{
+    PostGateReflectionStore, ReflectionInput, ReflectionPromotionConfig,
+};
 use crate::prompt_experiment::{ExperimentStatus, ExperimentStore, PromptExperiment};
 use crate::provider_health::ProviderHealthTracker;
 use crate::regression::{RegressionReport, RegressionThresholds, detect_regressions};
@@ -114,6 +117,8 @@ pub struct LearningPaths {
     pub local_rewards_json: PathBuf,
     /// Learned prompt section effectiveness snapshot.
     pub section_effects_json: PathBuf,
+    /// Structured post-gate reflection records and candidates.
+    pub post_gate_reflections_json: PathBuf,
 }
 
 impl LearningPaths {
@@ -137,6 +142,7 @@ impl LearningPaths {
             gate_thresholds_json: root.join("gate-thresholds.json"),
             local_rewards_json: root.join("local-rewards.json"),
             section_effects_json: root.join("section-effects.json"),
+            post_gate_reflections_json: root.join("post-gate-reflections.json"),
             root,
         }
     }
@@ -303,6 +309,10 @@ pub struct LearningUpdate {
     pub patterns_ingested: bool,
     /// Whether the cascade router was updated with an observation.
     pub router_updated: bool,
+    /// Whether a post-gate reflection record was persisted.
+    pub reflection_recorded: ApplyStatus,
+    /// Whether a reflection-derived playbook candidate was updated.
+    pub reflection_candidate_updated: ApplyStatus,
 }
 
 /// Errors produced by [`LearningRuntime`].
@@ -817,6 +827,18 @@ impl LearningRuntime {
             hook(input.episode.clone());
         }
         let episode_count = self.episode_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        if let Some(reflection_input) = ReflectionInput::from_episode(&input.episode) {
+            let mut reflection_store =
+                PostGateReflectionStore::load(&self.paths.post_gate_reflections_json);
+            let observation =
+                reflection_store.observe(reflection_input, ReflectionPromotionConfig::default());
+            reflection_store.save(&self.paths.post_gate_reflections_json)?;
+            update.reflection_recorded = ApplyStatus::Applied;
+            if observation.candidate.is_some() {
+                update.reflection_candidate_updated = ApplyStatus::Applied;
+            }
+        }
 
         if input.playbook_id.is_none() {
             input.playbook_id = extra_string(&input.episode, "playbook_id");
@@ -2482,6 +2504,30 @@ mod tests {
         let rules = runtime.playbook_rules.snapshot();
         rule = rules.into_iter().find(|r| r.rule_id == "r-1").unwrap();
         assert_eq!(rule.contradictions, 1);
+    }
+
+    #[tokio::test]
+    async fn completed_gate_run_persists_post_gate_reflection() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = LearningRuntime::open_under(tmp.path()).await.unwrap();
+        let mut ep = sample_episode(false);
+        ep.gate_verdicts.push(
+            crate::episode_logger::GateVerdict::new("compile", false).with_signature("E0308"),
+        );
+        ep.reflection = Some(
+            "Fix crates/roko-learn/src/lib.rs before retrying E0308 type_mismatch".to_string(),
+        );
+
+        let update = runtime
+            .record_completed_run(CompletedRunInput::from_episode(ep))
+            .await
+            .unwrap();
+
+        assert_eq!(update.reflection_recorded, ApplyStatus::Applied);
+        assert_eq!(update.reflection_candidate_updated, ApplyStatus::Applied);
+        let store = PostGateReflectionStore::load(&runtime.paths().post_gate_reflections_json);
+        assert_eq!(store.records.len(), 1);
+        assert_eq!(store.candidates.len(), 1);
     }
 
     #[tokio::test]

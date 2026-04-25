@@ -136,6 +136,8 @@ pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+/// Structured post-gate reflections and reflection-derived playbook candidates.
+pub mod post_gate_reflection;
 pub mod prediction;
 pub mod prompt_experiment;
 pub mod provider_health;

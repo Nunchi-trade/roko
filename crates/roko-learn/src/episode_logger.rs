@@ -236,6 +236,9 @@ pub struct Episode {
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// Optional post-gate reflection text for retry and playbook learning.
+    #[serde(default)]
+    pub reflection: Option<String>,
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
@@ -291,6 +294,7 @@ impl Episode {
             tokens_used: 0,
             external_actions: Vec::new(),
             failure_reason: None,
+            reflection: None,
             reasoning_summary: None,
             hdc_fingerprint: None,
             emotional_tag: None,
