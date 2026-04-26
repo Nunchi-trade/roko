@@ -92,6 +92,8 @@ pub mod bayesian_confidence;
 pub mod budget;
 /// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
 pub mod calibration_policy;
+/// Extracted submodules for cascade router types, helpers, and persistence.
+pub mod cascade;
 pub mod cascade_router;
 /// Causal microstructure discovery: Granger causality, PC algorithm,
 /// and formal causal DAG construction from time series data (TA-08).
