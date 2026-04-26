@@ -25,12 +25,16 @@ use roko_agent::safety::scrub::{ScrubPolicy, scrub_secrets};
 use roko_agent::task_runner::{
     AnomalyDetector as RunnerAnomalyDetector, BudgetGuardrail as RunnerBudgetGuardrail,
     ConductorBandit as RunnerConductorBandit, CostTable as RunnerCostTable,
-    EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
+    EventBus as RunnerEventBus, TaskRunner, TaskRunnerError,
 };
+<<<<<<< HEAD
 use roko_agent::{
     Agent, AgentInvocationSession, AgentResult, InvocationState, MultiAgentPool, ReuseScope,
     SafetyLayer, WarmReusePolicy, fingerprint_text,
 };
+=======
+use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
 use roko_chain::{ChainClient, ChainWallet};
 use roko_compose::enrichment::{
@@ -51,9 +55,9 @@ use roko_conductor::{CircuitBreakerState, Conductor, ConductorDecision, FailureR
 use roko_core::DaimonPolicy;
 use roko_core::Policy;
 use roko_core::agent::{ProviderKind, resolve_model};
-use roko_core::attestation::{self, SigningKey};
+use roko_core::attestation;
 use roko_core::config::schema::{
-    GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
+    GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig,
 };
 use roko_core::extension::ExtensionChain;
 use roko_core::metric::{ConfigHash, TaskMetric};
@@ -65,8 +69,13 @@ use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+<<<<<<< HEAD
     TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict,
     score_model_for_task,
+=======
+    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry,
+    Verdict, score_model_for_task,
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -121,7 +130,6 @@ use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::prediction::CalibrationTracker;
-use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
     RoutingDecisionLog, RoutingDecisionLogStore, RoutingDecisionMeta, RoutingLogger,
 };
@@ -195,14 +203,44 @@ use crate::agent_config::{
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::config::Config;
+use crate::config_helpers::{
+    apply_role_routing_override, cfactor_history_path, conductor_policy_path,
+    custody_logger_for, daimon_state_path, domain_uses_compiled_gates, domain_uses_git,
+    executor_snapshot_path, find_role_override, frequency_label, gate_artifact_store_path,
+    gate_ratchet_path, latency_registry_path, load_roko_config, mechanical_tier_model,
+    model_experiments_path, provider_id_for_routing_model,
+    replan_ledger_path, resolve_task_role, resolved_role_label, routing_log_path,
+    routing_model_provider_map, runtime_learning_config, state_dir, static_overrides_path,
+    task_runner_cost_table,
+};
 use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
     persist_heartbeat_snapshot,
 };
 use crate::plan::plans_dir;
+<<<<<<< HEAD
+=======
+use crate::prompt_helpers::{
+    apply_section_effectiveness_to_prompt_section, build_daimon_context_section,
+    build_relevant_context_layer, build_system_prompt,
+    build_system_prompt_with_context_validated, claude_task_tool_allowlist_with,
+    claude_tool_allowlist, claude_tool_allowlist_with, code_context_for_task,
+    default_task_category, effective_context_window_tokens,
+    prompt_section_meta_from_sections,
+};
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use crate::snapshot_migrate;
-use crate::task_parser::{TaskValidationIssue, TasksFile};
+use crate::task_helpers::{
+    conductor_signal_from_output, crate_root_for_path, extract_task_symbols,
+    file_contains_public_api, load_prior_task_outputs, maybe_attest_engram, parse_review_verdict,
+    read_full_crate_source, review_drift_report, save_task_output, significant_terms,
+    tail_output_lines, task_crate_name, task_def_to_dag_task, task_def_to_input,
+    task_read_cli_args, task_spec_summary, truncate_doc_snippet, truncate_output,
+    validate_tasks_file_for_execution, with_task_failure_context, ReviewDriftReport,
+    TASK_FAILURE_OUTPUT_TAIL_LINES,
+};
+use crate::task_parser::TasksFile;
 use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
 use crate::workspace_paths::find_prd_path;
@@ -224,6 +262,7 @@ const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
+<<<<<<< HEAD
 const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
@@ -293,6 +332,14 @@ fn cfactor_history_path(workdir: &Path) -> PathBuf {
         .learn_dir()
         .join("c-factor.jsonl")
 }
+=======
+
+// domain_uses_compiled_gates, domain_uses_git, resolve_task_role,
+// model_experiments_path, gate_artifact_store_path, gate_ratchet_path,
+// daimon_state_path, latency_registry_path, static_overrides_path,
+// routing_log_path, custody_logger_for, cfactor_history_path
+// → moved to config_helpers.rs
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 
 #[derive(Debug, Clone, Copy)]
 struct HeartbeatCounts {
@@ -610,9 +657,7 @@ fn task_requirements_for_routing(
     }
 }
 
-fn conductor_policy_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("learn").join("conductor.json")
-}
+// conductor_policy_path → moved to config_helpers.rs
 
 fn scrub_json_value(value: &serde_json::Value, policy: &ScrubPolicy) -> serde_json::Value {
     match value {
@@ -667,13 +712,7 @@ fn scrub_agent_result(result: &AgentResult, policy: &ScrubPolicy) -> AgentResult
 }
 
 
-fn state_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("state")
-}
-
-fn executor_snapshot_path(workdir: &Path) -> PathBuf {
-    state_dir(workdir).join("executor.json")
-}
+// state_dir, executor_snapshot_path → moved to config_helpers.rs
 
 fn agent_invocation_ledger_path(workdir: &Path) -> PathBuf {
     state_dir(workdir).join("agent-invocations.jsonl")
@@ -824,157 +863,11 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
 }
 
 
-fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
-    let path = workdir.join("roko.toml");
-    if !path.exists() {
-        return Ok(RokoConfig::default());
-    }
-
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))
-}
-
-fn frequency_label(frequency: OperatingFrequency) -> &'static str {
-    match frequency {
-        OperatingFrequency::Gamma => "gamma",
-        OperatingFrequency::Theta => "theta",
-        OperatingFrequency::Delta => "delta",
-    }
-}
-
-fn task_runner_cost_table(resolved: &roko_core::agent::ResolvedModel) -> RunnerCostTable {
-    let mut cost_table = RunnerCostTable::default();
-
-    if let Some(profile) = resolved.profile.as_ref() {
-        cost_table.insert(
-            resolved.slug.clone(),
-            RunnerModelPricing {
-                input_per_m: profile.cost_input_per_m.unwrap_or(0.0),
-                output_per_m: profile.cost_output_per_m.unwrap_or(0.0),
-                cache_read_per_m: profile.cost_cache_read_per_m.unwrap_or(0.0),
-                cache_write_per_m: profile.cost_cache_write_per_m.unwrap_or(0.0),
-            },
-        );
-    }
-
-    cost_table
-}
-
-fn routing_model_provider_map(config: &RokoConfig) -> HashMap<String, String> {
-    let mut providers = HashMap::new();
-    for (model_key, profile) in config.effective_models() {
-        providers.insert(model_key, profile.provider.clone());
-        providers.entry(profile.slug).or_insert(profile.provider);
-    }
-    providers
-}
-
-fn provider_id_for_routing_model(
-    config: &RokoConfig,
-    model_providers: &HashMap<String, String>,
-    model: &str,
-) -> String {
-    model_providers.get(model).cloned().unwrap_or_else(|| {
-        let resolved = resolve_model(config, model);
-        resolved
-            .profile
-            .map(|profile| profile.provider)
-            .unwrap_or_else(|| resolved.provider_kind.label().to_owned())
-    })
-}
-
-fn find_role_override<'a>(config: &'a RokoConfig, role_label: &str) -> Option<&'a RoleOverride> {
-    config.agent.roles.get(role_label).or_else(|| {
-        config
-            .agent
-            .roles
-            .iter()
-            .find_map(|(section_name, override_cfg)| {
-                (override_cfg.resolved_role_name(section_name) == role_label)
-                    .then_some(override_cfg)
-            })
-    })
-}
-
-fn resolved_role_label(config: &RokoConfig, role_label: &str) -> String {
-    find_role_override(config, role_label)
-        .map(|override_cfg| override_cfg.resolved_role_name(role_label).to_string())
-        .unwrap_or_else(|| role_label.to_string())
-}
-
-fn model_matches_forced_backend(
-    config: &RokoConfig,
-    model_providers: &HashMap<String, String>,
-    model: &str,
-    forced_backend: &str,
-) -> bool {
-    let forced_backend = forced_backend.trim().to_ascii_lowercase();
-    if forced_backend.is_empty() {
-        return false;
-    }
-
-    let provider_id = provider_id_for_routing_model(config, model_providers, model);
-    if provider_id.eq_ignore_ascii_case(&forced_backend) {
-        return true;
-    }
-
-    match resolve_model(config, model).backend {
-        roko_core::agent::AgentBackend::Claude => forced_backend == "claude",
-        roko_core::agent::AgentBackend::Codex => {
-            forced_backend == "codex"
-                || forced_backend == "openai"
-                || forced_backend == "openai_compat"
-        }
-        roko_core::agent::AgentBackend::Cursor => forced_backend == "cursor",
-        roko_core::agent::AgentBackend::Ollama => forced_backend == "ollama",
-        roko_core::agent::AgentBackend::OpenAi => {
-            forced_backend == "openai" || forced_backend == "openai_compat"
-        }
-        roko_core::agent::AgentBackend::Perplexity => {
-            forced_backend == "perplexity" || forced_backend == "sonar"
-        }
-        _ => false,
-    }
-}
-
-fn apply_role_routing_override(
-    config: &RokoConfig,
-    role_label: &str,
-    model_providers: &HashMap<String, String>,
-    candidates: &[String],
-) -> Option<(String, String)> {
-    let role_override = find_role_override(config, role_label)?;
-
-    if let Some(model) = role_override.model.as_deref().map(str::trim)
-        && !model.is_empty()
-    {
-        return Some((model.to_string(), "role_model_override".to_string()));
-    }
-
-    if let Some(routing_overrides) = role_override.routing_overrides.as_ref() {
-        if let Some(force_tier) = routing_overrides.force_tier.as_deref().map(str::trim)
-            && let Some(model) = config.agent.tier_models.get(force_tier)
-        {
-            return Some((model.clone(), "role_force_tier".to_string()));
-        }
-
-        if let Some(force_backend) = routing_overrides.force_backend.as_deref()
-            && let Some(model) = candidates
-                .iter()
-                .find(|model| {
-                    model_matches_forced_backend(config, model_providers, model, force_backend)
-                })
-                .cloned()
-        {
-            // UX34: outcome is persisted to the cascade router's confidence
-            // stats via record_outcome() in record_task_success/failure.
-            return Some((model, "role_force_backend".to_string()));
-        }
-    }
-
-    None
-}
+// load_roko_config, frequency_label, task_runner_cost_table,
+// routing_model_provider_map, provider_id_for_routing_model,
+// find_role_override, resolved_role_label,
+// model_matches_forced_backend, apply_role_routing_override
+// → moved to config_helpers.rs
 
 // ─── ContextAttributionTracker ────────────────────────────────────────────
 
@@ -1176,6 +1069,7 @@ impl CrateFamiliarityTracker {
     }
 }
 
+<<<<<<< HEAD
 /// Derive a crate name from the task's modified files.
 pub(crate) fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
     let mut seen = HashSet::new();
@@ -1352,6 +1246,12 @@ fn validate_tasks_file_for_execution(
         tasks_path.display()
     ))
 }
+=======
+// task_crate_name, crate_name_for_path, crate_root_for_path,
+// collect_crate_source_files, read_full_crate_source,
+// log_tasks_validation_issue, validate_tasks_file_for_execution
+// → moved to task_helpers.rs
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 
 // ─── Parallel agent execution ────────────────────────────────────────────
 
@@ -3469,7 +3369,7 @@ fn task_title_similarity(a: &str, b: &str) -> f64 {
     let set_b: HashSet<&str> = terms_b.iter().map(String::as_str).collect();
     let common = set_a.intersection(&set_b).count() as f64;
     let len_sum = (set_a.len() + set_b.len()) as f64;
-    let dice = if len_sum == 0.0 {
+    let dice: f64 = if len_sum == 0.0 {
         0.0
     } else {
         (2.0 * common) / len_sum
@@ -18176,22 +18076,8 @@ fn titleize_diagnosis_label(value: &str) -> String {
         .join(" ")
 }
 
-fn mechanical_tier_model(config: &Config) -> Option<String> {
-    config.agent.tier_models.get("mechanical").cloned()
-}
-
-fn runtime_learning_config(workdir: &Path) -> RuntimeLearningConfig {
-    let path = workdir.join("roko.toml");
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| toml::from_str::<RokoConfig>(&text).ok())
-        .map(|cfg| cfg.learning)
-        .unwrap_or_default()
-}
-
-fn replan_ledger_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("learn").join("replans.json")
-}
+// mechanical_tier_model, runtime_learning_config, replan_ledger_path
+// → moved to config_helpers.rs
 
 fn detect_cost_anomaly_override(
     detector: &mut AnomalyDetector,
@@ -18222,6 +18108,7 @@ fn detect_cost_anomaly_override(
     }
 }
 
+<<<<<<< HEAD
 
 
 fn prompt_section_meta_from_sections(
@@ -18256,6 +18143,16 @@ fn prompt_section_meta_from_sections(
         .collect()
 }
 
+=======
+// task_dispatch_conventions, build_system_prompt, build_system_prompt_with_context,
+// build_system_prompt_with_context_validated, prompt_budget_complexity,
+// effective_context_window_tokens, build_relevant_context_layer
+// → moved to prompt_helpers.rs
+
+// code_context_for_task, extract_task_keywords, adjust_priority_from_section_learning,
+// apply_section_effectiveness_to_prompt_section, prompt_section_meta_from_sections,
+// build_daimon_context_section → moved to prompt_helpers.rs
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 
 impl PlanRunner {
     // ── MultiAgentPool accessors (AGT-07) ────────────────────────────
@@ -18550,6 +18447,7 @@ impl PlanRunner {
     }
 }
 
+<<<<<<< HEAD
 
 /// Summary of how tightly a review output stays anchored to the task spec.
 #[derive(Debug, Clone, PartialEq)]
@@ -18955,6 +18853,21 @@ fn conductor_signal_from_output(output: &Engram) -> Option<Engram> {
     }
     Some(maybe_attest_engram(builder.build()))
 }
+=======
+// default_task_category, claude_tool_allowlist, claude_tool_allowlist_with,
+// claude_task_tool_allowlist_with → moved to prompt_helpers.rs
+
+// ReviewDriftReport, task_spec_summary, significant_terms, review_drift_report,
+// parse_review_verdict, task_def_to_input, task_def_to_dag_task, task_read_cli_args,
+// file_contains_public_api, truncate_doc_snippet, load_prior_task_outputs,
+// MAX_OUTPUT_BYTES, TASK_FAILURE_OUTPUT_TAIL_LINES, truncate_output, tail_output_lines,
+// extract_task_symbols, with_task_failure_context, save_task_output,
+// attestation_signing_key_from_env, maybe_attest_engram, conductor_signal_from_output
+// → moved to task_helpers.rs
+
+// (remaining ReviewDriftReport et al. moved to task_helpers.rs -- see above)
+
+>>>>>>> f432a118 (audit(C3): Extract 3 more modules from orchestrate.rs (-1,426 lines))
 
 #[cfg(test)]
 mod tests {
