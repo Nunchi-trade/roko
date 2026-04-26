@@ -573,23 +573,6 @@ impl ExtensionChain {
         Ok(ToolDecision::Allow)
     }
 
-    /// Run on_gate hooks (Cognition layer only).
-    pub fn run_on_gate(
-        &self,
-        gate_name: &str,
-        passed: bool,
-        details: &mut serde_json::Value,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        for ext in self
-            .extensions
-            .iter()
-            .filter(|e| e.layer() == ExtensionLayer::Cognition)
-        {
-            ext.on_gate(gate_name, passed, details)?;
-        }
-        Ok(())
-    }
-
     /// Run on_error hooks (Recovery layer only). Returns first non-Propagate.
     pub async fn run_on_error(
         &self,

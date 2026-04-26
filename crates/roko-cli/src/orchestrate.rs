@@ -6029,7 +6029,7 @@ impl PlanRunner {
     /// Gracefully shut down all managed agent processes.
     pub async fn shutdown(&mut self) {
         // A1: Tear down extension chain hooks in reverse order.
-        let ext_shutdown_errors = self.extension_chain.shutdown_all();
+        let ext_shutdown_errors = self.extension_chain.shutdown_all().await;
         for (name, err) in &ext_shutdown_errors {
             tracing::warn!(extension = %name, error = %err, "extension shutdown_all failed");
         }
@@ -8312,7 +8312,7 @@ impl PlanRunner {
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
         // A1: Initialize extension chain hooks before the main run loop.
-        let ext_init_errors = self.extension_chain.init_all();
+        let ext_init_errors = self.extension_chain.init_all().await;
         for (name, err) in &ext_init_errors {
             tracing::warn!(extension = %name, error = %err, "extension init_all failed");
         }
@@ -15680,17 +15680,15 @@ impl PlanRunner {
 
         // ── A1: Extension pre-inference hook ──────────────────────────
         {
-            let mut pre_inference_value = serde_json::json!({
-                "plan_id": plan_id,
-                "task": task,
-                "role": format!("{role:?}"),
-                "model": &selected_model,
-                "prompt_len": task_text.len(),
-            });
-            if let Err(err) = self
-                .extension_chain
-                .run_pre_inference(&mut pre_inference_value)
-            {
+            let mut req = roko_core::extension::InferenceRequest {
+                plan_id: plan_id.to_string(),
+                task: task.to_string(),
+                role: format!("{role:?}"),
+                model: selected_model.clone(),
+                prompt_tokens: task_text.len() / 4,
+                extra: serde_json::Value::Null,
+            };
+            if let Err(err) = self.extension_chain.run_pre_inference(&mut req).await {
                 tracing::warn!(error = %err, "extension pre_inference hook failed");
             }
         }
@@ -16079,19 +16077,17 @@ impl PlanRunner {
 
         // ── A1: Extension post-inference hook ─────────────────────
         {
-            let mut post_inference_value = serde_json::json!({
-                "plan_id": plan_id,
-                "task": task,
-                "role": format!("{role:?}"),
-                "model": &selected_model,
-                "success": result.success,
-                "cost_usd": result.usage.cost_usd,
-                "wall_ms": result.usage.wall_ms,
-            });
-            if let Err(err) = self
-                .extension_chain
-                .run_post_inference(&mut post_inference_value)
-            {
+            let mut resp = roko_core::extension::InferenceResponse {
+                plan_id: plan_id.to_string(),
+                task: task.to_string(),
+                role: format!("{role:?}"),
+                model: selected_model.clone(),
+                success: result.success,
+                cost_usd: result.usage.cost_usd as f64,
+                wall_ms: result.usage.wall_ms,
+                extra: serde_json::Value::Null,
+            };
+            if let Err(err) = self.extension_chain.run_post_inference(&mut resp).await {
                 tracing::warn!(error = %err, "extension post_inference hook failed");
             }
         }
@@ -16476,7 +16472,12 @@ impl PlanRunner {
             }
             Err(err) => {
                 // A1: Extension on_error (Recovery layer) hook.
-                let recovery = self.extension_chain.run_on_error(err.as_ref());
+                let error_event = roko_core::extension::ErrorEvent {
+                    error_message: err.to_string(),
+                    source: format!("{plan_id}:{task}"),
+                    extra: serde_json::Value::Null,
+                };
+                let recovery = self.extension_chain.run_on_error(&error_event).await;
                 match recovery {
                     Ok(roko_core::extension::RecoveryAction::Propagate) | Err(_) => {
                         // Default: propagate the error up.
@@ -16862,19 +16863,18 @@ impl PlanRunner {
         // ── A1: Extension on_gate (Cognition layer) hook ─────────────
         {
             let verdict_names: Vec<&str> = verdicts.iter().map(|v| v.gate.as_str()).collect();
-            let mut gate_details = serde_json::json!({
-                "plan_id": plan_id,
-                "rung": rung,
-                "passed": all_passed,
-                "duration_ms": wall_ms,
-                "verdict_count": verdicts.len(),
-                "verdict_names": verdict_names,
-            });
-            let gate_label = format!("pipeline:rung-{rung}");
-            if let Err(err) =
-                self.extension_chain
-                    .run_on_gate(&gate_label, all_passed, &mut gate_details)
-            {
+            let mut gate_event = roko_core::extension::GateEvent {
+                plan_id: plan_id.to_string(),
+                gate_name: format!("pipeline:rung-{rung}"),
+                passed: all_passed,
+                rung: format!("{rung}"),
+                duration_ms: wall_ms,
+                details: serde_json::json!({
+                    "verdict_count": verdicts.len(),
+                    "verdict_names": verdict_names,
+                }),
+            };
+            if let Err(err) = self.extension_chain.run_on_gate(&mut gate_event).await {
                 tracing::warn!(error = %err, "extension on_gate hook failed");
             }
         }
