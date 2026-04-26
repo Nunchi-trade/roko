@@ -106,6 +106,8 @@ pub mod query;
 pub mod score;
 pub mod secrets;
 pub mod shutdown;
+/// Signal — forward-compatible alias for `Engram` (Phase 1 prep).
+pub mod signal;
 pub mod signal_kinds;
 pub mod state_hub;
 pub mod task;
@@ -154,6 +156,7 @@ pub use decay::Decay;
 pub use demurrage::Demurrage;
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
+pub use signal::{Signal, SignalBuilder};
 pub use error::{Result, RokoError};
 pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
 pub use forensic::{

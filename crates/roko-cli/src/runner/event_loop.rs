@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use roko_core::state_hub::StateHub;
-use roko_core::{PhaseKind, PlanPhase};
+use roko_core::{AgentRole, PhaseKind, PlanPhase, TaskCategory, TaskComplexityBand};
+use roko_learn::contextual_bandit::{
+    ActionSafetyBounds, BanditContextFeatures, BanditDecisionKind,
+};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage};
+use roko_learn::model_router::RoutingContext;
 use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningPaths, LearningRuntime, RegressionConfig, RunnerFeedbackEvent,
 };
@@ -191,6 +195,47 @@ pub async fn run(
         ),
     );
 
+    // ─── Phase 0: Initialize subsystems ─────────────────────────────
+    // Extension chain init (no-op with empty chain).
+    if let Some(ext_chain) = &config.extension_chain {
+        let mut chain = ext_chain.lock().await;
+        let errors = chain.init_all().await;
+        for (name, err) in &errors {
+            warn!(extension = %name, error = %err, "extension init failed");
+        }
+        if !errors.is_empty() {
+            info!(failed = errors.len(), "extension chain init completed with errors");
+        }
+    }
+
+    // Register MCP connectors in the connector registry.
+    if let Some(registry) = &config.connector_registry {
+        if let Some(mcp_path) = &config.mcp_config {
+            if let Ok(contents) = std::fs::read_to_string(mcp_path) {
+                if let Ok(mcp_json) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(servers) = mcp_json.get("mcpServers").and_then(|s| s.as_object()) {
+                        if let Ok(mut reg) = registry.lock() {
+                            for name in servers.keys() {
+                                reg.register(roko_core::ConnectorInfo {
+                                    name: name.clone(),
+                                    kind: roko_core::ConnectorKind::Mcp,
+                                    health: roko_core::ConnectorHealth {
+                                        status: roko_core::ConnectorStatus::Connected,
+                                        latency_ms: 0,
+                                        last_check: chrono::Utc::now(),
+                                    },
+                                    created_at: chrono::Utc::now(),
+                                    metadata: serde_json::Value::Null,
+                                });
+                            }
+                            info!(count = servers.len(), "registered MCP connectors");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     loop {
         // Cancel-safety analysis:
         //   Branch 1 (agent_rx.recv): cancel-safe — mpsc::Receiver::recv drops no data.
@@ -259,10 +304,23 @@ pub async fn run(
                         );
                     }
 
+                    // Extension: post_inference hook.
+                    fire_post_inference_hook(
+                        config,
+                        &state.plan_id,
+                        &state.current_task,
+                        &state.agent_model,
+                        !turn_error,
+                        state.cost_usd,
+                        state.task_elapsed_ms(),
+                    )
+                    .await;
+
                     let plan_id = state.plan_id.clone();
                     if !plan_id.is_empty() {
                         if turn_error {
                             let message = "agent reported an error result".to_string();
+                            fire_on_error_hook(config, &message, "agent_turn").await;
                             tui.error(&message);
                             let _ = executor.apply_event(&plan_id, &ExecutorEvent::Fatal(message));
                         } else {
@@ -396,8 +454,12 @@ pub async fn run(
                     &paths,
                     learning_runtime.as_ref(),
                     &tui,
+                    config,
                 )
                 .await;
+
+                // Extension: on_gate hook.
+                fire_on_gate_hook(config, &completion).await;
 
                 if completion.kind == GateCompletionKind::PlanVerify {
                     handle_plan_verify_completion(
@@ -613,6 +675,7 @@ pub async fn run(
                     handle.kill(Duration::from_secs(3)).await;
                 }
                 save_snapshot(&executor, &paths, &mut state, &merge_queue);
+                shutdown_subsystems(config).await;
                 let event =
                     build_run_completed_event(&executor, &plans, &state, RunOutcome::Cancelled);
                 emit_runner_event(&paths, &mut state, &tui, event);
@@ -633,6 +696,9 @@ pub async fn run(
             break;
         }
     }
+
+    // Shutdown Phase 0 subsystems and persist learned state.
+    shutdown_subsystems(config).await;
 
     Ok(build_report(&executor, &plans, &state))
 }
@@ -863,6 +929,54 @@ fn build_run_completed_event(
             })
             .collect(),
     )
+}
+
+/// Select the model for a task dispatch using CascadeRouter when available.
+///
+/// Priority: explicit model_hint > cascade router > config default.
+fn select_model_for_dispatch(
+    task_def: &TaskDef,
+    config: &RunConfig,
+    attempt_num: u32,
+) -> String {
+    // Explicit model hint always wins.
+    if let Some(hint) = &task_def.model_hint {
+        info!(model = %hint, source = "model_hint", "model selection: explicit task override");
+        return hint.clone();
+    }
+
+    // Try CascadeRouter for learned model selection.
+    if let Some(router) = &config.cascade_router {
+        let ctx = RoutingContext {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: attempt_num.saturating_sub(1),
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: attempt_num > 1,
+            conductor_load: 0.0,
+            active_agents: 1,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
+            daimon_policy: roko_core::DaimonPolicy::default(),
+            thinking_level: None,
+            temperament: None,
+            previous_model: None,
+            plan_context_tokens: None,
+            tier_thresholds: None,
+        };
+        let result = router.route(&ctx);
+        info!(
+            model = %result.primary.slug,
+            source = "cascade_router",
+            "model selection: cascade router selected model"
+        );
+        return result.primary.slug;
+    }
+
+    // Fall back to config default.
+    info!(model = %config.model, source = "config_default", "model selection: using config default");
+    config.model.clone()
 }
 
 enum ResolvedAgentDispatch {
@@ -1327,11 +1441,11 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             let prompt = agent_stream::build_task_prompt(task_def, plan_id, &ctx.config.workdir);
             let system_prompt = agent_stream::build_minimal_system_prompt(task_def, plan_id);
 
-            let requested_model = task_def
-                .model_hint
-                .as_deref()
-                .unwrap_or(&ctx.config.model)
-                .to_string();
+            let requested_model = select_model_for_dispatch(task_def, ctx.config, attempt_num);
+
+            // Extension: pre-inference hook.
+            fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model).await;
+
             let dispatch = match resolve_agent_dispatch(ctx.config, &requested_model) {
                 Ok(selection) => selection,
                 Err(message) => {
@@ -1419,6 +1533,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 "implementing",
                             );
                             *ctx.agent_handle = Some(handle);
+                            register_agent_feed(ctx.config, plan_id, &task_id, &agent_id);
                         }
                         Err(e) => {
                             error!(err = %e, "failed to spawn agent");
@@ -1502,6 +1617,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         .agent_spawned(&agent_id, role, &format!("{provider_id}:{model}"));
                     ctx.tui
                         .task_started(plan_id, &task_id, &task_def.title, "implementing");
+                    register_agent_feed(ctx.config, plan_id, &task_id, &agent_id);
                 }
             }
         }
@@ -1735,6 +1851,7 @@ async fn emit_feedback(
     paths: &PersistPaths,
     learning_runtime: Option<&LearningRuntime>,
     tui: &TuiBridge,
+    config: &RunConfig,
 ) {
     let episode = build_episode(completion, state);
     let efficiency_event = build_efficiency_event(completion, state);
@@ -1779,6 +1896,262 @@ async fn emit_feedback(
         Err(err) => {
             warn!(error = %err, "knowledge lifecycle ingestion failed");
         }
+    }
+
+    // CascadeRouter observation: record gate outcome for learned model selection.
+    observe_cascade_router(config, state, completion);
+
+    // Bandit feedback: record decision context and outcome.
+    observe_bandit_policy(config, state, completion, paths);
+}
+
+/// Record gate outcome in the cascade router for learned model selection.
+fn observe_cascade_router(config: &RunConfig, state: &RunState, completion: &GateCompletion) {
+    let Some(router) = &config.cascade_router else {
+        return;
+    };
+    let model = &state.agent_model;
+    if model.is_empty() {
+        return;
+    }
+    let Some(model_idx) = router.model_index_for_slug(model) else {
+        debug!(model = %model, "cascade router: model not in slug list, skipping observation");
+        return;
+    };
+
+    let quality = if completion.passed { 1.0 } else { 0.0 };
+    let normalized_cost = (state.cost_usd / 1.0).clamp(0.0, 1.0); // Normalize against $1 reference
+    let wall_secs = state.task_elapsed_ms() as f64 / 1000.0;
+    let normalized_latency = (wall_secs / 300.0).clamp(0.0, 1.0); // Normalize against 5min reference
+
+    let ctx = RoutingContext {
+        task_category: TaskCategory::Implementation,
+        complexity: TaskComplexityBand::Standard,
+        iteration: state.iteration.saturating_sub(1),
+        role: AgentRole::Implementer,
+        crate_familiarity: 0.5,
+        has_prior_failure: state.iteration > 1,
+        conductor_load: 0.0,
+        active_agents: 1,
+        ready_queue_depth: 0,
+        max_queue_wait_hours: 0.0,
+        daimon_policy: roko_core::DaimonPolicy::default(),
+        thinking_level: None,
+        temperament: None,
+        previous_model: None,
+        plan_context_tokens: None,
+        tier_thresholds: None,
+    };
+    let weights = roko_core::config::schema::RewardWeights::default();
+    router.observe_multi_objective(
+        ctx.to_features(),
+        model_idx,
+        quality,
+        normalized_cost,
+        normalized_latency,
+        &weights,
+    );
+    debug!(
+        model = %model,
+        quality,
+        cost = normalized_cost,
+        latency = normalized_latency,
+        "cascade router: recorded observation"
+    );
+}
+
+/// Record bandit feedback for model-selection decisions.
+fn observe_bandit_policy(
+    config: &RunConfig,
+    state: &RunState,
+    completion: &GateCompletion,
+    _paths: &PersistPaths,
+) {
+    let Some(bandit) = &config.bandit_policy else {
+        return;
+    };
+    let model = &state.agent_model;
+    if model.is_empty() {
+        return;
+    }
+
+    let context = BanditContextFeatures::new(
+        BanditDecisionKind::ProviderModelRouting,
+        "implementation",
+        &completion.plan_id,
+        "implementer",
+    );
+    let observation = roko_learn::contextual_bandit::BanditRewardObservation {
+        action_id: format!("model:{model}"),
+        context_key: context.context_key(),
+        success: completion.passed,
+        quality: if completion.passed { 1.0 } else { 0.0 },
+        metrics: roko_learn::contextual_bandit::RewardMetrics {
+            latency_ms: Some(state.task_elapsed_ms()),
+            cost_usd: Some(state.cost_usd),
+            total_tokens: Some(state.tokens_in + state.tokens_out),
+            retry_count: state.iteration.saturating_sub(1),
+        },
+    };
+    let bounds = ActionSafetyBounds::default();
+
+    if let Ok(mut policy) = bandit.try_lock() {
+        if let Some(candidate) = policy.record_reward(observation, bounds) {
+            // Persist bandit decision to JSONL for offline analysis.
+            let bandit_log = config
+                .workdir
+                .join(".roko")
+                .join("learn")
+                .join("bandit-decisions.jsonl");
+            if let Err(err) = persist::append_jsonl(&bandit_log, &candidate) {
+                warn!(error = %err, "failed to append bandit decision");
+            }
+        }
+        debug!(model = %model, passed = completion.passed, "bandit policy: recorded reward");
+    } else {
+        warn!("bandit policy lock contended, skipping feedback");
+    }
+}
+
+// ─── Extension Chain Hooks ───────────────────────────────────────────────
+
+/// Fire pre_inference extension hook (non-blocking try_lock to avoid stalling select).
+async fn fire_pre_inference_hook(config: &RunConfig, plan_id: &str, task_id: &str, model: &str) {
+    let Some(ext_chain) = &config.extension_chain else {
+        return;
+    };
+    let Ok(chain) = ext_chain.try_lock() else {
+        warn!("extension chain lock contended, skipping pre_inference hook");
+        return;
+    };
+    let mut req = roko_core::extension::InferenceRequest {
+        plan_id: plan_id.to_string(),
+        task: task_id.to_string(),
+        role: "implementer".to_string(),
+        model: model.to_string(),
+        prompt_tokens: 0,
+        extra: serde_json::Value::Null,
+    };
+    if let Err(err) = chain.run_pre_inference(&mut req).await {
+        warn!(error = %err, "extension pre_inference hook failed");
+    }
+}
+
+/// Fire post_inference extension hook.
+async fn fire_post_inference_hook(
+    config: &RunConfig,
+    plan_id: &str,
+    task_id: &str,
+    model: &str,
+    success: bool,
+    cost_usd: f64,
+    wall_ms: u64,
+) {
+    let Some(ext_chain) = &config.extension_chain else {
+        return;
+    };
+    let Ok(chain) = ext_chain.try_lock() else {
+        warn!("extension chain lock contended, skipping post_inference hook");
+        return;
+    };
+    let mut resp = roko_core::extension::InferenceResponse {
+        plan_id: plan_id.to_string(),
+        task: task_id.to_string(),
+        role: "implementer".to_string(),
+        model: model.to_string(),
+        success,
+        cost_usd,
+        wall_ms,
+        extra: serde_json::Value::Null,
+    };
+    if let Err(err) = chain.run_post_inference(&mut resp).await {
+        warn!(error = %err, "extension post_inference hook failed");
+    }
+}
+
+/// Fire on_gate extension hook.
+async fn fire_on_gate_hook(config: &RunConfig, completion: &GateCompletion) {
+    let Some(ext_chain) = &config.extension_chain else {
+        return;
+    };
+    let Ok(chain) = ext_chain.try_lock() else {
+        warn!("extension chain lock contended, skipping on_gate hook");
+        return;
+    };
+    for verdict in &completion.verdicts {
+        let mut event = roko_core::extension::GateEvent {
+            plan_id: completion.plan_id.clone(),
+            gate_name: verdict.gate_name.clone(),
+            passed: verdict.passed,
+            rung: format!("rung-{}", completion.rung),
+            duration_ms: completion.duration_ms,
+            details: serde_json::Value::Null,
+        };
+        if let Err(err) = chain.run_on_gate(&mut event).await {
+            warn!(gate = %verdict.gate_name, error = %err, "extension on_gate hook failed");
+        }
+    }
+}
+
+/// Fire on_error extension hook.
+async fn fire_on_error_hook(config: &RunConfig, message: &str, source: &str) {
+    let Some(ext_chain) = &config.extension_chain else {
+        return;
+    };
+    let Ok(chain) = ext_chain.try_lock() else {
+        warn!("extension chain lock contended, skipping on_error hook");
+        return;
+    };
+    let event = roko_core::extension::ErrorEvent {
+        error_message: message.to_string(),
+        source: source.to_string(),
+        extra: serde_json::Value::Null,
+    };
+    let _ = chain.run_on_error(&event).await;
+}
+
+/// Shutdown extension chain + persist cascade router.
+async fn shutdown_subsystems(config: &RunConfig) {
+    // Extension chain shutdown.
+    if let Some(ext_chain) = &config.extension_chain {
+        let mut chain = ext_chain.lock().await;
+        let errors = chain.shutdown_all().await;
+        for (name, err) in &errors {
+            warn!(extension = %name, error = %err, "extension shutdown failed");
+        }
+    }
+
+    // Persist cascade router learned state.
+    if let Some(router) = &config.cascade_router {
+        let router_path = config
+            .workdir
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        if let Err(err) = router.save(&router_path) {
+            warn!(error = %err, "failed to persist cascade router");
+        } else {
+            info!("cascade router state persisted");
+        }
+    }
+}
+
+/// Register an agent feed entry after successful spawn.
+fn register_agent_feed(config: &RunConfig, plan_id: &str, task_id: &str, agent_id: &str) {
+    let Some(registry) = &config.feed_registry else {
+        return;
+    };
+    if let Ok(mut reg) = registry.try_lock() {
+        reg.register(roko_core::FeedInfo {
+            id: String::new(), // Auto-assigned by registry
+            name: format!("{plan_id}/{task_id}"),
+            agent_id: agent_id.to_string(),
+            kind: roko_core::FeedKind::Raw,
+            access: roko_core::FeedAccess::Private,
+            description: String::new(),
+            schema: None,
+            created_at: chrono::Utc::now(),
+        });
     }
 }
 

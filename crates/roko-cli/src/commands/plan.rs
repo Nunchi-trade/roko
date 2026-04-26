@@ -203,6 +203,33 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     .ok()
                     .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
                     .unwrap_or_default();
+
+            // Initialize Phase 0 subsystems.
+            let router_path = wd.join(".roko").join("learn").join("cascade-router.json");
+            let model_slugs = vec![
+                roko_config.agent.default_model.clone(),
+                "claude-haiku-4-5".to_string(),
+            ];
+            let cascade_router = std::sync::Arc::new(
+                roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
+            );
+            let extension_chain = std::sync::Arc::new(
+                tokio::sync::Mutex::new(roko_core::extension::ExtensionChain::new()),
+            );
+            let connector_registry = std::sync::Arc::new(
+                std::sync::Mutex::new(roko_core::ConnectorRegistry::new()),
+            );
+            let feed_registry = std::sync::Arc::new(
+                std::sync::Mutex::new(roko_core::FeedRegistry::new()),
+            );
+            let bandit_policy = std::sync::Arc::new(std::sync::Mutex::new(
+                roko_learn::contextual_bandit::ContextualBanditPolicy::new({
+                    let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
+                    cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
+                    cfg
+                }),
+            ));
+
             let run_config = roko_cli::runner::RunConfig {
                 workdir: wd.clone(),
                 plan_dir: plans_dir.clone(),
@@ -225,6 +252,11 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 clippy_enabled: roko_config.gates.clippy_enabled,
                 skip_tests: roko_config.gates.skip_tests,
                 roko_config: Some(std::sync::Arc::new(roko_config.clone())),
+                extension_chain: Some(extension_chain),
+                cascade_router: Some(cascade_router),
+                connector_registry: Some(connector_registry),
+                feed_registry: Some(feed_registry),
+                bandit_policy: Some(bandit_policy),
             };
 
             // Optionally spawn the approval TUI.

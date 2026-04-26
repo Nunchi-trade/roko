@@ -654,7 +654,7 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
         AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
         AgentCmd::Chat { agent, serve_url } => {
-            roko_cli::chat::run_chat_repl(&agent, &serve_url).await?;
+            roko_cli::chat_inline::run_chat_inline(&agent, &serve_url).await?;
             Ok(())
         }
     }

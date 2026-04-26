@@ -401,6 +401,29 @@ fn build_runner_config(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
 
+    // Initialize Phase 0 subsystems.
+    let router_path = workdir.join(".roko").join("learn").join("cascade-router.json");
+    let model_slugs = vec![model.clone(), "claude-haiku-4-5".to_string()];
+    let cascade_router = Arc::new(
+        roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
+    );
+    let extension_chain = Arc::new(
+        tokio::sync::Mutex::new(roko_core::extension::ExtensionChain::new()),
+    );
+    let connector_registry = Arc::new(
+        std::sync::Mutex::new(roko_core::ConnectorRegistry::new()),
+    );
+    let feed_registry = Arc::new(
+        std::sync::Mutex::new(roko_core::FeedRegistry::new()),
+    );
+    let bandit_policy = Arc::new(std::sync::Mutex::new(
+        roko_learn::contextual_bandit::ContextualBanditPolicy::new({
+            let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
+            cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
+            cfg
+        }),
+    ));
+
     crate::runner::RunConfig {
         workdir: workdir.to_path_buf(),
         plan_dir: plan_dir.to_path_buf(),
@@ -418,6 +441,11 @@ fn build_runner_config(
         clippy_enabled: roko_config.gates.clippy_enabled,
         skip_tests: roko_config.gates.skip_tests,
         roko_config: Some(Arc::new(roko_config)),
+        extension_chain: Some(extension_chain),
+        cascade_router: Some(cascade_router),
+        connector_registry: Some(connector_registry),
+        feed_registry: Some(feed_registry),
+        bandit_policy: Some(bandit_policy),
     }
 }
 
