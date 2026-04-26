@@ -95,9 +95,11 @@ pub fn builtin_role_policy_from_manifest(
         return Ok(None);
     }
 
-    let (role_profile, prompt_policy) = manifest
-        .role_with_default_prompt_policy(role.label())
-        .expect("validated built-in role manifest references existing prompt policy");
+    let (role_profile, prompt_policy) = match manifest.role_with_default_prompt_policy(role.label())
+    {
+        Ok(pair) => pair,
+        Err(_) => return Ok(None),
+    };
     Ok(Some(BuiltinRolePolicy {
         role_profile: role_profile.clone(),
         prompt_policy: prompt_policy.clone(),
@@ -686,9 +688,7 @@ pub fn role_prompt_source_for(role: AgentRole) -> RolePromptSource {
 /// section ids in the same typed contract future manifest-backed roles will use.
 #[must_use]
 pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
-    if let Some(loaded) = builtin_role_policy_from_manifest(role)
-        .expect("built-in role manifest must validate before runtime prompt policy fallback")
-    {
+    if let Ok(Some(loaded)) = builtin_role_policy_from_manifest(role) {
         return loaded.prompt_policy;
     }
 
@@ -714,9 +714,7 @@ pub fn builtin_prompt_policy_for(role: AgentRole) -> PromptPolicy {
 /// Build the manifest role-profile contract for an existing built-in role.
 #[must_use]
 pub fn builtin_role_profile_for(role: AgentRole) -> roko_core::RoleProfile {
-    if let Some(loaded) = builtin_role_policy_from_manifest(role)
-        .expect("built-in role manifest must validate before runtime role profile fallback")
-    {
+    if let Ok(Some(loaded)) = builtin_role_policy_from_manifest(role) {
         return loaded.role_profile;
     }
 

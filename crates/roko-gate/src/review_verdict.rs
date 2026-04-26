@@ -339,11 +339,11 @@ where
 fn extract_code_block(output: &str, language: &str) -> Option<String> {
     let fence = format!("```{language}");
     let start = output.find(&fence)?;
-    let after_fence = output[start + fence.len()..].strip_prefix('\r').unwrap_or(
-        output[start + fence.len()..]
-            .strip_prefix('\n')
-            .unwrap_or(&output[start + fence.len()..]),
-    );
+    let rest = &output[start + fence.len()..];
+    let after_fence = rest
+        .strip_prefix('\r')
+        .or_else(|| rest.strip_prefix('\n'))
+        .unwrap_or(rest);
     let after_fence = after_fence.strip_prefix('\n').unwrap_or(after_fence);
     let end = after_fence.find("```")?;
     Some(after_fence[..end].trim().to_string())

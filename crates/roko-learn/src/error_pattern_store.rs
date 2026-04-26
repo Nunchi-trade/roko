@@ -342,7 +342,7 @@ impl ErrorPatternStore {
             occurrences: 1,
             first_seen_at: now.clone(),
             last_seen_at: now,
-            plan_ids: [observation.plan_id].into_iter().collect(),
+            plan_ids: std::iter::once(observation.plan_id).collect(),
             task_ids: observation.task_id.into_iter().collect(),
             resolved: false,
             resolution: None,
@@ -478,7 +478,8 @@ impl ErrorPatternStore {
     ///    unresolved patterns until the limit is satisfied.
     /// 3. Rebuilds the `key_index` after any removals.
     pub fn gc(&mut self, max_age: Duration, max_patterns: usize) {
-        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(90));
+        let cutoff =
+            Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(90));
         let cutoff_str = cutoff.to_rfc3339();
 
         let before = self.patterns.len();

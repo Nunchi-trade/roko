@@ -6,8 +6,8 @@
 //! accounting, and event publishing.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -81,7 +81,6 @@ struct CompletionRequest {
     agent_id: Option<String>,
 
     // -- Routing hint fields (B4) ------------------------------------------
-
     /// Broad task category hint for model routing (e.g. `"implementation"`,
     /// `"research"`, `"refactor"`). Parsed into [`TaskCategory`]; unknown
     /// values fall back to `Implementation`.
@@ -575,9 +574,7 @@ async fn batch_submit(
                     };
 
                     // B3: increment progress counter after each item.
-                    progress_ref
-                        .completed
-                        .fetch_add(1, Ordering::Relaxed);
+                    progress_ref.completed.fetch_add(1, Ordering::Relaxed);
 
                     result_item
                 }
@@ -647,10 +644,7 @@ async fn batch_status(
             // B3: read incremental progress from the shared counter.
             let progress = state.batch_progress.read().await;
             let (completed, total) = if let Some(bp) = progress.get(&batch_id) {
-                (
-                    bp.completed.load(Ordering::Relaxed) as u32,
-                    bp.total as u32,
-                )
+                (bp.completed.load(Ordering::Relaxed) as u32, bp.total as u32)
             } else {
                 (0, 0)
             };
@@ -728,13 +722,13 @@ struct RoutingHints {
 fn parse_task_category(s: &str) -> TaskCategory {
     match s.to_ascii_lowercase().as_str() {
         "scaffolding" => TaskCategory::Scaffolding,
-        "implementation" => TaskCategory::Implementation,
         "integration" => TaskCategory::Integration,
         "verification" => TaskCategory::Verification,
         "research" => TaskCategory::Research,
         "refactor" => TaskCategory::Refactor,
         "infra" => TaskCategory::Infra,
         "docs" => TaskCategory::Docs,
+        // "implementation" and unrecognised values
         _ => TaskCategory::Implementation,
     }
 }
@@ -744,8 +738,8 @@ fn parse_task_category(s: &str) -> TaskCategory {
 fn parse_complexity(s: &str) -> TaskComplexityBand {
     match s.to_ascii_lowercase().as_str() {
         "fast" => TaskComplexityBand::Fast,
-        "standard" => TaskComplexityBand::Standard,
         "complex" => TaskComplexityBand::Complex,
+        // "standard" and unrecognised values
         _ => TaskComplexityBand::Standard,
     }
 }
@@ -756,7 +750,6 @@ fn parse_agent_role(s: &str) -> AgentRole {
     match s.to_ascii_lowercase().replace('-', "_").as_str() {
         "conductor" => AgentRole::Conductor,
         "strategist" => AgentRole::Strategist,
-        "implementer" => AgentRole::Implementer,
         "architect" => AgentRole::Architect,
         "researcher" => AgentRole::Researcher,
         "auditor" => AgentRole::Auditor,
@@ -769,6 +762,7 @@ fn parse_agent_role(s: &str) -> AgentRole {
         "doc_verifier" => AgentRole::DocVerifier,
         "integration_tester" => AgentRole::IntegrationTester,
         "merge_resolver" => AgentRole::MergeResolver,
+        // "implementer" and unrecognised values
         _ => AgentRole::Implementer,
     }
 }

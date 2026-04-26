@@ -1843,6 +1843,7 @@ pub fn pheromone_context(field: &[Engram], scope: &str) -> Vec<ContextChunk> {
 impl ContextProvider {
     // ── Tier 2: Focused context ────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn add_focused_context(
         &self,
         sections: &mut Vec<ContextSection>,

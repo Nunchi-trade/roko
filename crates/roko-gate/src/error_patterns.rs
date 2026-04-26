@@ -139,7 +139,10 @@ pub fn extract_error_digest(output: &str) -> String {
 }
 
 fn compile_error_digest(error: &CompileError) -> String {
-    let code = error.code.as_deref().unwrap_or(error_category_label(error));
+    let code = error
+        .code
+        .as_deref()
+        .unwrap_or_else(|| error_category_label(error));
     let mut digest = format!("{code}: {}", collapse_whitespace(&error.message));
     if let Some(file) = error.file.as_deref() {
         digest.push_str(" [");

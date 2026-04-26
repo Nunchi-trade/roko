@@ -242,10 +242,11 @@ impl PostGateReflectionStore {
             .count()
             .saturating_add(1) as u32;
         let confidence = confidence_for_evidence(evidence_count);
-        let mut admission_status = status_for_evidence(evidence_count, confidence, config);
-        if proposed_lesson.trim().is_empty() {
-            admission_status = ReflectionAdmissionStatus::RejectedNoActionableLesson;
-        }
+        let admission_status = if proposed_lesson.trim().is_empty() {
+            ReflectionAdmissionStatus::RejectedNoActionableLesson
+        } else {
+            status_for_evidence(evidence_count, confidence, config)
+        };
 
         let record = PostGateReflectionRecord {
             reflection_id: format!(
@@ -363,9 +364,11 @@ fn candidate_from_record(record: &PostGateReflectionRecord) -> Option<Reflection
 }
 
 fn triggers_from_record(record: &PostGateReflectionRecord) -> Triggers {
-    let mut triggers = Triggers::default();
-    triggers.file_globs = extract_file_mentions(&record.proposed_lesson);
-    triggers.tags = extract_error_tags(&record.proposed_lesson);
+    let mut triggers = Triggers {
+        file_globs: extract_file_mentions(&record.proposed_lesson),
+        tags: extract_error_tags(&record.proposed_lesson),
+        ..Default::default()
+    };
     triggers
         .error_signatures
         .extend(record.failure_pattern_ids.iter().cloned());

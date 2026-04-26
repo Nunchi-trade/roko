@@ -328,10 +328,8 @@ fn projection_accepts_event(name: &str, query: &ProjectionQuery, event: &Dashboa
         "plan_state" | "plans" => match event {
             DashboardEvent::PlanStarted { plan_id }
             | DashboardEvent::PlanCompleted { plan_id, .. }
-            | DashboardEvent::PhaseTransition { plan_id, .. } => {
-                plan_matches_filter(plan_id, query.filter.as_deref())
-            }
-            DashboardEvent::TaskStarted { plan_id, .. }
+            | DashboardEvent::PhaseTransition { plan_id, .. }
+            | DashboardEvent::TaskStarted { plan_id, .. }
             | DashboardEvent::TaskCompleted { plan_id, .. }
             | DashboardEvent::TaskPhaseChanged { plan_id, .. } => {
                 plan_matches_filter(plan_id, query.filter.as_deref())

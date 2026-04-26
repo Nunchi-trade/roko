@@ -402,6 +402,7 @@ pub struct ReviewVerdictRequirement {
 }
 
 /// Required recovery signals after failed gates.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecoveryRequirement {
     /// Whether recovery evidence blocks completion.
