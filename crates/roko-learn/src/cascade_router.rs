@@ -188,6 +188,9 @@ pub struct CascadeRouteExplanation {
     pub candidates: Vec<CascadeCandidateScore>,
     /// Current Pareto frontier snapshot used by the cascade.
     pub pareto_frontier: Vec<String>,
+    /// Knowledge store advice applied during this routing decision.
+    /// `None` when the knowledge store was not consulted.
+    pub knowledge_advice: Option<KnowledgeRoutingAdvice>,
 }
 
 /// Explainable routing output for one cascade decision.
@@ -231,6 +234,54 @@ pub struct RoutingBias {
     pub reason: String,
 }
 
+// ─── Knowledge-informed routing hints ───────────────────────────────────────
+
+/// A pre-computed hint from the durable knowledge store about a model's
+/// historical performance on a particular task category.
+///
+/// Orchestrate.rs queries the neuro `KnowledgeStore` and builds these hints
+/// before passing them to the cascade router. This keeps roko-learn free of
+/// a roko-neuro dependency while letting the router incorporate knowledge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeHint {
+    /// Model slug this hint applies to.
+    pub model_slug: String,
+    /// Confidence-weighted score from matching knowledge entries.
+    /// Positive values indicate past success; negative values indicate
+    /// past failures or anti-knowledge.
+    pub score: f64,
+    /// Number of knowledge entries that contributed to this hint.
+    pub supporting_entries: u32,
+    /// Brief human-readable reason (e.g. "2 insights: strong on research tasks").
+    pub reason: String,
+}
+
+/// Aggregate result of consulting the knowledge store for routing hints.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeRoutingAdvice {
+    /// Per-model hints derived from the knowledge store.
+    pub hints: Vec<KnowledgeHint>,
+    /// Whether any hints were found at all (false means the store was
+    /// empty or the query returned no relevant entries).
+    pub has_signal: bool,
+}
+
+impl KnowledgeRoutingAdvice {
+    /// Look up the hint for a specific model slug.
+    #[must_use]
+    pub fn hint_for(&self, model_slug: &str) -> Option<&KnowledgeHint> {
+        self.hints
+            .iter()
+            .find(|h| slugs_match(&h.model_slug, model_slug))
+    }
+
+    /// Return the score adjustment for a model, or 0.0 if no hint exists.
+    #[must_use]
+    pub fn score_for(&self, model_slug: &str) -> f64 {
+        self.hint_for(model_slug).map_or(0.0, |h| h.score)
+    }
+}
+
 // ─── Confidence-stage stats ─────────────────────────────────────────────────
 
 /// Threshold for transitioning from Confidence to UCB stage.
@@ -247,6 +298,13 @@ const CACHE_AFFINITY_BONUS: f64 = 0.15;
 const HYSTERESIS_THRESHOLD: f64 = 0.10;
 /// Recompute the Pareto frontier after every 50 observations.
 const PARETO_RECOMPUTE_INTERVAL: u64 = 50;
+/// Dampening factor for force_backend override learning (UX34).
+///
+/// Override observations use half the normal reward weight because a
+/// user-selected model succeeding may reflect domain knowledge about the task
+/// rather than intrinsic model capability. Over many observations the signal
+/// still accumulates, but a single override cannot dominate the bandit.
+const OVERRIDE_LEARNING_RATE: f64 = 0.5;
 
 /// Per-model observation record for the confidence stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1906,6 +1964,45 @@ impl CascadeRouter {
         true
     }
 
+    /// Record the outcome of a manually-forced backend override (UX34).
+    ///
+    /// When a user or config forces a specific model via `force_backend`, this
+    /// method feeds the result back into the cascade so it learns which models
+    /// work well for which task categories.
+    ///
+    /// Unlike [`record_outcome`], this method accepts a [`RoutingContext`] so
+    /// the LinUCB bandit receives a proper feature vector. The reward is
+    /// dampened by [`OVERRIDE_LEARNING_RATE`] (0.5x) because override success
+    /// may reflect user knowledge rather than intrinsic model capability. This
+    /// prevents a single user preference from dominating the bandit's learned
+    /// weights while still allowing the signal to accumulate over many
+    /// observations.
+    pub fn record_override_outcome(
+        &self,
+        model_slug: &str,
+        ctx: &RoutingContext,
+        success: bool,
+    ) -> bool {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return false;
+        };
+
+        // Dampen the reward: overrides are biased by user preference, so we
+        // apply a smaller update than organic (router-chosen) selections.
+        let raw_reward = if success { 1.0 } else { 0.0 };
+        let dampened_reward = raw_reward * OVERRIDE_LEARNING_RATE;
+
+        self.observe_internal(
+            &ctx.to_features(),
+            model_idx,
+            dampened_reward,
+            success,
+            None,
+            None,
+        );
+        true
+    }
+
     /// Run a shadow evaluation against a free-tier Gemini model.
     ///
     /// The shadow result never affects the primary task outcome. When the
@@ -2134,6 +2231,7 @@ impl CascadeRouter {
                     selected_slug: selected,
                     candidates: scored,
                     pareto_frontier,
+                    knowledge_advice: None,
                 }
             }
             CascadeStage::Confidence => {
@@ -2167,6 +2265,7 @@ impl CascadeRouter {
                     selected_slug: selected,
                     candidates: scored_candidates,
                     pareto_frontier,
+                    knowledge_advice: None,
                 }
             }
             CascadeStage::Ucb => {
@@ -2220,9 +2319,71 @@ impl CascadeRouter {
                     selected_slug: selected,
                     candidates: scored,
                     pareto_frontier: frontier,
+                    knowledge_advice: None,
                 }
             }
         }
+    }
+
+    /// Apply knowledge-informed routing advice to a routing explanation.
+    ///
+    /// This method takes pre-computed [`KnowledgeHint`]s (built by the caller
+    /// from the neuro `KnowledgeStore`) and folds them into the explanation's
+    /// candidate scores. The advice is also stored in the explanation for
+    /// observability.
+    ///
+    /// Score adjustment per candidate:
+    /// - Models with a positive knowledge hint get a confidence boost
+    ///   proportional to `hint.score` (capped at +0.20).
+    /// - Models with a negative hint (anti-knowledge) get a penalty
+    ///   proportional to `hint.score` (capped at -0.20).
+    /// - Models with no hint are unaffected.
+    ///
+    /// After adjusting scores the candidate list is re-sorted and the
+    /// `selected_slug` is updated if the top candidate changed.
+    pub fn apply_knowledge_advice(
+        &self,
+        explanation: &mut CascadeRouteExplanation,
+        advice: KnowledgeRoutingAdvice,
+    ) {
+        if !advice.has_signal || advice.hints.is_empty() {
+            explanation.knowledge_advice = Some(advice);
+            return;
+        }
+
+        // Apply score adjustments to candidates.
+        for candidate in &mut explanation.candidates {
+            if let Some(hint) = advice.hint_for(&candidate.slug) {
+                let adjustment = hint.score.clamp(-0.20, 0.20);
+                candidate.score += adjustment;
+            }
+        }
+
+        // Re-sort candidates by adjusted score.
+        explanation.candidates.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
+
+        // Update selected_slug if the top candidate changed.
+        if let Some(new_top) = explanation.candidates.first() {
+            if !slugs_match(&new_top.slug, &explanation.selected_slug) {
+                tracing::info!(
+                    previous = %explanation.selected_slug,
+                    new = %new_top.slug,
+                    "knowledge advice changed routing selection"
+                );
+            }
+            // Mark the new top as selected, unmark the old.
+            let new_top_slug = new_top.slug.clone();
+            for c in &mut explanation.candidates {
+                c.selected = slugs_match(&c.slug, &new_top_slug);
+            }
+            explanation.selected_slug = new_top_slug;
+        }
+
+        explanation.knowledge_advice = Some(advice);
     }
 
     /// Append a routing decision log entry for a selected model.
@@ -4724,6 +4885,32 @@ mod tests {
 
         let stats = cascade.confidence_snapshot();
         assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn record_override_outcome_updates_stats_and_linucb_with_dampened_reward() {
+        let cascade = CascadeRouter::new(test_slugs());
+        let ctx = default_ctx();
+
+        // A successful override should update BOTH confidence stats AND LinUCB
+        // (unlike record_outcome which only touches confidence stats).
+        assert!(cascade.record_override_outcome("claude-sonnet-4-5", &ctx, true));
+
+        // LinUCB should have received an observation (observation counter > 0).
+        assert_eq!(cascade.total_observations(), 1);
+
+        // Confidence stats should reflect the success.
+        let stats = cascade.confidence_snapshot();
+        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
+
+        // A failed override also feeds into LinUCB.
+        assert!(cascade.record_override_outcome("claude-sonnet-4-5", &ctx, false));
+        assert_eq!(cascade.total_observations(), 2);
+        let stats = cascade.confidence_snapshot();
+        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(2, 1)));
+
+        // Unknown model slug returns false.
+        assert!(!cascade.record_override_outcome("nonexistent-model", &ctx, true));
     }
 
     #[test]
