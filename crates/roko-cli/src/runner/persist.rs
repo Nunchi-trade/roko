@@ -2,15 +2,22 @@
 //!
 //! All writes use write-to-tmp-then-rename for crash safety.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use roko_orchestrator::{ExecutorSnapshot, OrchestratorSnapshot};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::types::RunnerEvent;
+
+/// Schema version for the runner-owned `run-state.json` snapshot.
+///
+/// Bump only when the on-disk shape of [`RunStateSnapshot`] changes in a way
+/// that requires migration on resume.
+pub const RUN_STATE_SCHEMA_VERSION: u32 = 1;
 
 /// Paths for all persistent state files.
 #[derive(Debug, Clone)]
@@ -19,10 +26,16 @@ pub struct PersistPaths {
     pub executor_json: PathBuf,
     /// `.roko/state/orchestrator.json` — aggregate orchestrator snapshot.
     pub orchestrator_json: PathBuf,
+    /// `.roko/state/run-state.json` — runner-owned cost/token/completed-task snapshot.
+    pub run_state_json: PathBuf,
     /// `.roko/episodes.jsonl` — episode log.
     pub episodes_jsonl: PathBuf,
     /// `.roko/learn/efficiency.jsonl` — efficiency events.
     pub efficiency_jsonl: PathBuf,
+    /// `.roko/learn/cascade-router.json` — cascade router learning state.
+    pub cascade_router_json: PathBuf,
+    /// `.roko/learn/gate-thresholds.json` — adaptive gate thresholds.
+    pub gate_thresholds_json: PathBuf,
     /// `.roko/runtime/agent-pids.json` — live agent PIDs.
     pub agent_pids_json: PathBuf,
     /// `.roko/state/events.json` — event log for replay.
@@ -46,13 +59,77 @@ impl PersistPaths {
         Ok(Self {
             executor_json: state.join("executor.json"),
             orchestrator_json: state.join("orchestrator.json"),
+            run_state_json: state.join("run-state.json"),
             episodes_jsonl: roko.join("episodes.jsonl"),
             efficiency_jsonl: learn.join("efficiency.jsonl"),
+            cascade_router_json: learn.join("cascade-router.json"),
+            gate_thresholds_json: learn.join("gate-thresholds.json"),
             agent_pids_json: runtime.join("agent-pids.json"),
             events_json: state.join("events.json"),
             events_jsonl: roko.join("events.jsonl"),
         })
     }
+}
+
+/// Runner-owned snapshot persisted alongside `executor.json`.
+///
+/// Captures the cost, token, and completed-task state the orchestrator-level
+/// `ExecutorSnapshot` does not retain. This is the structure written to
+/// `.roko/state/run-state.json` and consumed by [`super::resume`] when
+/// validating a resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunStateSnapshot {
+    /// On-disk schema version. See [`RUN_STATE_SCHEMA_VERSION`].
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Stable identifier for the runner invocation that wrote this snapshot.
+    pub run_id: String,
+    /// UTC ms when the run started.
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// UTC ms when the snapshot was written.
+    #[serde(default)]
+    pub timestamp_ms: u64,
+    /// Total tasks across all plans known at snapshot time.
+    pub tasks_total: usize,
+    /// Number of tasks completed.
+    pub tasks_completed: usize,
+    /// Number of tasks that failed.
+    pub tasks_failed: usize,
+    /// Total input tokens across the run.
+    pub total_tokens_in: u64,
+    /// Total output tokens across the run.
+    pub total_tokens_out: u64,
+    /// Total cost in USD across the run.
+    pub total_cost_usd: f64,
+    /// Total agent spawn count.
+    pub total_agent_calls: usize,
+    /// Per-plan cost accumulation.
+    #[serde(default)]
+    pub plan_costs: HashMap<String, f64>,
+    /// Completed task IDs per plan — the durable record used to skip
+    /// already-finished work on resume.
+    #[serde(default)]
+    pub completed_tasks: HashMap<String, Vec<String>>,
+    /// Consecutive snapshot save failures (degradation tracking).
+    #[serde(default)]
+    pub snapshot_fail_streak: u32,
+}
+
+/// Forensic fingerprint of a task definition used for strict resume validation.
+///
+/// Hash inputs are deterministic and span the fields a plan author can mutate
+/// between runs (id, title, role, tier, dependencies, verify steps, gate
+/// budgets). Mismatch on resume is a hard failure: see
+/// [`super::resume::ResumeError::TaskMismatch`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskDefFingerprint {
+    /// Plan identifier.
+    pub plan_id: String,
+    /// Task identifier.
+    pub task_id: String,
+    /// FNV-1a hash (hex) of the canonical task definition payload.
+    pub fingerprint: String,
 }
 
 /// Atomically write `content` to `path` via a `.tmp` sibling.
