@@ -34,7 +34,9 @@
 //! neuro store and a tiny default budget — used by tests and CI smoke
 //! runs to keep prompt construction deterministic.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +61,8 @@ pub struct PromptContext {
     pub plan_id: String,
     /// Role label.
     pub role: String,
+    /// Workspace root used to resolve `.roko` learning stores.
+    pub workdir: PathBuf,
     /// Files in scope for this task (from `task.files`).
     pub files_in_scope: Vec<String>,
     /// Acceptance criteria (from `task.acceptance`).
@@ -78,6 +82,7 @@ impl PromptContext {
         Self {
             plan_id: ctx.plan_id.clone(),
             role: ctx.role.clone(),
+            workdir: ctx.workdir.clone(),
             files_in_scope: task.files.clone(),
             acceptance_criteria: task.acceptance.clone(),
             verify_commands: task
@@ -108,6 +113,44 @@ pub struct GateFeedback {
     pub clippy_warnings: Vec<String>,
     /// The original gate output (truncated to ≤ 4 KB upstream).
     pub raw_output: String,
+}
+
+impl GateFeedback {
+    /// Parse raw gate output into structured retry context.
+    #[must_use]
+    pub fn from_raw(raw_output: &str) -> Option<Self> {
+        let raw = raw_output.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        let mut compile_errors = Vec::new();
+        let mut test_failures = Vec::new();
+        let mut clippy_warnings = Vec::new();
+        for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let lower = line.to_ascii_lowercase();
+            let truncated = line.chars().take(240).collect::<String>();
+            if lower.contains("error[") || lower.starts_with("error:") || line.contains("-->") {
+                compile_errors.push(truncated);
+            } else if lower.contains("test")
+                && (lower.contains("failed") || lower.contains("panicked"))
+            {
+                test_failures.push(truncated);
+            } else if lower.contains("warning") || lower.contains("clippy") {
+                clippy_warnings.push(truncated);
+            }
+            if compile_errors.len() + test_failures.len() + clippy_warnings.len() >= 24 {
+                break;
+            }
+        }
+
+        Some(Self {
+            compile_errors,
+            test_failures,
+            clippy_warnings,
+            raw_output: raw.chars().take(4096).collect(),
+        })
+    }
 }
 
 // ─── Outputs ───────────────────────────────────────────────────────────
@@ -141,6 +184,57 @@ pub struct PromptDiagnostics {
     pub knowledge_ids: Vec<String>,
 }
 
+// ─── Source Plugins ────────────────────────────────────────────────────
+
+/// One optional section contributed by a prompt context source.
+#[derive(Debug, Clone)]
+struct PromptSection {
+    name: String,
+    body: String,
+    drop_priority: u32,
+    knowledge_ids: Vec<String>,
+    playbook_ids: Vec<String>,
+}
+
+impl PromptSection {
+    fn new(name: impl Into<String>, body: impl Into<String>, drop_priority: u32) -> Self {
+        Self {
+            name: name.into(),
+            body: body.into(),
+            drop_priority,
+            knowledge_ids: Vec::new(),
+            playbook_ids: Vec::new(),
+        }
+    }
+
+    fn with_knowledge_ids(mut self, ids: Vec<String>) -> Self {
+        self.knowledge_ids = ids;
+        self
+    }
+
+    fn with_playbook_ids(mut self, ids: Vec<String>) -> Self {
+        self.playbook_ids = ids;
+        self
+    }
+}
+
+/// Pluggable prompt context provider.
+trait PromptSectionSource: Send + Sync + std::fmt::Debug {
+    fn collect(&self, task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection>;
+}
+
+/// Reads durable `.roko` knowledge stores and prior episodes.
+#[derive(Debug, Default)]
+struct WorkdirKnowledgeSource;
+
+/// Reads learned playbooks from `.roko/learn/playbooks`.
+#[derive(Debug, Default)]
+struct WorkdirPlaybookSource;
+
+/// Applies learned section-effectiveness priority adjustments.
+#[derive(Debug, Default)]
+struct SectionEffectivenessSource;
+
 // ─── Assembler ─────────────────────────────────────────────────────────
 
 /// Prompt assembler.
@@ -153,9 +247,8 @@ pub struct PromptDiagnostics {
 pub struct PromptAssembler {
     /// Token budget cap.
     token_budget: u32,
-    /// Whether to query playbook / neuro stores during assembly.
-    /// Off in `minimal()` (tests / smoke) and on once stores are wired.
-    use_knowledge_stores: bool,
+    /// Optional prompt context sources. `minimal()` leaves this empty.
+    sources: Vec<Arc<dyn PromptSectionSource>>,
 }
 
 impl PromptAssembler {
@@ -164,7 +257,11 @@ impl PromptAssembler {
     pub fn new() -> Self {
         Self {
             token_budget: DEFAULT_TOKEN_BUDGET,
-            use_knowledge_stores: true,
+            sources: vec![
+                Arc::new(WorkdirKnowledgeSource),
+                Arc::new(WorkdirPlaybookSource),
+                Arc::new(SectionEffectivenessSource),
+            ],
         }
     }
 
@@ -173,7 +270,7 @@ impl PromptAssembler {
     pub fn minimal() -> Self {
         Self {
             token_budget: 8_000,
-            use_knowledge_stores: false,
+            sources: Vec::new(),
         }
     }
 
@@ -265,29 +362,91 @@ impl PromptAssembler {
             });
 
         // ── Assemble + budget ─────────────────────────────────────────
-        let mut sections: Vec<(&'static str, String, u32)> = Vec::new();
-        sections.push(("role", role_section, 1));
-        sections.push(("task", task_section, 1));
+        let mut sections: Vec<PromptSection> = Vec::new();
+        sections.push(PromptSection::new("role", role_section, 1));
+        sections.push(PromptSection::new("task", task_section, 1));
         if let Some(s) = files_section {
-            sections.push(("files", s, 4));
+            sections.push(PromptSection::new("files", s, 4));
         }
         if let Some(s) = acceptance_section {
-            sections.push(("acceptance", s, 2));
+            sections.push(PromptSection::new("acceptance", s, 2));
         }
         if let Some(s) = verify_section {
-            sections.push(("verify", s, 3));
+            sections.push(PromptSection::new("verify", s, 3));
         }
         if let Some(s) = retry_section {
-            sections.push(("retry", s, 5));
+            sections.push(PromptSection::new("retry", s, 5));
         }
         if let Some(s) = allowlist_section {
-            sections.push(("allowlist", s, 6));
+            sections.push(PromptSection::new("allowlist", s, 6));
         }
 
         let mut diagnostics = PromptDiagnostics::default();
+        for source in &self.sources {
+            sections.extend(source.collect(task, ctx));
+        }
+        apply_section_effectiveness(&ctx.workdir, &ctx.role, &mut sections);
         let system_prompt = self.enforce_budget(&mut sections, &mut diagnostics);
 
-        let user_prompt = task.title.clone();
+        let mut user_prompt = format!("# Task Request\n{}\n", task.title);
+        if let Some(description) = &task.description {
+            user_prompt.push_str("\n## Details\n");
+            user_prompt.push_str(description);
+            user_prompt.push('\n');
+        }
+        if let Some(context) = &task.context {
+            if !context.read_files.is_empty()
+                || !context.symbols.is_empty()
+                || !context.anti_patterns.is_empty()
+                || !context.prior_failures.is_empty()
+            {
+                user_prompt.push_str("\n## Task Context\n");
+                for file in &context.read_files {
+                    user_prompt.push_str("- Read `");
+                    user_prompt.push_str(&file.path);
+                    if let Some(lines) = &file.lines {
+                        user_prompt.push_str("` lines ");
+                        user_prompt.push_str(lines);
+                    } else {
+                        user_prompt.push('`');
+                    }
+                    user_prompt.push_str(": ");
+                    user_prompt.push_str(&file.why);
+                    user_prompt.push('\n');
+                }
+                for symbol in &context.symbols {
+                    user_prompt.push_str("- Symbol: ");
+                    user_prompt.push_str(symbol);
+                    user_prompt.push('\n');
+                }
+                for anti_pattern in &context.anti_patterns {
+                    user_prompt.push_str("- Avoid: ");
+                    user_prompt.push_str(anti_pattern);
+                    user_prompt.push('\n');
+                }
+                for failure in &context.prior_failures {
+                    user_prompt.push_str("- Prior failure: ");
+                    user_prompt.push_str(failure);
+                    user_prompt.push('\n');
+                }
+            }
+        }
+        if !task.acceptance.is_empty() {
+            user_prompt.push_str("\n## Acceptance\n");
+            for item in &task.acceptance {
+                user_prompt.push_str("- ");
+                user_prompt.push_str(item);
+                user_prompt.push('\n');
+            }
+        }
+        if !task.verify.is_empty() {
+            user_prompt.push_str("\n## Verification Commands\n");
+            for step in &task.verify {
+                user_prompt.push_str("- ");
+                user_prompt.push_str(&step.command);
+                user_prompt.push('\n');
+            }
+        }
 
         Ok(AssembledPrompt {
             system_prompt,
@@ -312,15 +471,12 @@ impl PromptAssembler {
     /// once those stores are wired through the assembler.
     fn enforce_budget(
         &self,
-        sections: &mut Vec<(&'static str, String, u32)>,
+        sections: &mut Vec<PromptSection>,
         diagnostics: &mut PromptDiagnostics,
     ) -> String {
         // Sort by drop priority descending so high-priority sections drop first.
-        sections.sort_by(|a, b| b.2.cmp(&a.2));
-        let mut selected: Vec<(&'static str, String)> = sections
-            .iter()
-            .map(|(name, body, _)| (*name, body.clone()))
-            .collect();
+        sections.sort_by(|a, b| b.drop_priority.cmp(&a.drop_priority));
+        let mut selected = sections.clone();
         // Drop highest drop-priority first while we exceed budget.
         loop {
             let total = estimate_tokens(&selected);
@@ -329,8 +485,8 @@ impl PromptAssembler {
                 break;
             }
             // Section index 0 has the highest drop priority after the sort
-            if let Some(dropped) = selected.first().map(|(name, _)| *name) {
-                diagnostics.dropped_sections.push(dropped.to_string());
+            if let Some(dropped) = selected.first().map(|section| section.name.clone()) {
+                diagnostics.dropped_sections.push(dropped);
                 selected.remove(0);
             } else {
                 break;
@@ -346,17 +502,336 @@ impl PromptAssembler {
             "verify",
             "retry",
             "allowlist",
+            "knowledge",
+            "episode_knowledge",
+            "playbooks",
+            "section_effectiveness",
         ];
-        let mut ordered: Vec<&(&'static str, String)> = selected.iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|(name, _)| canonical.iter().position(|n| n == name).unwrap_or(99));
-        diagnostics.included_sections = ordered.iter().map(|(n, _)| n.to_string()).collect();
+        let mut ordered: Vec<&PromptSection> = selected.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|section| {
+            canonical
+                .iter()
+                .position(|name| *name == section.name.as_str())
+                .unwrap_or(99)
+        });
+        diagnostics.included_sections =
+            ordered.iter().map(|section| section.name.clone()).collect();
+        diagnostics.knowledge_ids = ordered
+            .iter()
+            .flat_map(|section| section.knowledge_ids.clone())
+            .collect();
+        diagnostics.playbook_ids = ordered
+            .iter()
+            .flat_map(|section| section.playbook_ids.clone())
+            .collect();
 
         ordered
             .into_iter()
-            .map(|(_, body)| body.clone())
+            .map(|section| section.body.clone())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
+}
+
+impl PromptSectionSource for WorkdirKnowledgeSource {
+    fn collect(&self, task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
+        let mut sections = Vec::new();
+        if let Some(section) = collect_neuro_knowledge(task, ctx) {
+            sections.push(section);
+        }
+        if let Some(section) = collect_episode_knowledge(task, ctx) {
+            sections.push(section);
+        }
+        sections
+    }
+}
+
+impl PromptSectionSource for WorkdirPlaybookSource {
+    fn collect(&self, task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
+        collect_playbooks(task, ctx).into_iter().collect()
+    }
+}
+
+impl PromptSectionSource for SectionEffectivenessSource {
+    fn collect(&self, _task: &TaskDef, ctx: &PromptContext) -> Vec<PromptSection> {
+        let path = ctx
+            .workdir
+            .join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
+        if !path.exists() {
+            return Vec::new();
+        }
+        let registry = roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
+        let positive = registry.positive_lift_sections(&ctx.role);
+        if positive.is_empty() {
+            return Vec::new();
+        }
+        let mut body = String::from(
+            "# Prompt section effectiveness\nHistorically high-signal prompt sections for this role:\n",
+        );
+        for effect in positive.into_iter().take(5) {
+            body.push_str(&format!(
+                "- {} (lift {:+.2}, weight {:.2})\n",
+                effect.section_name,
+                effect.lift(),
+                effect.lift_weight()
+            ));
+        }
+        vec![PromptSection::new("section_effectiveness", body, 7)]
+    }
+}
+
+fn collect_neuro_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
+    let store = roko_neuro::KnowledgeStore::for_workdir(&ctx.workdir);
+    if !store.path().exists() {
+        return None;
+    }
+    let query = task_query_text(task, ctx);
+    let entries = store.query(&query, 5).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+
+    let ids = entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    let mut body = String::from("# Neuro knowledge\nRelevant durable knowledge from prior runs:\n");
+    for entry in entries {
+        let source = entry.source.as_deref().unwrap_or("neuro");
+        body.push_str(&format!(
+            "- [{}] {} (confidence {:.2}, source: {})\n",
+            entry.id,
+            truncate_chars(&entry.content, 420),
+            entry.confidence,
+            source
+        ));
+    }
+    Some(PromptSection::new("knowledge", body, 7).with_knowledge_ids(ids))
+}
+
+fn collect_episode_knowledge(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
+    let keywords = query_keywords(&task_query_text(task, ctx));
+    if keywords.is_empty() {
+        return None;
+    }
+
+    let mut scored = Vec::new();
+    for path in episode_paths(&ctx.workdir) {
+        let file = std::fs::File::open(path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(episode) = serde_json::from_str::<roko_learn::episode_logger::Episode>(trimmed)
+            else {
+                continue;
+            };
+            let haystack = format!(
+                "{} {} {} {} {}",
+                episode.task_id,
+                episode.agent_id,
+                episode.model,
+                episode.reasoning_summary.as_deref().unwrap_or(""),
+                episode.failure_reason.as_deref().unwrap_or("")
+            )
+            .to_ascii_lowercase();
+            let score = keywords
+                .iter()
+                .filter(|keyword| haystack.contains(keyword.as_str()))
+                .count();
+            if score > 0 {
+                scored.push((score, episode));
+            }
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.1.success
+            .cmp(&a.1.success)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.1.completed_at.cmp(&a.1.completed_at))
+    });
+    scored.truncate(5);
+
+    let ids = scored
+        .iter()
+        .map(|(_, episode)| {
+            if !episode.id.is_empty() {
+                episode.id.clone()
+            } else if !episode.episode_id.is_empty() {
+                episode.episode_id.clone()
+            } else {
+                episode.task_id.clone()
+            }
+        })
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    let mut body =
+        String::from("# Learned patterns from prior episodes\nSimilar prior work suggests:\n");
+    for (_, episode) in scored {
+        let outcome = if episode.success { "passed" } else { "failed" };
+        let summary = episode
+            .reasoning_summary
+            .as_deref()
+            .or(episode.reflection.as_deref())
+            .or(episode.failure_reason.as_deref())
+            .unwrap_or("no summary recorded");
+        body.push_str(&format!(
+            "- {} ({}, model: {}): {}\n",
+            episode.task_id,
+            outcome,
+            if episode.model.is_empty() {
+                "unknown"
+            } else {
+                &episode.model
+            },
+            truncate_chars(summary, 420)
+        ));
+    }
+    Some(PromptSection::new("episode_knowledge", body, 7).with_knowledge_ids(ids))
+}
+
+fn collect_playbooks(task: &TaskDef, ctx: &PromptContext) -> Option<PromptSection> {
+    let root = ctx.workdir.join(".roko").join("learn").join("playbooks");
+    if !root.is_dir() {
+        return None;
+    }
+    let query = query_keywords(&task_query_text(task, ctx));
+    let mut scored = Vec::new();
+    for entry in std::fs::read_dir(root).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let Ok(playbook) = serde_json::from_str::<roko_learn::playbook::Playbook>(&text) else {
+            continue;
+        };
+        let haystack = playbook_text(&playbook).to_ascii_lowercase();
+        let lexical_score = query
+            .iter()
+            .filter(|keyword| haystack.contains(keyword.as_str()))
+            .count();
+        let outcome_score = playbook
+            .success_count
+            .saturating_sub(playbook.failure_count) as usize;
+        let score = lexical_score
+            .saturating_mul(10)
+            .saturating_add(outcome_score);
+        if score > 0 || scored.len() < 3 {
+            scored.push((score, playbook));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.success_count.cmp(&a.1.success_count))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+    scored.truncate(3);
+
+    let ids = scored
+        .iter()
+        .map(|(_, playbook)| playbook.id.clone())
+        .collect::<Vec<_>>();
+    let mut body = String::from("# Relevant playbooks\nReusable proven procedures:\n");
+    for (_, playbook) in scored {
+        body.push_str(&format!(
+            "- {}: {} (successes {}, failures {})\n",
+            playbook.id, playbook.goal, playbook.success_count, playbook.failure_count
+        ));
+        for step in playbook.steps.iter().take(5) {
+            body.push_str(&format!(
+                "  - {} via {}; expect {}\n",
+                step.description,
+                step.action_kind,
+                if step.expected_signals.is_empty() {
+                    "task-local verification".to_string()
+                } else {
+                    step.expected_signals.join(", ")
+                }
+            ));
+        }
+    }
+    Some(PromptSection::new("playbooks", body, 7).with_playbook_ids(ids))
+}
+
+fn apply_section_effectiveness(workdir: &Path, role: &str, sections: &mut [PromptSection]) {
+    let path = workdir.join(roko_learn::section_effect::DEFAULT_SECTION_EFFECTS_PATH);
+    if !path.exists() {
+        return;
+    }
+    let registry = roko_learn::section_effect::SectionEffectivenessRegistry::load_or_new(&path);
+    for section in sections {
+        match registry.recommend_priority_change(&section.name, role) {
+            roko_learn::section_effect::PriorityChange::Increase => {
+                section.drop_priority = section.drop_priority.saturating_sub(1);
+            }
+            roko_learn::section_effect::PriorityChange::Decrease => {
+                section.drop_priority = section.drop_priority.saturating_add(1);
+            }
+            roko_learn::section_effect::PriorityChange::NoChange
+            | roko_learn::section_effect::PriorityChange::InsufficientData => {}
+        }
+    }
+}
+
+fn task_query_text(task: &TaskDef, ctx: &PromptContext) -> String {
+    let mut parts = vec![task.id.clone(), task.title.clone(), ctx.role.clone()];
+    if let Some(description) = &task.description {
+        parts.push(description.clone());
+    }
+    parts.extend(task.acceptance.clone());
+    parts.extend(task.files.clone());
+    parts.join(" ")
+}
+
+fn query_keywords(text: &str) -> HashSet<String> {
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .filter(|word| word.len() > 2)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn episode_paths(workdir: &Path) -> Vec<PathBuf> {
+    [
+        workdir.join(".roko").join("episodes.jsonl"),
+        workdir.join(".roko").join("learn").join("episodes.jsonl"),
+        workdir.join(".roko").join("memory").join("episodes.jsonl"),
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .collect()
+}
+
+fn playbook_text(playbook: &roko_learn::playbook::Playbook) -> String {
+    let mut text = format!("{} {} {}", playbook.id, playbook.name, playbook.goal);
+    for step in &playbook.steps {
+        text.push(' ');
+        text.push_str(&step.description);
+        text.push(' ');
+        text.push_str(&step.action_kind);
+        text.push(' ');
+        text.push_str(&step.expected_signals.join(" "));
+    }
+    text
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let mut out = text.chars().take(limit).collect::<String>();
+    if text.chars().count() > limit {
+        out.push_str(" [truncated]");
+    }
+    out
 }
 
 impl Default for PromptAssembler {
@@ -365,11 +840,11 @@ impl Default for PromptAssembler {
     }
 }
 
-fn estimate_tokens(sections: &[(&'static str, String)]) -> u32 {
+fn estimate_tokens(sections: &[PromptSection]) -> u32 {
     // Coarse rule-of-thumb: 1 token ≈ 4 ASCII characters.
     sections
         .iter()
-        .map(|(_, body)| (body.len() / 4) as u32)
+        .map(|section| (section.body.len() / 4) as u32)
         .sum::<u32>()
         .max(1)
 }

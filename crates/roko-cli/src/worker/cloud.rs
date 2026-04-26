@@ -6,16 +6,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use roko_agent::mcp::{McpClient, StdioTransport};
-use roko_core::obs::MetricRegistry;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::PlanRunner;
-use crate::config::Config;
 use crate::serve::deploy::CloudExecutionConfig;
 use crate::workspace_paths::relative_plans_dir;
 
@@ -454,22 +450,43 @@ pub async fn run_code_implementer_cloud(
         git_clone(&execution.repo_url(), &workspace, &execution.github_token).await?;
         git_checkout_new_branch(&workspace, &execution.branch_name()).await?;
 
-        let config_path = workspace.join("roko.toml");
-        let config = Config::from_file(&config_path).unwrap_or_else(|_| Config::default());
-        let metrics = Arc::new(MetricRegistry::new());
-        let mut runner =
-            PlanRunner::from_plans_dir(&plan_dir, &workspace, config, metrics, false).await?;
-        runner.enable_cloud_execution(execution.clone());
-
-        let report = runner.run_task_plans(&plan_dir).await?;
+        let roko_config = roko_core::config::load_config(&workspace)
+            .with_context(|| format!("load roko config from {}", workspace.display()))?;
+        let plans = crate::runner::load_plans(&plan_dir)?;
+        let run_config = crate::runner::RunConfig::from_roko_config(
+            workspace.clone(),
+            plan_dir.clone(),
+            roko_config,
+        );
+        let state_hub = roko_core::state_hub::StateHub::default_capacity();
+        let report = crate::runner::run(
+            plans,
+            &run_config,
+            &state_hub,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
         let success = report.all_succeeded();
         let gate_verdicts = report
             .plans
             .first()
-            .map(|plan| plan.gate_results.clone())
+            .map(|plan| {
+                plan.gate_results
+                    .iter()
+                    .map(|gate| (gate.gate_name.clone(), gate.passed))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
 
         if success {
+            let commit_message = format!("plan: {}", execution.plan_slug);
+            git_commit(&workspace, &commit_message).await?;
+            git_push(
+                &workspace,
+                &execution.branch_name(),
+                &execution.github_token,
+            )
+            .await?;
             github_create_pr(&workspace, &execution).await?;
         }
 

@@ -37,8 +37,11 @@ pub mod warm_pool;
 
 use std::sync::Arc;
 
+use roko_agent::AgentRuntimeEvent;
 use roko_core::agent::ModelSpec;
+use roko_core::config::schema::RokoConfig;
 use roko_learn::cascade_router::CascadeRouter;
+use tokio::sync::mpsc;
 
 pub use model_routing::{ModelChoice, ModelChoiceSource, ModelRouter, RoutingInputs};
 pub use outcome::{AgentOutcome, DispatchError};
@@ -47,6 +50,9 @@ pub use prompt_builder::{
 };
 pub use warm_pool::{WarmPool, WarmPoolStats};
 
+pub use crate::dispatch_v2::AgentDispatchRequest;
+use crate::dispatch_v2::{AgentDispatcherV2, CliProviderConfig, ProviderDispatchResolver};
+use crate::dispatch_v2::{DispatchEvent, ProviderRuntime};
 use crate::task_parser::TaskDef;
 
 // ─── Per-call value objects ────────────────────────────────────────────
@@ -156,6 +162,19 @@ impl Dispatcher {
             .map_err(|err| DispatchError::SpawnFailed(err.to_string()))?;
         Ok(result)
     }
+
+    /// Launch a streaming CLI agent through the dispatch facade.
+    ///
+    /// Runner v2 still owns the returned process handle so it can enforce
+    /// cancellation and orphan cleanup, but provider invocation construction and
+    /// runtime event normalization are below dispatch/roko-agent.
+    pub async fn spawn_streaming_cli_agent(
+        &self,
+        config: &crate::runner::agent_stream::AgentSpawnConfig,
+        event_tx: mpsc::Sender<AgentRuntimeEvent>,
+    ) -> anyhow::Result<crate::runner::agent_stream::AgentHandle> {
+        crate::runner::agent_stream::spawn_agent(config, event_tx).await
+    }
 }
 
 /// Materialized dispatch plan — what `Dispatcher::plan` resolves to.
@@ -185,6 +204,99 @@ pub trait AgentResultBridge: Send + Sync {
         plan: &DispatchPlan,
         ctx: &DispatchContext,
     ) -> Result<AgentOutcome, anyhow::Error>;
+}
+
+// ─── Runtime Launch Facade ─────────────────────────────────────────────
+
+/// Runtime selected for a resolved model.
+#[derive(Debug, Clone)]
+pub enum ResolvedAgentRuntime {
+    /// Streaming CLI subprocess with provider-specific invocation metadata.
+    Cli {
+        /// Concrete model slug sent to the CLI.
+        model: String,
+        /// Resolved CLI provider. `None` preserves legacy runner defaults when
+        /// no `roko.toml` provider graph has been loaded.
+        cli_provider: Option<CliProviderConfig>,
+    },
+    /// API/provider-backed agent bridged through `AgentDispatcherV2`.
+    Bridge {
+        /// Concrete model slug sent to the provider.
+        model: String,
+        /// Provider registry id for diagnostics.
+        provider_id: String,
+        /// Effective config used to create the provider-backed agent.
+        roko_config: Arc<RokoConfig>,
+    },
+}
+
+/// Resolve the runtime that should execute `requested_model`.
+pub fn resolve_agent_runtime(
+    roko_config: Option<&Arc<RokoConfig>>,
+    requested_model: &str,
+) -> Result<ResolvedAgentRuntime, String> {
+    let Some(roko_config) = roko_config else {
+        return Ok(ResolvedAgentRuntime::Cli {
+            model: requested_model.to_string(),
+            cli_provider: None,
+        });
+    };
+
+    let resolver = ProviderDispatchResolver::new(Arc::clone(roko_config));
+    let spec = resolver.resolve(requested_model);
+    match spec.runtime {
+        ProviderRuntime::Cli(provider) => Ok(ResolvedAgentRuntime::Cli {
+            model: spec.model_slug,
+            cli_provider: Some(provider),
+        }),
+        ProviderRuntime::AgentResultBridge { .. } => Ok(ResolvedAgentRuntime::Bridge {
+            model: spec.model_slug,
+            provider_id: spec.provider_id,
+            roko_config: Arc::clone(roko_config),
+        }),
+        ProviderRuntime::Unsupported(unsupported) => Err(format!(
+            "model `{requested_model}` resolved to unsupported provider `{}`: {}",
+            spec.provider_id, unsupported.detail
+        )),
+    }
+}
+
+/// Spawn an API/provider-backed agent and forward normalized runtime events.
+pub fn spawn_agent_result_bridge(
+    roko_config: Arc<RokoConfig>,
+    request: AgentDispatchRequest,
+    event_tx: mpsc::Sender<AgentRuntimeEvent>,
+) {
+    tokio::spawn(async move {
+        let dispatcher = AgentDispatcherV2::new(roko_config);
+        match dispatcher.run_agent_result_bridge(request).await {
+            Ok(dispatch) => {
+                for event in dispatch.events {
+                    if event_tx
+                        .send(agent_event_from_dispatch(event))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = event_tx
+                    .send(AgentRuntimeEvent::Error {
+                        message: err.to_string(),
+                    })
+                    .await;
+                let _ = event_tx
+                    .send(AgentRuntimeEvent::Exited { exit_code: Some(1) })
+                    .await;
+            }
+        }
+    });
+}
+
+fn agent_event_from_dispatch(event: DispatchEvent) -> AgentRuntimeEvent {
+    event
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────

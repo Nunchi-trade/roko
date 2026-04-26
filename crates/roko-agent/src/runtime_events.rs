@@ -21,6 +21,8 @@
 //! (cost deltas, retry hints, structured tool diffs, ...) without breaking
 //! existing consumers.
 
+use serde::{Deserialize, Serialize};
+
 /// A provider-neutral event emitted while a dispatched agent is running.
 ///
 /// Every dispatch path is expected to:
@@ -31,7 +33,8 @@
 ///   finishes (carries the authoritative cost/turn count),
 /// - emit a [`AgentRuntimeEvent::Exited`] (or [`AgentRuntimeEvent::Error`]
 ///   followed by `Exited`) when the underlying executor stops.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum AgentRuntimeEvent {
     /// The runtime has launched an agent and bound it to a transport.
     Started {

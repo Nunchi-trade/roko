@@ -18,7 +18,6 @@ mod dry_run_fs;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use crate::agent_exec::{AgentExecEpisode, AgentExecOpts, run_agent_logged};
 use crate::task_parser::TasksFile;
@@ -27,7 +26,6 @@ use crate::workspace_paths::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use roko_core::config::schema::RokoConfig;
-use roko_core::obs::MetricRegistry;
 use roko_core::{Body, Engram, Kind, Provenance, Store};
 use roko_fs::FileSubstrate;
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
@@ -726,14 +724,25 @@ where
 }
 
 async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
-    let resolved = crate::load_layered(workdir)?;
-    let metrics = Arc::new(MetricRegistry::new());
-    roko_core::obs::register_standard_metrics(&metrics);
-
-    let mut runner =
-        crate::PlanRunner::from_plans_dir(plans_root, workdir, resolved.config, metrics, false)
-            .await?;
-    let _report = runner.run_task_plans(plans_root).await?;
+    let plans = crate::runner::load_plans(plans_root)?;
+    let roko_config = roko_core::config::load_config(workdir)
+        .with_context(|| format!("load roko config from {}", workdir.display()))?;
+    let run_config = crate::runner::RunConfig::from_roko_config(
+        workdir.to_path_buf(),
+        plans_root.to_path_buf(),
+        roko_config,
+    );
+    let state_hub = roko_core::state_hub::StateHub::default_capacity();
+    let report = crate::runner::run(
+        plans,
+        &run_config,
+        &state_hub,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    if !report.all_succeeded() {
+        return Err(anyhow!("generated plan execution failed"));
+    }
     Ok(())
 }
 

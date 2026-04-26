@@ -65,7 +65,7 @@ impl RoutingInputs {
         Self {
             task_domain: task.domain.as_ref().map(|d| d.label().to_string()),
             task_tier: task.tier.clone(),
-            task_model_hint: task.model_hint.clone(),
+            task_model_hint: task.model_hint.clone().or_else(|| ctx.model_hint.clone()),
             force_backend: ctx.force_backend.clone(),
             budget_remaining_usd: ctx.budget_remaining_usd,
             attempt: ctx.attempt,

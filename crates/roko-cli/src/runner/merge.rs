@@ -57,6 +57,9 @@ pub struct PlanMergerConfig {
     pub workdir: PathBuf,
     /// Wall-clock timeout for the regression gate.
     pub regression_timeout: Duration,
+    /// Optional merge backend. When `None`, the merger uses
+    /// [`PlanMerger::default_merge_backend`].
+    pub merge_backend: Option<Arc<dyn MergeBackend>>,
     /// Optional post-merge regression gate. When `None`, the merger uses
     /// [`PlanMerger::default_regression_gate`] (a `cargo check` runner).
     pub regression_gate: Option<Arc<dyn RegressionGate>>,
@@ -71,8 +74,16 @@ impl PlanMergerConfig {
         Self {
             workdir,
             regression_timeout,
+            merge_backend: None,
             regression_gate: None,
         }
+    }
+
+    /// Install a custom merge backend.
+    #[must_use]
+    pub fn with_merge_backend(mut self, backend: Arc<dyn MergeBackend>) -> Self {
+        self.merge_backend = Some(backend);
+        self
     }
 
     /// Install a custom regression gate (used by tests and integrations
@@ -81,6 +92,147 @@ impl PlanMergerConfig {
     pub fn with_regression_gate(mut self, gate: Arc<dyn RegressionGate>) -> Self {
         self.regression_gate = Some(gate);
         self
+    }
+}
+
+// ─── Merge backend ─────────────────────────────────────────────────────
+
+/// Outcome of applying a plan merge/finalization request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBackendOutcome {
+    pub passed: bool,
+    pub summary: String,
+    pub failure_kind: Option<RunnerFailureKind>,
+    pub duration_ms: u64,
+}
+
+impl MergeBackendOutcome {
+    #[must_use]
+    pub fn pass(summary: impl Into<String>, duration_ms: u64) -> Self {
+        Self {
+            passed: true,
+            summary: summary.into(),
+            failure_kind: None,
+            duration_ms,
+        }
+    }
+
+    #[must_use]
+    pub fn fail(
+        summary: impl Into<String>,
+        failure_kind: RunnerFailureKind,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            passed: false,
+            summary: summary.into(),
+            failure_kind: Some(failure_kind),
+            duration_ms,
+        }
+    }
+}
+
+/// Pluggable backend for applying a reserved merge request.
+#[async_trait::async_trait]
+pub trait MergeBackend: Send + Sync + std::fmt::Debug {
+    async fn merge(&self, request: &MergeRequest, config: &PlanMergerConfig)
+    -> MergeBackendOutcome;
+}
+
+/// Git-backed merge backend.
+///
+/// Runner v2 currently supports two execution modes:
+/// - branch/worktree mode, where `request.branch_name` exists and is merged
+///   with `git merge --no-ff --no-edit`;
+/// - in-place mode, where the runner executed directly in `workdir` and there
+///   is no branch to merge. In-place mode is explicit and still runs the
+///   post-merge regression gate before the executor can complete.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GitMergeBackend;
+
+#[async_trait::async_trait]
+impl MergeBackend for GitMergeBackend {
+    async fn merge(
+        &self,
+        request: &MergeRequest,
+        config: &PlanMergerConfig,
+    ) -> MergeBackendOutcome {
+        use std::time::Instant;
+
+        let started = Instant::now();
+        let branch_exists = git_success(
+            &config.workdir,
+            &["rev-parse", "--verify", "--quiet", &request.branch_name],
+        )
+        .await;
+        if !branch_exists {
+            let dirty = git_output(&config.workdir, &["status", "--porcelain"]).await;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            return match dirty {
+                Ok(output) if !output.trim().is_empty() => MergeBackendOutcome::pass(
+                    format!(
+                        "in-place runner mode: branch `{}` is absent; validating current working tree with {} dirty path(s)",
+                        request.branch_name,
+                        output.lines().count()
+                    ),
+                    duration_ms,
+                ),
+                Ok(_) => MergeBackendOutcome::pass(
+                    format!(
+                        "nothing to merge for `{}`: branch absent and working tree clean",
+                        request.branch_name
+                    ),
+                    duration_ms,
+                ),
+                Err(err) => MergeBackendOutcome::fail(
+                    format!("git status failed before merge: {err}"),
+                    RunnerFailureKind::Resource,
+                    duration_ms,
+                ),
+            };
+        }
+
+        let output = tokio::process::Command::new("git")
+            .args(["merge", "--no-ff", "--no-edit", &request.branch_name])
+            .current_dir(&config.workdir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match output {
+            Ok(output) if output.status.success() => MergeBackendOutcome::pass(
+                format!("merged branch `{}` into working tree", request.branch_name),
+                duration_ms,
+            ),
+            Ok(output) => {
+                let _ = tokio::process::Command::new("git")
+                    .args(["merge", "--abort"])
+                    .current_dir(&config.workdir)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .output()
+                    .await;
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let details = if stderr.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    stderr.trim().to_string()
+                };
+                MergeBackendOutcome::fail(
+                    format!("git merge `{}` failed: {details}", request.branch_name),
+                    RunnerFailureKind::Structural,
+                    duration_ms,
+                )
+            }
+            Err(err) => MergeBackendOutcome::fail(
+                format!(
+                    "failed to spawn git merge for `{}`: {err}",
+                    request.branch_name
+                ),
+                RunnerFailureKind::Resource,
+                duration_ms,
+            ),
+        }
     }
 }
 
@@ -190,12 +342,49 @@ impl RegressionGate for CargoCheckRegressionGate {
     }
 }
 
+async fn git_success(workdir: &std::path::Path, args: &[&str]) -> bool {
+    tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+async fn git_output(workdir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 impl PlanMerger {
     /// Construct a new merger. The merger borrows the existing
     /// `MergeQueue` from the runtime so resume snapshots remain coherent.
     #[must_use]
     pub fn new(queue: MergeQueue, config: PlanMergerConfig) -> Self {
         Self { queue, config }
+    }
+
+    /// Default merge backend.
+    #[must_use]
+    pub fn default_merge_backend() -> Arc<dyn MergeBackend> {
+        Arc::new(GitMergeBackend)
     }
 
     /// Default regression gate (cargo check workspace) used when none has
@@ -252,6 +441,11 @@ impl PlanMerger {
     fn spawn_regression(&self, request: MergeRequest, gate_tx: mpsc::Sender<GateCompletion>) {
         let queue = self.queue.clone();
         let config = self.config.clone();
+        let merge_backend = self
+            .config
+            .merge_backend
+            .clone()
+            .unwrap_or_else(Self::default_merge_backend);
         let gate = self
             .config
             .regression_gate
@@ -259,7 +453,25 @@ impl PlanMerger {
             .unwrap_or_else(Self::default_regression_gate);
 
         tokio::spawn(async move {
-            let outcome = gate.run(&request, &config).await;
+            let merge_outcome = merge_backend.merge(&request, &config).await;
+            let outcome = if merge_outcome.passed {
+                let gate_outcome = gate.run(&request, &config).await;
+                RegressionOutcome {
+                    passed: gate_outcome.passed,
+                    summary: format!("{}; {}", merge_outcome.summary, gate_outcome.summary),
+                    failure_kind: gate_outcome.failure_kind,
+                    duration_ms: merge_outcome
+                        .duration_ms
+                        .saturating_add(gate_outcome.duration_ms),
+                }
+            } else {
+                RegressionOutcome {
+                    passed: false,
+                    summary: merge_outcome.summary,
+                    failure_kind: merge_outcome.failure_kind,
+                    duration_ms: merge_outcome.duration_ms,
+                }
+            };
             let plan_id = request.plan_id.clone();
             let passed = outcome.passed;
 
@@ -278,7 +490,7 @@ impl PlanMerger {
             };
 
             let completion = GateCompletion {
-                kind: GateCompletionKind::Gate,
+                kind: GateCompletionKind::Merge,
                 plan_id,
                 task_id: format!("merge:{}", request.branch_name),
                 rung: u32::MAX - 1,
@@ -308,6 +520,22 @@ mod tests {
         outcome: Mutex<Option<RegressionOutcome>>,
     }
 
+    #[derive(Debug)]
+    struct StubMerge {
+        outcome: MergeBackendOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl MergeBackend for StubMerge {
+        async fn merge(
+            &self,
+            _request: &MergeRequest,
+            _config: &PlanMergerConfig,
+        ) -> MergeBackendOutcome {
+            self.outcome.clone()
+        }
+    }
+
     impl StubGate {
         fn new(outcome: RegressionOutcome) -> Self {
             Self {
@@ -334,7 +562,11 @@ mod tests {
     }
 
     fn merger_with_gate(gate: Arc<dyn RegressionGate>) -> PlanMerger {
+        let merge: Arc<dyn MergeBackend> = Arc::new(StubMerge {
+            outcome: MergeBackendOutcome::pass("merge ok", 1),
+        });
         let cfg = PlanMergerConfig::new(PathBuf::from("/tmp"), Duration::from_secs(5))
+            .with_merge_backend(merge)
             .with_regression_gate(gate);
         PlanMerger::new(MergeQueue::new(), cfg)
     }
@@ -411,7 +643,11 @@ mod tests {
         // Manually craft a queue with plan-a already merging so plan-b is
         // blocked when it submits.
         let gate = Arc::new(StubGate::new(RegressionOutcome::pass("ok", 1)));
+        let merge: Arc<dyn MergeBackend> = Arc::new(StubMerge {
+            outcome: MergeBackendOutcome::pass("merge ok", 1),
+        });
         let cfg = PlanMergerConfig::new(PathBuf::from("/tmp"), Duration::from_secs(5))
+            .with_merge_backend(merge)
             .with_regression_gate(gate.clone());
         let queue = MergeQueue::new();
         queue.enqueue(MergeRequest::new(

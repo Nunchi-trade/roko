@@ -446,6 +446,8 @@ fn build_runner_config(
         connector_registry: Some(connector_registry),
         feed_registry: Some(feed_registry),
         bandit_policy: Some(bandit_policy),
+        feedback_facade: None,
+        projection: None,
     }
 }
 
@@ -631,6 +633,7 @@ fn gate_kind_label(kind: GateCompletionKind) -> &'static str {
     match kind {
         GateCompletionKind::Gate => "gate",
         GateCompletionKind::PlanVerify => "plan_verify",
+        GateCompletionKind::Merge => "merge",
     }
 }
 

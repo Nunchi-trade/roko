@@ -11,60 +11,9 @@ use roko_core::config::schema::RokoConfig;
 
 // ─── Agent Events ───────────────────────────────────────────────────────
 
-/// Events emitted by the agent stream parser.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    /// The runtime has launched an agent process.
-    Started {
-        agent_id: String,
-        provider: String,
-        model: String,
-        pid: Option<u32>,
-    },
-    /// Claude CLI sent a `system` init message.
-    SystemInit { session_id: String, model: String },
-    /// A chunk of assistant text output.
-    MessageDelta { text: String },
-    /// The agent is invoking a tool.
-    ToolCall { id: String, name: String },
-    /// Result of a tool invocation.
-    ToolOutput { id: String, output: String },
-    /// Token usage update from a turn.
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-    },
-    /// An entire turn has completed.
-    TurnCompleted {
-        session_id: Option<String>,
-        total_cost_usd: Option<f64>,
-        num_turns: Option<u32>,
-        is_error: bool,
-    },
-    /// An error from the agent process.
-    Error { message: String },
-    /// The agent process has exited.
-    Exited { exit_code: Option<i32> },
-}
-
-impl AgentEvent {
-    /// Stable normalized event type for logs/projections.
-    pub const fn event_type(&self) -> &'static str {
-        match self {
-            Self::Started { .. } => "agent.started",
-            Self::SystemInit { .. } => "agent.system_init",
-            Self::MessageDelta { .. } => "agent.message_delta",
-            Self::ToolCall { .. } => "agent.tool_call",
-            Self::ToolOutput { .. } => "agent.tool_output",
-            Self::TokenUsage { .. } => "agent.token_usage",
-            Self::TurnCompleted { .. } => "agent.turn_completed",
-            Self::Error { .. } => "agent.error",
-            Self::Exited { .. } => "agent.exited",
-        }
-    }
-}
+// Events emitted by provider runtime adapters. Re-exporting the canonical
+// runtime event keeps runner code away from provider-specific stream schemas.
+pub use roko_agent::AgentRuntimeEvent as AgentEvent;
 
 // ─── Verify Completion ────────────────────────────────────────────────────
 
@@ -76,6 +25,8 @@ pub enum GateCompletionKind {
     Gate,
     /// Plan-level task verify commands after all gates pass.
     PlanVerify,
+    /// Plan merge/finalization plus post-merge regression gate.
+    Merge,
 }
 
 /// Coarse runner-level failure kind for retry policy and prompt shaping.
@@ -1158,7 +1109,7 @@ pub struct RunConfig {
     pub resume_session: Option<String>,
     /// Maximum gate rung to run (0=compile, 1=clippy, 2=test, ...).
     pub max_gate_rung: u32,
-    /// Claude CLI binary path.
+    /// Default CLI binary path for legacy CLI-provider fallback.
     pub claude_program: PathBuf,
     /// Maximum USD spend per plan (0 = unlimited). From `[budget]`.
     pub max_plan_usd: f64,
@@ -1181,6 +1132,99 @@ pub struct RunConfig {
     /// Contextual bandit policy for recording model-selection feedback.
     pub bandit_policy:
         Option<Arc<std::sync::Mutex<roko_learn::contextual_bandit::ContextualBanditPolicy>>>,
+    /// Single feedback facade — receives every runner event and fans it
+    /// out to the registered learning / knowledge / conductor / dream
+    /// sinks. `None` means feedback is suppressed (tests, smoke runs).
+    pub feedback_facade: Option<Arc<crate::runtime_feedback::FeedbackFacade>>,
+    /// Projection facade — receives every runner / agent event and
+    /// re-emits it as a normalized `ProjectionEvent` for TUI / HTTP / CLI
+    /// subscribers. `None` means events are not mirrored.
+    pub projection: Option<Arc<super::projection::Projection>>,
+}
+
+impl RunConfig {
+    /// Build a runner-v2 config from the effective project config.
+    #[must_use]
+    pub fn from_roko_config(workdir: PathBuf, plan_dir: PathBuf, roko_config: RokoConfig) -> Self {
+        let model = if roko_config.agent.default_model.trim().is_empty() {
+            "claude-sonnet-4-6".to_string()
+        } else {
+            roko_config.agent.default_model.clone()
+        };
+
+        let router_path = workdir
+            .join(".roko")
+            .join("learn")
+            .join("cascade-router.json");
+        let mut model_slugs = roko_config
+            .effective_models()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        if model_slugs.is_empty() {
+            model_slugs.push(model.clone());
+        }
+        model_slugs.sort();
+        model_slugs.dedup();
+
+        let cascade_router = Arc::new(roko_learn::cascade_router::CascadeRouter::load_or_new(
+            &router_path,
+            model_slugs,
+        ));
+        let extension_chain = Arc::new(tokio::sync::Mutex::new(
+            roko_core::extension::ExtensionChain::new(),
+        ));
+        let connector_registry =
+            Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
+        let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
+        let bandit_policy = Arc::new(std::sync::Mutex::new(
+            roko_learn::contextual_bandit::ContextualBanditPolicy::new({
+                let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
+                cfg.mode = roko_learn::contextual_bandit::BanditPolicyMode::Shadow;
+                cfg
+            }),
+        ));
+
+        Self {
+            workdir,
+            plan_dir,
+            model,
+            timeout_secs: roko_config.agent.timeout_ms.unwrap_or(600_000) / 1000,
+            max_retries: 2,
+            approval: false,
+            dangerously_skip_permissions: true,
+            mcp_config: None,
+            resume_session: None,
+            max_gate_rung: if roko_config.gates.skip_tests {
+                u32::from(roko_config.gates.clippy_enabled)
+            } else {
+                2
+            },
+            claude_program: roko_config
+                .agent
+                .command
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("claude")),
+            max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
+            max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
+            clippy_enabled: roko_config.gates.clippy_enabled,
+            skip_tests: roko_config.gates.skip_tests,
+            roko_config: Some(Arc::new(roko_config)),
+            extension_chain: Some(extension_chain),
+            cascade_router: Some(cascade_router),
+            connector_registry: Some(connector_registry),
+            feed_registry: Some(feed_registry),
+            bandit_policy: Some(bandit_policy),
+            // The runner constructs feedback / projection facades at run
+            // start (`event_loop::run`) so they share their lifetime
+            // with the run id. `None` here is the safe default for
+            // callers that build a `RunConfig` directly without going
+            // through the full runner setup (tests, integration shims).
+            feedback_facade: None,
+            projection: None,
+        }
+    }
 }
 
 impl Default for RunConfig {
@@ -1192,7 +1236,7 @@ impl Default for RunConfig {
             timeout_secs: 600,
             max_retries: 5,
             approval: false,
-            dangerously_skip_permissions: false,
+            dangerously_skip_permissions: true,
             mcp_config: None,
             resume_session: None,
             max_gate_rung: 2,
@@ -1207,6 +1251,8 @@ impl Default for RunConfig {
             connector_registry: None,
             feed_registry: None,
             bandit_policy: None,
+            feedback_facade: None,
+            projection: None,
         }
     }
 }
@@ -1238,110 +1284,6 @@ impl std::fmt::Debug for RunConfig {
             .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
             .finish()
     }
-}
-
-// ─── Claude Stream JSON Protocol ────────────────────────────────────────
-
-/// Top-level stream event from `claude --output-format stream-json`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClaudeStreamEvent {
-    System(ClaudeSystemEvent),
-    Assistant(ClaudeAssistantEvent),
-    Tool(ClaudeToolEvent),
-    Result(ClaudeResultEvent),
-}
-
-/// The `system` init event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeSystemEvent {
-    #[serde(default)]
-    pub subtype: String,
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub tools: Vec<serde_json::Value>,
-    // mcp_servers, cwd, etc. — we ignore them
-}
-
-/// An assistant message event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeAssistantEvent {
-    #[serde(default)]
-    pub subtype: String,
-    pub message: ClaudeMessage,
-}
-
-/// The message body inside an assistant event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeMessage {
-    #[serde(default)]
-    pub content: Vec<ClaudeContentBlock>,
-    #[serde(default)]
-    pub usage: Option<ClaudeUsage>,
-}
-
-/// Content block — either text or tool_use.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClaudeContentBlock {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        #[serde(default)]
-        input: serde_json::Value,
-    },
-}
-
-/// A tool result event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeToolEvent {
-    #[serde(default)]
-    pub subtype: String,
-    #[serde(default)]
-    pub tool_name: String,
-    #[serde(default)]
-    pub tool_use_id: String,
-    #[serde(default)]
-    pub content: String,
-}
-
-/// The final result event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeResultEvent {
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub total_cost_usd: Option<f64>,
-    #[serde(default)]
-    pub num_turns: Option<u32>,
-    #[serde(default)]
-    pub is_error: bool,
-    #[serde(default)]
-    pub duration_ms: Option<f64>,
-    #[serde(default)]
-    pub duration_api_ms: Option<f64>,
-    /// Final cumulative usage for the session.
-    #[serde(default)]
-    pub usage: Option<ClaudeUsage>,
-}
-
-/// Token usage from a message.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ClaudeUsage {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u64,
-    #[serde(default)]
-    pub cache_read_input_tokens: u64,
 }
 
 #[cfg(test)]

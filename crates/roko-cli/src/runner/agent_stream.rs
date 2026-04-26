@@ -3,13 +3,11 @@
 //! Spawns the configured CLI provider, parses stdout lines into
 //! [`AgentEvent`]s, and sends them through a tokio mpsc channel.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use roko_compose::{Complexity, GateFeedback, RoleSystemPromptSpec, TaskContext};
-use roko_core::AgentRole;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -20,7 +18,7 @@ use roko_agent::process::{kill_tree, set_process_group};
 
 use crate::dispatch_v2::{CliDispatchProvider, CliDispatchRequest, CliProviderConfig};
 
-use super::types::{AgentEvent, ClaudeContentBlock, ClaudeStreamEvent, RunConfig};
+use super::types::{AgentEvent, RunConfig};
 
 /// Configuration for spawning a single agent.
 #[derive(Debug, Clone)]
@@ -119,121 +117,7 @@ impl AgentHandle {
 /// May return multiple events (e.g., a MessageDelta AND a TokenUsage from the
 /// same assistant message).
 pub fn parse_stream_line(line: &str) -> Vec<AgentEvent> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Vec::new();
-    }
-
-    let event: ClaudeStreamEvent = match serde_json::from_str(line) {
-        Ok(e) => e,
-        Err(e) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                return parse_generic_json_line(&value);
-            }
-            debug!(line_len = line.len(), err = %e, "ignoring unparseable stream line");
-            return Vec::new();
-        }
-    };
-
-    match event {
-        ClaudeStreamEvent::System(sys) => vec![AgentEvent::SystemInit {
-            session_id: sys.session_id,
-            model: sys.model,
-        }],
-
-        ClaudeStreamEvent::Assistant(asst) => {
-            // An assistant event can have content blocks AND usage in the same
-            // message. Emit ALL of them — content block first, then usage.
-            let mut events = Vec::new();
-
-            for block in &asst.message.content {
-                match block {
-                    ClaudeContentBlock::Text { text } => {
-                        events.push(AgentEvent::MessageDelta { text: text.clone() });
-                    }
-                    ClaudeContentBlock::ToolUse { id, name, .. } => {
-                        events.push(AgentEvent::ToolCall {
-                            id: id.clone(),
-                            name: name.clone(),
-                        });
-                    }
-                }
-            }
-
-            // Always emit TokenUsage when present — even alongside content.
-            if let Some(usage) = &asst.message.usage {
-                events.push(AgentEvent::TokenUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cache_read_tokens: usage.cache_read_input_tokens,
-                    cache_write_tokens: usage.cache_creation_input_tokens,
-                });
-            }
-
-            events
-        }
-
-        ClaudeStreamEvent::Tool(tool) => {
-            let output = if tool.content.len() > 4096 {
-                format!("{}… [truncated]", &tool.content[..4096])
-            } else {
-                tool.content
-            };
-            vec![AgentEvent::ToolOutput {
-                id: tool.tool_use_id,
-                output,
-            }]
-        }
-
-        ClaudeStreamEvent::Result(res) => {
-            let mut events = vec![AgentEvent::TurnCompleted {
-                session_id: Some(res.session_id).filter(|s| !s.is_empty()),
-                total_cost_usd: res.total_cost_usd,
-                num_turns: res.num_turns,
-                is_error: res.is_error,
-            }];
-            // Result events also carry final usage — capture it.
-            if let Some(usage) = &res.usage {
-                events.push(AgentEvent::TokenUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cache_read_tokens: usage.cache_read_input_tokens,
-                    cache_write_tokens: usage.cache_creation_input_tokens,
-                });
-            }
-            events
-        }
-    }
-}
-
-fn parse_generic_json_line(value: &serde_json::Value) -> Vec<AgentEvent> {
-    let event_type = value
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    if event_type.contains("error") {
-        let message = value
-            .get("message")
-            .or_else(|| value.get("error"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("agent emitted an error event");
-        return vec![AgentEvent::Error {
-            message: message.to_string(),
-        }];
-    }
-
-    if event_type.contains("message") || event_type.contains("output") {
-        for key in ["text", "message", "content", "delta"] {
-            if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                return vec![AgentEvent::MessageDelta {
-                    text: text.to_string(),
-                }];
-            }
-        }
-    }
-
-    Vec::new()
+    roko_agent::provider::claude_cli::stream::parse_stream_line(line)
 }
 
 /// Spawn a configured CLI agent process and stream its output through the channel.
@@ -270,6 +154,14 @@ pub async fn spawn_agent(
     for (key, value) in &invocation.env {
         cmd.env(key, value);
     }
+    // Unset all Claude Code env vars to prevent "nested session" detection
+    // when spawning agents from within a Claude Code session.
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+    cmd.env_remove("CLAUDE_CODE_SSE_PORT");
+    cmd.env_remove("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+    cmd.env_remove("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+    cmd.env_remove("CLAUDE_CODE_EFFORT_LEVEL");
 
     // Process group isolation.
     set_process_group(&mut cmd);
@@ -290,15 +182,13 @@ pub async fn spawn_agent(
         })
         .await;
 
-    // Write prompt to stdin, then close it.
+    // Write prompt to stdin synchronously, then close it (matching mori's pattern).
+    // Must complete BEFORE spawning reader tasks to avoid race conditions.
     if let Some(mut stdin) = child.stdin.take() {
-        let prompt_to_send = invocation.stdin.clone();
-        tokio::spawn(async move {
-            if let Err(e) = stdin.write_all(prompt_to_send.as_bytes()).await {
-                error!(err = %e, "writing prompt to agent stdin");
-            }
-            drop(stdin);
-        });
+        if let Err(e) = stdin.write_all(invocation.stdin.as_bytes()).await {
+            error!(err = %e, "writing prompt to agent stdin");
+        }
+        drop(stdin); // EOF signals end of input to Claude CLI
     }
 
     // Spawn reader task for stdout.
@@ -353,151 +243,9 @@ pub async fn spawn_agent(
     })
 }
 
-/// Build the task prompt from a task definition.
-pub fn build_task_prompt(
-    task: &crate::task_parser::TaskDef,
-    plan_id: &str,
-    workdir: &Path,
-) -> String {
-    task.build_prompt(plan_id, workdir)
-}
-
-/// Build a minimal system prompt for a task.
-///
-/// TODO: Replace with `RoleSystemPromptSpec` 9-layer builder (Phase 5 R028-R029).
-pub fn build_minimal_system_prompt(task: &crate::task_parser::TaskDef, plan_id: &str) -> String {
-    build_composed_system_prompt(task, plan_id, 16_000)
-        .unwrap_or_else(|_| build_legacy_system_prompt(task, plan_id))
-}
-
-/// Build the task system prompt through the shared 9-layer role prompt builder.
-pub fn build_composed_system_prompt(
-    task: &crate::task_parser::TaskDef,
-    plan_id: &str,
-    context_window_tokens: usize,
-) -> Result<String> {
-    let role_text = task.role.as_deref().unwrap_or("implementer");
-    let role = parse_runner_agent_role(role_text).unwrap_or(AgentRole::Implementer);
-    let mut spec = RoleSystemPromptSpec::new(
-        role,
-        TaskContext::new(task_system_context(task))
-            .with_plan_id(plan_id)
-            .with_workspace("roko runner v2"),
-        "",
-    )
-    .with_complexity(prompt_complexity(task))
-    .with_cache_markers();
-
-    if let Some(conventions) = task_scope_conventions(task, role_text) {
-        spec = spec.with_extra_conventions(conventions);
-    }
-    if let Some(ctx) = &task.context {
-        for anti_pattern in &ctx.anti_patterns {
-            spec = spec.add_anti_pattern(anti_pattern.clone());
-        }
-        for prior_failure in &ctx.prior_failures {
-            spec =
-                spec.add_anti_pattern(format!("Prior failure to avoid repeating: {prior_failure}"));
-        }
-    }
-
-    Ok(spec.build_with_context_window(context_window_tokens.max(1))?)
-}
-
-/// Format previous gate output as bounded, actionable retry context.
-pub fn format_gate_feedback_for_prompt(raw_output: &str, rung: u32) -> Option<String> {
-    GateFeedback::from_raw(raw_output, rung).map(|feedback| feedback.render_prompt_section())
-}
-
-fn build_legacy_system_prompt(task: &crate::task_parser::TaskDef, plan_id: &str) -> String {
-    let role = task.role.as_deref().unwrap_or("implementer");
-    format!(
-        "You are a {role} agent working on plan `{plan_id}`, task `{}`.\n\n## Constraints\n- Make minimal, targeted changes.\n- Do not modify files outside the task scope.\n- Ensure verification passes before finishing.\n",
-        task.id
-    )
-}
-
-fn task_system_context(task: &crate::task_parser::TaskDef) -> String {
-    let mut context = format!("Task ID: {}\nTitle: {}", task.id, task.title);
-    if let Some(description) = task.description.as_deref().filter(|s| !s.trim().is_empty()) {
-        context.push_str("\nDescription: ");
-        context.push_str(description.trim());
-    }
-    if !task.acceptance.is_empty() {
-        context.push_str("\n\nAcceptance criteria:");
-        for criterion in &task.acceptance {
-            context.push_str("\n- ");
-            context.push_str(criterion);
-        }
-    }
-    if !task.verify.is_empty() {
-        context.push_str("\n\nVerification gates:");
-        for step in &task.verify {
-            context.push_str("\n- `");
-            context.push_str(&step.command);
-            context.push_str("` (");
-            context.push_str(&step.phase);
-            context.push(')');
-        }
-    }
-    context
-}
-
-fn task_scope_conventions(task: &crate::task_parser::TaskDef, role_text: &str) -> Option<String> {
-    let mut sections = Vec::new();
-    if !task.files.is_empty() {
-        let mut scope = String::from(
-            "Honor the declared write scope strictly. Only create, edit, move, or delete files in this allowlist unless the user explicitly expands it:",
-        );
-        for file in &task.files {
-            scope.push_str("\n- ");
-            scope.push_str(file);
-        }
-        sections.push(scope);
-    }
-    if let Some(max_loc) = task.max_loc {
-        sections.push(format!(
-            "Keep the total code delta within roughly {max_loc} lines unless verification requires a tightly scoped follow-up."
-        ));
-    }
-    if parse_runner_agent_role(role_text).is_none() {
-        sections.push(format!("Treat the task role hint literally: {role_text}"));
-    }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
-}
-
-fn prompt_complexity(task: &crate::task_parser::TaskDef) -> Complexity {
-    match task.tier.as_str() {
-        "mechanical" | "fast" => Complexity::Trivial,
-        "integrative" | "architectural" | "complex" | "premium" => Complexity::Complex,
-        _ => Complexity::Standard,
-    }
-}
-
-fn parse_runner_agent_role(role: &str) -> Option<AgentRole> {
-    let normalized = role.trim().to_ascii_lowercase().replace(['_', ' '], "-");
-    Some(match normalized.as_str() {
-        "conductor" => AgentRole::Conductor,
-        "strategist" => AgentRole::Strategist,
-        "implementer" | "engineer" | "coder" => AgentRole::Implementer,
-        "architect" => AgentRole::Architect,
-        "researcher" => AgentRole::Researcher,
-        "auditor" => AgentRole::Auditor,
-        "quick-reviewer" | "quickreviewer" => AgentRole::QuickReviewer,
-        "scribe" => AgentRole::Scribe,
-        "critic" => AgentRole::Critic,
-        "auto-fixer" | "autofixer" => AgentRole::AutoFixer,
-        "pattern-extractor" | "patternextractor" => AgentRole::PatternExtractor,
-        "snapshot-comparator" | "snapshotcomparator" => AgentRole::SnapshotComparator,
-        "full-loop-validator" | "fullloopvalidator" => AgentRole::FullLoopValidator,
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task_parser::{TaskContext as ParserTaskContext, TaskDef, VerifyStep};
 
     #[test]
     fn parse_system_event() {
@@ -521,77 +269,6 @@ mod tests {
                 assert_eq!(text, "hello world");
             }
             _ => panic!("expected MessageDelta"),
-        }
-    }
-
-    #[test]
-    fn composed_system_prompt_contains_expected_layers() {
-        let task = sample_task();
-        let prompt = build_composed_system_prompt(&task, "plan-a", 16_000).unwrap();
-
-        assert!(prompt.contains("<!-- cache:system -->"));
-        assert!(prompt.contains("## Project Conventions"));
-        assert!(prompt.contains("## Tool Instructions"));
-        assert!(prompt.contains("## Current Task"));
-        assert!(prompt.contains("Plan: plan-a"));
-        assert!(prompt.contains("Task ID: T1"));
-        assert!(prompt.contains("Acceptance criteria"));
-        assert!(prompt.contains("Verification gates"));
-        assert!(prompt.contains("cargo test -p roko-compose"));
-        assert!(prompt.contains("Honor the declared write scope strictly"));
-        assert!(prompt.contains("crates/roko-compose/src/prompt.rs"));
-        assert!(prompt.contains("## Anti-Patterns"));
-        assert!(prompt.contains("Do not rewrite the runner"));
-    }
-
-    #[test]
-    fn gate_feedback_is_structured_and_bounded() {
-        let raw =
-            "noise\nerror[E0308]: mismatched types\n --> src/lib.rs:9:1\nwarning: unused import\n";
-        let feedback = format_gate_feedback_for_prompt(raw, 2).unwrap();
-
-        assert!(feedback.contains("## Previous Verify Failure"));
-        assert!(feedback.contains("Gate rung: 2"));
-        assert!(feedback.contains("error[E0308]"));
-        assert!(feedback.contains("src/lib.rs:9:1"));
-        assert!(feedback.contains("warning: unused import"));
-        assert!(!feedback.contains("\nnoise\n"));
-    }
-
-    fn sample_task() -> TaskDef {
-        TaskDef {
-            id: "T1".into(),
-            title: "Wire prompt assembly".into(),
-            description: Some("Replace the ad hoc prompt path.".into()),
-            role: Some("implementer".into()),
-            status: "ready".into(),
-            tier: "focused".into(),
-            frequency: None,
-            model_hint: None,
-            replan_strategy: None,
-            max_loc: Some(80),
-            files: vec!["crates/roko-compose/src/prompt.rs".into()],
-            allowed_tools: None,
-            denied_tools: None,
-            mcp_servers: None,
-            depends_on: Vec::new(),
-            depends_on_plan: Vec::new(),
-            split_into: None,
-            context: Some(ParserTaskContext {
-                anti_patterns: vec!["Do not rewrite the runner".into()],
-                ..ParserTaskContext::default()
-            }),
-            verify: vec![VerifyStep {
-                phase: "test".into(),
-                command: "cargo test -p roko-compose".into(),
-                fail_msg: None,
-                timeout_ms: 60_000,
-            }],
-            timeout_secs: 600,
-            max_retries: 3,
-            acceptance: vec!["Prompt contains task context".into()],
-            acceptance_contract: None,
-            domain: None,
         }
     }
 

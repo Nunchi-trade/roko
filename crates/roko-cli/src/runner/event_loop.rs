@@ -29,15 +29,17 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::dispatch_v2::{
-    AgentDispatchRequest, AgentDispatcherV2, CliProviderConfig, DispatchEvent,
-    ProviderDispatchResolver, ProviderRuntime,
+use crate::dispatch::{
+    AgentDispatchRequest, DispatchContext, Dispatcher, GateFeedback as DispatchGateFeedback,
+    PromptAssembler, ResolvedAgentRuntime, WarmPool, resolve_agent_runtime,
+    spawn_agent_result_bridge,
 };
 use crate::task_parser::TaskDef;
 
 use super::agent_events::handle_agent_event;
-use super::agent_stream::{self, AgentHandle, AgentSpawnConfig};
+use super::agent_stream::{AgentHandle, AgentSpawnConfig};
 use super::gate_dispatch;
+use super::merge::{MergeDispatch, PlanMerger, PlanMergerConfig};
 use super::persist::{self, PersistPaths};
 use super::plan_loader::Plan;
 use super::state::RunState;
@@ -72,6 +74,7 @@ pub struct PlanReport {
     pub tasks_total: usize,
     pub tasks_completed: usize,
     pub tasks_failed: usize,
+    pub gate_results: Vec<GateResult>,
 }
 
 impl RunReport {
@@ -95,7 +98,6 @@ struct RunContext<'a> {
     gate_tx: &'a mpsc::Sender<GateCompletion>,
     paths: &'a PersistPaths,
     merge_queue: &'a MergeQueue,
-    daimon_policy: roko_core::DaimonPolicy,
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -169,19 +171,6 @@ pub async fn run(
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
     let mut agent_handle: Option<AgentHandle> = None;
-
-    // Load Daimon affect state for affect-informed routing.
-    let daimon_state = roko_daimon::DaimonState::load_or_new(
-        config
-            .workdir
-            .join(".roko")
-            .join("daimon")
-            .join("affect.json"),
-    );
-    let daimon_policy = roko_core::DaimonPolicy::new(
-        daimon_state.state.pad.pleasure.clamp(0.0, 1.0) as f64,
-        daimon_state.behavioral_tracker.current_state,
-    );
 
     let skip_enrichment: HashMap<String, bool> = plans
         .iter()
@@ -485,6 +474,21 @@ pub async fn run(
                 // Extension: on_gate hook.
                 fire_on_gate_hook(config, &completion, &tui).await;
 
+                if completion.kind == GateCompletionKind::Merge {
+                    handle_merge_completion(
+                        &completion,
+                        &mut executor,
+                        &mut state,
+                        &paths,
+                        &merge_queue,
+                        &gate_tx,
+                        &config.workdir,
+                        Duration::from_secs(config.timeout_secs),
+                        &tui,
+                    );
+                    continue;
+                }
+
                 if completion.kind == GateCompletionKind::PlanVerify {
                     handle_plan_verify_completion(
                         &completion,
@@ -742,7 +746,6 @@ pub async fn run(
                         gate_tx: &gate_tx,
                         paths: &paths,
                         merge_queue: &merge_queue,
-                        daimon_policy,
                     };
                     dispatch_action(&action, &mut ctx).await;
                 }
@@ -904,6 +907,87 @@ fn handle_plan_verify_completion(
     save_snapshot(executor, paths, state, merge_queue);
 }
 
+fn handle_merge_completion(
+    completion: &GateCompletion,
+    executor: &mut ParallelExecutor,
+    state: &mut RunState,
+    paths: &PersistPaths,
+    merge_queue: &MergeQueue,
+    gate_tx: &mpsc::Sender<GateCompletion>,
+    workdir: &Path,
+    regression_timeout: Duration,
+    tui: &TuiBridge,
+) {
+    let run_id = state.run_id().to_string();
+    if completion.passed {
+        match executor.apply_event(&completion.plan_id, &ExecutorEvent::MergeSucceeded) {
+            Ok(phase) => {
+                tui.phase_transition(&completion.plan_id, "merging", &format!("{phase:?}"));
+                tui.plan_completed(&completion.plan_id, true);
+                emit_runner_event(
+                    paths,
+                    state,
+                    tui,
+                    RunnerEvent::plan_completed(
+                        &run_id,
+                        &completion.plan_id,
+                        PlanOutcome::Succeeded,
+                        None,
+                    ),
+                );
+                info!(
+                    plan_id = %completion.plan_id,
+                    output = %completion.output,
+                    "merge finalized and regression passed"
+                );
+            }
+            Err(err) => {
+                let reason = format!("executor rejected successful merge: {err}");
+                let _ = executor.apply_event(&completion.plan_id, &ExecutorEvent::Fatal(reason));
+            }
+        }
+    } else {
+        let reason = format!("merge failed: {}", completion.output);
+        match executor.apply_event(&completion.plan_id, &ExecutorEvent::MergeFailed) {
+            Ok(phase) => {
+                tui.phase_transition(&completion.plan_id, "merging", &format!("{phase:?}"));
+                tui.plan_completed(&completion.plan_id, false);
+            }
+            Err(err) => {
+                warn!(
+                    plan_id = %completion.plan_id,
+                    error = %err,
+                    "transition error after merge failure"
+                );
+                let _ = executor
+                    .apply_event(&completion.plan_id, &ExecutorEvent::Fatal(reason.clone()));
+            }
+        }
+        emit_runner_event(
+            paths,
+            state,
+            tui,
+            RunnerEvent::plan_completed(
+                &run_id,
+                &completion.plan_id,
+                PlanOutcome::Failed,
+                Some(reason.clone()),
+            ),
+        );
+        tui.error(&reason);
+    }
+
+    if let Some(next_plan_id) = PlanMerger::new(
+        merge_queue.clone(),
+        PlanMergerConfig::new(workdir.to_path_buf(), regression_timeout),
+    )
+    .drain_next(gate_tx.clone())
+    {
+        info!(plan_id = %next_plan_id, "started next queued merge");
+    }
+    save_snapshot(executor, paths, state, merge_queue);
+}
+
 fn append_agent_event(paths: &PersistPaths, event: &AgentEvent, state: &RunState) {
     let event_type = event.event_type();
 
@@ -976,6 +1060,23 @@ fn emit_runner_event(
     tui: &TuiBridge,
     event: RunnerEvent,
 ) {
+    emit_runner_event_with_facades(paths, state, tui, None, None, event);
+}
+
+/// Internal variant accepting the optional projection + feedback facades.
+///
+/// All emit sites end up here. The facade refs are read off `RunConfig`
+/// in the `_via_config` wrapper so most sites do not need to thread the
+/// extra arguments — the simple 4-arg `emit_runner_event` continues to
+/// work for helpers that have no `&RunConfig` in scope.
+fn emit_runner_event_with_facades(
+    paths: &PersistPaths,
+    state: &mut RunState,
+    tui: &TuiBridge,
+    projection: Option<&Arc<super::projection::Projection>>,
+    feedback_facade: Option<&Arc<crate::runtime_feedback::FeedbackFacade>>,
+    event: RunnerEvent,
+) {
     state.apply_runner_event(&event);
     tui.runner_event(&event);
     if let Err(err) = persist::append_runner_event(paths, &event) {
@@ -984,6 +1085,132 @@ fn emit_runner_event(
             error = %err,
             "failed to append runner lifecycle event"
         );
+    }
+
+    // ── Mirror to projection facade ─────────────────────────────────────
+    if let Some(proj) = projection {
+        let raw = super::projection::RawRuntimeEvent::Runner(event.clone());
+        match proj.publish(raw) {
+            Ok(()) => {}
+            Err(super::projection::ProjectionError::NoSubscribers) => {
+                // Publishing without live subscribers is normal during smoke
+                // runs — the projection facade tracks the dropped-event
+                // counter for diagnostics.
+            }
+        }
+    }
+
+    // ── Translate to FeedbackEvent and fan out (fire-and-forget) ────────
+    if let Some(facade) = feedback_facade {
+        if let Some(feedback) = runner_event_to_feedback(&event) {
+            let facade = Arc::clone(facade);
+            tokio::spawn(async move {
+                if let Err(err) = facade.on_event(&feedback).await {
+                    warn!(
+                        event_type = feedback.label(),
+                        %err,
+                        "feedback facade returned terminal error",
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// Convenience wrapper that reads facades from `RunConfig`.
+fn emit_runner_event_via_config(
+    paths: &PersistPaths,
+    state: &mut RunState,
+    tui: &TuiBridge,
+    config: &RunConfig,
+    event: RunnerEvent,
+) {
+    emit_runner_event_with_facades(
+        paths,
+        state,
+        tui,
+        config.projection.as_ref(),
+        config.feedback_facade.as_ref(),
+        event,
+    );
+}
+
+/// Translate a [`RunnerEvent`] into a [`FeedbackEvent`] when the runner
+/// has enough information for one. Returns `None` for variants that do
+/// not map to the feedback layer (e.g. `RunStarted`, `ResumeMarker`).
+fn runner_event_to_feedback(event: &RunnerEvent) -> Option<crate::runtime_feedback::FeedbackEvent> {
+    use crate::dispatch::{AgentOutcome, ModelChoiceSource};
+    use crate::runtime_feedback::FeedbackEvent;
+
+    match event {
+        RunnerEvent::TaskAttemptCompleted {
+            attempt, outcome, ..
+        } => {
+            let succeeded = matches!(outcome, TaskAttemptOutcome::Passed);
+            // The runner-level event does not carry per-attempt usage;
+            // the dispatch layer overlays the real numbers when it is on
+            // the hot loop. For now this fills `model` / `provider` /
+            // tokens / cost with empty defaults — episodes still get
+            // written; the routing sink dampens its observation
+            // accordingly when the model slug is empty.
+            let agent_outcome = AgentOutcome {
+                task_id: attempt.task_id.clone(),
+                plan_id: attempt.plan_id.clone(),
+                model: String::new(),
+                provider: String::new(),
+                output: String::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                cost_usd: 0.0,
+                duration_ms: 0,
+                exit_code: None,
+                is_error: !succeeded,
+            };
+            Some(FeedbackEvent::TaskCompleted {
+                plan_id: attempt.plan_id.clone(),
+                task_id: attempt.task_id.clone(),
+                outcome: agent_outcome,
+                model_source: ModelChoiceSource::Default,
+                succeeded,
+            })
+        }
+        RunnerEvent::GateCompleted {
+            attempt,
+            rung,
+            passed,
+            duration_ms,
+            ..
+        } => Some(FeedbackEvent::GateOutcome {
+            plan_id: attempt.plan_id.clone(),
+            task_id: attempt.task_id.clone(),
+            rung: *rung,
+            passed: *passed,
+            duration_ms: *duration_ms,
+        }),
+        RunnerEvent::RetryDecision {
+            attempt,
+            cooldown_ms,
+            current_attempt,
+            ..
+        } => Some(FeedbackEvent::RetryDecision {
+            plan_id: attempt.plan_id.clone(),
+            task_id: attempt.task_id.clone(),
+            attempt: *current_attempt,
+            backoff_secs: cooldown_ms / 1000,
+        }),
+        RunnerEvent::PlanCompleted {
+            plan_id, outcome, ..
+        } => {
+            let succeeded = matches!(outcome, PlanOutcome::Succeeded);
+            Some(FeedbackEvent::PlanCompleted {
+                plan_id: plan_id.clone(),
+                succeeded,
+                tasks_completed: 0,
+                tasks_failed: 0,
+                total_cost_usd: 0.0,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -1017,175 +1244,6 @@ fn build_run_completed_event(
             })
             .collect(),
     )
-}
-
-/// Select the model for a task dispatch using CascadeRouter when available.
-///
-/// Priority: explicit model_hint > cascade router > config default.
-fn select_model_for_dispatch(
-    task_def: &TaskDef,
-    config: &RunConfig,
-    attempt_num: u32,
-    tui: &TuiBridge,
-    plan_id: &str,
-    task_id: &str,
-    daimon_policy: roko_core::DaimonPolicy,
-) -> String {
-    // Explicit model hint always wins.
-    if let Some(hint) = &task_def.model_hint {
-        info!(model = %hint, source = "model_hint", "model selection: explicit task override");
-        tui.model_selected(plan_id, task_id, hint, "model_hint");
-        return hint.clone();
-    }
-
-    // Try CascadeRouter for learned model selection.
-    if let Some(router) = &config.cascade_router {
-        let ctx = RoutingContext {
-            task_category: TaskCategory::Implementation,
-            complexity: TaskComplexityBand::Standard,
-            iteration: attempt_num.saturating_sub(1),
-            role: AgentRole::Implementer,
-            crate_familiarity: 0.5,
-            has_prior_failure: attempt_num > 1,
-            conductor_load: 0.0,
-            active_agents: 1,
-            ready_queue_depth: 0,
-            max_queue_wait_hours: 0.0,
-            daimon_policy,
-            thinking_level: None,
-            temperament: None,
-            previous_model: None,
-            plan_context_tokens: None,
-            tier_thresholds: None,
-        };
-        let result = router.route(&ctx);
-        info!(
-            model = %result.primary.slug,
-            source = "cascade_router",
-            "model selection: cascade router selected model"
-        );
-        tui.model_selected(plan_id, task_id, &result.primary.slug, "cascade_router");
-        return result.primary.slug;
-    }
-
-    // Fall back to config default.
-    info!(model = %config.model, source = "config_default", "model selection: using config default");
-    tui.model_selected(plan_id, task_id, &config.model, "config_default");
-    config.model.clone()
-}
-
-enum ResolvedAgentDispatch {
-    Cli {
-        model: String,
-        cli_provider: Option<CliProviderConfig>,
-    },
-    Bridge {
-        model: String,
-        provider_id: String,
-        roko_config: Arc<roko_core::config::schema::RokoConfig>,
-    },
-}
-
-fn resolve_agent_dispatch(
-    config: &RunConfig,
-    requested_model: &str,
-) -> Result<ResolvedAgentDispatch, String> {
-    let Some(roko_config) = &config.roko_config else {
-        return Ok(ResolvedAgentDispatch::Cli {
-            model: requested_model.to_string(),
-            cli_provider: None,
-        });
-    };
-
-    let resolver = ProviderDispatchResolver::new(roko_config.clone());
-    let spec = resolver.resolve(requested_model);
-    match spec.runtime {
-        ProviderRuntime::Cli(provider) => Ok(ResolvedAgentDispatch::Cli {
-            model: spec.model_slug,
-            cli_provider: Some(provider),
-        }),
-        ProviderRuntime::AgentResultBridge { .. } => Ok(ResolvedAgentDispatch::Bridge {
-            model: spec.model_slug,
-            provider_id: spec.provider_id,
-            roko_config: roko_config.clone(),
-        }),
-        ProviderRuntime::Unsupported(unsupported) => Err(format!(
-            "model `{requested_model}` resolved to unsupported provider `{}`: {}",
-            spec.provider_id, unsupported.detail
-        )),
-    }
-}
-
-fn spawn_agent_result_bridge(
-    roko_config: Arc<roko_core::config::schema::RokoConfig>,
-    request: AgentDispatchRequest,
-    agent_tx: mpsc::Sender<AgentEvent>,
-) {
-    tokio::spawn(async move {
-        let dispatcher = AgentDispatcherV2::new(roko_config);
-        match dispatcher.run_agent_result_bridge(request).await {
-            Ok(dispatch) => {
-                for event in dispatch.events {
-                    if agent_tx
-                        .send(agent_event_from_dispatch(event))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-            Err(err) => {
-                let _ = agent_tx
-                    .send(AgentEvent::Error {
-                        message: err.to_string(),
-                    })
-                    .await;
-                let _ = agent_tx
-                    .send(AgentEvent::Exited { exit_code: Some(1) })
-                    .await;
-            }
-        }
-    });
-}
-
-fn agent_event_from_dispatch(event: DispatchEvent) -> AgentEvent {
-    match event {
-        DispatchEvent::Started {
-            agent_id,
-            provider,
-            model,
-            pid,
-        } => AgentEvent::Started {
-            agent_id,
-            provider,
-            model,
-            pid,
-        },
-        DispatchEvent::MessageDelta { text } => AgentEvent::MessageDelta { text },
-        DispatchEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-        } => AgentEvent::TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-        },
-        DispatchEvent::TurnCompleted {
-            total_cost_usd,
-            is_error,
-        } => AgentEvent::TurnCompleted {
-            session_id: None,
-            total_cost_usd,
-            num_turns: Some(1),
-            is_error,
-        },
-        DispatchEvent::Error { message } => AgentEvent::Error { message },
-        DispatchEvent::Exited { exit_code } => AgentEvent::Exited { exit_code },
-    }
 }
 
 // ─── Snapshot Helper ────────────────────────────────────────────────────
@@ -1571,23 +1629,62 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             ctx.state.total_agent_calls += 1;
             ctx.state.task_agent_calls += 1;
 
-            let prompt = agent_stream::build_task_prompt(task_def, plan_id, &ctx.config.workdir);
-            let system_prompt = agent_stream::build_minimal_system_prompt(task_def, plan_id);
-
-            let requested_model = select_model_for_dispatch(
-                task_def,
-                ctx.config,
-                attempt_num,
-                ctx.tui,
-                plan_id,
-                &task_id,
-                ctx.daimon_policy,
+            let role = task_def.role.as_deref().unwrap_or("implementer");
+            let gate_feedback = DispatchGateFeedback::from_raw(&previous_gate_output);
+            let dispatch_ctx = DispatchContext {
+                plan_id: plan_id.clone(),
+                role: role.to_string(),
+                workdir: ctx.config.workdir.clone(),
+                model_hint: Some(ctx.config.model.clone()),
+                force_backend: None,
+                budget_remaining_usd: if ctx.config.max_plan_usd > 0.0 {
+                    (ctx.config.max_plan_usd - ctx.state.plan_cost(plan_id)).max(0.0)
+                } else {
+                    f64::INFINITY
+                },
+                attempt: attempt_num.saturating_sub(1),
+                gate_feedback,
+            };
+            let dispatcher = Dispatcher::new(
+                ctx.config.cascade_router.clone(),
+                PromptAssembler::new(),
+                WarmPool::new(0),
+            );
+            let dispatch_plan = match dispatcher.plan(task_def, &dispatch_ctx) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    let message = format!("dispatch planning failed: {err}");
+                    error!(plan_id = %plan_id, task = %task_id, error = %message);
+                    let _ = ctx
+                        .executor
+                        .apply_event(plan_id, &ExecutorEvent::Fatal(message.clone()));
+                    ctx.tui.error(&message);
+                    return;
+                }
+            };
+            let requested_model = dispatch_plan.model.slug.clone();
+            ctx.tui
+                .model_selected(plan_id, &task_id, &requested_model, "dispatcher");
+            let system_prompt = dispatch_plan.prompt.system_prompt;
+            let mut final_prompt = dispatch_plan.prompt.user_prompt;
+            debug!(
+                plan_id = %plan_id,
+                task = %task_id,
+                model = %requested_model,
+                included_sections = ?dispatch_plan.prompt.diagnostics.included_sections,
+                dropped_sections = ?dispatch_plan.prompt.diagnostics.dropped_sections,
+                knowledge_ids = ?dispatch_plan.prompt.diagnostics.knowledge_ids,
+                playbook_ids = ?dispatch_plan.prompt.diagnostics.playbook_ids,
+                "dispatch prompt assembled"
             );
 
             // Extension: pre-inference hook.
             fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model, ctx.tui).await;
 
-            let dispatch = match resolve_agent_dispatch(ctx.config, &requested_model) {
+            let dispatch = match resolve_agent_runtime(
+                ctx.config.roko_config.as_ref(),
+                &requested_model,
+            ) {
                 Ok(selection) => selection,
                 Err(message) => {
                     error!(plan_id = %plan_id, task = %task_id, error = %message, "agent provider resolution failed");
@@ -1599,7 +1696,6 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 }
             };
 
-            let role = task_def.role.as_deref().unwrap_or("implementer");
             let agent_id = format!("{plan_id}/{task_id}");
             let attempt_ref = TaskAttemptRef::new(plan_id.clone(), task_id.clone(), attempt_num);
             let run_id = ctx.state.run_id().to_string();
@@ -1622,22 +1718,13 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ),
             );
 
-            // Prepend gate feedback if this is a retry.
-            let mut final_prompt = if let Some(feedback) =
-                agent_stream::format_gate_feedback_for_prompt(&previous_gate_output, 0)
-            {
-                format!("{feedback}\n\n---\n\n{prompt}")
-            } else {
-                prompt
-            };
-
             // Append replan context if accumulated from repeated failures.
             if let Some(replan) = ctx.state.take_replan_context(plan_id, &task_id) {
                 final_prompt.push_str(&replan);
             }
 
             match dispatch {
-                ResolvedAgentDispatch::Cli {
+                ResolvedAgentRuntime::Cli {
                     model,
                     cli_provider,
                 } => {
@@ -1653,7 +1740,10 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         spawn_config = spawn_config.with_cli_provider(provider);
                     }
 
-                    match agent_stream::spawn_agent(&spawn_config, ctx.agent_tx.clone()).await {
+                    match dispatcher
+                        .spawn_streaming_cli_agent(&spawn_config, ctx.agent_tx.clone())
+                        .await
+                    {
                         Ok(handle) => {
                             ctx.state.agent_active = true;
                             ctx.state.agent_pid = Some(handle.pid);
@@ -1718,7 +1808,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         }
                     }
                 }
-                ResolvedAgentDispatch::Bridge {
+                ResolvedAgentRuntime::Bridge {
                     model,
                     provider_id,
                     roko_config,
@@ -1942,52 +2032,39 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 .plan_state(plan_id)
                 .map(|state| state.files_changed.clone())
                 .unwrap_or_default();
-            ctx.merge_queue.enqueue(MergeRequest::new(
+            let request = MergeRequest::new(
                 plan_id.clone(),
-                format!("roko/{plan_id}"),
+                format!("roko/plan/{plan_id}"),
                 files_changed,
                 0,
-            ));
-            let Some(request) = ctx.merge_queue.reserve_next_mergeable() else {
-                info!(
-                    plan_id = %plan_id,
-                    blocked_conflicts = ?ctx.merge_queue.blocked_conflicts(),
-                    "merge queued but currently blocked by file locks"
-                );
-                save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
-                return;
-            };
-
-            info!(
-                plan_id = %request.plan_id,
-                branch = %request.branch_name,
-                files = request.files_changed.len(),
-                "reserved merge queue request"
             );
-            if ctx
-                .executor
-                .apply_event(&request.plan_id, &ExecutorEvent::MergeSucceeded)
-                .is_ok()
-            {
-                ctx.merge_queue.mark_complete(&request.plan_id);
-                ctx.tui.plan_completed(&request.plan_id, true);
-                let run_id = ctx.state.run_id().to_string();
-                emit_runner_event(
-                    ctx.paths,
-                    ctx.state,
-                    ctx.tui,
-                    RunnerEvent::plan_completed(
-                        &run_id,
-                        &request.plan_id,
-                        PlanOutcome::Succeeded,
-                        None,
-                    ),
-                );
-                save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
-            } else {
-                ctx.merge_queue
-                    .mark_failed(&request.plan_id, "executor rejected merge transition");
-                save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+            let merger = PlanMerger::new(
+                ctx.merge_queue.clone(),
+                PlanMergerConfig::new(
+                    ctx.config.workdir.clone(),
+                    Duration::from_secs(ctx.config.timeout_secs),
+                ),
+            );
+            match merger.submit(request, ctx.gate_tx.clone()) {
+                MergeDispatch::Reserved {
+                    plan_id,
+                    branch_name,
+                } => {
+                    info!(
+                        plan_id = %plan_id,
+                        branch = %branch_name,
+                        "reserved merge queue request"
+                    );
+                    save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+                }
+                MergeDispatch::Blocked { plan_id } => {
+                    info!(
+                        plan_id = %plan_id,
+                        blocked_conflicts = ?ctx.merge_queue.blocked_conflicts(),
+                        "merge queued but currently blocked by file locks"
+                    );
+                    save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
+                }
             }
         }
 
@@ -2610,6 +2687,9 @@ fn build_report(executor: &ParallelExecutor, plans: &[Plan], state: &RunState) -
                 } else {
                     0
                 },
+                gate_results: orc_state
+                    .map(|state| state.gate_results.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect();

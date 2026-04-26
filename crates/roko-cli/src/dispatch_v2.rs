@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use roko_agent::AgentRuntimeEvent;
 use roko_agent::provider::{AgentOptions, ProviderSemaphores};
 use roko_agent::{Agent, AgentResult, create_agent_for_model};
 use roko_core::agent::{ProviderKind, resolve_model};
@@ -697,35 +698,7 @@ pub struct AgentResultDispatch {
 }
 
 /// Provider-neutral events emitted by dispatch v2.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum DispatchEvent {
-    /// A dispatch started. `pid` is only present for subprocess runtimes.
-    Started {
-        agent_id: String,
-        provider: String,
-        model: String,
-        pid: Option<u32>,
-    },
-    /// Assistant text.
-    MessageDelta { text: String },
-    /// Token/cost usage.
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-    },
-    /// Turn completion.
-    TurnCompleted {
-        total_cost_usd: Option<f64>,
-        is_error: bool,
-    },
-    /// Runtime/provider error.
-    Error { message: String },
-    /// Dispatch exit marker.
-    Exited { exit_code: Option<i32> },
-}
+pub type DispatchEvent = AgentRuntimeEvent;
 
 fn dispatch_events_from_result(
     request: &AgentDispatchRequest,
@@ -776,7 +749,9 @@ fn dispatch_events_from_result(
     }
 
     events.push(DispatchEvent::TurnCompleted {
+        session_id: None,
         total_cost_usd: (result.usage.cost_usd > 0.0).then_some(f64::from(result.usage.cost_usd)),
+        num_turns: Some(1),
         is_error: !result.success,
     });
     events.push(DispatchEvent::Exited {
