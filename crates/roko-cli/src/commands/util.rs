@@ -235,6 +235,46 @@ pub(crate) async fn cmd_run(
             roko_cli::run_inline::run_once_inline(&workdir, &config, &prompt, external_hub)
                 .await?;
 
+        // Persist shareable transcript when serve is active.
+        if serve {
+            let run_id = &report.episode_id[..8.min(report.episode_id.len())];
+            let transcript = roko_serve::routes::shared_runs::RunTranscript {
+                id: run_id.to_string(),
+                agent: config.agent.command.clone(),
+                role: config.prompt.role.clone(),
+                prompt: prompt.clone(),
+                success: report.overall_success(),
+                gates: report.gate_verdicts.clone(),
+                output: report.output_text.clone(),
+                cost_usd: None, // TODO: wire from efficiency events
+                input_tokens: None,
+                output_tokens: None,
+                model: None,
+                duration_s: None,
+                episode_id: Some(report.episode_id.clone()),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+
+            // Save to .roko/shared/
+            let shared_dir = workdir.join(".roko").join("shared");
+            let _ = std::fs::create_dir_all(&shared_dir);
+            let transcript_path = shared_dir.join(format!("{run_id}.json"));
+            if let Ok(json) = serde_json::to_string_pretty(&transcript) {
+                let _ = std::fs::write(&transcript_path, json);
+            }
+
+            // Print the share URL
+            let port = 6677;
+            eprintln!();
+            eprintln!("  share  http://localhost:{port}/runs/{run_id}");
+            eprintln!();
+            eprintln!("  (serve is running — press Ctrl+C to stop)");
+
+            // Keep serve alive so the URL is accessible
+            tokio::signal::ctrl_c().await.ok();
+            eprintln!();
+        }
+
         // Shut down the HTTP server if it was started.
         if let Some((state, handle)) = server_guard {
             state.cancel.cancel();
