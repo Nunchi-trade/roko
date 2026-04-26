@@ -3394,6 +3394,50 @@ fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) 
     }
 }
 
+// ─── Post-plan cold archival ─────────────────────────────────────────────
+
+/// Migrate aged-out engrams from the hot substrate to cold storage after a
+/// plan run completes.
+///
+/// This is the non-interactive equivalent of `roko knowledge archive --older-than 7d`.
+/// It queries the hot `FileSubstrate` for engrams older than 7 days and
+/// batch-archives them into `.roko/cold/` using `ArchiveColdSubstrate`.
+///
+/// Errors are propagated to the caller, which logs and continues (non-fatal).
+async fn post_plan_cold_archival(workdir: &Path) -> Result<()> {
+    use roko_core::{ColdSubstrate, Context, Query, Substrate};
+
+    let roko_dir = workdir.join(".roko");
+    if !roko_dir.exists() {
+        return Ok(());
+    }
+
+    // Archive engrams older than 7 days, up to 500 per run.
+    const MAX_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
+    const BATCH_SIZE: usize = 500;
+
+    let hot = roko_fs::FileSubstrate::open(&roko_dir).await?;
+    let ctx = Context::now();
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - MAX_AGE_MS;
+    let query = Query::all().until(cutoff_ms).limit(BATCH_SIZE);
+    let candidates = hot.query(&query, &ctx).await?;
+
+    if candidates.is_empty() {
+        tracing::debug!("[orchestrate] post-plan cold archival: no aged engrams found");
+        return Ok(());
+    }
+
+    let cold_dir = roko_dir.join("cold");
+    let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
+    let archived = cold.archive_batch(candidates).await?;
+    tracing::info!(
+        "[orchestrate] post-plan cold archival: archived {archived} engram(s) to {}",
+        cold_dir.display()
+    );
+
+    Ok(())
+}
+
 fn normalize_task_title(title: &str) -> String {
     title
         .chars()
@@ -7517,6 +7561,14 @@ impl PlanRunner {
 
         if let Err(e) = refresh_cfactor_snapshot(self.learning.paths().root.clone()).await {
             tracing::warn!(error = %e, "failed to refresh c-factor snapshot after plan run");
+        }
+
+        // Post-plan cold archival: migrate aged-out engrams to `.roko/cold/`.
+        // This runs non-interactively after every plan execution, archiving
+        // engrams older than 7 days (same defaults as the `roko knowledge archive`
+        // CLI command).  Errors are logged but never fail the plan run.
+        if let Err(e) = post_plan_cold_archival(&self.workdir).await {
+            tracing::warn!(error = %e, "post-plan cold archival failed (non-fatal)");
         }
 
         result
