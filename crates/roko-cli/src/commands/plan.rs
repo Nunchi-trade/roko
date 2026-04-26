@@ -206,10 +206,16 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 
             // Initialize Phase 0 subsystems.
             let router_path = wd.join(".roko").join("learn").join("cascade-router.json");
-            let model_slugs = vec![
-                roko_config.agent.default_model.clone(),
-                "claude-haiku-4-5".to_string(),
-            ];
+            let mut model_slugs = roko_config
+                .effective_models()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            model_slugs.sort();
+            model_slugs.dedup();
+            if model_slugs.is_empty() && !roko_config.agent.default_model.trim().is_empty() {
+                model_slugs.push(roko_config.agent.default_model.clone());
+            }
             let cascade_router = std::sync::Arc::new(
                 roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
             );
@@ -240,7 +246,11 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 dangerously_skip_permissions: true,
                 mcp_config: None,
                 resume_session: cli.resume.clone(),
-                max_gate_rung: if roko_config.gates.skip_tests { 1 } else { 2 },
+                max_gate_rung: if roko_config.gates.skip_tests {
+                    u32::from(roko_config.gates.clippy_enabled)
+                } else {
+                    2
+                },
                 claude_program: roko_config
                     .agent
                     .command

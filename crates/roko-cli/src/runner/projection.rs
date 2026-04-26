@@ -176,10 +176,7 @@ impl Projection {
 
     /// Snapshot of the current bounded dashboard buffer.
     pub fn dashboard_snapshot(&self) -> DashboardSnapshot {
-        self.dashboard
-            .lock()
-            .map(|d| d.clone())
-            .unwrap_or_default()
+        self.dashboard.lock().map(|d| d.clone()).unwrap_or_default()
     }
 
     /// Current counters.
@@ -340,77 +337,70 @@ impl Projection {
 
         let mut preview = None;
         let mut severity = None;
-        let mut payload = serde_json::Value::Null;
-        match &event {
+        let payload = match &event {
             AgentEvent::Started {
                 agent_id: started_id,
                 provider,
                 model,
                 pid,
-            } => {
-                payload = serde_json::json!({
-                    "agent_id": started_id,
-                    "provider": provider,
-                    "model": model,
-                    "pid": pid,
-                });
-            }
+            } => serde_json::json!({
+                "agent_id": started_id,
+                "provider": provider,
+                "model": model,
+                "pid": pid,
+            }),
             AgentEvent::SystemInit { session_id, model } => {
-                payload = serde_json::json!({"session_id": session_id, "model": model});
+                serde_json::json!({"session_id": session_id, "model": model})
             }
             AgentEvent::MessageDelta { text } => {
                 preview = Some(truncate_preview(text.clone()));
-                payload = serde_json::json!({"text_len": text.len()});
+                serde_json::json!({"text_len": text.len()})
             }
             AgentEvent::ToolCall { id, name } => {
-                payload = serde_json::json!({"tool_call_id": id, "tool_name": name});
+                serde_json::json!({"tool_call_id": id, "tool_name": name})
             }
             AgentEvent::ToolOutput { id, output } => {
                 preview = Some(truncate_preview(output.clone()));
-                payload = serde_json::json!({
+                serde_json::json!({
                     "tool_call_id": id,
                     "output_bytes": output.len(),
-                });
+                })
             }
             AgentEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
-            } => {
-                payload = serde_json::json!({
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_tokens": cache_read_tokens,
-                    "cache_write_tokens": cache_write_tokens,
-                });
-            }
+            } => serde_json::json!({
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+            }),
             AgentEvent::TurnCompleted {
                 session_id,
                 total_cost_usd,
                 num_turns,
                 is_error,
-            } => {
-                payload = serde_json::json!({
-                    "session_id": session_id,
-                    "total_cost_usd": total_cost_usd,
-                    "num_turns": num_turns,
-                    "is_error": is_error,
-                });
-            }
+            } => serde_json::json!({
+                "session_id": session_id,
+                "total_cost_usd": total_cost_usd,
+                "num_turns": num_turns,
+                "is_error": is_error,
+            }),
             AgentEvent::Error { message } => {
                 let sev = StderrSeverity::from_message(message);
                 severity = Some(sev);
                 preview = Some(truncate_preview(message.clone()));
-                payload = serde_json::json!({
+                serde_json::json!({
                     "message_len": message.len(),
                     "severity": sev.as_str(),
-                });
+                })
             }
             AgentEvent::Exited { exit_code } => {
-                payload = serde_json::json!({"exit_code": exit_code});
+                serde_json::json!({"exit_code": exit_code})
             }
-        }
+        };
 
         ProjectionEvent {
             run_id,

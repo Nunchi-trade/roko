@@ -122,7 +122,7 @@ pub(crate) async fn spawn_background_run(
                     DashboardEvent::AgentSpawned {
                         agent_id: agent_label.to_string(),
                         role: "run".into(),
-                        model: String::new(),
+                        model: agent_label.to_string(),
                     },
                     DashboardEvent::EventLogEntry {
                         timestamp_ms: run_now_millis(),

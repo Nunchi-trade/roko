@@ -99,6 +99,10 @@ pub struct RunState {
     pub started_at: Instant,
     /// When the current task started (reset per task).
     pub task_started_at: Instant,
+
+    // ─── Replan Context ──────────────────────────────────────────────
+    /// Accumulated failure context per plan/task for retry prompt enrichment.
+    pub replan_contexts: HashMap<String, String>,
 }
 
 impl RunState {
@@ -139,6 +143,7 @@ impl RunState {
             snapshot_degraded: false,
             started_at: Instant::now(),
             task_started_at: Instant::now(),
+            replan_contexts: HashMap::new(),
         }
     }
 
@@ -482,5 +487,16 @@ impl RunState {
     /// Total elapsed time since the run started.
     pub fn elapsed(&self) -> std::time::Duration {
         self.started_at.elapsed()
+    }
+
+    /// Store failure context for a task to enrich the next retry prompt.
+    pub fn set_replan_context(&mut self, plan_id: &str, task_id: &str, context: String) {
+        self.replan_contexts
+            .insert(format!("{plan_id}/{task_id}"), context);
+    }
+
+    /// Take (and remove) stored replan context for a task.
+    pub fn take_replan_context(&mut self, plan_id: &str, task_id: &str) -> Option<String> {
+        self.replan_contexts.remove(&format!("{plan_id}/{task_id}"))
     }
 }

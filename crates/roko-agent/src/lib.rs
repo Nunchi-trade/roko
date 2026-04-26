@@ -45,6 +45,8 @@ pub mod agent;
 /// Short-lived content-addressed response cache for identical backend requests.
 pub mod cache;
 pub mod chat_types;
+/// File-backed response cache for demo determinism.
+pub mod file_cache;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;

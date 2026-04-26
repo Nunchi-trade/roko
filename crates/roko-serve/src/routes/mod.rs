@@ -28,6 +28,7 @@ mod providers;
 mod research;
 mod run;
 mod secrets;
+pub mod shared_runs;
 mod sse;
 mod status;
 mod subscriptions;
@@ -122,6 +123,8 @@ pub fn build_router(
         // Top-level liveness probe — no auth, no /api prefix.
         .route("/health", get(top_level_health))
         .merge(webhooks::routes())
+        // Shareable run pages — no auth, serves HTML at /runs/{id}
+        .merge(shared_runs::routes())
         .nest("/api", api)
         .merge(ws)
         .layer(TraceLayer::new_for_http())

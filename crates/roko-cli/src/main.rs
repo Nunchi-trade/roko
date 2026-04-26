@@ -315,6 +315,9 @@ Examples:
         /// Start the HTTP control plane alongside the run for external observability.
         #[arg(long)]
         serve: bool,
+        /// Generate a shareable URL for this run (starts serve if needed).
+        #[arg(long)]
+        share: bool,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
     #[command(after_help = "\
@@ -547,6 +550,18 @@ Examples:
     },
 
     // ── Utilities ───────────────────────────────────────────────────
+    /// Resume a plan execution from its last checkpoint.
+    #[command(after_help = "\
+Examples:
+  roko resume                         Resume from default snapshot
+  roko resume run_4823                Resume a specific run by ID")]
+    Resume {
+        /// Run or plan ID to resume (optional — defaults to most recent snapshot).
+        run_id: Option<String>,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Walk the lineage DAG rooted at a signal hash and print it.
     Replay {
         /// Engram hash (64 hex chars) to walk.
@@ -557,6 +572,12 @@ Examples:
         /// Show forensic detail: timestamps, full hashes, metadata.
         #[arg(long)]
         forensic: bool,
+        /// Filter replay to events from this step forward.
+        #[arg(long)]
+        as_of: Option<String>,
+        /// Output format: tree (default) or json.
+        #[arg(long, default_value = "tree")]
+        format: String,
     },
     /// Inject a signal into a running session.
     Inject {
@@ -1858,7 +1879,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             prompt,
             workdir,
             serve,
-        } => commands::util::cmd_run(cli, workdir, prompt, serve).await,
+            share,
+        } => commands::util::cmd_run(cli, workdir, prompt, serve || share).await,
         Command::Status {
             workdir,
             cfactor,
@@ -2009,11 +2031,61 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             println!("  run ID: {}", result.run_id);
             Ok(EXIT_SUCCESS)
         }
+        Command::Resume { run_id, workdir } => {
+            // Sugar for `roko plan run --resume-plan`
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            let snapshot = if let Some(ref id) = run_id {
+                // Try .roko/state/<id>.json then .roko/state/executor.json
+                let specific = workdir.join(format!(".roko/state/{id}.json"));
+                if specific.exists() {
+                    specific
+                } else {
+                    workdir.join(".roko/state/executor.json")
+                }
+            } else {
+                workdir.join(".roko/state/executor.json")
+            };
+
+            if !snapshot.exists() {
+                eprintln!("no snapshot found at {}", snapshot.display());
+                eprintln!("hint: run `roko plan run <dir>` first to create a checkpoint");
+                return Ok(1);
+            }
+
+            // Print resume header using inline primitives
+            if roko_cli::inline::should_use_inline() {
+                let theme = roko_cli::tui::Theme::from_env();
+                let id_display = run_id.as_deref().unwrap_or("latest");
+                let lines = vec![
+                    roko_cli::inline::styled::section_start(
+                        &theme,
+                        "resume",
+                        id_display,
+                        Some(&format!("from {}", snapshot.display())),
+                    ),
+                ];
+                roko_cli::inline::plaintext::print_plain(&lines);
+            }
+
+            // Delegate to plan run with resume
+            let plan_dir = workdir.join("plans");
+            let plan_cmd = PlanCmd::Run {
+                plans_dir: plan_dir,
+                resume_plan: Some(snapshot),
+                workdir: Some(workdir),
+                approval: false,
+                max_retries: None,
+                dry_run: false,
+            };
+            commands::plan::cmd_plan(cli, plan_cmd).await
+        }
         Command::Replay {
             hash,
             workdir,
             forensic,
-        } => commands::util::cmd_replay(workdir, hash, forensic).await,
+            as_of,
+            format,
+        } => commands::util::cmd_replay(workdir, hash, forensic, as_of, format).await,
         Command::Inject {
             session,
             kind,

@@ -219,7 +219,6 @@ impl PlanMerger {
         gate_tx: mpsc::Sender<GateCompletion>,
     ) -> MergeDispatch {
         let plan_id = request.plan_id.clone();
-        let branch = request.branch_name.clone();
         self.queue.enqueue(request);
 
         let Some(reserved) = self.queue.reserve_next_mergeable() else {
@@ -292,9 +291,7 @@ impl PlanMerger {
 
             // Channel may be closed if the runner shut down — log only.
             if gate_tx.send(completion).await.is_err() {
-                tracing::warn!(
-                    "merge regression completion dropped — gate channel closed"
-                );
+                tracing::warn!("merge regression completion dropped — gate channel closed");
             }
         });
     }
@@ -322,7 +319,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RegressionGate for StubGate {
-        async fn run(&self, request: &MergeRequest, _config: &PlanMergerConfig) -> RegressionOutcome {
+        async fn run(
+            &self,
+            request: &MergeRequest,
+            _config: &PlanMergerConfig,
+        ) -> RegressionOutcome {
             self.calls.lock().unwrap().push(request.clone());
             self.outcome
                 .lock()
@@ -343,8 +344,7 @@ mod tests {
         let gate: Arc<StubGate> = Arc::new(StubGate::new(RegressionOutcome::pass("ok", 10)));
         let merger = merger_with_gate(gate.clone());
         let (tx, mut rx) = mpsc::channel(4);
-        let request =
-            MergeRequest::new("plan-a", "roko/plan-a", vec!["src/lib.rs".to_string()], 0);
+        let request = MergeRequest::new("plan-a", "roko/plan-a", vec!["src/lib.rs".to_string()], 0);
 
         let result = merger.submit(request, tx);
         assert!(matches!(
@@ -386,10 +386,8 @@ mod tests {
         let merger = merger_with_gate(gate.clone());
         let (tx1, mut rx1) = mpsc::channel(4);
 
-        let req_a =
-            MergeRequest::new("plan-a", "roko/plan-a", vec!["src/lib.rs".into()], 0);
-        let req_b =
-            MergeRequest::new("plan-b", "roko/plan-b", vec!["src/lib.rs".into()], 0);
+        let req_a = MergeRequest::new("plan-a", "roko/plan-a", vec!["src/lib.rs".into()], 0);
+        let req_b = MergeRequest::new("plan-b", "roko/plan-b", vec!["src/lib.rs".into()], 0);
 
         let dispatch_a = merger.submit(req_a, tx1.clone());
         assert!(matches!(dispatch_a, MergeDispatch::Reserved { .. }));

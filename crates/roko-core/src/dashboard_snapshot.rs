@@ -798,6 +798,26 @@ const GATE_TREND_BUCKET_COUNT: usize = 24;
 // ---------------------------------------------------------------------------
 
 impl DashboardSnapshot {
+    fn push_event_log(
+        &mut self,
+        timestamp_ms: u64,
+        event_type: String,
+        plan_id: String,
+        task_id: String,
+        message: String,
+    ) {
+        while self.event_log.len() >= MAX_EVENT_LOG {
+            self.event_log.pop_front();
+        }
+        self.event_log.push_back(DashboardEventLogEntry {
+            timestamp_ms,
+            event_type,
+            plan_id,
+            task_id,
+            message,
+        });
+    }
+
     /// Apply a single event, mutating the snapshot in place.
     ///
     /// This is called inside `watch::Sender::send_modify` so that all
@@ -907,6 +927,16 @@ impl DashboardSnapshot {
                 role,
                 model,
             } => {
+                if model.trim().is_empty() {
+                    self.push_event_log(
+                        ts,
+                        "validation_warning".to_string(),
+                        String::new(),
+                        String::new(),
+                        format!("AgentSpawned for '{agent_id}' had an empty model"),
+                    );
+                }
+
                 // Only increment the counter if this is a genuinely new agent,
                 // or if an existing agent is being re-activated after completion.
                 let entry = self.agents.entry(agent_id.clone());
@@ -1069,16 +1099,13 @@ impl DashboardSnapshot {
                 task_id,
                 message,
             } => {
-                while self.event_log.len() >= MAX_EVENT_LOG {
-                    self.event_log.pop_front();
-                }
-                self.event_log.push_back(DashboardEventLogEntry {
-                    timestamp_ms: *timestamp_ms,
-                    event_type: event_type.clone(),
-                    plan_id: plan_id.clone(),
-                    task_id: task_id.clone(),
-                    message: message.clone(),
-                });
+                self.push_event_log(
+                    *timestamp_ms,
+                    event_type.clone(),
+                    plan_id.clone(),
+                    task_id.clone(),
+                    message.clone(),
+                );
             }
             DashboardEvent::CascadeRouterUpdated { snapshot_json } => {
                 self.cascade_router_json = snapshot_json.clone();
@@ -2620,6 +2647,24 @@ mod tests {
             content: "hello world".into(),
         });
         assert_eq!(snap.agents["a1"].output_bytes, 11);
+    }
+
+    #[test]
+    fn agent_spawned_empty_model_records_validation_warning() {
+        let mut snap = DashboardSnapshot::default();
+        snap.apply_with_ts(
+            &DashboardEvent::AgentSpawned {
+                agent_id: "a1".into(),
+                role: "coder".into(),
+                model: String::new(),
+            },
+            42,
+        );
+
+        let warning = snap.event_log.back().expect("validation warning");
+        assert_eq!(warning.timestamp_ms, 42);
+        assert_eq!(warning.event_type, "validation_warning");
+        assert!(warning.message.contains("empty model"));
     }
 
     #[test]

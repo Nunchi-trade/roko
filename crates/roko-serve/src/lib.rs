@@ -758,7 +758,7 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
-            model: model.clone(),
+            model: dashboard_model_label(model, agent_id),
         }),
         ServerEvent::AgentOutput {
             agent_id, content, ..
@@ -870,12 +870,21 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::AgentStarted { agent_id, .. } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: String::new(),
-            model: String::new(),
+            model: dashboard_model_label("", agent_id),
         }),
         ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
             agent_id: agent_id.clone(),
         }),
         _ => None,
+    }
+}
+
+fn dashboard_model_label(model: &str, fallback: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        fallback.to_string()
+    } else {
+        model.to_string()
     }
 }
 

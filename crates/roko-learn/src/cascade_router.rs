@@ -1380,8 +1380,8 @@ impl CascadeRouter {
             .collect()
     }
 
-    /// Save confidence stats, model slugs, and total observation count to a JSON file.
-    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+    /// Build a JSON snapshot of the current router state (same format as `save()`).
+    pub fn snapshot_json(&self) -> String {
         let stage_transitions = self.stage_tracking.lock().transitions.clone();
         let snapshot = CascadeSnapshot {
             model_slugs: self.model_slugs.clone(),
@@ -1417,13 +1417,23 @@ impl CascadeRouter {
             total_observations: self.linucb.total_observations(),
             stage_transitions,
         };
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        serde_json::to_string_pretty(&snapshot).unwrap_or_default()
+    }
+
+    /// Save confidence stats, model slugs, and total observation count to a JSON file.
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let json = self.snapshot_json();
+        if json.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "failed to serialize cascade snapshot",
+            ));
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
+        std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }

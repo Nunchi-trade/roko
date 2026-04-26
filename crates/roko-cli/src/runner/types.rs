@@ -1191,7 +1191,7 @@ impl Default for RunConfig {
             timeout_secs: 600,
             max_retries: 5,
             approval: false,
-            dangerously_skip_permissions: true,
+            dangerously_skip_permissions: false,
             mcp_config: None,
             resume_session: None,
             max_gate_rung: 2,

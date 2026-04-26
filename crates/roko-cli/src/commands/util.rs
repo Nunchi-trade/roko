@@ -229,6 +229,26 @@ pub(crate) async fn cmd_run(
     // from run_once() flow to the HTTP server's SSE/WebSocket/snapshot endpoints.
     let external_hub = server_guard.as_ref().map(|(state, _)| &*state.state_hub);
 
+    // Use inline rendering when stdout is a TTY and we're not in --json or --quiet mode.
+    if !cli.json && !cli.quiet && roko_cli::inline::should_use_inline() {
+        let report =
+            roko_cli::run_inline::run_once_inline(&workdir, &config, &prompt, external_hub)
+                .await?;
+
+        // Shut down the HTTP server if it was started.
+        if let Some((state, handle)) = server_guard {
+            state.cancel.cancel();
+            let _ = handle.await;
+        }
+
+        return if report.overall_success() {
+            Ok(0)
+        } else {
+            Ok(1)
+        };
+    }
+
+    // Legacy output path (--json, --quiet, or non-TTY)
     if !cli.quiet {
         println!(
             "running agent `{}` with {} gate(s)",
@@ -687,6 +707,8 @@ pub(crate) async fn cmd_replay(
     workdir: Option<PathBuf>,
     hash: String,
     forensic: bool,
+    as_of: Option<String>,
+    format: String,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
@@ -695,20 +717,64 @@ pub(crate) async fn cmd_replay(
     let start = ContentHash::from_hex(&hash)
         .ok_or_else(|| anyhow!("invalid hash (expected 64 hex chars): {hash}"))?;
 
+    // Parse --as-of filter: skip signals until this depth/index.
+    let skip_until: usize = as_of
+        .as_deref()
+        .and_then(|s| {
+            // Accept "step 5", "step05", "5", "#5"
+            let stripped = s
+                .trim_start_matches("step")
+                .trim_start_matches('#')
+                .trim();
+            stripped.parse().ok()
+        })
+        .unwrap_or(0);
+
+    let is_json = format == "json";
+
     let mut visited = std::collections::HashSet::new();
     let mut queue = vec![(start, 0usize)];
     let mut printed = 0usize;
+    let mut index = 0usize;
+
     while let Some((id, depth)) = queue.pop() {
         if !visited.insert(id) {
             continue;
         }
-        let indent = "  ".repeat(depth);
         if let Some(sig) = substrate.get(&id).await.map_err(|e| anyhow!("get: {e}"))? {
-            if forensic {
-                println!("{indent}{} {}", sig.kind, sig.id,);
-                println!("{indent}  hash:      {}", sig.id,);
-                println!("{indent}  author:    {}", sig.provenance.author,);
-                println!("{indent}  created:   {}", sig.created_at_ms,);
+            index += 1;
+
+            // Apply --as-of filter: skip events before the target index.
+            if index < skip_until {
+                for parent in &sig.lineage {
+                    queue.push((*parent, depth + 1));
+                }
+                continue;
+            }
+
+            if is_json {
+                // JSON output: one JSON object per line.
+                let mut obj = serde_json::Map::new();
+                obj.insert("event".into(), serde_json::json!(index));
+                obj.insert("hash".into(), serde_json::json!(sig.id.to_string()));
+                obj.insert("kind".into(), serde_json::json!(sig.kind.to_string()));
+                obj.insert("author".into(), serde_json::json!(sig.provenance.author));
+                obj.insert("created_at_ms".into(), serde_json::json!(sig.created_at_ms));
+                if !sig.tags.is_empty() {
+                    obj.insert("tags".into(), serde_json::json!(sig.tags));
+                }
+                if let Ok(text) = sig.body.as_text() {
+                    let preview: String = text.chars().take(500).collect();
+                    obj.insert("body".into(), serde_json::json!(preview));
+                }
+                println!("{}", serde_json::Value::Object(obj));
+            } else if forensic {
+                let indent = "  ".repeat(depth);
+                println!("{indent}{} {}", sig.kind, sig.id);
+                println!("{indent}  event:     {index}");
+                println!("{indent}  hash:      {}", sig.id);
+                println!("{indent}  author:    {}", sig.provenance.author);
+                println!("{indent}  created:   {}", sig.created_at_ms);
                 println!(
                     "{indent}  lineage:   [{}]",
                     sig.lineage
@@ -718,7 +784,7 @@ pub(crate) async fn cmd_replay(
                         .join(", "),
                 );
                 if !sig.tags.is_empty() {
-                    println!("{indent}  tags:      {:?}", sig.tags,);
+                    println!("{indent}  tags:      {:?}", sig.tags);
                 }
                 if let Ok(text) = sig.body.as_text() {
                     let body_preview: String = text.chars().take(120).collect();
@@ -726,8 +792,9 @@ pub(crate) async fn cmd_replay(
                 }
                 println!();
             } else {
+                let indent = "  ".repeat(depth);
                 println!(
-                    "{indent}{} {}  (author={})",
+                    "{indent}{} {}  (event={index}, author={})",
                     sig.kind, sig.id, sig.provenance.author
                 );
             }
@@ -735,12 +802,15 @@ pub(crate) async fn cmd_replay(
                 queue.push((*parent, depth + 1));
             }
             printed += 1;
-        } else {
+        } else if !is_json {
+            let indent = "  ".repeat(depth);
             println!("{indent}<missing {id}>");
         }
     }
     if printed == 0 {
-        println!("signal {hash} not found in substrate");
+        if !is_json {
+            println!("signal {hash} not found in substrate");
+        }
         return Ok(EXIT_AGENT_FAILURE);
     }
     Ok(EXIT_SUCCESS)

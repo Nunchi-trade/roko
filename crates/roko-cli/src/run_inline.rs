@@ -2,22 +2,17 @@
 //!
 //! Wraps [`run_once`] with the inline terminal engine to produce structured
 //! clack-style output. Falls back to plain text when stdout is not a TTY.
-//!
-//! This is the same set of primitives used by `roko chat`, ensuring visual
-//! consistency across all commands.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::{
-    style::{Modifier, Style},
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 
 use crate::config::Config;
 use crate::inline::markdown;
-use crate::inline::primitives::{RunBlockData, ToolCallInfo};
+use crate::inline::plaintext;
+use crate::inline::primitives::{GateBlockData, RunBlockData};
 use crate::inline::styled;
 use crate::inline::symbols;
 use crate::inline::terminal::{InlineTerminal, should_use_inline};
@@ -27,13 +22,10 @@ use roko_core::StateHub;
 
 /// Run the universal loop with inline terminal output.
 ///
-/// Displays:
-/// - Agent header with role
-/// - Gate verdicts with ✔/✖
-/// - Agent output rendered as markdown
-/// - Cost summary
+/// Displays: agent header, gate pipeline with per-rung results,
+/// markdown-rendered output, and session summary.
 ///
-/// Falls back to the existing plain `run_once` output when not a TTY.
+/// Falls back to plain text when not a TTY.
 pub async fn run_once_inline(
     workdir: &Path,
     config: &Config,
@@ -41,65 +33,84 @@ pub async fn run_once_inline(
     external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
     if !should_use_inline() {
-        // Fallback: run normally, print text summary
         let report = run_once(workdir, config, prompt_text, external_hub).await?;
-        print_plain_report(&report);
+        print_plain_report(&report, config);
         return Ok(report);
     }
 
-    let mut term = InlineTerminal::new()
-        .map_err(|e| anyhow::anyhow!("init inline terminal: {e}"))?;
+    let mut term =
+        InlineTerminal::new().map_err(|e| anyhow::anyhow!("init inline terminal: {e}"))?;
     let theme = *term.theme();
 
     // Header
-    term.push_lines(&[styled::section_start(
+    let gate_count = config.gates.len();
+    let gate_detail = if gate_count > 0 {
+        Some(format!(
+            "{gate_count} gate{}",
+            if gate_count == 1 { "" } else { "s" }
+        ))
+    } else {
+        None
+    };
+    term.push_lines_revealed(
+        &[styled::section_start(
+            &theme,
+            "run",
+            &config.prompt.role,
+            gate_detail.as_deref(),
+        )],
+        Duration::from_millis(30),
+    )?;
+
+    // Show prompt (truncated)
+    let prompt_preview: String = prompt_text.chars().take(80).collect();
+    term.push_lines(&[styled::continuation(
         &theme,
-        "run",
-        &config.prompt.role,
-        Some(&config.agent.command),
+        "prompt",
+        &prompt_preview,
+        if prompt_text.len() > 80 {
+            Some("...")
+        } else {
+            None
+        },
     )])?;
 
-    // Spinner while running
+    // Spinner while executing
     let start = Instant::now();
     term.push_lines(&[styled::spinner_line(
         &theme,
         0,
-        "executing...",
+        &format!("dispatching to {}...", config.agent.command),
         0.0,
     )])?;
 
-    // Execute the universal loop
+    // Execute
     let report = run_once(workdir, config, prompt_text, external_hub).await?;
-
     let elapsed = start.elapsed().as_secs_f64();
 
-    // Build the RunBlock from the report
-    let block = RunBlockData {
-        agent_name: config.agent.command.clone(),
-        identity: None,
-        attested: false,
-        predicted_cost: None,
-        predicted_time: None,
-        predicted_route: None,
-        gate_verdicts: report.gate_verdicts.clone(),
-        knowledge_loaded: None,
-        actual_cost: None, // TODO: wire from report when available
-        actual_route: None,
-        actual_time: Some(elapsed),
-        tool_calls: Vec::new(),
-        deposited_count: 0,
-        deposited_path: None,
-        chain_block: None,
-    };
+    // Gate results as a proper GateBlock
+    if !report.gate_verdicts.is_empty() {
+        let gate_block = GateBlockData::from_verdicts(&report.gate_verdicts);
+        term.push_blank()?;
+        term.push_lines_revealed(&gate_block.to_lines(&theme), Duration::from_millis(40))?;
+    }
 
-    // Push the structured summary
-    term.push_lines(&block.to_lines(&theme))?;
-
-    // Push agent output as markdown
+    // Agent output as markdown
     if let Some(ref text) = report.output_text {
         term.push_blank()?;
         let md_lines = markdown::render_markdown_with_bar(text, &theme);
-        term.push_lines(&md_lines)?;
+        if md_lines.len() > 30 {
+            // Truncate long output, show first 25 + count
+            term.push_lines_revealed(&md_lines[..25], Duration::from_millis(20))?;
+            term.push_lines(&[styled::continuation(
+                &theme,
+                "",
+                &format!("... +{} more lines", md_lines.len() - 25),
+                None,
+            )])?;
+        } else {
+            term.push_lines_revealed(&md_lines, Duration::from_millis(20))?;
+        }
     }
 
     // Result line
@@ -109,54 +120,58 @@ pub async fn run_once_inline(
             Span::styled(symbols::PASS.to_string(), theme.success()),
             Span::raw(" "),
             Span::styled(
-                format!("completed in {elapsed:.1}s"),
-                Style::default().fg(Theme::SAGE),
+                format!(
+                    "completed in {elapsed:.1}s  {}  episode {}",
+                    symbols::SEP,
+                    &report.episode_id[..8.min(report.episode_id.len())],
+                ),
+                theme.success(),
             ),
         ])
     } else {
-        let failed_gates: Vec<&str> = report
+        let failed: Vec<&str> = report
             .gate_verdicts
             .iter()
             .filter(|(_, p)| !p)
             .map(|(n, _)| n.as_str())
             .collect();
+        let reason = if failed.is_empty() {
+            "agent error".to_string()
+        } else {
+            format!(
+                "gate{} failed: {}",
+                if failed.len() == 1 { "" } else { "s" },
+                failed.join(", ")
+            )
+        };
         Line::from(vec![
             Span::styled(symbols::FAIL.to_string(), theme.danger()),
             Span::raw(" "),
-            Span::styled(
-                format!(
-                    "failed: {}",
-                    if failed_gates.is_empty() {
-                        "agent error".to_string()
-                    } else {
-                        failed_gates.join(", ")
-                    }
-                ),
-                Style::default().fg(Theme::EMBER).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(reason, theme.danger()),
         ])
     };
     term.push_lines(&[result_line])?;
     term.push_blank()?;
 
-    drop(term); // restore terminal
+    drop(term);
     Ok(report)
 }
 
 /// Plain text fallback for non-TTY environments.
-fn print_plain_report(report: &RunReport) {
-    if report.overall_success() {
-        println!("{} completed successfully", symbols::PASS);
-    } else {
-        println!("{} failed", symbols::FAIL);
-    }
-    for (gate, passed) in &report.gate_verdicts {
-        let sym = if *passed { symbols::PASS } else { symbols::FAIL };
-        println!("  {sym} {gate}");
-    }
+fn print_plain_report(report: &RunReport, config: &Config) {
+    // Build the same primitives, render as plain text
+    let theme = Theme::dark();
+
+    let block = RunBlockData {
+        agent_name: config.agent.command.clone(),
+        gate_verdicts: report.gate_verdicts.clone(),
+        actual_time: None,
+        ..Default::default()
+    };
+    plaintext::print_plain(&block.to_lines(&theme));
+
     if let Some(ref text) = report.output_text {
         println!();
-        // Truncate for plain output
         for line in text.lines().take(20) {
             println!("  {line}");
         }
@@ -165,38 +180,55 @@ fn print_plain_report(report: &RunReport) {
             println!("  ... +{} more lines", total - 20);
         }
     }
+
+    println!();
+    if report.overall_success() {
+        println!("{} completed  episode={}", symbols::PASS, report.episode_id);
+    } else {
+        println!("{} failed  episode={}", symbols::FAIL, report.episode_id);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn plain_report_success() {
-        let report = RunReport {
-            episode_id: "abc".into(),
+    fn make_report(success: bool) -> RunReport {
+        RunReport {
+            episode_id: "abc12345".into(),
             prompt_id: "def".into(),
             agent_output_id: "ghi".into(),
-            agent_success: true,
-            gate_verdicts: vec![("compile".into(), true), ("test".into(), true)],
+            agent_success: success,
+            gate_verdicts: vec![("compile".into(), true), ("test".into(), success)],
             total_signals: 5,
-            output_text: Some("Hello world".into()),
-        };
-        // Just verify it doesn't panic
-        print_plain_report(&report);
+            output_text: Some("Hello **world**".into()),
+        }
+    }
+
+    #[test]
+    fn plain_report_success() {
+        let config = Config::default();
+        print_plain_report(&make_report(true), &config);
     }
 
     #[test]
     fn plain_report_failure() {
-        let report = RunReport {
-            episode_id: "abc".into(),
-            prompt_id: "def".into(),
-            agent_output_id: "ghi".into(),
-            agent_success: false,
-            gate_verdicts: vec![("compile".into(), true), ("test".into(), false)],
-            total_signals: 3,
-            output_text: None,
+        let config = Config::default();
+        print_plain_report(&make_report(false), &config);
+    }
+
+    #[test]
+    fn plain_report_uses_primitives() {
+        // Verify that the plain fallback actually renders RunBlock lines
+        let theme = Theme::dark();
+        let block = RunBlockData {
+            agent_name: "test-agent".into(),
+            gate_verdicts: vec![("compile".into(), true)],
+            ..Default::default()
         };
-        print_plain_report(&report);
+        let lines = block.to_lines(&theme);
+        let text = crate::inline::plaintext::lines_to_plain(&lines);
+        assert!(text.contains("test-agent"));
+        assert!(text.contains(symbols::PASS));
     }
 }

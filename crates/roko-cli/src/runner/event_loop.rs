@@ -95,6 +95,7 @@ struct RunContext<'a> {
     gate_tx: &'a mpsc::Sender<GateCompletion>,
     paths: &'a PersistPaths,
     merge_queue: &'a MergeQueue,
+    daimon_policy: roko_core::DaimonPolicy,
 }
 
 // ─── Main Entry Point ───────────────────────────────────────────────────
@@ -116,6 +117,12 @@ pub async fn run(
 
     let paths = PersistPaths::from_workdir(&config.workdir)?;
     persist::cleanup_orphaned_agents(&paths);
+
+    // Ensure knowledge store directory exists for episode ingestion.
+    let neuro_dir = config.workdir.join(".roko").join("neuro");
+    if let Err(err) = std::fs::create_dir_all(&neuro_dir) {
+        warn!(error = %err, "failed to create neuro directory");
+    }
 
     // Build plan ID set for resume validation.
     let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
@@ -163,6 +170,19 @@ pub async fn run(
     let mut state = RunState::new(total_tasks);
     let mut agent_handle: Option<AgentHandle> = None;
 
+    // Load Daimon affect state for affect-informed routing.
+    let daimon_state = roko_daimon::DaimonState::load_or_new(
+        config
+            .workdir
+            .join(".roko")
+            .join("daimon")
+            .join("affect.json"),
+    );
+    let daimon_policy = roko_core::DaimonPolicy::new(
+        daimon_state.state.pad.pleasure.clamp(0.0, 1.0) as f64,
+        daimon_state.behavioral_tracker.current_state,
+    );
+
     let skip_enrichment: HashMap<String, bool> = plans
         .iter()
         .map(|p| (p.id.clone(), p.tasks.meta.skip_enrichment))
@@ -204,7 +224,10 @@ pub async fn run(
             warn!(extension = %name, error = %err, "extension init failed");
         }
         if !errors.is_empty() {
-            info!(failed = errors.len(), "extension chain init completed with errors");
+            info!(
+                failed = errors.len(),
+                "extension chain init completed with errors"
+            );
         }
     }
 
@@ -313,6 +336,7 @@ pub async fn run(
                         !turn_error,
                         state.cost_usd,
                         state.task_elapsed_ms(),
+                        &tui,
                     )
                     .await;
 
@@ -320,7 +344,7 @@ pub async fn run(
                     if !plan_id.is_empty() {
                         if turn_error {
                             let message = "agent reported an error result".to_string();
-                            fire_on_error_hook(config, &message, "agent_turn").await;
+                            fire_on_error_hook(config, &message, "agent_turn", &tui, &state.plan_id, &state.current_task).await;
                             tui.error(&message);
                             let _ = executor.apply_event(&plan_id, &ExecutorEvent::Fatal(message));
                         } else {
@@ -459,7 +483,7 @@ pub async fn run(
                 .await;
 
                 // Extension: on_gate hook.
-                fire_on_gate_hook(config, &completion).await;
+                fire_on_gate_hook(config, &completion, &tui).await;
 
                 if completion.kind == GateCompletionKind::PlanVerify {
                     handle_plan_verify_completion(
@@ -469,6 +493,18 @@ pub async fn run(
                         &paths,
                         &merge_queue,
                         &tui,
+                    );
+                    continue;
+                }
+
+                if completion.passed && completion.rung < config.max_gate_rung {
+                    state.clear_retry_backoff(&completion.plan_id);
+                    info!(
+                        plan_id = %completion.plan_id,
+                        task_id = %completion.task_id,
+                        rung = completion.rung,
+                        max_gate_rung = config.max_gate_rung,
+                        "gate rung passed — advancing to next configured rung"
                     );
                     continue;
                 }
@@ -525,6 +561,41 @@ pub async fn run(
                         // All tasks done — let the plan proceed to completion.
                         let _ = executor.apply_event(&completion.plan_id, &ExecutorEvent::GatePassed);
                         info!(plan_id = %completion.plan_id, "all tasks passed — plan completing");
+
+                        // Trigger dream consolidation after plan completion.
+                        tokio::spawn({
+                            let workdir = config.workdir.clone();
+                            async move {
+                                info!("triggering dream consolidation after plan completion");
+                                let dream_config = roko_dreams::DreamLoopConfig {
+                                    auto_dream: true,
+                                    idle_threshold_mins: 0,
+                                    min_episodes_for_dream: 1,
+                                    agent: roko_dreams::DreamAgentConfig {
+                                        command: "claude".to_string(),
+                                        args: Vec::new(),
+                                        model: None,
+                                        bare_mode: true,
+                                        effort: "low".to_string(),
+                                        fallback_model: None,
+                                        timeout_ms: 120_000,
+                                        env: Vec::new(),
+                                    },
+                                };
+                                let mut dream_runner = roko_dreams::DreamRunner::new(
+                                    workdir.join(".roko"),
+                                    dream_config,
+                                );
+                                match dream_runner.consolidate_now() {
+                                    Ok(report) => info!(
+                                        knowledge_entries = report.knowledge_entries_written,
+                                        playbooks = report.playbooks_created,
+                                        "dream consolidation completed"
+                                    ),
+                                    Err(err) => warn!(error = %err, "dream consolidation failed"),
+                                }
+                            }
+                        });
                     }
                 } else {
                     let failure_kind = completion
@@ -576,6 +647,22 @@ pub async fn run(
                                     failure_kind = ?failure_kind,
                                     "gate failed — entering auto-fix"
                                 );
+
+                                // On 3rd+ retry, enrich the task prompt with failure analysis.
+                                if state.iteration >= 3 {
+                                    let replan_context = format!(
+                                        "\n\n## IMPORTANT: Prior attempts failed\n\
+                                         This is attempt {}. Previous gate failures:\n{}\n\
+                                         Analyze WHY previous approaches failed and try a fundamentally different strategy.",
+                                        state.iteration + 1,
+                                        completion.output.chars().take(2000).collect::<String>(),
+                                    );
+                                    state.set_replan_context(
+                                        &completion.plan_id,
+                                        &completion.task_id,
+                                        replan_context,
+                                    );
+                                }
                             }
                             Err(e) => {
                                 warn!(plan_id = %completion.plan_id, err = %e, "transition error after gate failure");
@@ -655,6 +742,7 @@ pub async fn run(
                         gate_tx: &gate_tx,
                         paths: &paths,
                         merge_queue: &merge_queue,
+                        daimon_policy,
                     };
                     dispatch_action(&action, &mut ctx).await;
                 }
@@ -675,7 +763,7 @@ pub async fn run(
                     handle.kill(Duration::from_secs(3)).await;
                 }
                 save_snapshot(&executor, &paths, &mut state, &merge_queue);
-                shutdown_subsystems(config).await;
+                shutdown_subsystems(config, &tui).await;
                 let event =
                     build_run_completed_event(&executor, &plans, &state, RunOutcome::Cancelled);
                 emit_runner_event(&paths, &mut state, &tui, event);
@@ -698,7 +786,7 @@ pub async fn run(
     }
 
     // Shutdown Phase 0 subsystems and persist learned state.
-    shutdown_subsystems(config).await;
+    shutdown_subsystems(config, &tui).await;
 
     Ok(build_report(&executor, &plans, &state))
 }
@@ -938,10 +1026,15 @@ fn select_model_for_dispatch(
     task_def: &TaskDef,
     config: &RunConfig,
     attempt_num: u32,
+    tui: &TuiBridge,
+    plan_id: &str,
+    task_id: &str,
+    daimon_policy: roko_core::DaimonPolicy,
 ) -> String {
     // Explicit model hint always wins.
     if let Some(hint) = &task_def.model_hint {
         info!(model = %hint, source = "model_hint", "model selection: explicit task override");
+        tui.model_selected(plan_id, task_id, hint, "model_hint");
         return hint.clone();
     }
 
@@ -958,7 +1051,7 @@ fn select_model_for_dispatch(
             active_agents: 1,
             ready_queue_depth: 0,
             max_queue_wait_hours: 0.0,
-            daimon_policy: roko_core::DaimonPolicy::default(),
+            daimon_policy,
             thinking_level: None,
             temperament: None,
             previous_model: None,
@@ -971,11 +1064,13 @@ fn select_model_for_dispatch(
             source = "cascade_router",
             "model selection: cascade router selected model"
         );
+        tui.model_selected(plan_id, task_id, &result.primary.slug, "cascade_router");
         return result.primary.slug;
     }
 
     // Fall back to config default.
     info!(model = %config.model, source = "config_default", "model selection: using config default");
+    tui.model_selected(plan_id, task_id, &config.model, "config_default");
     config.model.clone()
 }
 
@@ -1287,6 +1382,44 @@ fn load_orchestrator_checkpoint(
 
 // ─── Action Dispatcher ──────────────────────────────────────────────────
 
+fn record_skipped_gate_rung(
+    ctx: &mut RunContext<'_>,
+    plan_id: &str,
+    task_id: &str,
+    rung: u32,
+    gate_name: &str,
+    summary: &str,
+) {
+    if let Some(plan_state) = ctx.executor.plan_state_mut(plan_id) {
+        plan_state.gate_results.push(GateResult {
+            gate_name: gate_name.to_string(),
+            rung,
+            passed: true,
+            summary: summary.to_string(),
+            duration_ms: 0,
+            test_count: None,
+        });
+    }
+    ctx.tui.gate_result(plan_id, task_id, gate_name, true);
+
+    if rung >= ctx.config.max_gate_rung {
+        if let Err(err) = ctx
+            .executor
+            .apply_event(plan_id, &ExecutorEvent::GatePassed)
+        {
+            warn!(plan_id = %plan_id, rung, error = %err, "failed to advance after skipped final gate");
+        }
+    } else {
+        debug!(
+            plan_id = %plan_id,
+            task_id = %task_id,
+            rung,
+            max_gate_rung = ctx.config.max_gate_rung,
+            "skipped gate rung recorded; advancing to next rung"
+        );
+    }
+}
+
 async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
     match action {
         ExecutorAction::DispatchPlan { plan_id } => {
@@ -1441,10 +1574,18 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             let prompt = agent_stream::build_task_prompt(task_def, plan_id, &ctx.config.workdir);
             let system_prompt = agent_stream::build_minimal_system_prompt(task_def, plan_id);
 
-            let requested_model = select_model_for_dispatch(task_def, ctx.config, attempt_num);
+            let requested_model = select_model_for_dispatch(
+                task_def,
+                ctx.config,
+                attempt_num,
+                ctx.tui,
+                plan_id,
+                &task_id,
+                ctx.daimon_policy,
+            );
 
             // Extension: pre-inference hook.
-            fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model).await;
+            fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model, ctx.tui).await;
 
             let dispatch = match resolve_agent_dispatch(ctx.config, &requested_model) {
                 Ok(selection) => selection,
@@ -1482,13 +1623,18 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             );
 
             // Prepend gate feedback if this is a retry.
-            let final_prompt = if let Some(feedback) =
+            let mut final_prompt = if let Some(feedback) =
                 agent_stream::format_gate_feedback_for_prompt(&previous_gate_output, 0)
             {
                 format!("{feedback}\n\n---\n\n{prompt}")
             } else {
                 prompt
             };
+
+            // Append replan context if accumulated from repeated failures.
+            if let Some(replan) = ctx.state.take_replan_context(plan_id, &task_id) {
+                final_prompt.push_str(&replan);
+            }
 
             match dispatch {
                 ResolvedAgentDispatch::Cli {
@@ -1533,7 +1679,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 "implementing",
                             );
                             *ctx.agent_handle = Some(handle);
-                            register_agent_feed(ctx.config, plan_id, &task_id, &agent_id);
+                            register_agent_feed(ctx.config, plan_id, &task_id, &agent_id, ctx.tui);
                         }
                         Err(e) => {
                             error!(err = %e, "failed to spawn agent");
@@ -1617,30 +1763,40 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         .agent_spawned(&agent_id, role, &format!("{provider_id}:{model}"));
                     ctx.tui
                         .task_started(plan_id, &task_id, &task_def.title, "implementing");
-                    register_agent_feed(ctx.config, plan_id, &task_id, &agent_id);
+                    register_agent_feed(ctx.config, plan_id, &task_id, &agent_id, ctx.tui);
                 }
             }
         }
 
         ExecutorAction::RunGate { plan_id, rung } => {
+            let task_id = ctx.state.current_task.clone();
             // Honor gates config: skip clippy rung (1) if disabled, skip test rung (2) if skip_tests.
             if *rung == 1 && !ctx.config.clippy_enabled {
                 info!(plan_id = %plan_id, rung = rung, "skipping clippy gate (disabled in config)");
-                let _ = ctx
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::GatePassed);
+                record_skipped_gate_rung(
+                    ctx,
+                    plan_id,
+                    &task_id,
+                    *rung,
+                    "clippy",
+                    "skipped: clippy disabled in config",
+                );
                 return;
             }
             if *rung == 2 && ctx.config.skip_tests {
                 info!(plan_id = %plan_id, rung = rung, "skipping test gate (skip_tests in config)");
-                let _ = ctx
-                    .executor
-                    .apply_event(plan_id, &ExecutorEvent::GatePassed);
+                record_skipped_gate_rung(
+                    ctx,
+                    plan_id,
+                    &task_id,
+                    *rung,
+                    "test",
+                    "skipped: tests disabled in config",
+                );
                 return;
             }
 
             info!(plan_id = %plan_id, rung = rung, "dispatching gate");
-            let task_id = ctx.state.current_task.clone();
             let effect_key = gate_effect_key(plan_id, &task_id, *rung, GateCompletionKind::Gate);
             if !ctx.state.mark_gate_active(effect_key.clone()) {
                 debug!(
@@ -1899,14 +2055,60 @@ async fn emit_feedback(
     }
 
     // CascadeRouter observation: record gate outcome for learned model selection.
-    observe_cascade_router(config, state, completion);
+    observe_cascade_router(config, state, completion, tui);
 
     // Bandit feedback: record decision context and outcome.
-    observe_bandit_policy(config, state, completion, paths);
+    observe_bandit_policy(config, state, completion, paths, tui);
+
+    // Update adaptive gate thresholds based on this verdict.
+    update_gate_thresholds(workdir, completion.rung, completion.passed);
+}
+
+/// Update EMA-based adaptive gate thresholds for a given rung.
+fn update_gate_thresholds(workdir: &Path, rung: u32, passed: bool) {
+    let path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("gate-thresholds.json");
+    let mut thresholds: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({"rungs": {}}));
+
+    let rungs = thresholds.get_mut("rungs").and_then(|r| r.as_object_mut());
+    if let Some(rungs) = rungs {
+        let key = rung.to_string();
+        let entry = rungs.entry(key).or_insert_with(
+            || serde_json::json!({"pass_count": 0, "total_count": 0, "ema_pass_rate": 0.5}),
+        );
+        if let Some(obj) = entry.as_object_mut() {
+            let total = obj.get("total_count").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+            let passes = obj.get("pass_count").and_then(|v| v.as_u64()).unwrap_or(0)
+                + if passed { 1 } else { 0 };
+            let alpha = 0.1;
+            let old_ema = obj
+                .get("ema_pass_rate")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5);
+            let new_ema = alpha * (if passed { 1.0 } else { 0.0 }) + (1.0 - alpha) * old_ema;
+            obj.insert("pass_count".into(), serde_json::json!(passes));
+            obj.insert("total_count".into(), serde_json::json!(total));
+            obj.insert("ema_pass_rate".into(), serde_json::json!(new_ema));
+        }
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&thresholds).unwrap_or_default(),
+    );
 }
 
 /// Record gate outcome in the cascade router for learned model selection.
-fn observe_cascade_router(config: &RunConfig, state: &RunState, completion: &GateCompletion) {
+fn observe_cascade_router(
+    config: &RunConfig,
+    state: &RunState,
+    completion: &GateCompletion,
+    tui: &TuiBridge,
+) {
     let Some(router) = &config.cascade_router else {
         return;
     };
@@ -1958,6 +2160,8 @@ fn observe_cascade_router(config: &RunConfig, state: &RunState, completion: &Gat
         latency = normalized_latency,
         "cascade router: recorded observation"
     );
+
+    tui.cascade_router_updated(&router.snapshot_json());
 }
 
 /// Record bandit feedback for model-selection decisions.
@@ -1966,6 +2170,7 @@ fn observe_bandit_policy(
     state: &RunState,
     completion: &GateCompletion,
     _paths: &PersistPaths,
+    tui: &TuiBridge,
 ) {
     let Some(bandit) = &config.bandit_policy else {
         return;
@@ -2008,6 +2213,12 @@ fn observe_bandit_policy(
             }
         }
         debug!(model = %model, passed = completion.passed, "bandit policy: recorded reward");
+        tui.extension_hook(
+            &completion.plan_id,
+            &completion.task_id,
+            "bandit_reward",
+            completion.passed,
+        );
     } else {
         warn!("bandit policy lock contended, skipping feedback");
     }
@@ -2016,7 +2227,13 @@ fn observe_bandit_policy(
 // ─── Extension Chain Hooks ───────────────────────────────────────────────
 
 /// Fire pre_inference extension hook (non-blocking try_lock to avoid stalling select).
-async fn fire_pre_inference_hook(config: &RunConfig, plan_id: &str, task_id: &str, model: &str) {
+async fn fire_pre_inference_hook(
+    config: &RunConfig,
+    plan_id: &str,
+    task_id: &str,
+    model: &str,
+    tui: &TuiBridge,
+) {
     let Some(ext_chain) = &config.extension_chain else {
         return;
     };
@@ -2032,9 +2249,11 @@ async fn fire_pre_inference_hook(config: &RunConfig, plan_id: &str, task_id: &st
         prompt_tokens: 0,
         extra: serde_json::Value::Null,
     };
-    if let Err(err) = chain.run_pre_inference(&mut req).await {
-        warn!(error = %err, "extension pre_inference hook failed");
+    let success = chain.run_pre_inference(&mut req).await.is_ok();
+    if !success {
+        warn!("extension pre_inference hook failed");
     }
+    tui.extension_hook(plan_id, task_id, "pre_inference", success);
 }
 
 /// Fire post_inference extension hook.
@@ -2046,6 +2265,7 @@ async fn fire_post_inference_hook(
     success: bool,
     cost_usd: f64,
     wall_ms: u64,
+    tui: &TuiBridge,
 ) {
     let Some(ext_chain) = &config.extension_chain else {
         return;
@@ -2064,13 +2284,15 @@ async fn fire_post_inference_hook(
         wall_ms,
         extra: serde_json::Value::Null,
     };
-    if let Err(err) = chain.run_post_inference(&mut resp).await {
-        warn!(error = %err, "extension post_inference hook failed");
+    let hook_ok = chain.run_post_inference(&mut resp).await.is_ok();
+    if !hook_ok {
+        warn!("extension post_inference hook failed");
     }
+    tui.extension_hook(plan_id, task_id, "post_inference", hook_ok);
 }
 
 /// Fire on_gate extension hook.
-async fn fire_on_gate_hook(config: &RunConfig, completion: &GateCompletion) {
+async fn fire_on_gate_hook(config: &RunConfig, completion: &GateCompletion, tui: &TuiBridge) {
     let Some(ext_chain) = &config.extension_chain else {
         return;
     };
@@ -2087,14 +2309,28 @@ async fn fire_on_gate_hook(config: &RunConfig, completion: &GateCompletion) {
             duration_ms: completion.duration_ms,
             details: serde_json::Value::Null,
         };
-        if let Err(err) = chain.run_on_gate(&mut event).await {
-            warn!(gate = %verdict.gate_name, error = %err, "extension on_gate hook failed");
+        let hook_ok = chain.run_on_gate(&mut event).await.is_ok();
+        if !hook_ok {
+            warn!(gate = %verdict.gate_name, "extension on_gate hook failed");
         }
+        tui.extension_hook(
+            &completion.plan_id,
+            &completion.task_id,
+            &format!("on_gate:{}", verdict.gate_name),
+            hook_ok,
+        );
     }
 }
 
 /// Fire on_error extension hook.
-async fn fire_on_error_hook(config: &RunConfig, message: &str, source: &str) {
+async fn fire_on_error_hook(
+    config: &RunConfig,
+    message: &str,
+    source: &str,
+    tui: &TuiBridge,
+    plan_id: &str,
+    task_id: &str,
+) {
     let Some(ext_chain) = &config.extension_chain else {
         return;
     };
@@ -2107,11 +2343,12 @@ async fn fire_on_error_hook(config: &RunConfig, message: &str, source: &str) {
         source: source.to_string(),
         extra: serde_json::Value::Null,
     };
-    let _ = chain.run_on_error(&event).await;
+    let hook_ok = chain.run_on_error(&event).await.is_ok();
+    tui.extension_hook(plan_id, task_id, "on_error", hook_ok);
 }
 
 /// Shutdown extension chain + persist cascade router.
-async fn shutdown_subsystems(config: &RunConfig) {
+async fn shutdown_subsystems(config: &RunConfig, tui: &TuiBridge) {
     // Extension chain shutdown.
     if let Some(ext_chain) = &config.extension_chain {
         let mut chain = ext_chain.lock().await;
@@ -2132,12 +2369,19 @@ async fn shutdown_subsystems(config: &RunConfig) {
             warn!(error = %err, "failed to persist cascade router");
         } else {
             info!("cascade router state persisted");
+            tui.cascade_router_updated(&router.snapshot_json());
         }
     }
 }
 
 /// Register an agent feed entry after successful spawn.
-fn register_agent_feed(config: &RunConfig, plan_id: &str, task_id: &str, agent_id: &str) {
+fn register_agent_feed(
+    config: &RunConfig,
+    plan_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    tui: &TuiBridge,
+) {
     let Some(registry) = &config.feed_registry else {
         return;
     };
@@ -2152,6 +2396,7 @@ fn register_agent_feed(config: &RunConfig, plan_id: &str, task_id: &str, agent_i
             schema: None,
             created_at: chrono::Utc::now(),
         });
+        tui.extension_hook(plan_id, task_id, "feed_registered", true);
     }
 }
 

@@ -140,4 +140,40 @@ impl TuiBridge {
             message: event.message(),
         });
     }
+
+    /// Cascade router state updated after observation.
+    pub fn cascade_router_updated(&self, snapshot_json: &str) {
+        self.sender.publish(DashboardEvent::CascadeRouterUpdated {
+            snapshot_json: snapshot_json.to_string(),
+        });
+    }
+
+    /// Model was selected for a task dispatch.
+    pub fn model_selected(&self, plan_id: &str, task_id: &str, model: &str, source: &str) {
+        self.sender.publish(DashboardEvent::EventLogEntry {
+            timestamp_ms: timestamp_now_ms(),
+            event_type: "model_selected".to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("model={model} source={source}"),
+        });
+    }
+
+    /// Extension hook fired.
+    pub fn extension_hook(&self, plan_id: &str, task_id: &str, hook: &str, success: bool) {
+        self.sender.publish(DashboardEvent::EventLogEntry {
+            timestamp_ms: timestamp_now_ms(),
+            event_type: "extension_hook".to_string(),
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            message: format!("hook={hook} success={success}"),
+        });
+    }
+}
+
+fn timestamp_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

@@ -12,7 +12,6 @@ use serde_json::Value;
 use crate::tui::Theme;
 
 use super::super::styled;
-use super::super::symbols;
 
 /// A completed tool call with its result.
 #[derive(Debug, Clone)]
@@ -65,12 +64,7 @@ impl ToolCallBlock {
     }
 
     fn render_collapsed(&self, theme: &Theme) -> Line<'static> {
-        styled::tool_call_collapsed(
-            theme,
-            &self.name,
-            &self.input_summary,
-            self.duration_s,
-        )
+        styled::tool_call_collapsed(theme, &self.name, &self.input_summary, self.duration_s)
     }
 
     fn render_expanded(&self, theme: &Theme) -> Vec<Line<'static>> {
@@ -147,10 +141,7 @@ pub fn summarize_tool_input(name: &str, input: &Value) -> String {
             shorten_path(path).to_string()
         }
         "Bash" => {
-            let cmd = input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let cmd = input.get("command").and_then(Value::as_str).unwrap_or("?");
             if cmd.len() > 50 {
                 format!("{}...", &cmd[..47])
             } else {
@@ -158,17 +149,11 @@ pub fn summarize_tool_input(name: &str, input: &Value) -> String {
             }
         }
         "Grep" | "Glob" => {
-            let pattern = input
-                .get("pattern")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let pattern = input.get("pattern").and_then(Value::as_str).unwrap_or("?");
             format!("\"{pattern}\"")
         }
         "WebSearch" => {
-            let query = input
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
+            let query = input.get("query").and_then(Value::as_str).unwrap_or("?");
             format!("\"{query}\"")
         }
         _ => {

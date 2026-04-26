@@ -184,7 +184,7 @@ pub async fn run_once(
     event_hub.publish(DashboardEvent::AgentSpawned {
         agent_id: config.agent.command.clone(),
         role: config.prompt.role.clone(),
-        model: String::new(),
+        model: dashboard_agent_model(config),
     });
     if let Ok(text) = final_output_sig.body.as_text() {
         let preview: String = text.chars().take(200).collect();
@@ -1107,6 +1107,20 @@ fn resolved_model(config: &Config) -> String {
     }
 }
 
+fn dashboard_agent_model(config: &Config) -> String {
+    let model = resolved_model(config);
+    if model != "unknown-model" {
+        return model;
+    }
+
+    let command = config.agent.command.trim();
+    if command.is_empty() {
+        "unknown-model".to_string()
+    } else {
+        command.to_string()
+    }
+}
+
 fn infer_provider(config: &Config) -> String {
     let command = config.agent.command.trim();
     let model = resolved_model(config).to_ascii_lowercase();
@@ -1482,6 +1496,18 @@ mod tests {
             optional_resume_session_id(&cfg, None).as_deref(),
             Some("env-sess")
         );
+    }
+
+    #[test]
+    fn dashboard_agent_model_is_never_empty_for_run_events() {
+        let mut cfg = Config::default();
+        cfg.agent.command = "codex".to_string();
+        cfg.agent.model = None;
+
+        assert_eq!(dashboard_agent_model(&cfg), "codex");
+
+        cfg.agent.model = Some("gpt-5.4".to_string());
+        assert_eq!(dashboard_agent_model(&cfg), "gpt-5.4");
     }
 
     #[tokio::test]
