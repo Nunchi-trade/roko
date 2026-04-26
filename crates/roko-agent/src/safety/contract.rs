@@ -21,6 +21,33 @@ const EDIT_TOOLS: &[&str] = &[
     "notebook_edit",
 ];
 
+/// How to handle a missing or invalid bundled contract asset.
+///
+/// Used by [`AgentContract::load_for_role_with_mode`] to choose between a
+/// hard error and a deny-everything fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractLoadMode {
+    /// Treat a missing or malformed asset as a fatal error.
+    ///
+    /// Callers that prefer to fail fast on bootstrap should use this mode
+    /// so the workspace is forced to ship explicit contracts for every role.
+    Strict,
+    /// Substitute a deny-everything restricted contract when the asset is
+    /// missing or malformed.
+    ///
+    /// The fallback contract has zero allowed tools, no governance, and no
+    /// invariants beyond the implicit deny-by-default. This keeps the
+    /// dispatcher safe when an unfamiliar role is requested without
+    /// breaking the orchestrator.
+    RestrictedFallback,
+}
+
+impl Default for ContractLoadMode {
+    fn default() -> Self {
+        Self::RestrictedFallback
+    }
+}
+
 /// Behavioral contract for a specific agent role.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentContract {
@@ -36,18 +63,44 @@ pub struct AgentContract {
     /// Recovery actions for soft invariant violations or policy triggers.
     #[serde(default)]
     pub recovery: Vec<RecoveryAction>,
+    /// Optional explicit allowlist of tool names this role may invoke.
+    ///
+    /// When `Some(_)`, the dispatcher enforces capability intersection: any
+    /// dispatch request whose tool is not in this list is rejected before
+    /// the handler runs. When `None`, the role is gated only by the
+    /// `ForbiddenTools` denylist in `governance`.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl AgentContract {
     /// Build a permissive contract for `role`.
     ///
-    /// This is used as a safe fallback when contract assets are missing or
-    /// malformed.
+    /// This is retained for tests and adapter shims. New code should prefer
+    /// either [`AgentContract::load_for_role`] or
+    /// [`AgentContract::restricted`] so missing-role fallbacks fail closed.
     #[must_use]
     pub fn permissive(role: impl Into<String>) -> Self {
         Self {
             role: role.into(),
             ..Self::default()
+        }
+    }
+
+    /// Build a deny-everything restricted contract for `role`.
+    ///
+    /// The contract sets `allowed_tools = Some(vec![])` and an empty
+    /// `ForbiddenTools` rule (the allowlist intersection is the binding
+    /// constraint). Used as the [`ContractLoadMode::RestrictedFallback`]
+    /// substitute when no bundled YAML exists for a role.
+    #[must_use]
+    pub fn restricted(role: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            invariants: vec![Invariant::NoNetworkAccess],
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: Some(Vec::new()),
         }
     }
 
@@ -90,12 +143,79 @@ impl AgentContract {
         Ok(contract)
     }
 
+    /// Load the bundled contract for `role` using `mode` to handle missing
+    /// or malformed assets.
+    ///
+    /// In [`ContractLoadMode::Strict`] mode the underlying load error is
+    /// surfaced directly. In [`ContractLoadMode::RestrictedFallback`] mode a
+    /// deny-everything contract is substituted and a warning is emitted via
+    /// `tracing::warn!`.
+    pub fn load_for_role_with_mode(
+        role: impl AsRef<str>,
+        mode: ContractLoadMode,
+    ) -> Result<Self, ContractLoadError> {
+        let role_ref = role.as_ref();
+        match Self::load_for_role(role_ref) {
+            Ok(contract) => Ok(contract),
+            Err(err) => match mode {
+                ContractLoadMode::Strict => Err(err),
+                ContractLoadMode::RestrictedFallback => {
+                    tracing::warn!(
+                        role = %role_ref,
+                        %err,
+                        "no contract for role; using restricted (deny-all) fallback"
+                    );
+                    Ok(Self::restricted(role_ref))
+                }
+            },
+        }
+    }
+
+    /// Returns `true` if the given tool name is permitted by this contract's
+    /// allowlist + denylist intersection.
+    ///
+    /// - When `allowed_tools` is `Some(_)`, the tool must appear in the
+    ///   allowlist *and* must not appear in any `ForbiddenTools` rule.
+    /// - When `allowed_tools` is `None`, the tool only needs to avoid the
+    ///   `ForbiddenTools` denylist.
+    #[must_use]
+    pub fn permits_tool(&self, tool_name: &str) -> bool {
+        if let Some(ref allowed) = self.allowed_tools {
+            if !allowed.iter().any(|allowed_name| allowed_name == tool_name) {
+                return false;
+            }
+        }
+
+        for rule in &self.governance {
+            if let GovernanceRule::ForbiddenTools(forbidden) = rule {
+                if forbidden.iter().any(|name| name == tool_name) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Validate this contract against an inbound tool invocation.
     pub fn check_pre_execution(
         &self,
         call: &ToolCall,
         ctx: &ToolContext,
     ) -> Result<(), ContractViolation> {
+        // Capability intersection — `allowed_tools` is the binding allowlist
+        // when set; reject before invariants/governance run so a denied tool
+        // never observes any contract side effects.
+        if !self.permits_tool(&call.name) {
+            return Err(ContractViolation::new(
+                &self.role,
+                "AllowedTools",
+                format!(
+                    "tool `{}` is not in the role's allowed_tools list",
+                    call.name
+                ),
+            ));
+        }
         for invariant in &self.invariants {
             invariant.check(&self.role, call, ctx)?;
         }
@@ -638,6 +758,7 @@ mod tests {
             invariants: Vec::new(),
             governance: vec![GovernanceRule::RequireToolBeforeEdit("read_file".into())],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
         let actions = Arc::new(RwLock::new(vec![ExternalAction {
             service: "tool_dispatcher".into(),
@@ -678,6 +799,7 @@ mod tests {
             invariants: Vec::new(),
             governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
 
         // Build 3 consecutive failure actions.
@@ -723,6 +845,7 @@ mod tests {
             invariants: Vec::new(),
             governance: vec![GovernanceRule::MaxConsecutiveFailures(3)],
             recovery: Vec::new(),
+            allowed_tools: None,
         };
 
         // 2 failures, then 1 success, then 2 more failures = 2 trailing failures.
@@ -811,5 +934,95 @@ mod tests {
             },
         ];
         assert_eq!(super::count_trailing_failures(&actions), 2);
+    }
+
+    #[test]
+    fn allowed_tools_blocks_disallowed_call_in_check_pre_execution() {
+        let contract = AgentContract {
+            role: "auditor".into(),
+            invariants: Vec::new(),
+            governance: Vec::new(),
+            recovery: Vec::new(),
+            allowed_tools: Some(vec!["read_file".into(), "grep".into()]),
+        };
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        );
+
+        // `write_file` is not in the allowlist — must be rejected.
+        let call = ToolCall::new("c1", "write_file", serde_json::json!({}));
+        let err = contract
+            .check_pre_execution(&call, &ctx)
+            .expect_err("write_file must be blocked");
+        assert_eq!(err.rule, "AllowedTools");
+        assert!(err.detail.contains("write_file"));
+
+        // `read_file` is in the allowlist — must pass.
+        let call = ToolCall::new("c2", "read_file", serde_json::json!({"path": "."}));
+        contract.check_pre_execution(&call, &ctx).unwrap();
+    }
+
+    #[test]
+    fn restricted_contract_denies_every_tool() {
+        let contract = AgentContract::restricted("unknown");
+        let ctx = ToolContext::new(
+            "/tmp/contract-tests",
+            Duration::from_secs(5),
+            ToolPermission {
+                read: true,
+                write: true,
+                exec: true,
+                git: true,
+                network: true,
+            },
+            Arc::new(NoopAuditSink),
+            Arc::new(NoopTraceSink),
+            Arc::new(NoopMetricsSink),
+            Arc::new(roko_core::tool::NeverCancel),
+        );
+        for tool in ["read_file", "write_file", "grep", "bash"] {
+            let call = ToolCall::new("x", tool, serde_json::json!({}));
+            assert!(
+                contract.check_pre_execution(&call, &ctx).is_err(),
+                "restricted contract should deny `{tool}`",
+            );
+        }
+    }
+
+    #[test]
+    fn load_for_role_with_mode_strict_errors_on_missing() {
+        let err = AgentContract::load_for_role_with_mode(
+            "totally-not-a-role",
+            ContractLoadMode::Strict,
+        )
+        .expect_err("missing role must error in strict mode");
+        match err {
+            ContractLoadError::MissingAsset { .. } => {}
+            other => panic!("expected MissingAsset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_for_role_with_mode_fallback_returns_restricted() {
+        let contract = AgentContract::load_for_role_with_mode(
+            "totally-not-a-role",
+            ContractLoadMode::RestrictedFallback,
+        )
+        .expect("fallback contract must load");
+        assert_eq!(contract.role, "totally-not-a-role");
+        assert_eq!(contract.allowed_tools.as_deref(), Some(&[][..]));
+        assert!(!contract.permits_tool("read_file"));
     }
 }
