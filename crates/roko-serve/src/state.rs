@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,7 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
 use roko_core::{Engram, Substrate};
 use roko_daimon::{DaimonState, StrategySpaceDefinition};
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
 use roko_runtime::cancel::CancelToken;
@@ -274,6 +276,66 @@ pub struct TemplateRunRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Gateway token & cost counters (B1)
+// ---------------------------------------------------------------------------
+
+/// Atomic per-model token and cost counters accumulated across inference
+/// requests and surfaced by the `GET /api/gateway/stats` endpoint.
+pub struct GatewayModelCounters {
+    /// Estimated input tokens dispatched to this model.
+    pub tokens_in: AtomicU64,
+    /// Estimated output tokens received from this model.
+    pub tokens_out: AtomicU64,
+    /// Cost in USD * 1e9 (nano-dollars) for atomic accumulation.
+    pub cost_nano_usd: AtomicU64,
+}
+
+impl GatewayModelCounters {
+    /// Create a fresh zeroed counter set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tokens_in: AtomicU64::new(0),
+            tokens_out: AtomicU64::new(0),
+            cost_nano_usd: AtomicU64::new(0),
+        }
+    }
+
+    /// Record one completion's token + cost figures.
+    pub fn record(&self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
+        self.tokens_in.fetch_add(input_tokens, Ordering::Relaxed);
+        self.tokens_out.fetch_add(output_tokens, Ordering::Relaxed);
+        let nano = (cost_usd * 1_000_000_000.0) as u64;
+        self.cost_nano_usd.fetch_add(nano, Ordering::Relaxed);
+    }
+
+    /// Read the current accumulated cost as USD.
+    #[must_use]
+    pub fn cost_usd(&self) -> f64 {
+        self.cost_nano_usd.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+}
+
+impl Default for GatewayModelCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch progress tracker (B3)
+// ---------------------------------------------------------------------------
+
+/// Shared progress state for a running inference batch, allowing the status
+/// endpoint to report incremental completion counts.
+pub struct BatchProgress {
+    /// Number of items that have finished processing (success or failure).
+    pub completed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Total number of items in the batch.
+    pub total: usize,
+}
+
+// ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
 
@@ -347,6 +409,15 @@ pub struct AppState {
     pub connectors: RwLock<roko_core::ConnectorRegistry>,
     /// In-memory feed registry.
     pub feeds: RwLock<roko_core::FeedRegistry>,
+
+    // -- Gateway audit fixes (D1, B1, B3) --
+
+    /// Cached [`CascadeRouter`] so model routing avoids per-request disk I/O.
+    pub cascade_router: RwLock<Option<CascadeRouter>>,
+    /// Per-model token + cost counters accumulated across inference requests.
+    pub gateway_model_counters: RwLock<HashMap<String, Arc<GatewayModelCounters>>>,
+    /// Per-batch progress counters keyed by batch id.
+    pub batch_progress: RwLock<HashMap<String, Arc<BatchProgress>>>,
 }
 
 impl AppState {
@@ -435,6 +506,9 @@ impl AppState {
             )),
             connectors: RwLock::new(roko_core::ConnectorRegistry::new()),
             feeds: RwLock::new(roko_core::FeedRegistry::new()),
+            cascade_router: RwLock::new(None),
+            gateway_model_counters: RwLock::new(HashMap::new()),
+            batch_progress: RwLock::new(HashMap::new()),
         }
     }
 
@@ -490,6 +564,22 @@ impl AppState {
     /// Atomically swap in a new config snapshot.
     pub fn store_roko_config(&self, roko_config: RokoConfig) {
         self.roko_config.store(Arc::new(roko_config));
+    }
+
+    /// Return a reference-counted handle to the per-model gateway counters,
+    /// creating a fresh entry when the model is seen for the first time.
+    pub async fn gateway_counters_for(&self, model_slug: &str) -> Arc<GatewayModelCounters> {
+        {
+            let map = self.gateway_model_counters.read().await;
+            if let Some(c) = map.get(model_slug) {
+                return Arc::clone(c);
+            }
+        }
+        let mut map = self.gateway_model_counters.write().await;
+        Arc::clone(
+            map.entry(model_slug.to_owned())
+                .or_insert_with(|| Arc::new(GatewayModelCounters::new())),
+        )
     }
 
     /// Publish the current job list to the StateHub so dashboard consumers
