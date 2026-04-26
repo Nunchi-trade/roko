@@ -3,6 +3,13 @@
 //! 6 connector kinds: MCP, API, Database, Blockchain, Feed, Custom.
 //! The [`ConnectorRegistry`] provides an in-memory catalog of configured
 //! connectors with health tracking.
+//!
+//! **Migration note (Phase 1, §1.12):** This module will be superseded by the
+//! `Connect` protocol trait (`connect/query/execute/health/disconnect`) defined
+//! in `tmp/unified/12-CONNECTIVITY.md`. The `ConnectorRegistry` is actively
+//! used by `roko-serve` HTTP routes and will be migrated to the new trait-based
+//! approach in M037. Do not add new callers — prefer the Connect trait once
+//! available.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -97,6 +104,9 @@ pub struct ConnectorInfo {
 // ── Registry ──────────────────────────────────────────────────────
 
 /// In-memory registry of [`ConnectorInfo`] entries.
+///
+/// **Migration (M037):** Will be replaced by the `Connect` trait (Phase 1 §1.12).
+/// See `tmp/unified/12-CONNECTIVITY.md` for the replacement design.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectorRegistry {
     connectors: Vec<ConnectorInfo>,

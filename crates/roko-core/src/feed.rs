@@ -4,6 +4,12 @@
 //! (Raw, Derived, Composite, Meta), an access level, and an optional JSON
 //! schema describing the payload shape. The [`FeedRegistry`] tracks all
 //! registered feeds and supports queries by kind, agent, and free-text search.
+//!
+//! **Migration note (Phase 1, §1.12):** Feeds will become Pulse streams on
+//! the Bus, managed via the `Connect` + `Trigger` protocols defined in
+//! `tmp/unified/12-CONNECTIVITY.md`. The `FeedRegistry` is actively used by
+//! `roko-serve` HTTP routes and will be migrated in M037. Do not add new
+//! callers — prefer Bus-based Pulse streams once available.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,6 +73,10 @@ pub struct FeedInfo {
 // ── Registry ──────────────────────────────────────────────────────
 
 /// In-memory registry of [`FeedInfo`] entries.
+///
+/// **Migration (M037):** Will be replaced by Bus-based Pulse streams
+/// with the `Connect` + `Trigger` protocols (Phase 1 §1.12).
+/// See `tmp/unified/12-CONNECTIVITY.md` for the replacement design.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FeedRegistry {
     feeds: Vec<FeedInfo>,
