@@ -249,6 +249,12 @@ pub struct Episode {
     /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
     #[serde(default)]
     pub headline: bool,
+    /// Snapshot of the prompt composition that produced the agent's system
+    /// prompt: which sections were included, their token counts, and
+    /// whether any were truncated or dropped due to budget pressure.
+    /// Populated at dispatch time from the `PromptSectionMeta` vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_composition: Option<serde_json::Value>,
     /// Forward-compat extension bag. Must serialize to ≤
     /// [`MAX_EXTRA_BYTES`].
     #[serde(default)]
@@ -295,6 +301,7 @@ impl Episode {
             hdc_fingerprint: None,
             emotional_tag: None,
             headline: false,
+            prompt_composition: None,
             extra: HashMap::new(),
         }
     }

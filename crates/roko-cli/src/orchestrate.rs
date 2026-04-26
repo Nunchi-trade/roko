@@ -10017,6 +10017,19 @@ impl PlanRunner {
         ep.extra
             .entry("task_category".to_string())
             .or_insert_with(|| serde_json::json!(default_task_category(role)));
+
+        // B5: Persist prompt composition snapshot into the episode so auditors
+        // can inspect which sections were included, their token budgets, and
+        // whether any were truncated or dropped due to budget pressure.
+        if ep.prompt_composition.is_none() {
+            if let Some(tracker) = self.task_trackers.get(plan_id) {
+                if !tracker.last_prompt_sections.is_empty() {
+                    ep.prompt_composition =
+                        serde_json::to_value(&tracker.last_prompt_sections).ok();
+                }
+            }
+        }
+
         attach_episode_hdc_fingerprint(&mut ep, prompt, outcome);
 
         let provider = self.provider_id_for_model(model);
