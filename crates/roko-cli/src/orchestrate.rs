@@ -61,6 +61,7 @@ use roko_core::obs::{LabelSet, MetricRegistry};
 use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
+use roko_core::extension::ExtensionChain;
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
@@ -3200,6 +3201,8 @@ pub struct PlanRunner {
     code_index_cache: Option<(std::time::Instant, roko_index::WorkspaceIndex)>,
     /// Append-only custody logger for audit chain records.
     custody_logger: CustodyLogger,
+    /// Extension chain for composable agent behavior hooks (A1 audit finding).
+    extension_chain: ExtensionChain,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -4808,6 +4811,7 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            extension_chain: ExtensionChain::new(),
         })
     }
 
@@ -5010,6 +5014,7 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            extension_chain: ExtensionChain::new(),
         })
     }
 
@@ -5214,6 +5219,7 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            extension_chain: ExtensionChain::new(),
         })
     }
 
@@ -5741,7 +5747,12 @@ impl PlanRunner {
     }
 
     /// Gracefully shut down all managed agent processes.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&mut self) {
+        // A1: Tear down extension chain hooks in reverse order.
+        let ext_shutdown_errors = self.extension_chain.shutdown_all();
+        for (name, err) in &ext_shutdown_errors {
+            tracing::warn!(extension = %name, error = %err, "extension shutdown_all failed");
+        }
         let outcomes = self.supervisor.shutdown_all().await;
         if !outcomes.is_empty() {
             tracing::info!("[orchestrate] shut down {} agent processes", outcomes.len());
@@ -5793,7 +5804,7 @@ impl PlanRunner {
     }
 
     /// Force-kill all managed agent processes, then persist runtime artifacts.
-    async fn force_shutdown(&self) {
+    async fn force_shutdown(&mut self) {
         let killed = self.supervisor.kill_all().await;
         if !killed.is_empty() {
             tracing::warn!(
@@ -8020,6 +8031,11 @@ impl PlanRunner {
 
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        // A1: Initialize extension chain hooks before the main run loop.
+        let ext_init_errors = self.extension_chain.init_all();
+        for (name, err) in &ext_init_errors {
+            tracing::warn!(extension = %name, error = %err, "extension init_all failed");
+        }
         warn_if_distillation_disabled();
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
@@ -14593,6 +14609,20 @@ impl PlanRunner {
             ));
         }
 
+        // ── A1: Extension pre-inference hook ──────────────────────────
+        {
+            let mut pre_inference_value = serde_json::json!({
+                "plan_id": plan_id,
+                "task": task,
+                "role": format!("{role:?}"),
+                "model": &selected_model,
+                "prompt_len": task_text.len(),
+            });
+            if let Err(err) = self.extension_chain.run_pre_inference(&mut pre_inference_value) {
+                tracing::warn!(error = %err, "extension pre_inference hook failed");
+            }
+        }
+
         // ── Run the agent with per-task model selection ─────────────
         let ctx = ctx
             .with_attr("task_id", task)
@@ -14935,6 +14965,22 @@ impl PlanRunner {
             )
         };
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
+
+        // ── A1: Extension post-inference hook ─────────────────────
+        {
+            let mut post_inference_value = serde_json::json!({
+                "plan_id": plan_id,
+                "task": task,
+                "role": format!("{role:?}"),
+                "model": &selected_model,
+                "success": result.success,
+                "cost_usd": result.usage.cost_usd,
+                "wall_ms": result.usage.wall_ms,
+            });
+            if let Err(err) = self.extension_chain.run_post_inference(&mut post_inference_value) {
+                tracing::warn!(error = %err, "extension post_inference hook failed");
+            }
+        }
 
         // ── AGT-01: Post-dispatch safety check ─────────────────────
         let post_changed_files = if uses_git {
@@ -15315,6 +15361,19 @@ impl PlanRunner {
                 )?;
             }
             Err(err) => {
+                // A1: Extension on_error (Recovery layer) hook.
+                let recovery = self.extension_chain.run_on_error(err.as_ref());
+                match recovery {
+                    Ok(roko_core::extension::RecoveryAction::Propagate) | Err(_) => {
+                        // Default: propagate the error up.
+                    }
+                    Ok(action) => {
+                        tracing::info!(
+                            recovery_action = ?action,
+                            "extension on_error hook suggested non-propagate recovery"
+                        );
+                    }
+                }
                 self.record_model_experiment_outcome(
                     selected_model_experiment.as_ref(),
                     false,
@@ -15679,6 +15738,24 @@ impl PlanRunner {
                 );
             }
         }
+
+        // ── A1: Extension on_gate (Cognition layer) hook ─────────────
+        {
+            let verdict_names: Vec<&str> = verdicts.iter().map(|v| v.gate.as_str()).collect();
+            let mut gate_details = serde_json::json!({
+                "plan_id": plan_id,
+                "rung": rung,
+                "passed": all_passed,
+                "duration_ms": wall_ms,
+                "verdict_count": verdicts.len(),
+                "verdict_names": verdict_names,
+            });
+            let gate_label = format!("pipeline:rung-{rung}");
+            if let Err(err) = self.extension_chain.run_on_gate(&gate_label, all_passed, &mut gate_details) {
+                tracing::warn!(error = %err, "extension on_gate hook failed");
+            }
+        }
+
         Ok(all_passed)
     }
 
