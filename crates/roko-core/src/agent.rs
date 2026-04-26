@@ -41,6 +41,8 @@ pub enum ProviderKind {
     OpenAiCompat,
     /// Cursor Agent Client Protocol.
     CursorAcp,
+    /// Perplexity Sonar search-grounded API.
+    PerplexityApi,
 }
 
 impl ProviderKind {
@@ -52,6 +54,7 @@ impl ProviderKind {
             Self::ClaudeCli => "claude_cli",
             Self::OpenAiCompat => "openai_compat",
             Self::CursorAcp => "cursor_acp",
+            Self::PerplexityApi => "perplexity_api",
         }
     }
 }
@@ -82,6 +85,8 @@ pub enum AgentBackend {
     Ollama,
     /// Raw `OpenAI` HTTP API (no CLI).
     OpenAi,
+    /// Perplexity Sonar API (search-grounded, OpenAI-compatible HTTP).
+    Perplexity,
 }
 
 impl AgentBackend {
@@ -94,6 +99,7 @@ impl AgentBackend {
             Self::Cursor => "cx",
             Self::Ollama => "ol",
             Self::OpenAi => "oa",
+            Self::Perplexity => "px",
         }
     }
 
@@ -112,6 +118,8 @@ impl AgentBackend {
             Self::Claude
         } else if slug.starts_with("ollama/") || slug.starts_with("llama") {
             Self::Ollama
+        } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
+            Self::Perplexity
         } else if is_cursor_slug(slug) {
             Self::Cursor
         } else {
@@ -127,6 +135,7 @@ impl From<AgentBackend> for ProviderKind {
             AgentBackend::Codex | AgentBackend::OpenAi => ProviderKind::OpenAiCompat,
             AgentBackend::Cursor => ProviderKind::CursorAcp,
             AgentBackend::Ollama => ProviderKind::OpenAiCompat,
+            AgentBackend::Perplexity => ProviderKind::PerplexityApi,
         }
     }
 }
@@ -821,6 +830,23 @@ mod tests {
     }
 
     #[test]
+    fn backend_from_perplexity_slug() {
+        assert_eq!(AgentBackend::from_model("sonar"), AgentBackend::Perplexity);
+        assert_eq!(
+            AgentBackend::from_model("sonar-pro"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            AgentBackend::from_model("perplexity/sonar"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
+    }
+
+    #[test]
     fn kimi_not_cursor() {
         assert!(!is_cursor_slug("kimi-k2.5"));
         assert_eq!(AgentBackend::from_model("kimi-k2.5"), AgentBackend::Codex);
@@ -850,6 +876,10 @@ mod tests {
             ProviderKind::from(AgentBackend::Ollama),
             ProviderKind::OpenAiCompat
         );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
     }
 
     #[test]
@@ -859,6 +889,7 @@ mod tests {
             (ProviderKind::ClaudeCli, "claude_cli"),
             (ProviderKind::OpenAiCompat, "openai_compat"),
             (ProviderKind::CursorAcp, "cursor_acp"),
+            (ProviderKind::PerplexityApi, "perplexity_api"),
         ];
 
         for (kind, label) in kinds {

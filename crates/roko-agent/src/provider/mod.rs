@@ -72,6 +72,9 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::ClaudeCli => &CLAUDE_CLI_ADAPTER,
         ProviderKind::AnthropicApi => &ANTHROPIC_API_ADAPTER,
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
+        // Perplexity is OpenAI-compatible at the chat completions layer;
+        // a dedicated adapter is added in a later task (2Q.03+).
+        ProviderKind::PerplexityApi => &OPENAI_COMPAT_ADAPTER,
     }
 }
 
