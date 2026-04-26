@@ -10,23 +10,40 @@ use std::path::Path;
 
 use thiserror::Error;
 
+pub mod agent;
+pub mod budget;
+pub mod chain;
 pub mod compat;
+pub mod gates;
 pub mod hot_reload;
+pub mod learning;
 pub mod presets;
+pub mod project;
+pub mod provider;
+pub mod routing;
 pub mod schema;
+pub mod serve;
+pub mod subscriptions;
+pub mod tools;
+pub mod tui_cfg;
 
 // Re-exports for ergonomic use.
 pub use crate::temperament::Temperament;
 pub use compat::from_mori_toml;
 pub use presets::Preset;
+// All section structs are re-exported from schema (which re-exports from submodules).
 pub use schema::{
-    AgentBudget, AgentConfig, AgentRoleToggles, AgentThresholds, ApiKeyEntry, AttentionConfig,
-    BudgetConfig, CURRENT_SCHEMA_VERSION, ConductorConfig, DemurrageConfig, EnergyConfig,
-    GatesConfig, GoalsConfig, ImmuneConfig, LearningConfig, OneirographyConfig, PrdConfig,
-    ProjectConfig, RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig,
-    RoutingOverrides, RoutingRewardWeightsConfig, SchedulerConfig, SchedulerCronConfig,
+    AgentBudget, AgentConfig, AgentDefinition, AgentMode, AgentRoleToggles, AgentThresholds,
+    ApiKeyEntry, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig,
+    ConductorConfig, DataLlmConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig,
+    GeminiConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig, ModelProfile,
+    OneirographyConfig, PerplexityConfig, PipelineBandConfig, PipelineConfig,
+    PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig, ProviderRouting,
+    RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
+    RoutingRewardWeightsConfig, SafetySetting, SchedulerConfig, SchedulerCronConfig, RelayConfig,
     ServeAuthConfig, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig,
-    SubscriptionTrigger, TemporalConfig, TuiConfig, WatcherConfig, WatcherPathConfig,
+    SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TemporalConfig,
+    ToolProfileConfig, ToolsConfig, TuiConfig, WatcherConfig, WatcherPathConfig, WebhooksConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.
