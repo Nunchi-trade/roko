@@ -9,11 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use roko_core::{Context, Engram, Gate, TaskDomain, Verdict};
-use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_gate::generated_test_gate::ArtifactStore as GeneratedArtifactStore;
 use roko_gate::rung_selector::Rung;
 use roko_gate::{AcceptanceDecision, AcceptanceOutcome, NoStubEvidence};
-use roko_neuro::KnowledgeStore;
 use roko_orchestrator::GateResult;
 
 // ─── Path helpers ────────────────────────────────────────────────────────
@@ -157,69 +155,6 @@ pub(crate) fn format_acceptance_decision(
 // ─── Neuro-gate bridge ───────────────────────────────────────────────────
 
 /// INT-15: Query neuro knowledge for gate-related failure and stability
-/// patterns and apply them as hints to the adaptive gate thresholds.
-///
-/// This bridges neuro (durable knowledge) with the gate verification pipeline,
-/// so that known problematic or reliably stable rungs are tuned accordingly
-/// before the plan run begins.
-pub(crate) fn apply_neuro_gate_hints(
-    knowledge_store: &KnowledgeStore,
-    thresholds: &mut AdaptiveThresholds,
-) {
-    let failure_rungs = match knowledge_store.query("gate failure compile lint test", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint")
-                    || content_lower.contains("clippy")
-                    || content_lower.contains("rung 1")
-                {
-                    Some(1)
-                } else if content_lower.contains("test fail") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            tracing::debug!(error = %err, "INT-15: skipping neuro gate hints (query failed)");
-            return;
-        }
-    };
-
-    let stable_rungs = match knowledge_store.query("gate stable passing consistently", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint") || content_lower.contains("rung 1") {
-                    Some(1)
-                } else if content_lower.contains("test") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
-
-    if !failure_rungs.is_empty() || !stable_rungs.is_empty() {
-        tracing::info!(
-            failure_rungs = ?failure_rungs,
-            stable_rungs = ?stable_rungs,
-            "INT-15: applying neuro knowledge hints to adaptive gate thresholds"
-        );
-        thresholds.apply_neuro_hints(&failure_rungs, &stable_rungs);
-    }
-}
-
 // ─── Recording gate wrapper ──────────────────────────────────────────────
 
 /// A verdict captured by [`RecordingGate`] for post-pipeline analysis.

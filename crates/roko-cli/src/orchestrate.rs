@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
-use roko_agent::chat_types::FinishReason;
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
@@ -28,7 +27,6 @@ use roko_agent::task_runner::{
     ConductorBandit as RunnerConductorBandit, CostTable as RunnerCostTable,
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
-use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
 use roko_agent::{
     Agent, AgentInvocationSession, AgentResult, InvocationState, MultiAgentPool, ReuseScope,
     SafetyLayer, WarmReusePolicy, fingerprint_text,
@@ -41,9 +39,8 @@ use roko_compose::enrichment::{
     StepOutcome, StepSelector, estimate_enrichment,
 };
 use roko_compose::{
-    AttentionBidder, Complexity as PromptComplexity, ContextProvider, PadState, Placement,
-    PlanArtifacts, PromptComposer, PromptSection, SectionPriority, SectionScorer, TaskContext,
-    estimate_tokens,
+    AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
+    PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
 use roko_conductor::diagnosis::{
     DiagnosisEngine, DiagnosisResult, ErrorCategory, SuggestedIntervention,
@@ -67,9 +64,9 @@ use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
-    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
-    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, TaskStatus, ToolRegistry,
-    Verdict, score_model_for_task,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict,
+    score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -122,7 +119,7 @@ use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
+use roko_learn::playbook::PlaybookStore;
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
@@ -132,7 +129,7 @@ use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
 };
-use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
+use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
@@ -160,20 +157,38 @@ use roko_runtime::event_bus::{
     Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
     PlanRevisionReason, RokoEvent,
 };
-use roko_runtime::lifecycle::{
-    AgentLifecycleState, LifecycleTransition, LifecycleTransitionReason,
-};
 use roko_runtime::process::ProcessSupervisor;
 use roko_std::StaticToolRegistry;
 use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::dispatch_helpers::{
+    TASK_FAILURE_OUTPUT_TAIL_LINES, apply_section_effectiveness_to_prompt_section,
+    build_daimon_context_section, build_relevant_context_layer, build_system_prompt,
+    build_system_prompt_with_context_validated, claude_task_tool_allowlist_with,
+    claude_tool_allowlist, claude_tool_allowlist_with, code_context_for_task,
+    default_task_category, effective_context_window_tokens, extract_task_symbols,
+    file_contains_public_api, load_prior_task_outputs, save_task_output, tail_output_lines,
+    task_def_to_dag_task, task_def_to_input, task_read_cli_args,
+    truncate_doc_snippet, truncate_output, with_task_failure_context,
+};
+use crate::learning_helpers::{
+    TurnLearningFeedback, apply_concluded_experiment_overrides, build_task_playbook,
+    install_episode_distillation_hook, learned_error_signature, load_efficiency_cost_signals,
+    load_efficiency_signals_sync, load_or_create_playbook_store, load_or_create_skill_library,
+    load_recent_signals, playbook_query_context, publish_turn_learning_feedback,
+    render_prior_experience, warn_if_distillation_disabled,
+};
+use crate::knowledge_helpers::{
+    apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
+    build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
+    record_lifecycle_knowledge, render_neuro_chunk,
+};
 use crate::agent_config::{
     synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
 };
@@ -185,9 +200,7 @@ use crate::heartbeat::{
     persist_heartbeat_snapshot,
 };
 use crate::plan::plans_dir;
-use crate::prompting::{
-    PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
-};
+use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use crate::snapshot_migrate;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::tui::ApprovalRequest;
@@ -197,9 +210,9 @@ use crate::workspace_paths::find_prd_path;
 // Gate-related free functions and types extracted to gate_runner.rs.
 use crate::gate_runner::{
     FsGeneratedArtifactStore, RecordedGateVerdict, RecordingGate, acceptance_task_dir,
-    apply_neuro_gate_hints, domain_uses_compiled_gates, format_acceptance_decision,
-    gate_artifact_store_path, gate_ratchet_path, gate_result_matches_requirement,
-    primary_gate_phase_to_rung, scan_no_stub_evidence,
+    domain_uses_compiled_gates, format_acceptance_decision, gate_artifact_store_path,
+    gate_ratchet_path, gate_result_matches_requirement, primary_gate_phase_to_rung,
+    scan_no_stub_evidence,
 };
 
 /// Default number of actions between auto-saves.
@@ -207,7 +220,6 @@ const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
-const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
@@ -262,7 +274,7 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join("latency-stats.json")
 }
 
-fn static_overrides_path(workdir: &Path) -> PathBuf {
+pub(crate) fn static_overrides_path(workdir: &Path) -> PathBuf {
     workdir.join(DEFAULT_STATIC_OVERRIDES_PATH)
 }
 
@@ -654,117 +666,6 @@ fn scrub_agent_result(result: &AgentResult, policy: &ScrubPolicy) -> AgentResult
     }
 }
 
-#[derive(Debug, Clone)]
-struct TurnLearningFeedback {
-    task_id: String,
-    model: String,
-    provider: String,
-    timestamp_ms: i64,
-    prompt_hash: u64,
-    ttft_ms: u64,
-    total_ms: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-    usage: roko_agent::Usage,
-    success: bool,
-}
-
-fn publish_turn_learning_feedback(
-    event_bus: &LearningEventBus,
-    latency_registry: &LatencyRegistry,
-    anomaly_detector: &mut AnomalyDetector,
-    feedback: TurnLearningFeedback,
-) {
-    let mut rx = event_bus.subscribe();
-    event_bus.publish(AgentEvent::TurnStarted {
-        task_id: feedback.task_id.clone(),
-        model: feedback.model.clone(),
-        provider: feedback.provider.clone(),
-        timestamp_ms: feedback.timestamp_ms,
-    });
-    event_bus.publish(AgentEvent::TurnCompleted {
-        turn: 1,
-        usage: feedback.usage,
-        tool_call_count: 0,
-        gate_passed: Some(feedback.success),
-        finish_reason: if feedback.success {
-            FinishReason::Stop
-        } else {
-            FinishReason::Error("agent failed".to_string())
-        },
-    });
-    event_bus.publish(AgentEvent::CostRecorded {
-        model: feedback.model.clone(),
-        provider: feedback.provider.clone(),
-        cost_usd: feedback.cost_usd,
-        tokens: u64::from(feedback.usage.total_tokens()),
-    });
-
-    drain_turn_learning_events(&mut rx, latency_registry, anomaly_detector, &feedback);
-}
-
-fn drain_turn_learning_events(
-    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
-    latency_registry: &LatencyRegistry,
-    anomaly_detector: &mut AnomalyDetector,
-    feedback: &TurnLearningFeedback,
-) {
-    loop {
-        match rx.try_recv() {
-            Ok(AgentEvent::TurnStarted { .. }) => {
-                if let Some(anomaly) = anomaly_detector.check_prompt(feedback.prompt_hash) {
-                    tracing::warn!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        ?anomaly,
-                        "learning anomaly detected from prompt"
-                    );
-                }
-            }
-            Ok(AgentEvent::TurnCompleted { .. }) => {
-                latency_registry.record(
-                    &feedback.model,
-                    &feedback.provider,
-                    feedback.ttft_ms as f64,
-                    feedback.total_ms as f64,
-                    feedback.output_tokens,
-                );
-                tracing::info!(
-                    model = %feedback.model,
-                    provider = %feedback.provider,
-                    ttft_ms = feedback.ttft_ms,
-                    total_ms = feedback.total_ms,
-                    output_tokens = feedback.output_tokens,
-                    "learning latency recorded"
-                );
-            }
-            Ok(AgentEvent::CostRecorded { .. }) => {
-                if let Some(anomaly) = anomaly_detector.check_cost(feedback.cost_usd) {
-                    tracing::warn!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        ?anomaly,
-                        "learning anomaly detected from cost"
-                    );
-                } else {
-                    tracing::info!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        "learning anomaly scan complete"
-                    );
-                }
-            }
-            Ok(_) => {}
-            Err(
-                tokio::sync::broadcast::error::TryRecvError::Empty
-                | tokio::sync::broadcast::error::TryRecvError::Closed,
-            ) => break,
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "learning feedback lagged behind event stream");
-            }
-        }
-    }
-}
 
 fn state_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("state")
@@ -922,34 +823,6 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
     }
 }
 
-fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
-    let distillation_workdir = workdir.to_path_buf();
-    learning.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
-    });
-}
-
-/// Log a one-time warning if `ANTHROPIC_API_KEY` is not set, which means
-/// episode distillation into the neuro knowledge store will be silently
-/// skipped.  Called at the start of each `PlanRunner::run_task_plans_inner`
-/// invocation but only emits the warning once per process.
-fn warn_if_distillation_disabled() {
-    use std::sync::Once;
-    static WARN: Once = Once::new();
-    WARN.call_once(|| {
-        let key_set = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_owned())
-            .is_some_and(|k| !k.is_empty());
-        if !key_set {
-            tracing::warn!(
-                "ANTHROPIC_API_KEY is not set; episode distillation into the neuro \
-                 knowledge store is disabled. Set it to enable automatic learning \
-                 from completed episodes."
-            );
-        }
-    });
-}
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let path = workdir.join("roko.toml");
@@ -1304,7 +1177,7 @@ impl CrateFamiliarityTracker {
 }
 
 /// Derive a crate name from the task's modified files.
-fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
+pub(crate) fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
     let mut seen = HashSet::new();
     task_def
         .into_iter()
@@ -2209,226 +2082,6 @@ impl WatcherRunner {
     }
 }
 
-async fn load_recent_signals(path: &Path, tail_len: usize) -> std::io::Result<Vec<Engram>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let text = tokio::fs::read_to_string(path).await?;
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(tail_len);
-    let mut signals = Vec::with_capacity(lines.len().saturating_sub(start));
-    for line in &lines[start..] {
-        if let Ok(signal) = serde_json::from_str::<Engram>(line) {
-            signals.push(signal);
-        }
-    }
-    Ok(signals)
-}
-
-/// Load the latest efficiency entries and convert them into cost metric signals.
-async fn load_efficiency_cost_signals(
-    path: &Path,
-    budget_usd: Option<f64>,
-) -> std::io::Result<Vec<Engram>> {
-    let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) else {
-        return Ok(Vec::new());
-    };
-
-    let text = tokio::fs::read_to_string(path).await?;
-    Ok(build_cost_overrun_signals(&text, budget_usd))
-}
-
-/// Synchronous variant used by the main conductor check path.
-fn load_efficiency_signals_sync(
-    path: &Path,
-    budget_usd: Option<f64>,
-) -> std::io::Result<Vec<Engram>> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(build_efficiency_signals(&text, budget_usd))
-}
-
-async fn load_or_create_skill_library(path: &Path) -> Result<SkillLibrary> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .await
-    {
-        Ok(mut file) => {
-            file.write_all(b"[]").await?;
-            file.flush().await?;
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(err.into()),
-    }
-
-    Ok(SkillLibrary::new(path).await?)
-}
-
-async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
-    tokio::fs::create_dir_all(path).await?;
-    Ok(PlaybookStore::new(path))
-}
-
-fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
-    let overrides_path = static_overrides_path(workdir);
-    let winners = {
-        let store = learning.experiment_store().lock();
-        let winners = store.concluded_winners();
-        if let Err(err) = store.apply_winners_to(&winners, &overrides_path) {
-            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to persist experiment winners");
-        }
-        winners
-    };
-
-    if winners.is_empty() {
-        return;
-    }
-
-    match learning
-        .cascade_router()
-        .load_static_overrides(&overrides_path)
-    {
-        Ok(applied) => {
-            tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides")
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides")
-        }
-    }
-}
-
-/// Convert the latest efficiency entries into the signals expected by the conductor.
-fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Engram> {
-    let mut signals = Vec::new();
-
-    if let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) {
-        signals.extend(build_cost_overrun_signals(text, budget_usd));
-    }
-
-    if let Some(signal) = build_context_window_pressure_signal(text) {
-        signals.push(signal);
-    }
-
-    signals
-}
-
-/// Sum the cost from the latest valid efficiency events in the JSONL log.
-fn latest_efficiency_cost(text: &str) -> Option<f64> {
-    let mut total = 0.0;
-    let mut seen = 0usize;
-
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
-            total += event.cost_usd;
-            seen += 1;
-            if seen >= EFFICIENCY_SIGNAL_TAIL {
-                break;
-            }
-        }
-    }
-
-    (seen > 0).then_some(total)
-}
-
-fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Engram> {
-    let Some(cost_usd) = latest_efficiency_cost(text) else {
-        return Vec::new();
-    };
-
-    vec![
-        Engram::builder(Kind::Metric)
-            .body(Body::text("plan cost"))
-            .tag("name", "plan_cost")
-            .tag("value", format!("{cost_usd:.6}"))
-            .build(),
-        Engram::builder(Kind::Metric)
-            .body(Body::text("plan budget"))
-            .tag("name", "plan_budget")
-            .tag("value", format!("{budget_usd:.6}"))
-            .build(),
-    ]
-}
-
-fn build_context_window_pressure_signal(text: &str) -> Option<Engram> {
-    let event = latest_efficiency_event(text)?;
-    let body = Body::from_json(&event).unwrap_or_else(|_| {
-        Body::text(format!(
-            "{} tokens used on {}",
-            event.total_prompt_tokens, event.model
-        ))
-    });
-
-    Some(
-        Engram::builder(Kind::TokenUsage)
-            .body(body)
-            .tag("plan_id", event.plan_id)
-            .tag("task_id", event.task_id)
-            .tag("role", event.role)
-            .tag("model", event.model)
-            .tag("tokens_used", event.total_prompt_tokens.to_string())
-            .build(),
-    )
-}
-
-/// Render up to 3 prior skills into a "## Prior Experience" context section.
-///
-/// Follows the same pattern as `render_knowledge_context` — a markdown heading
-/// followed by numbered entries with key metadata so the agent can leverage
-/// successful approaches from prior tasks.
-fn render_prior_experience(skills: &[Skill]) -> String {
-    use std::fmt::Write as _;
-
-    let mut content = String::from(
-        "## Relevant Skills\n\nThe following skills were high-confidence matches for this task:\n",
-    );
-    for (idx, skill) in skills.iter().enumerate() {
-        let _ = write!(
-            content,
-            "\n### {}. {} (confidence: {:.0}%)\n",
-            idx + 1,
-            skill.name,
-            (skill.score.clamp(0.0, 1.0) * 100.0).round(),
-        );
-        let _ = writeln!(content, "Summary: {}", skill.summary);
-        if skill.usage_count > 0 {
-            let _ = writeln!(
-                content,
-                "Telemetry: {:.0}% success over {} uses",
-                (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
-                skill.usage_count
-            );
-        }
-        if skill.validated_count > 0 {
-            let _ = writeln!(content, "Validated matches: {}", skill.validated_count);
-        }
-        if !skill.description.is_empty() {
-            let _ = writeln!(content, "Description: {}", skill.description);
-        }
-        if !skill.files.is_empty() {
-            let _ = writeln!(content, "Files: {}", skill.files.join(", "));
-        }
-        if !skill.pattern.is_empty() {
-            let _ = writeln!(content, "Pattern:\n{}", skill.pattern);
-        }
-        if !skill.prompt_template.is_empty() {
-            let _ = writeln!(content, "Template:\n{}", skill.prompt_template);
-        }
-    }
-    content
-}
 
 fn select_prompt_skills(
     skill_library: &SkillLibrary,
@@ -2509,40 +2162,6 @@ fn learned_query_context(
     }
 }
 
-fn learned_error_signature(last_gate_failure: Option<&str>) -> Option<String> {
-    let failure = last_gate_failure?.trim();
-    if failure.is_empty() {
-        return None;
-    }
-
-    if let Some(code) = extract_rust_error_code(failure) {
-        return Some(code);
-    }
-
-    failure
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(160).collect())
-}
-
-fn extract_rust_error_code(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 {
-        return None;
-    }
-
-    for idx in 0..=bytes.len() - 5 {
-        if bytes[idx] != b'E' {
-            continue;
-        }
-        if bytes[idx + 1..idx + 5].iter().all(u8::is_ascii_digit) {
-            return text.get(idx..idx + 5).map(str::to_string);
-        }
-    }
-
-    None
-}
 
 fn routing_budget_pressure(
     budget: &crate::config::BudgetConfig,
@@ -2601,468 +2220,7 @@ fn cascade_routing_bias_from_conductor(
     }
 }
 
-fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
-    match role {
-        AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
-            TaskCategory::Research
-        }
-        AgentRole::Refactorer => TaskCategory::Refactor,
-        AgentRole::Scribe => TaskCategory::Docs,
-        AgentRole::DocVerifier
-        | AgentRole::IntegrationTester
-        | AgentRole::TerminalValidator
-        | AgentRole::GolemLifecycleTester
-        | AgentRole::RegressionDetector
-        | AgentRole::CoverageTracker
-        | AgentRole::CrossSystemTester
-        | AgentRole::DependencyValidator
-        | AgentRole::FullLoopValidator => TaskCategory::Verification,
-        _ => TaskCategory::Implementation,
-    }
-}
 
-fn strategy_fragment_query(
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-) -> String {
-    let mut query_parts = vec![
-        neuro_prompt_task_category(role).label().to_string(),
-        task_text.trim().to_string(),
-    ];
-    if let Some(crate_name) = task_crate_name(task_def) {
-        query_parts.push(crate_name);
-    }
-    query_parts.retain(|part| !part.trim().is_empty());
-    query_parts.join(" ")
-}
-
-fn select_strategy_fragments(
-    knowledge_store: &KnowledgeStore,
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-    current_model: &str,
-    limit: usize,
-) -> Vec<KnowledgeEntry> {
-    let query = strategy_fragment_query(role, task_def, task_text);
-    knowledge_store
-        .query_kind(
-            &query,
-            KnowledgeKind::StrategyFragment,
-            limit.saturating_mul(3).max(limit),
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| entry.confidence > 0.0)
-        .filter(|entry| entry.applies_to_model(current_model))
-        .take(limit)
-        .collect()
-}
-
-fn render_strategy_fragments(entries: &[KnowledgeEntry]) -> String {
-    use std::fmt::Write as _;
-
-    let mut content = String::from(
-        "## Strategy Fragments\n\nThe following reusable approach fragments were distilled from repeated successful runs:\n",
-    );
-    for (idx, entry) in entries.iter().enumerate() {
-        let confidence = entry.confidence.clamp(0.0, 1.0);
-        let tags = if entry.tags.is_empty() {
-            String::from("-")
-        } else {
-            entry.tags.join(", ")
-        };
-        let _ = write!(
-            content,
-            "\n### {}. Strategy fragment ({:.0}%)\nTags: {}\n\n{}\n",
-            idx + 1,
-            confidence * 100.0,
-            tags,
-            entry.content.trim()
-        );
-    }
-    content
-}
-
-/// Query AntiKnowledge entries from the neuro store and convert them to
-/// anti-pattern strings for injection into layer 7 of the system prompt.
-fn query_anti_knowledge_patterns(
-    knowledge_store: &KnowledgeStore,
-    task_text: &str,
-    limit: usize,
-) -> Vec<String> {
-    match knowledge_store.query_kind(task_text, KnowledgeKind::AntiKnowledge, limit) {
-        Ok(entries) => entries.into_iter().map(|entry| entry.content).collect(),
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to query AntiKnowledge for anti-patterns");
-            Vec::new()
-        }
-    }
-}
-
-/// Query the knowledge store for routing-relevant entries about a model and return
-/// a small confidence-weighted boost in `[0.0, 0.3]`.
-///
-/// This is a lightweight, non-blocking query: it scans at most 5 entries whose tags
-/// or content mention the model slug combined with the role/task-type context.
-/// Positive entries (Heuristic/Insight) contribute a positive boost proportional
-/// to their confidence; AntiKnowledge entries contribute a negative signal.
-fn knowledge_routing_boost(
-    knowledge_store: &KnowledgeStore,
-    model_slug: &str,
-    role: AgentRole,
-    task_category: &str,
-) -> f64 {
-    let query = format!("{} {} routing model", role.label(), task_category);
-    let entries = match knowledge_store.query(&query, 5) {
-        Ok(entries) => entries,
-        Err(_) => return 0.0,
-    };
-
-    let mut boost = 0.0_f64;
-    for entry in &entries {
-        // Only consider entries that mention this specific model.
-        let slug_lower = model_slug.to_lowercase();
-        let content_matches = entry.content.to_lowercase().contains(&slug_lower)
-            || entry
-                .source_model
-                .as_deref()
-                .is_some_and(|sm| sm.eq_ignore_ascii_case(model_slug))
-            || entry
-                .tags
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(model_slug));
-        if !content_matches {
-            continue;
-        }
-
-        let weight = entry.confidence.clamp(0.0, 1.0);
-        if entry.kind == KnowledgeKind::AntiKnowledge {
-            boost -= weight * 0.15;
-        } else {
-            boost += weight * 0.10;
-        }
-    }
-
-    boost.clamp(-0.3, 0.3)
-}
-
-/// Build structured knowledge routing advice for all candidate models.
-///
-/// This aggregates per-model knowledge signals into a
-/// [`KnowledgeRoutingAdvice`] that can be applied to a
-/// [`CascadeRouteExplanation`] via
-/// [`CascadeRouter::apply_knowledge_advice`].
-fn build_knowledge_routing_advice(
-    knowledge_store: &KnowledgeStore,
-    candidate_slugs: &[String],
-    role: AgentRole,
-    task_category: &str,
-) -> roko_learn::cascade_router::KnowledgeRoutingAdvice {
-    use roko_learn::cascade_router::{KnowledgeHint, KnowledgeRoutingAdvice};
-
-    let query = format!("{} {} routing model", role.label(), task_category);
-    let entries = match knowledge_store.query(&query, 10) {
-        Ok(entries) => entries,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "failed to query knowledge store for routing advice"
-            );
-            return KnowledgeRoutingAdvice::default();
-        }
-    };
-
-    if entries.is_empty() {
-        return KnowledgeRoutingAdvice::default();
-    }
-
-    let mut hints: Vec<KnowledgeHint> = Vec::new();
-
-    for slug in candidate_slugs {
-        let slug_lower = slug.to_lowercase();
-        let mut score = 0.0_f64;
-        let mut supporting = 0_u32;
-        let mut positive_count = 0_u32;
-        let mut negative_count = 0_u32;
-
-        for entry in &entries {
-            let content_matches = entry.content.to_lowercase().contains(&slug_lower)
-                || entry
-                    .source_model
-                    .as_deref()
-                    .is_some_and(|sm| sm.eq_ignore_ascii_case(slug))
-                || entry
-                    .tags
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case(slug));
-            if !content_matches {
-                continue;
-            }
-
-            supporting += 1;
-            let weight = entry.confidence.clamp(0.0, 1.0);
-            if entry.kind == KnowledgeKind::AntiKnowledge {
-                score -= weight * 0.15;
-                negative_count += 1;
-            } else {
-                score += weight * 0.10;
-                positive_count += 1;
-            }
-        }
-
-        if supporting > 0 {
-            let reason = if negative_count > 0 && positive_count > 0 {
-                format!(
-                    "{positive_count} positive + {negative_count} negative entries for {slug}"
-                )
-            } else if negative_count > 0 {
-                format!("{negative_count} anti-knowledge entries for {slug}")
-            } else {
-                format!("{positive_count} positive entries for {slug}")
-            };
-
-            hints.push(KnowledgeHint {
-                model_slug: slug.clone(),
-                score: score.clamp(-0.3, 0.3),
-                supporting_entries: supporting,
-                reason,
-            });
-        }
-    }
-
-    let has_signal = !hints.is_empty();
-    KnowledgeRoutingAdvice { hints, has_signal }
-}
-
-/// INT-20: Record significant lifecycle transitions as knowledge entries in the
-/// neuro store.
-///
-/// Restores, degradation events, and metamorphosis are operationally significant
-/// -- they capture when and why agents changed state.  Recording them as
-/// knowledge enables future sessions to learn from operational history (e.g.
-/// "agent X was degraded due to budget constraints 5 times last week").
-fn record_lifecycle_knowledge(
-    knowledge_store: &KnowledgeStore,
-    admission: Option<&KnowledgeAdmissionStore>,
-    transition: &LifecycleTransition,
-) {
-    // Only record significant transitions -- skip routine Active/Waiting/Initiated.
-    let is_significant = matches!(
-        &transition.to,
-        AgentLifecycleState::Hibernated
-            | AgentLifecycleState::Metamorphosing
-            | AgentLifecycleState::Degraded { .. }
-            | AgentLifecycleState::Deleted
-    ) || matches!(
-        &transition.reason,
-        LifecycleTransitionReason::OperatorResume
-            | LifecycleTransitionReason::BudgetConstrained
-            | LifecycleTransitionReason::BudgetRestored
-            | LifecycleTransitionReason::MetamorphosisFinished
-    );
-
-    if !is_significant {
-        return;
-    }
-
-    let content = format!(
-        "Agent '{}' transitioned from {:?} to {:?} (reason: {:?}) at {}",
-        transition.agent_id,
-        transition.from,
-        transition.to,
-        transition.reason,
-        transition.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
-    );
-
-    let kind = if matches!(
-        &transition.to,
-        AgentLifecycleState::Degraded { .. } | AgentLifecycleState::Deleted
-    ) {
-        KnowledgeKind::AntiKnowledge
-    } else {
-        KnowledgeKind::Heuristic
-    };
-
-    let entry_id = format!(
-        "lifecycle-{}-{}",
-        transition.agent_id,
-        transition.occurred_at.timestamp_millis()
-    );
-
-    // Route through admission store when available.
-    if let Some(admission) = admission {
-        let candidate =
-            KnowledgeCandidateRecord::new(&entry_id, kind, "lifecycle-monitor", &content, 1.0)
-                .with_tags(vec![
-                    "lifecycle".to_string(),
-                    format!("agent:{}", transition.agent_id),
-                    format!("state:{:?}", transition.to),
-                ]);
-
-        match admission.submit_candidate(candidate) {
-            Ok(decision) => {
-                tracing::debug!(
-                    candidate_id = %decision.candidate_id,
-                    outcome = ?decision.outcome,
-                    "INT-20: lifecycle knowledge admission decision"
-                );
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "INT-20: failed to submit lifecycle candidate");
-            }
-        }
-        return;
-    }
-
-    // Fallback: direct write when admission store is not configured.
-    let mut entry = KnowledgeEntry {
-        id: entry_id,
-        kind,
-        content,
-        tags: vec![
-            "lifecycle".to_string(),
-            format!("agent:{}", transition.agent_id),
-            format!("state:{:?}", transition.to),
-        ],
-        confidence: 1.0,
-        source_episodes: Vec::new(),
-        tier: roko_neuro::KnowledgeTier::Transient,
-        half_life_days: 30.0,
-        created_at: transition.occurred_at,
-        ..KnowledgeEntry::default()
-    };
-    entry.source = Some("lifecycle-monitor".to_string());
-
-    if let Err(err) = knowledge_store.add(entry) {
-        tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
-    }
-}
-
-fn build_strategy_fragment_context(
-    knowledge_store: &KnowledgeStore,
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-    current_model: &str,
-) -> Option<String> {
-    let fragments =
-        select_strategy_fragments(knowledge_store, role, task_def, task_text, current_model, 3);
-    if fragments.is_empty() {
-        None
-    } else {
-        Some(render_strategy_fragments(&fragments))
-    }
-}
-
-fn playbook_query(
-    task: &str,
-    task_text: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    let mut parts = vec![task.to_string(), task_text.to_string()];
-    if let Some(task_def) = task_def {
-        parts.push(task_def.title.clone());
-        if let Some(description) = &task_def.description {
-            parts.push(description.clone());
-        }
-        if !task_def.files.is_empty() {
-            parts.push(task_def.files.join(" "));
-        }
-        if !task_def.acceptance.is_empty() {
-            parts.push(task_def.acceptance.join(" "));
-        }
-    }
-    parts.join("\n")
-}
-
-fn playbook_query_context(
-    role: AgentRole,
-    task: &str,
-    task_text: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> QueryContext {
-    let task_title = task_def
-        .map(|task_def| task_def.title.clone())
-        .unwrap_or_else(|| task.to_string());
-    QueryContext::new(
-        task,
-        task_title,
-        playbook_query(task, task_text, task_def),
-        role.label(),
-        10,
-        3,
-    )
-}
-
-fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
-    let goal = task_def
-        .description
-        .clone()
-        .unwrap_or_else(|| task_def.title.clone());
-    let mut playbook = Playbook::new(task_def.id.clone(), goal);
-    playbook.name = task_def.title.clone();
-
-    let mut next_index = 0u32;
-    playbook.steps.push(PlaybookStep::new(
-        next_index,
-        task_def
-            .description
-            .clone()
-            .unwrap_or_else(|| task_def.title.clone()),
-        task_def
-            .role
-            .clone()
-            .unwrap_or_else(|| "execute_task".to_string()),
-        if task_def.acceptance.is_empty() {
-            vec!["task_success".to_string()]
-        } else {
-            task_def.acceptance.clone()
-        },
-    ));
-    next_index += 1;
-
-    if !task_def.files.is_empty() {
-        playbook.steps.push(PlaybookStep::new(
-            next_index,
-            format!("Touch files: {}", task_def.files.join(", ")),
-            "edit_file",
-            task_def.files.clone(),
-        ));
-        next_index += 1;
-    }
-
-    if !task_def.verify.is_empty() {
-        let signals = task_def
-            .verify
-            .iter()
-            .map(|step| step.phase.clone())
-            .collect::<Vec<_>>();
-        playbook.steps.push(PlaybookStep::new(
-            next_index,
-            format!("Verify task with {} checks", task_def.verify.len()),
-            "verify",
-            signals,
-        ));
-    }
-
-    playbook
-}
-
-fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
-            return Some(event);
-        }
-    }
-
-    None
-}
 
 /// Enrich a task with search context from Perplexity Sonar before dispatch.
 ///
@@ -18323,19 +17481,6 @@ impl PlanRunner {
     }
 }
 
-fn render_neuro_chunk(chunk: &roko_neuro::ContextChunk) -> Option<String> {
-    let heading = match &chunk.source {
-        roko_compose::ContextSource::KnowledgeEntry { .. } => "## Neuro Knowledge",
-        roko_compose::ContextSource::Episode { .. } => "## Neuro Episodes",
-        roko_compose::ContextSource::RecentSignal { .. } => "## Neuro Signals",
-        _ => return None,
-    };
-    let body = chunk.content.trim();
-    if body.is_empty() {
-        return None;
-    }
-    Some(format!("{heading}\n\n{body}"))
-}
 
 impl PlanRunner {
     fn build_context_assembler_sections(
@@ -18433,162 +17578,9 @@ impl PlanRunner {
     }
 }
 
-fn build_success_knowledge_entry(
-    plan_id: &str,
-    task_id: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    result: &AgentResult,
-    model: &str,
-    episode_id: &str,
-) -> KnowledgeEntry {
-    let kind = infer_success_knowledge_kind(task_def, result);
-    let title = task_def
-        .map(|task| task.title.trim())
-        .filter(|title| !title.is_empty())
-        .unwrap_or(task_id);
-    let description = task_def
-        .and_then(|task| task.description.as_deref())
-        .map(str::trim)
-        .filter(|description| !description.is_empty());
-    let output_summary = result
-        .output
-        .body
-        .as_text()
-        .ok()
-        .map(|text| truncate_doc_snippet(text, 600))
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "Task completed with {} output.",
-                result.output.kind.as_str()
-            )
-        });
 
-    let mut content = format!("Task `{task_id}` succeeded: {title}.");
-    if let Some(description) = description {
-        content.push_str("\n\nWhy it worked:\n");
-        content.push_str(description);
-    }
-    content.push_str("\n\nSuccessful outcome:\n");
-    content.push_str(&output_summary);
 
-    let mut tags = vec![
-        "task-success".to_string(),
-        format!("plan:{plan_id}"),
-        format!("task:{task_id}"),
-        kind.as_str().to_string(),
-    ];
-    if let Some(task) = task_def {
-        tags.push(format!("tier:{}", task.tier));
-        if task.files.len() > 1 {
-            tags.push("multi-file".to_string());
-        } else if let Some(path) = task.files.first() {
-            tags.push(format!("file:{path}"));
-        }
-    }
-    if let Some(emotional_tag) = result.output.emotional_tag.as_ref() {
-        tags.push(format!(
-            "emotion_trigger:{}",
-            emotional_tag.trigger.trim().to_ascii_lowercase()
-        ));
-        tags.push(emotion_valence_tag(emotional_tag).to_string());
-        tags.push(emotion_arousal_tag(emotional_tag).to_string());
-    }
-    tags.sort();
-    tags.dedup();
 
-    KnowledgeEntry {
-        id: format!("task-success:{plan_id}:{task_id}:{}", result.output.id),
-        kind,
-        source: Some("task-success".to_string()),
-        content,
-        confidence: 0.75,
-        confidence_weight: 0.75,
-        refuted_insight_id: None,
-        refutation_evidence: None,
-        source_episodes: vec![episode_id.to_string()],
-        tags,
-        source_model: Some(model.to_string()),
-        model_generality: 0.9,
-        created_at: chrono::Utc::now(),
-        half_life_days: kind.default_half_life_days(),
-        tier: KnowledgeTier::Transient,
-        emotional_tag: result.output.emotional_tag.clone(),
-        emotional_provenance: result
-            .output
-            .emotional_tag
-            .as_ref()
-            .map(EmotionalProvenance::from_tag),
-        hdc_vector: None,
-        confirmation_count: 0,
-        distinct_contexts: Vec::new(),
-        deprecated: false,
-        balance: 1.0,
-        frozen: false,
-        catalytic_score: 0,
-    }
-}
-
-fn emotion_valence_tag(tag: &roko_core::EmotionalTag) -> &'static str {
-    if tag.pad.pleasure >= 0.2 {
-        "emotion_valence:positive"
-    } else if tag.pad.pleasure <= -0.2 {
-        "emotion_valence:negative"
-    } else {
-        "emotion_valence:neutral"
-    }
-}
-
-fn emotion_arousal_tag(tag: &roko_core::EmotionalTag) -> &'static str {
-    if tag.pad.arousal >= 0.35 {
-        "emotion_arousal:high"
-    } else if tag.pad.arousal <= -0.35 {
-        "emotion_arousal:low"
-    } else {
-        "emotion_arousal:mid"
-    }
-}
-
-fn infer_success_knowledge_kind(
-    task_def: Option<&crate::task_parser::TaskDef>,
-    result: &AgentResult,
-) -> KnowledgeKind {
-    let mut hint_text = task_def
-        .map(|task| {
-            format!(
-                "{} {}",
-                task.title,
-                task.description.as_deref().unwrap_or_default()
-            )
-        })
-        .unwrap_or_default();
-    if let Ok(output_text) = result.output.body.as_text() {
-        hint_text.push(' ');
-        hint_text.push_str(output_text);
-    }
-    let hint_text = hint_text.to_ascii_lowercase();
-    let looks_reusable = task_def.is_some_and(|task| task.files.len() > 1)
-        || [
-            "refactor",
-            "standardize",
-            "reuse",
-            "reusable",
-            "pattern",
-            "workflow",
-            "pipeline",
-            "template",
-            "guardrail",
-            "strategy",
-        ]
-        .iter()
-        .any(|needle| hint_text.contains(needle));
-
-    if looks_reusable {
-        KnowledgeKind::Heuristic
-    } else {
-        KnowledgeKind::Insight
-    }
-}
 
 fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     let mut changed: Vec<String> = status
@@ -19178,383 +18170,7 @@ fn detect_cost_anomaly_override(
     }
 }
 
-fn task_dispatch_conventions(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
-    let task_def = task_def?;
-    let mut sections = Vec::new();
 
-    if !task_def.files.is_empty() {
-        let mut write_scope = String::from(
-            "Honor the declared write scope strictly. Only create, edit, move, or delete files in this allowlist unless the user explicitly expands it:",
-        );
-        for path in &task_def.files {
-            write_scope.push_str("\n- ");
-            write_scope.push_str(path);
-        }
-        sections.push(write_scope);
-    }
-
-    if let Some(max_loc) = task_def.max_loc {
-        sections.push(format!(
-            "Keep the total code delta within roughly {max_loc} lines of change unless verification requires a tightly scoped follow-up."
-        ));
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n\n"))
-    }
-}
-
-fn build_system_prompt(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None, task_def)
-}
-
-fn build_system_prompt_with_context(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    context_layer: Option<&str>,
-    affect_state: Option<PadState>,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    let mut task_context = TaskContext::new(task)
-        .with_plan_id(plan_id)
-        .with_workspace("roko-cli orchestration");
-    if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
-        task_context = task_context.with_context(context);
-    }
-    build_role_system_prompt(
-        role,
-        task_context,
-        tools_csv,
-        PromptBuildOptions {
-            affect_state,
-            complexity: Some(prompt_budget_complexity(task_def)),
-            extra_conventions: task_dispatch_conventions(task_def),
-            ..PromptBuildOptions::default()
-        },
-    )
-}
-
-fn build_system_prompt_with_context_validated(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    context_layer: Option<&str>,
-    affect_state: Option<PadState>,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    relevant_skills: &[Skill],
-    relevant_playbooks: &[Playbook],
-    context_window_tokens: usize,
-    section_effectiveness: Option<&SectionEffectivenessRegistry>,
-    code_context: Vec<String>,
-    pheromones: Vec<roko_compose::ContextChunk>,
-    extra_anti_patterns: Vec<String>,
-) -> Result<String> {
-    let mut task_context = TaskContext::new(task)
-        .with_plan_id(plan_id)
-        .with_workspace("roko-cli orchestration");
-    if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
-        task_context = task_context.with_context(context);
-    }
-    build_role_system_prompt_validated(
-        role,
-        task_context,
-        tools_csv,
-        PromptBuildOptions {
-            affect_state,
-            complexity: Some(prompt_budget_complexity(task_def)),
-            extra_conventions: task_dispatch_conventions(task_def),
-            extra_anti_patterns,
-            relevant_skills: relevant_skills.to_vec(),
-            relevant_playbooks: relevant_playbooks.to_vec(),
-            code_context,
-            pheromones,
-        },
-        context_window_tokens,
-        section_effectiveness,
-    )
-}
-
-fn prompt_budget_complexity(task_def: Option<&crate::task_parser::TaskDef>) -> PromptComplexity {
-    match task_def.map(|task| task.tier.as_str()) {
-        Some("fast" | "mechanical") => PromptComplexity::Trivial,
-        Some("complex" | "premium" | "architectural") => PromptComplexity::Complex,
-        _ => PromptComplexity::Standard,
-    }
-}
-
-fn effective_context_window_tokens(config: &Config) -> usize {
-    config.prompt.token_budget
-}
-
-fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<String> {
-    let non_empty_sections = context_sections
-        .iter()
-        .map(|section| section.content.trim())
-        .filter(|section| !section.is_empty())
-        .count();
-    let content = context_sections
-        .iter()
-        .map(|section| section.content.trim())
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    if content.is_empty() {
-        return None;
-    }
-
-    let token_estimate = estimate_tokens(&content);
-    if non_empty_sections < 2 && token_estimate < 48 {
-        tracing::debug!(
-            non_empty_sections,
-            token_estimate,
-            "skipping underspecified relevant-context layer"
-        );
-        None
-    } else {
-        Some(format!("## Relevant Context\n\n{content}"))
-    }
-}
-
-/// Extract code-intelligence context chunks for a task description.
-///
-/// When `cached_index` is `Some`, uses the pre-built index instead of loading
-/// from disk. This avoids a full workspace scan on every dispatch when the
-/// caller maintains a `code_index_cache` (see `PlanRunner::cached_code_index`).
-///
-/// Falls back to loading from `workdir` when no cached index is available.
-/// Returns an empty vec if the index cannot be built or yields no results.
-fn code_context_for_task(
-    workdir: &Path,
-    task_description: &str,
-    cached_index: Option<&roko_index::WorkspaceIndex>,
-) -> Vec<String> {
-    const MAX_RESULTS: usize = 15;
-    const MAX_TOKENS: usize = 3000;
-    const TOKENS_PER_RESULT: usize = 200;
-
-    // Use the cached index if provided, otherwise load fresh.
-    let owned_index;
-    let index: &roko_index::WorkspaceIndex = if let Some(idx) = cached_index {
-        idx
-    } else {
-        match roko_index::WorkspaceIndex::load(workdir) {
-            Ok(idx) => {
-                owned_index = idx;
-                &owned_index
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
-                return Vec::new();
-            }
-        }
-    };
-
-    let keywords = extract_task_keywords(task_description);
-    if keywords.is_empty() {
-        return Vec::new();
-    }
-
-    let query_text = keywords.join(" ");
-    let strategy = roko_index::SearchStrategy::Hybrid {
-        keyword: Some(roko_index::KeywordQuery {
-            text: query_text,
-            scope: roko_index::SearchScope::Both,
-            case_sensitive: false,
-            whole_word: false,
-        }),
-        structural: None,
-        hdc: None,
-    };
-
-    let results = index.search(strategy, MAX_RESULTS);
-    if results.is_empty() {
-        return Vec::new();
-    }
-
-    let mut chunks = Vec::new();
-    let mut total_tokens = 0;
-    for result in &results {
-        let chunk = format!(
-            "- `{}` ({:?}) in `{}` line {} (score: {:.3})",
-            result.symbol.id.symbol_name,
-            result.symbol.id.kind,
-            result.symbol.id.file_path,
-            result.symbol.line,
-            result.score,
-        );
-        let est = estimate_tokens(&chunk);
-        if total_tokens + est > MAX_TOKENS {
-            break;
-        }
-        total_tokens += est.min(TOKENS_PER_RESULT);
-        chunks.push(chunk);
-    }
-
-    if chunks.is_empty() {
-        return Vec::new();
-    }
-
-    vec![format!(
-        "### Relevant Code Symbols\n\n{}",
-        chunks.join("\n")
-    )]
-}
-
-/// Extract meaningful keywords from a task description for code search.
-fn extract_task_keywords(description: &str) -> Vec<String> {
-    static STOP_WORDS: &[&str] = &[
-        "the",
-        "a",
-        "an",
-        "in",
-        "on",
-        "at",
-        "to",
-        "for",
-        "of",
-        "and",
-        "or",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "could",
-        "should",
-        "may",
-        "might",
-        "shall",
-        "can",
-        "need",
-        "must",
-        "it",
-        "its",
-        "this",
-        "that",
-        "these",
-        "those",
-        "with",
-        "from",
-        "by",
-        "as",
-        "into",
-        "not",
-        "no",
-        "if",
-        "then",
-        "else",
-        "when",
-        "where",
-        "which",
-        "who",
-        "what",
-        "how",
-        "all",
-        "each",
-        "every",
-        "both",
-        "few",
-        "more",
-        "most",
-        "other",
-        "some",
-        "such",
-        "only",
-        "own",
-        "same",
-        "so",
-        "than",
-        "too",
-        "very",
-        "just",
-        "but",
-        "also",
-        "about",
-        "above",
-        "after",
-        "before",
-        "between",
-        "through",
-        "during",
-        "up",
-        "down",
-        "out",
-        "over",
-        "under",
-        "again",
-        "further",
-        "implement",
-        "add",
-        "create",
-        "make",
-        "use",
-        "update",
-        "fix",
-        "change",
-        "ensure",
-    ];
-
-    description
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .filter(|w| w.len() >= 3)
-        .map(|w| w.to_lowercase())
-        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .take(10)
-        .collect()
-}
-
-fn adjust_priority_from_section_learning(
-    priority: SectionPriority,
-    section_name: &str,
-    role: &str,
-    registry: &SectionEffectivenessRegistry,
-) -> SectionPriority {
-    let next = match registry.recommend_priority_change(section_name, role) {
-        PriorityChange::Increase => (priority as u8).saturating_add(1),
-        PriorityChange::Decrease => (priority as u8).saturating_sub(1),
-        PriorityChange::NoChange | PriorityChange::InsufficientData => priority as u8,
-    };
-    match next {
-        0 => SectionPriority::Low,
-        1 => SectionPriority::Normal,
-        2 => SectionPriority::High,
-        _ => SectionPriority::Critical,
-    }
-}
-
-fn apply_section_effectiveness_to_prompt_section(
-    mut section: PromptSection,
-    role: &str,
-    registry: &SectionEffectivenessRegistry,
-) -> PromptSection {
-    section.priority =
-        adjust_priority_from_section_learning(section.priority, &section.name, role, registry);
-    section
-}
 
 fn prompt_section_meta_from_sections(
     sections: &[Engram],
@@ -19588,45 +18204,6 @@ fn prompt_section_meta_from_sections(
         .collect()
 }
 
-fn build_daimon_context_section(
-    affect_state: PadState,
-    behavioral_state: roko_core::BehavioralState,
-) -> Option<PromptSection> {
-    let pad_magnitude = affect_state.pleasure.abs()
-        + affect_state.arousal.abs()
-        + affect_state.dominance.abs()
-        + affect_state.somatic_intensity;
-    if pad_magnitude < 0.35 {
-        return None;
-    }
-
-    let mut content = format!(
-        "## Daimon state\nBehavioral state: {behavioral_state:?}\nPAD: pleasure={:.2}, arousal={:.2}, dominance={:.2}\n",
-        affect_state.pleasure, affect_state.arousal, affect_state.dominance
-    );
-    if affect_state.somatic_intensity >= 0.15 {
-        content.push_str(&format!(
-            "Somatic hint: valence={:.2}, intensity={:.2}\n",
-            affect_state.somatic_valence, affect_state.somatic_intensity
-        ));
-        if affect_state.somatic_valence <= -0.2 {
-            content
-                .push_str("Interpretation: slow down, prefer caution, and verify risky moves.\n");
-        } else if affect_state.somatic_valence >= 0.2 {
-            content.push_str(
-                "Interpretation: this strategy region has positive prior outcomes; keep momentum without skipping checks.\n",
-            );
-        }
-    }
-
-    Some(
-        PromptSection::new("daimon-state", content)
-            .with_priority(SectionPriority::Normal)
-            .with_placement(Placement::Middle)
-            .with_bidder(AttentionBidder::Daimon)
-            .with_hard_cap(256),
-    )
-}
 
 impl PlanRunner {
     // ── MultiAgentPool accessors (AGT-07) ────────────────────────────
@@ -19921,93 +18498,6 @@ impl PlanRunner {
     }
 }
 
-fn default_task_category(role: &str) -> &'static str {
-    if role.eq_ignore_ascii_case("Implementer") || role.eq_ignore_ascii_case("AutoFixer") {
-        "implementation"
-    } else if role.eq_ignore_ascii_case("Strategist") {
-        "planning"
-    } else if role.eq_ignore_ascii_case("Auditor") {
-        "review"
-    } else if role.eq_ignore_ascii_case("Scribe") {
-        "documentation"
-    } else {
-        "implementation"
-    }
-}
-
-fn claude_tool_allowlist(role: AgentRole) -> String {
-    claude_tool_allowlist_with(role, None)
-}
-
-fn claude_tool_allowlist_with(
-    role: AgentRole,
-    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
-) -> String {
-    use roko_core::tool::ToolRegistry;
-    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
-        registry.for_role(role).into_iter().cloned().collect()
-    } else {
-        let registry = StaticToolRegistry::new();
-        registry.for_role(role).into_iter().cloned().collect()
-    };
-    match ClaudeTranslator.render_tools(&tools) {
-        RenderedTools::CliFlag(csv) => csv,
-        _ => String::new(),
-    }
-}
-
-fn claude_task_tool_allowlist_with(
-    role: AgentRole,
-    allowed_tools: Option<&[String]>,
-    denied_tools: Option<&[String]>,
-    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
-) -> String {
-    use roko_core::tool::ToolRegistry;
-
-    let allowed: Option<HashSet<&str>> =
-        allowed_tools.map(|tools| tools.iter().map(String::as_str).collect());
-    let denied: Option<HashSet<&str>> =
-        denied_tools.map(|tools| tools.iter().map(String::as_str).collect());
-    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
-        registry
-            .for_role(role)
-            .into_iter()
-            .filter(|tool| {
-                allowed
-                    .as_ref()
-                    .is_none_or(|set| set.contains(tool.name.as_str()))
-            })
-            .filter(|tool| {
-                denied
-                    .as_ref()
-                    .is_none_or(|set| !set.contains(tool.name.as_str()))
-            })
-            .cloned()
-            .collect()
-    } else {
-        let registry = StaticToolRegistry::new();
-        registry
-            .for_role(role)
-            .into_iter()
-            .filter(|tool| {
-                allowed
-                    .as_ref()
-                    .is_none_or(|set| set.contains(tool.name.as_str()))
-            })
-            .filter(|tool| {
-                denied
-                    .as_ref()
-                    .is_none_or(|set| !set.contains(tool.name.as_str()))
-            })
-            .cloned()
-            .collect()
-    };
-
-    match ClaudeTranslator.render_tools(&tools) {
-        RenderedTools::CliFlag(csv) => csv,
-        _ => String::new(),
-    }
-}
 
 /// Summary of how tightly a review output stays anchored to the task spec.
 #[derive(Debug, Clone, PartialEq)]
@@ -20356,244 +18846,6 @@ where
 /// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
 /// (from roko-compose's `context_provider`). This bridges the two crate
 /// boundaries without creating a dependency.
-fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInput {
-    let (read_files, symbols, anti_patterns, prior_failures) = match &td.context {
-        Some(ctx) => (
-            ctx.read_files
-                .iter()
-                .map(|rf| roko_compose::ReadFileSpec {
-                    path: rf.path.clone(),
-                    lines: rf.lines.clone(),
-                    why: rf.why.clone(),
-                })
-                .collect(),
-            ctx.symbols.clone(),
-            ctx.anti_patterns.clone(),
-            ctx.prior_failures.clone(),
-        ),
-        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-    };
-
-    roko_compose::TaskInput {
-        id: td.id.clone(),
-        title: td.title.clone(),
-        description: td.description.clone(),
-        tier: td.tier.clone(),
-        files: td.files.clone(),
-        read_files,
-        symbols,
-        anti_patterns,
-        prior_failures,
-        verify_commands: td
-            .verify
-            .iter()
-            .map(|v| roko_compose::VerifySpec {
-                phase: v.phase.clone(),
-                command: v.command.clone(),
-                fail_msg: v.fail_msg.clone(),
-            })
-            .collect(),
-        acceptance: td.acceptance.clone(),
-        depends_on: td.depends_on.clone(),
-        max_loc: td.max_loc,
-    }
-}
-
-fn task_def_to_dag_task(task: &crate::task_parser::TaskDef, completed: bool) -> Task {
-    let mut dag_task = Task::new(task.id.clone(), task.title.clone());
-    dag_task.status = if completed {
-        TaskStatus::Done
-    } else {
-        TaskStatus::Pending
-    };
-    dag_task.files = task.files.clone();
-    dag_task.role = task.role.clone();
-    dag_task.acceptance = task.acceptance.clone();
-    dag_task.depends_on = task.depends_on.clone();
-    dag_task
-}
-
-/// Convert declared task context files into Claude CLI `--read` args.
-fn task_read_cli_args(task_def: &crate::task_parser::TaskDef) -> Vec<String> {
-    task_def
-        .context
-        .as_ref()
-        .map(|ctx| {
-            ctx.read_files
-                .iter()
-                .flat_map(|rf| ["--read".to_string(), rf.path.clone()])
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn file_contains_public_api(path: &str, content: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    if normalized.ends_with("/src/lib.rs") || normalized.ends_with("/src/mod.rs") {
-        return true;
-    }
-
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("pub fn ")
-            || trimmed.starts_with("pub struct ")
-            || trimmed.starts_with("pub enum ")
-            || trimmed.starts_with("pub trait ")
-            || trimmed.starts_with("pub type ")
-            || trimmed.starts_with("pub use ")
-            || trimmed.starts_with("pub mod ")
-    })
-}
-
-fn truncate_doc_snippet(content: &str, max_chars: usize) -> String {
-    let mut chars = content.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_none() {
-        content.to_string()
-    } else {
-        format!("{truncated}\n\n[... truncated]")
-    }
-}
-
-/// Load prior task outputs from `.roko/task-outputs/{task_id}.txt`.
-///
-/// When a task completes successfully, we persist a summary of its output
-/// so that downstream tasks can reference it. If no outputs exist on disk,
-/// returns an empty vec.
-fn load_prior_task_outputs(
-    workdir: &Path,
-    depends_on: &[String],
-) -> Vec<roko_compose::PriorTaskOutput> {
-    let output_dir = workdir.join(".roko").join("task-outputs");
-    let mut outputs = Vec::new();
-
-    for dep_id in depends_on {
-        let output_path = output_dir.join(format!("{dep_id}.txt"));
-        if let Ok(summary) = std::fs::read_to_string(&output_path) {
-            if !summary.trim().is_empty() {
-                outputs.push(roko_compose::PriorTaskOutput {
-                    task_id: dep_id.clone(),
-                    summary,
-                });
-            }
-        }
-    }
-
-    outputs
-}
-
-/// Maximum output size stored in task outputs and episode context (32 KB).
-const MAX_OUTPUT_BYTES: usize = 32_768;
-/// Number of output lines to include in task failure logs.
-const TASK_FAILURE_OUTPUT_TAIL_LINES: usize = 20;
-
-/// Truncate an agent output string, keeping the last N lines if it exceeds
-/// `MAX_OUTPUT_BYTES` and prepending a truncation header.
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_string();
-    }
-    // Keep the tail — the most recent output is usually most relevant.
-    let tail = &output[output.len() - MAX_OUTPUT_BYTES..];
-    // Find the first newline to avoid a partial first line.
-    let start = tail.find('\n').map_or(0, |i| i + 1);
-    format!(
-        "[truncated: original {} bytes, showing last {} bytes]\n{}",
-        output.len(),
-        MAX_OUTPUT_BYTES,
-        &tail[start..]
-    )
-}
-
-/// Return the last `line_count` lines from `output`, preserving order.
-fn tail_output_lines(output: &str, line_count: usize) -> String {
-    if output.is_empty() || line_count == 0 {
-        return String::new();
-    }
-
-    let mut lines: Vec<&str> = output.lines().rev().take(line_count).collect();
-    lines.reverse();
-    lines.join("\n")
-}
-
-/// Pull likely Rust symbol names out of task text for skill extraction.
-fn extract_task_symbols(text: &str) -> Vec<String> {
-    let mut symbols = Vec::new();
-    let mut seen = HashSet::new();
-
-    for raw in text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')) {
-        if raw.is_empty() {
-            continue;
-        }
-
-        for candidate in raw.split("::") {
-            let candidate =
-                candidate.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
-            if candidate.len() < 3 {
-                continue;
-            }
-            let has_underscore = candidate.contains('_');
-            let has_upper = candidate.chars().any(|ch| ch.is_ascii_uppercase());
-            if !has_underscore && !has_upper {
-                continue;
-            }
-
-            let candidate = candidate.to_string();
-            if seen.insert(candidate.clone()) {
-                symbols.push(candidate);
-            }
-        }
-    }
-
-    symbols
-}
-
-/// Add task failure context to an error chain.
-fn with_task_failure_context(
-    error: anyhow::Error,
-    task_id: &str,
-    phase: &str,
-    gate: &str,
-    output_tail: Option<&str>,
-) -> anyhow::Error {
-    let error = error
-        .context(format!("task_id={task_id}"))
-        .context(format!("phase={phase}"))
-        .context(format!("gate={gate}"));
-
-    match output_tail {
-        Some(tail) if !tail.trim().is_empty() => error.context(format!(
-            "agent_output_tail_last_{}_lines:\n{}",
-            TASK_FAILURE_OUTPUT_TAIL_LINES, tail
-        )),
-        _ => error.context(format!(
-            "agent_output_tail_last_{}_lines: <unavailable>",
-            TASK_FAILURE_OUTPUT_TAIL_LINES
-        )),
-    }
-}
-
-/// Persist a task's output summary so downstream tasks can reference it.
-fn save_task_output(
-    workdir: &Path,
-    task_id: &str,
-    output: &str,
-    hub: Option<&roko_core::StateHubSender>,
-) {
-    let output_dir = workdir.join(".roko").join("task-outputs");
-    let _ = std::fs::create_dir_all(&output_dir);
-    let output_path = output_dir.join(format!("{task_id}.txt"));
-    let summary = truncate_output(output);
-    let _ = std::fs::write(output_path, &summary);
-
-    if let Some(hub) = hub {
-        let lines: Vec<String> = summary.lines().map(String::from).collect();
-        hub.publish(roko_core::DashboardEvent::TaskOutputAppended {
-            task_id: task_id.to_string(),
-            lines,
-        });
-    }
-}
 
 fn attestation_signing_key_from_env() -> Option<SigningKey> {
     let seed = std::env::var("ROKO_ATTEST_SIGNING_KEY_HEX").ok()?;
