@@ -1179,7 +1179,8 @@ pub struct RunConfig {
     /// Agent feed tracking registry.
     pub feed_registry: Option<Arc<std::sync::Mutex<roko_core::FeedRegistry>>>,
     /// Contextual bandit policy for recording model-selection feedback.
-    pub bandit_policy: Option<Arc<std::sync::Mutex<roko_learn::contextual_bandit::ContextualBanditPolicy>>>,
+    pub bandit_policy:
+        Option<Arc<std::sync::Mutex<roko_learn::contextual_bandit::ContextualBanditPolicy>>>,
 }
 
 impl Default for RunConfig {
@@ -1221,9 +1222,18 @@ impl std::fmt::Debug for RunConfig {
             .field("max_gate_rung", &self.max_gate_rung)
             .field("max_plan_usd", &self.max_plan_usd)
             .field("max_turn_usd", &self.max_turn_usd)
-            .field("extension_chain", &self.extension_chain.as_ref().map(|_| ".."))
-            .field("cascade_router", &self.cascade_router.as_ref().map(|_| ".."))
-            .field("connector_registry", &self.connector_registry.as_ref().map(|_| ".."))
+            .field(
+                "extension_chain",
+                &self.extension_chain.as_ref().map(|_| ".."),
+            )
+            .field(
+                "cascade_router",
+                &self.cascade_router.as_ref().map(|_| ".."),
+            )
+            .field(
+                "connector_registry",
+                &self.connector_registry.as_ref().map(|_| ".."),
+            )
             .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
             .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
             .finish()
@@ -1396,7 +1406,10 @@ mod tests {
     #[test]
     fn event_category_runner_mapping() {
         let event = RunnerEvent::plan_started("run-1", "plan-a");
-        assert_eq!(EventCategory::from_runner_event(&event), EventCategory::Plan);
+        assert_eq!(
+            EventCategory::from_runner_event(&event),
+            EventCategory::Plan
+        );
 
         let event = RunnerEvent::resume_marker(
             "run-1",
@@ -1422,7 +1435,10 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         };
-        assert_eq!(EventCategory::from_agent_event(&token), EventCategory::Token);
+        assert_eq!(
+            EventCategory::from_agent_event(&token),
+            EventCategory::Token
+        );
 
         let tool = AgentEvent::ToolCall {
             id: "1".into(),

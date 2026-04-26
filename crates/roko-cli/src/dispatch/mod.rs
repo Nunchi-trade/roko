@@ -263,11 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatcher_plan_and_dispatch_round_trip() {
-        let dispatcher = Dispatcher::new(
-            None,
-            PromptAssembler::minimal(),
-            WarmPool::new(0),
-        );
+        let dispatcher = Dispatcher::new(None, PromptAssembler::minimal(), WarmPool::new(0));
         let task = make_task("t-1");
         let ctx = make_ctx();
         let plan = dispatcher.plan(&task, &ctx).expect("plan");
@@ -284,11 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn force_backend_overrides_router() {
-        let dispatcher = Dispatcher::new(
-            None,
-            PromptAssembler::minimal(),
-            WarmPool::new(0),
-        );
+        let dispatcher = Dispatcher::new(None, PromptAssembler::minimal(), WarmPool::new(0));
         let task = make_task("t-2");
         let ctx = DispatchContext {
             force_backend: Some("gpt-5".into()),

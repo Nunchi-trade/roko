@@ -68,7 +68,10 @@ pub fn render_code_block(code: &str, language: Option<&str>, theme: &Theme) -> V
     lines.push(Line::from(vec![
         Span::styled(symbols::BAR.to_string(), bar_style),
         Span::raw(" "),
-        Span::styled(format!("└{}", "─".repeat(32 + lang_label.len())), border_style),
+        Span::styled(
+            format!("└{}", "─".repeat(32 + lang_label.len())),
+            border_style,
+        ),
     ]));
     lines
 }
@@ -141,9 +144,7 @@ impl MdRenderer {
             heading_style: Style::default()
                 .fg(Theme::ROSE_BRIGHT)
                 .add_modifier(Modifier::BOLD),
-            code_span_style: Style::default()
-                .fg(Theme::BONE)
-                .add_modifier(Modifier::DIM),
+            code_span_style: Style::default().fg(Theme::BONE).add_modifier(Modifier::DIM),
             link_style: Style::default()
                 .fg(Theme::DREAM)
                 .add_modifier(Modifier::UNDERLINED),
@@ -205,10 +206,7 @@ impl MdRenderer {
             Event::Code(code) => {
                 if self.in_table {
                     if let Some(cell) = self.table_row.last_mut() {
-                        cell.push(Span::styled(
-                            format!("`{code}`"),
-                            self.code_span_style,
-                        ));
+                        cell.push(Span::styled(format!("`{code}`"), self.code_span_style));
                     }
                 } else {
                     self.current_spans
@@ -419,10 +417,13 @@ impl MdRenderer {
         }
 
         // Top border
-        let top: String = widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("┬");
-        self.lines.push(Line::from(vec![
-            Span::styled(format!("  ┌{top}┐"), border),
-        ]));
+        let top: String = widths
+            .iter()
+            .map(|w| "─".repeat(*w))
+            .collect::<Vec<_>>()
+            .join("┬");
+        self.lines
+            .push(Line::from(vec![Span::styled(format!("  ┌{top}┐"), border)]));
 
         for (row_idx, row) in self.table_rows.iter().enumerate() {
             // Data row
@@ -450,24 +451,36 @@ impl MdRenderer {
 
             // Separator after header
             if row_idx == 0 {
-                let sep: String = widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("┼");
-                self.lines.push(Line::from(vec![
-                    Span::styled(format!("  ├{sep}┤"), border),
-                ]));
+                let sep: String = widths
+                    .iter()
+                    .map(|w| "─".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("┼");
+                self.lines
+                    .push(Line::from(vec![Span::styled(format!("  ├{sep}┤"), border)]));
             }
         }
 
         // Bottom border
-        let bottom: String = widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("┴");
-        self.lines.push(Line::from(vec![
-            Span::styled(format!("  └{bottom}┘"), border),
-        ]));
+        let bottom: String = widths
+            .iter()
+            .map(|w| "─".repeat(*w))
+            .collect::<Vec<_>>()
+            .join("┴");
+        self.lines.push(Line::from(vec![Span::styled(
+            format!("  └{bottom}┘"),
+            border,
+        )]));
     }
 
     fn finish(mut self) -> Vec<Line<'static>> {
         self.flush_line();
         // Trim trailing blank lines
-        while self.lines.last().is_some_and(|l| l.spans.is_empty() || l.to_string().trim().is_empty()) {
+        while self
+            .lines
+            .last()
+            .is_some_and(|l| l.spans.is_empty() || l.to_string().trim().is_empty())
+        {
             self.lines.pop();
         }
         self.lines
@@ -507,7 +520,11 @@ mod tests {
         // Should have: top border, header, separator, 2 data rows, bottom border
         assert!(lines.len() >= 6, "got {} lines", lines.len());
         // Check that table borders are present
-        let all_text: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let all_text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(all_text.contains('┌'), "missing top border");
         assert!(all_text.contains('┘'), "missing bottom border");
         assert!(all_text.contains('│'), "missing column separator");

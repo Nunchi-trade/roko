@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::runner::projection::{ProjectionEvent, PROJECTION_OUTPUT_PREVIEW_BYTES};
+use crate::runner::projection::{PROJECTION_OUTPUT_PREVIEW_BYTES, ProjectionEvent};
 use crate::runner::types::EventCategory;
 
 /// Counters surfaced by [`DashboardProjection::stats`].
@@ -259,8 +259,7 @@ mod tests {
         let snip = bridge.map(&e).expect("mapped");
         assert!(snip.preview.is_some());
         assert!(
-            snip.preview.unwrap().len()
-                <= PROJECTION_OUTPUT_PREVIEW_BYTES + 4 // ellipsis bytes
+            snip.preview.unwrap().len() <= PROJECTION_OUTPUT_PREVIEW_BYTES + 4 // ellipsis bytes
         );
         assert_eq!(bridge.stats().truncated, 1);
     }

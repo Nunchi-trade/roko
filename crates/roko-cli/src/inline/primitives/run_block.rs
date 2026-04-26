@@ -177,10 +177,7 @@ impl RunBlockData {
 
         // Deposited knowledge
         if self.deposited_count > 0 {
-            let path = self
-                .deposited_path
-                .as_deref()
-                .unwrap_or("knowledge store");
+            let path = self.deposited_path.as_deref().unwrap_or("knowledge store");
             lines.push(styled::section_end(
                 theme,
                 "deposited",

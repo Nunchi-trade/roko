@@ -29,7 +29,9 @@ pub fn section_start(
         Span::raw(" "),
         Span::styled(
             label.to_string(),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(value.to_string(), theme.text()),
@@ -51,10 +53,7 @@ pub fn continuation(
     let mut spans = vec![
         Span::styled(symbols::BAR.to_string(), theme.muted()),
         Span::raw(" "),
-        Span::styled(
-            format!("{label:<10}"),
-            Style::default().fg(Theme::TEXT_DIM),
-        ),
+        Span::styled(format!("{label:<10}"), Style::default().fg(Theme::TEXT_DIM)),
         Span::styled(value.to_string(), theme.text()),
     ];
     if let Some(d) = detail {
@@ -69,10 +68,7 @@ pub fn section_end(theme: &Theme, label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(symbols::END.to_string(), theme.muted()),
         Span::raw(" "),
-        Span::styled(
-            format!("{label:<10}"),
-            Style::default().fg(Theme::TEXT_DIM),
-        ),
+        Span::styled(format!("{label:<10}"), Style::default().fg(Theme::TEXT_DIM)),
         Span::styled(value.to_string(), theme.text()),
     ])
 }
@@ -80,7 +76,11 @@ pub fn section_end(theme: &Theme, label: &str, value: &str) -> Line<'static> {
 /// A gate verdict item: `gate_name ✔` or `gate_name ✖`
 pub fn gate_verdict(theme: &Theme, name: &str, passed: bool) -> Vec<Span<'static>> {
     let symbol = if passed { symbols::PASS } else { symbols::FAIL };
-    let style = if passed { theme.success() } else { theme.danger() };
+    let style = if passed {
+        theme.success()
+    } else {
+        theme.danger()
+    };
     vec![
         Span::styled(name.to_string(), theme.text()),
         Span::raw(" "),
@@ -144,10 +144,7 @@ pub fn spinner_line(theme: &Theme, tick: u64, message: &str, elapsed_s: f64) -> 
     Line::from(vec![
         Span::styled(symbols::BAR.to_string(), theme.muted()),
         Span::raw(" "),
-        Span::styled(
-            symbols::spinner_frame(tick).to_string(),
-            theme.accent(),
-        ),
+        Span::styled(symbols::spinner_frame(tick).to_string(), theme.accent()),
         Span::raw(" "),
         Span::styled(message.to_string(), theme.text()),
         Span::styled(
@@ -167,31 +164,19 @@ pub fn status_bar(
     progress: Option<f64>,
 ) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(
-            format!("${cost_usd:.4}"),
-            Style::default().fg(Theme::SAGE),
-        ),
-        Span::styled(
-            format!("  {}  ", symbols::SEP),
-            theme.muted(),
-        ),
+        Span::styled(format!("${cost_usd:.4}"), Style::default().fg(Theme::SAGE)),
+        Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
         Span::styled(
             format!("{input_tokens} in / {output_tokens} out"),
             Style::default().fg(Theme::TEXT_DIM),
         ),
-        Span::styled(
-            format!("  {}  ", symbols::SEP),
-            theme.muted(),
-        ),
+        Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
         Span::styled(model.to_string(), theme.info()),
     ];
     if let Some(p) = progress {
         let bar = symbols::progress_bar(p, 10);
         let pct = (p * 100.0).round() as u32;
-        spans.push(Span::styled(
-            format!("  {}  ", symbols::SEP),
-            theme.muted(),
-        ));
+        spans.push(Span::styled(format!("  {}  ", symbols::SEP), theme.muted()));
         spans.push(Span::styled(bar, theme.accent()));
         spans.push(Span::styled(
             format!(" {pct}%"),
@@ -265,10 +250,7 @@ mod tests {
     #[test]
     fn gates_line_renders() {
         let theme = Theme::dark();
-        let verdicts = vec![
-            ("compile".to_string(), true),
-            ("test".to_string(), false),
-        ];
+        let verdicts = vec![("compile".to_string(), true), ("test".to_string(), false)];
         let line = gates_line(&theme, &verdicts);
         assert!(line.spans.len() > 3);
     }

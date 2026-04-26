@@ -62,7 +62,6 @@ uuid = { workspace = true }
 parking_lot = { workspace = true }
 gethostname = "0.5"
 validator = { version = "0.20", features = ["derive"] }
-gethostname = "1.1.0"
 dirs = "6"
 
 [dev-dependencies]

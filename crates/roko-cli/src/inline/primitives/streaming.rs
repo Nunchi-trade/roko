@@ -7,11 +7,11 @@
 //! into scrollback as part of a `RunBlock`.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
-    Frame,
 };
 
 use crate::tui::Theme;
@@ -136,8 +136,8 @@ impl StreamingState {
     /// - Bottom 1 line: status bar
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let chunks = Layout::vertical([
-            Constraint::Min(1),      // streaming content
-            Constraint::Length(1),   // status bar
+            Constraint::Min(1),    // streaming content
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -181,7 +181,9 @@ impl StreamingState {
         if let Some(last) = lines.last_mut() {
             last.spans.push(Span::styled(
                 symbols::CURSOR,
-                Style::default().fg(Theme::ROSE).add_modifier(Modifier::SLOW_BLINK),
+                Style::default()
+                    .fg(Theme::ROSE)
+                    .add_modifier(Modifier::SLOW_BLINK),
             ));
         }
 
@@ -217,10 +219,7 @@ impl StreamingState {
                 format!("{elapsed:.1}s"),
                 Style::default().fg(Theme::TEXT_GHOST),
             ),
-            Span::styled(
-                format!("  {}  ", symbols::SEP),
-                theme.muted(),
-            ),
+            Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
         ];
         spans.extend(status.spans);
 

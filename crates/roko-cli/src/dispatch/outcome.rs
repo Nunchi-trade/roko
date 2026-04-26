@@ -56,7 +56,7 @@ impl AgentOutcome {
             return false;
         }
         match self.exit_code {
-            None => true,        // in-process providers — no exit code
+            None => true, // in-process providers — no exit code
             Some(0) => true,
             Some(_) => false,
         }

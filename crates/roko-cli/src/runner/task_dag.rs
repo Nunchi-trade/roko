@@ -116,7 +116,9 @@ impl DagConfig {
         // Attempt 0 is the first retry → 1s. Attempt 1 → 2s. Attempt 2 → 4s.
         let shift = attempt.min(16);
         let factor = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
-        let raw = self.retry_base.saturating_mul(factor.min(u32::MAX as u64) as u32);
+        let raw = self
+            .retry_base
+            .saturating_mul(factor.min(u32::MAX as u64) as u32);
         std::cmp::min(raw, self.retry_max)
     }
 }
@@ -302,11 +304,7 @@ impl TaskDag {
 
     /// Mark every non-terminal task in this plan as skipped because the
     /// plan timed out. Returns the ids that were newly skipped.
-    pub fn mark_plan_timed_out(
-        &mut self,
-        plan_id: &str,
-        all_tasks: &[&TaskDef],
-    ) -> Vec<TaskId> {
+    pub fn mark_plan_timed_out(&mut self, plan_id: &str, all_tasks: &[&TaskDef]) -> Vec<TaskId> {
         let plan = self.plan_mut(plan_id);
         let mut newly_skipped = Vec::new();
         for task in all_tasks {
@@ -394,7 +392,10 @@ mod tests {
 
         // Initially, only A is ready.
         let ready = dag.ready_tasks("p1", &tasks, &[], &[]);
-        assert_eq!(ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["A"]);
+        assert_eq!(
+            ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["A"]
+        );
 
         // After A completes, B and C become ready.
         let ready = dag.ready_tasks("p1", &tasks, &["A".into()], &[]);
@@ -403,11 +404,17 @@ mod tests {
 
         // After A and B, only C is ready (D still blocked on C).
         let ready = dag.ready_tasks("p1", &tasks, &["A".into(), "B".into()], &[]);
-        assert_eq!(ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["C"]);
+        assert_eq!(
+            ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["C"]
+        );
 
         // After A, B, C all done, D is ready.
         let ready = dag.ready_tasks("p1", &tasks, &["A".into(), "B".into(), "C".into()], &[]);
-        assert_eq!(ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["D"]);
+        assert_eq!(
+            ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["D"]
+        );
     }
 
     #[test]

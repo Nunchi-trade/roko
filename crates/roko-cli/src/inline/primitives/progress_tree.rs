@@ -116,7 +116,9 @@ impl ProgressTreeData {
             Span::raw(" "),
             Span::styled(
                 "plan".to_string(),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(self.plan_name.clone(), theme.text()),
@@ -127,14 +129,21 @@ impl ProgressTreeData {
             ),
             Span::styled(format!("  {}  ", symbols::SEP), theme.muted()),
             Span::styled(
-                format!("{wave_count} wave{}", if wave_count == 1 { "" } else { "s" }),
+                format!(
+                    "{wave_count} wave{}",
+                    if wave_count == 1 { "" } else { "s" }
+                ),
                 Style::default().fg(Theme::TEXT_DIM),
             ),
         ]));
 
         for (wi, wave) in self.waves.iter().enumerate() {
             let is_last_wave = wi == self.waves.len() - 1;
-            let wave_connector = if is_last_wave { symbols::END } else { symbols::BRANCH };
+            let wave_connector = if is_last_wave {
+                symbols::END
+            } else {
+                symbols::BRANCH
+            };
             let done = wave.done_count();
             let total_in_wave = wave.tasks.len();
             let progress = wave.progress();
@@ -170,10 +179,18 @@ impl ProgressTreeData {
             ]));
 
             // Tasks under this wave
-            let indent_prefix = if is_last_wave { "  " } else { &format!("{} ", symbols::BAR) };
+            let indent_prefix = if is_last_wave {
+                "  "
+            } else {
+                &format!("{} ", symbols::BAR)
+            };
             for (ti, task) in wave.tasks.iter().enumerate() {
                 let is_last_task = ti == wave.tasks.len() - 1;
-                let task_connector = if is_last_task { symbols::END } else { symbols::BRANCH };
+                let task_connector = if is_last_task {
+                    symbols::END
+                } else {
+                    symbols::BRANCH
+                };
                 lines.push(render_task(theme, indent_prefix, task_connector, task));
             }
         }
@@ -182,12 +199,7 @@ impl ProgressTreeData {
     }
 }
 
-fn render_task(
-    theme: &Theme,
-    indent: &str,
-    connector: &str,
-    task: &TreeTask,
-) -> Line<'static> {
+fn render_task(theme: &Theme, indent: &str, connector: &str, task: &TreeTask) -> Line<'static> {
     let id_width = 4;
     let title_width = 20;
 
@@ -199,10 +211,7 @@ fn render_task(
             format!("{:<w$}", task.id, w = id_width),
             Style::default().fg(Theme::TEXT_DIM),
         ),
-        Span::styled(
-            format!("{:<w$}", task.title, w = title_width),
-            theme.text(),
-        ),
+        Span::styled(format!("{:<w$}", task.title, w = title_width), theme.text()),
     ];
 
     match &task.status {
@@ -220,11 +229,17 @@ fn render_task(
         }
         TaskProgress::Running { elapsed_s } => {
             spans.push(Span::styled(
-                format!("{} running ({elapsed_s:.1}s)", symbols::progress_bar(0.5, 6)),
+                format!(
+                    "{} running ({elapsed_s:.1}s)",
+                    symbols::progress_bar(0.5, 6)
+                ),
                 theme.accent(),
             ));
         }
-        TaskProgress::Done { cost_usd, duration_s } => {
+        TaskProgress::Done {
+            cost_usd,
+            duration_s,
+        } => {
             spans.push(Span::styled(symbols::PASS.to_string(), theme.success()));
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -258,22 +273,48 @@ mod tests {
                 TreeWave {
                     number: 1,
                     tasks: vec![
-                        TreeTask { id: "T01".into(), title: "dep-scan".into(), status: TaskProgress::Done { cost_usd: 0.012, duration_s: 2.1 } },
-                        TreeTask { id: "T02".into(), title: "secret-scan".into(), status: TaskProgress::Done { cost_usd: 0.008, duration_s: 1.4 } },
+                        TreeTask {
+                            id: "T01".into(),
+                            title: "dep-scan".into(),
+                            status: TaskProgress::Done {
+                                cost_usd: 0.012,
+                                duration_s: 2.1,
+                            },
+                        },
+                        TreeTask {
+                            id: "T02".into(),
+                            title: "secret-scan".into(),
+                            status: TaskProgress::Done {
+                                cost_usd: 0.008,
+                                duration_s: 1.4,
+                            },
+                        },
                     ],
                 },
                 TreeWave {
                     number: 2,
                     tasks: vec![
-                        TreeTask { id: "T03".into(), title: "integration".into(), status: TaskProgress::Running { elapsed_s: 6.2 } },
-                        TreeTask { id: "T04".into(), title: "diff-review".into(), status: TaskProgress::Blocked { blocked_by: "T03".into() } },
+                        TreeTask {
+                            id: "T03".into(),
+                            title: "integration".into(),
+                            status: TaskProgress::Running { elapsed_s: 6.2 },
+                        },
+                        TreeTask {
+                            id: "T04".into(),
+                            title: "diff-review".into(),
+                            status: TaskProgress::Blocked {
+                                blocked_by: "T03".into(),
+                            },
+                        },
                     ],
                 },
                 TreeWave {
                     number: 3,
-                    tasks: vec![
-                        TreeTask { id: "T05".into(), title: "chain-anchor".into(), status: TaskProgress::Pending },
-                    ],
+                    tasks: vec![TreeTask {
+                        id: "T05".into(),
+                        title: "chain-anchor".into(),
+                        status: TaskProgress::Pending,
+                    }],
                 },
             ],
         };
@@ -289,8 +330,19 @@ mod tests {
         let wave = TreeWave {
             number: 1,
             tasks: vec![
-                TreeTask { id: "T01".into(), title: "a".into(), status: TaskProgress::Done { cost_usd: 0.01, duration_s: 1.0 } },
-                TreeTask { id: "T02".into(), title: "b".into(), status: TaskProgress::Pending },
+                TreeTask {
+                    id: "T01".into(),
+                    title: "a".into(),
+                    status: TaskProgress::Done {
+                        cost_usd: 0.01,
+                        duration_s: 1.0,
+                    },
+                },
+                TreeTask {
+                    id: "T02".into(),
+                    title: "b".into(),
+                    status: TaskProgress::Pending,
+                },
             ],
         };
         assert_eq!(wave.done_count(), 1);

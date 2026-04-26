@@ -101,7 +101,10 @@ impl SessionSummaryData {
         lines.push(styled::continuation(
             theme,
             "tokens",
-            &format!("{} in / {} out", self.cost.input_tokens, self.cost.output_tokens),
+            &format!(
+                "{} in / {} out",
+                self.cost.input_tokens, self.cost.output_tokens
+            ),
             None,
         ));
 
@@ -109,7 +112,11 @@ impl SessionSummaryData {
         if self.gates_total > 0 {
             let gates_text = format!("{}/{} passed", self.gates_passed, self.gates_total);
             let gates_detail = if self.replans > 0 {
-                Some(format!("{} replan{}", self.replans, if self.replans == 1 { "" } else { "s" }))
+                Some(format!(
+                    "{} replan{}",
+                    self.replans,
+                    if self.replans == 1 { "" } else { "s" }
+                ))
             } else {
                 None
             };

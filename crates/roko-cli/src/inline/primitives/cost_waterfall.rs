@@ -57,7 +57,12 @@ impl CostWaterfallData {
     pub fn to_lines(&self, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.entries.len() + 4);
 
-        lines.push(styled::section_start(theme, "cost waterfall", "this session", None));
+        lines.push(styled::section_start(
+            theme,
+            "cost waterfall",
+            "this session",
+            None,
+        ));
 
         // Baseline
         lines.push(styled::continuation(
@@ -82,18 +87,9 @@ impl CostWaterfallData {
 
             lines.push(Line::from(vec![
                 Span::styled(connector, theme.muted()),
-                Span::styled(
-                    format!("{:<28}", entry.label),
-                    theme.text(),
-                ),
-                Span::styled(
-                    format!("{:<12}", savings_str),
-                    theme.success(),
-                ),
-                Span::styled(
-                    factor_str,
-                    Style::default().fg(Theme::TEXT_DIM),
-                ),
+                Span::styled(format!("{:<28}", entry.label), theme.text()),
+                Span::styled(format!("{:<12}", savings_str), theme.success()),
+                Span::styled(factor_str, Style::default().fg(Theme::TEXT_DIM)),
             ]));
         }
 
@@ -143,10 +139,26 @@ mod tests {
         let data = CostWaterfallData {
             baseline_usd: 2.61,
             entries: vec![
-                WaterfallEntry { label: "prompt caching".into(), savings_usd: 1.31, factor: 5.0 },
-                WaterfallEntry { label: "cascade routing (haiku)".into(), savings_usd: 0.78, factor: 3.1 },
-                WaterfallEntry { label: "knowledge pre-load".into(), savings_usd: 0.29, factor: 1.4 },
-                WaterfallEntry { label: "gate early-exit".into(), savings_usd: 0.14, factor: 1.2 },
+                WaterfallEntry {
+                    label: "prompt caching".into(),
+                    savings_usd: 1.31,
+                    factor: 5.0,
+                },
+                WaterfallEntry {
+                    label: "cascade routing (haiku)".into(),
+                    savings_usd: 0.78,
+                    factor: 3.1,
+                },
+                WaterfallEntry {
+                    label: "knowledge pre-load".into(),
+                    savings_usd: 0.29,
+                    factor: 1.4,
+                },
+                WaterfallEntry {
+                    label: "gate early-exit".into(),
+                    savings_usd: 0.14,
+                    factor: 1.2,
+                },
             ],
             actual_usd: 0.084,
         };

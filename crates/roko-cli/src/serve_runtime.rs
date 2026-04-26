@@ -402,20 +402,20 @@ fn build_runner_config(
         .unwrap_or_else(|| PathBuf::from("claude"));
 
     // Initialize Phase 0 subsystems.
-    let router_path = workdir.join(".roko").join("learn").join("cascade-router.json");
+    let router_path = workdir
+        .join(".roko")
+        .join("learn")
+        .join("cascade-router.json");
     let model_slugs = vec![model.clone(), "claude-haiku-4-5".to_string()];
-    let cascade_router = Arc::new(
-        roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
-    );
-    let extension_chain = Arc::new(
-        tokio::sync::Mutex::new(roko_core::extension::ExtensionChain::new()),
-    );
-    let connector_registry = Arc::new(
-        std::sync::Mutex::new(roko_core::ConnectorRegistry::new()),
-    );
-    let feed_registry = Arc::new(
-        std::sync::Mutex::new(roko_core::FeedRegistry::new()),
-    );
+    let cascade_router = Arc::new(roko_learn::cascade_router::CascadeRouter::load_or_new(
+        &router_path,
+        model_slugs,
+    ));
+    let extension_chain = Arc::new(tokio::sync::Mutex::new(
+        roko_core::extension::ExtensionChain::new(),
+    ));
+    let connector_registry = Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
+    let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
     let bandit_policy = Arc::new(std::sync::Mutex::new(
         roko_learn::contextual_bandit::ContextualBanditPolicy::new({
             let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();

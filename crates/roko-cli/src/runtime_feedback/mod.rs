@@ -26,8 +26,8 @@
 //! event distribution. Errors surface through tracing and a per-sink
 //! counter so observability can flag stuck subsystems.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 

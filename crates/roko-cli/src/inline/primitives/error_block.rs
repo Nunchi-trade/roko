@@ -82,7 +82,9 @@ impl ErrorBlockData {
             Span::raw("  "),
             Span::styled(
                 format!("{}: ", self.source),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(self.summary.clone(), style),
         ]));
@@ -110,9 +112,10 @@ impl ErrorBlockData {
 
         // Retry info
         if let Some(ref retry) = self.retry {
-            lines.push(Line::from(vec![
-                Span::styled(symbols::BAR.to_string(), theme.muted()),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                symbols::BAR.to_string(),
+                theme.muted(),
+            )]));
             lines.push(Line::from(vec![
                 Span::styled(symbols::BAR.to_string(), theme.muted()),
                 Span::raw("    "),

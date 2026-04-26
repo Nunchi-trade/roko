@@ -217,7 +217,10 @@ mod tests {
         let pool = WarmPool::new(2);
         pool.insert("scribe", agent("expired", 0));
         std::thread::sleep(Duration::from_millis(2));
-        assert!(pool.take("scribe").is_none(), "expired agent must not be returned");
+        assert!(
+            pool.take("scribe").is_none(),
+            "expired agent must not be returned"
+        );
     }
 
     #[test]

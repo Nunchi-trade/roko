@@ -157,9 +157,7 @@ impl InlineTerminal {
         let style = ratatui::style::Style::default().fg(
             ratatui::style::Color::Rgb(55, 42, 55), // TEXT_PHANTOM
         );
-        self.push_line(Line::from(vec![
-            Span::styled("─".repeat(width), style),
-        ]))
+        self.push_line(Line::from(vec![Span::styled("─".repeat(width), style)]))
     }
 
     /// Restore the terminal to its normal state.

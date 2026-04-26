@@ -27,8 +27,8 @@ use std::sync::Arc;
 use roko_core::agent::ModelSpec;
 use roko_learn::cascade_router::CascadeRouter;
 
-use super::outcome::DispatchError;
 use super::DispatchContext;
+use super::outcome::DispatchError;
 use crate::task_parser::TaskDef;
 
 // ─── Inputs ────────────────────────────────────────────────────────────

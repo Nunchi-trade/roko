@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -253,7 +253,16 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
             if let Event::Key(key) = event::read().context("read event")? {
                 match session.phase {
                     Phase::Input => {
-                        if handle_input_key(key, &mut session, &mut term, &theme, &client, serve_url).await? {
+                        if handle_input_key(
+                            key,
+                            &mut session,
+                            &mut term,
+                            &theme,
+                            &client,
+                            serve_url,
+                        )
+                        .await?
+                        {
                             break; // exit signal
                         }
                     }
@@ -287,18 +296,15 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                 Ok(Ok(reply)) => {
                     push_agent_response(&mut term, &theme, &reply, &session.agent_id)?;
                     let approx_tokens = (reply.len() as u64) / 4;
-                    session.cost.record_run(0.0, approx_tokens, approx_tokens, "unknown", 0.0);
+                    session
+                        .cost
+                        .record_run(0.0, approx_tokens, approx_tokens, "unknown", 0.0);
                     session.phase = Phase::Input;
                     session.response_rx = None;
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
-                    term.push_lines(&[styled::continuation(
-                        &theme,
-                        "error",
-                        &err,
-                        None,
-                    )])?;
+                    term.push_lines(&[styled::continuation(&theme, "error", &err, None)])?;
                     session.phase = Phase::Input;
                     session.response_rx = None;
                     term.push_blank()?;
@@ -345,7 +351,10 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
             )
         };
         term.push_lines(&[styled::section_start(
-            &theme, "session", &summary_line, None,
+            &theme,
+            "session",
+            &summary_line,
+            None,
         )])?;
     }
 
@@ -401,16 +410,9 @@ async fn handle_input_key(
             let serve_url_owned = serve_url.to_string();
             let agent_id_owned = session.agent_id.clone();
             tokio::spawn(async move {
-                let result = send_and_receive(
-                    &client_clone,
-                    &serve_url_owned,
-                    &agent_id_owned,
-                    &text,
-                )
-                .await;
-                let _ = tx
-                    .send(result.map_err(|e| e.to_string()))
-                    .await;
+                let result =
+                    send_and_receive(&client_clone, &serve_url_owned, &agent_id_owned, &text).await;
+                let _ = tx.send(result.map_err(|e| e.to_string())).await;
             });
         }
 
@@ -483,12 +485,7 @@ fn handle_slash_command(
             let ratio = session.cost.savings_ratio();
             term.push_lines(&[
                 styled::section_start(theme, "cost", "session summary", None),
-                styled::continuation(
-                    theme,
-                    "turns",
-                    &session.cost.run_count.to_string(),
-                    None,
-                ),
+                styled::continuation(theme, "turns", &session.cost.run_count.to_string(), None),
                 styled::continuation(
                     theme,
                     "total",
@@ -498,14 +495,13 @@ fn handle_slash_command(
                 styled::continuation(
                     theme,
                     "tokens",
-                    &format!("{} in / {} out", session.cost.input_tokens, session.cost.output_tokens),
+                    &format!(
+                        "{} in / {} out",
+                        session.cost.input_tokens, session.cost.output_tokens
+                    ),
                     None,
                 ),
-                styled::section_end(
-                    theme,
-                    "savings",
-                    &format!("{ratio:.1}x vs baseline"),
-                ),
+                styled::section_end(theme, "savings", &format!("{ratio:.1}x vs baseline")),
             ])?;
         }
         "/clear" => {
@@ -536,11 +532,7 @@ fn render_viewport(frame: &mut Frame<'_>, session: &ChatSession, theme: &Theme) 
     match session.phase {
         Phase::Input => render_input(frame, area, session, theme),
         Phase::Thinking => {
-            let chunks = Layout::vertical([
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
+            let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
 
             let spinner = styled::spinner_line(
                 theme,
@@ -556,9 +548,10 @@ fn render_viewport(frame: &mut Frame<'_>, session: &ChatSession, theme: &Theme) 
         }
         Phase::Done => {
             frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("bye.".to_string(), theme.muted()),
-                ])),
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "bye.".to_string(),
+                    theme.muted(),
+                )])),
                 area,
             );
         }
@@ -580,7 +573,9 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
     let input_line = Line::from(vec![
         Span::styled(
             format!("{} ", symbols::PROMPT),
-            Style::default().fg(Theme::ROSE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Theme::ROSE)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(before_cursor.to_string(), theme.text()),
         Span::styled(
@@ -595,7 +590,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
         ),
         Span::styled(
             if after_cursor.len() > 1 {
-                after_cursor[after_cursor.chars().next().map(|c| c.len_utf8()).unwrap_or(1)..].to_string()
+                after_cursor[after_cursor
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1)..]
+                    .to_string()
             } else {
                 String::new()
             },
@@ -608,11 +608,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme: &Theme) {
-    let model = session
-        .cost
-        .primary_model()
-        .unwrap_or("—")
-        .to_string();
+    let model = session.cost.primary_model().unwrap_or("—").to_string();
 
     let bar = styled::status_bar(
         theme,
@@ -731,9 +727,10 @@ fn push_agent_response(
     lines.extend(md_lines);
 
     // Close
-    lines.push(Line::from(vec![
-        Span::styled(symbols::END.to_string(), theme.muted()),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        symbols::END.to_string(),
+        theme.muted(),
+    )]));
 
     term.push_lines(&lines)
 }

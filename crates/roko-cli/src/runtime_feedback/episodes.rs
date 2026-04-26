@@ -125,7 +125,10 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"backend\":\"claude_cli\""));
         assert!(contents.contains("\"model\":\"claude-sonnet-4-6\""));
-        assert!(contents.contains("\"plan_id\":\"plan-1\""), "extra carries plan id");
+        assert!(
+            contents.contains("\"plan_id\":\"plan-1\""),
+            "extra carries plan id"
+        );
         assert!(contents.contains("\"task_id\":\"task-1\""));
     }
 

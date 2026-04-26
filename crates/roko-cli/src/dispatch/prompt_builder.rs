@@ -38,8 +38,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::outcome::DispatchError;
 use super::DispatchContext;
+use super::outcome::DispatchError;
 use crate::task_parser::TaskDef;
 
 /// Maximum tokens an assembled prompt may emit before deterministic
@@ -198,7 +198,9 @@ impl PromptAssembler {
         let task_section = format!(
             "# Task\n**{}**: {}",
             task.id,
-            task.description.clone().unwrap_or_else(|| task.title.clone())
+            task.description
+                .clone()
+                .unwrap_or_else(|| task.title.clone())
         );
 
         let files_section = if ctx.files_in_scope.is_empty() {
@@ -253,7 +255,9 @@ impl PromptAssembler {
             .map(|list| {
                 format!(
                     "# Allowed tools\nYou may only invoke: {}",
-                    list.iter().cloned().collect::<BTreeSet<_>>()
+                    list.iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -281,8 +285,7 @@ impl PromptAssembler {
         }
 
         let mut diagnostics = PromptDiagnostics::default();
-        let system_prompt =
-            self.enforce_budget(&mut sections, &mut diagnostics);
+        let system_prompt = self.enforce_budget(&mut sections, &mut diagnostics);
 
         let user_prompt = task.title.clone();
 
@@ -344,14 +347,9 @@ impl PromptAssembler {
             "retry",
             "allowlist",
         ];
-        let mut ordered: Vec<&(&'static str, String)> = selected
-            .iter()
-            .collect::<Vec<_>>();
-        ordered.sort_by_key(|(name, _)| {
-            canonical.iter().position(|n| n == name).unwrap_or(99)
-        });
-        diagnostics.included_sections =
-            ordered.iter().map(|(n, _)| n.to_string()).collect();
+        let mut ordered: Vec<&(&'static str, String)> = selected.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(name, _)| canonical.iter().position(|n| n == name).unwrap_or(99));
+        diagnostics.included_sections = ordered.iter().map(|(n, _)| n.to_string()).collect();
 
         ordered
             .into_iter()

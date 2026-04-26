@@ -92,12 +92,7 @@ fn parse_tool_call(value: Value) -> Vec<AgentEvent> {
 }
 
 fn parse_usage(value: Value) -> Vec<AgentEvent> {
-    let get_u64 = |key: &str| -> u64 {
-        value
-            .get(key)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-    };
+    let get_u64 = |key: &str| -> u64 { value.get(key).and_then(Value::as_u64).unwrap_or(0) };
 
     vec![AgentEvent::Usage {
         input_tokens: get_u64("input_tokens"),
@@ -118,7 +113,10 @@ pub struct AgentEventStream {
 
 /// Spawn the polling loop that drains a `AgentStreamClient` and forwards
 /// parsed events to the channel.
-fn spawn_poll_loop(mut client: AgentStreamClient, tx: mpsc::Sender<AgentEvent>) -> tokio::task::JoinHandle<()> {
+fn spawn_poll_loop(
+    mut client: AgentStreamClient,
+    tx: mpsc::Sender<AgentEvent>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match client.try_recv() {
@@ -210,12 +208,15 @@ mod tests {
         });
         let events = parse_chunk(StreamChunk::Usage(value));
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::Usage {
-            input_tokens: 1000,
-            output_tokens: 500,
-            cache_read_tokens: 200,
-            ..
-        }));
+        assert!(matches!(
+            &events[0],
+            AgentEvent::Usage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                cache_read_tokens: 200,
+                ..
+            }
+        ));
     }
 
     #[test]

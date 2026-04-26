@@ -104,7 +104,10 @@ fn format_plan(event: &ProjectionEvent) -> String {
 fn format_task(event: &ProjectionEvent) -> String {
     let plan = event.plan_id.as_deref().unwrap_or("?");
     let task = event.task_id.as_deref().unwrap_or("?");
-    let attempt = event.attempt.map(|a| format!(" (attempt {a})")).unwrap_or_default();
+    let attempt = event
+        .attempt
+        .map(|a| format!(" (attempt {a})"))
+        .unwrap_or_default();
     match event.event_type.as_str() {
         "task.attempt.started" => format!("▶ task {plan}/{task} started{attempt}"),
         "task.attempt.completed" => format!("✓ task {plan}/{task} completed{attempt}"),
@@ -269,10 +272,7 @@ mod tests {
     #[test]
     fn agent_message_deltas_are_suppressed() {
         let printer = CliProgressPrinter::new();
-        let line = printer.format(&event(
-            EventCategory::AgentMessage,
-            "agent.message_delta",
-        ));
+        let line = printer.format(&event(EventCategory::AgentMessage, "agent.message_delta"));
         assert!(line.is_none());
     }
 

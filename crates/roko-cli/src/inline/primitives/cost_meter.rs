@@ -43,14 +43,7 @@ impl CostMeter {
     }
 
     /// Record a completed run.
-    pub fn record_run(
-        &mut self,
-        cost: f64,
-        input: u64,
-        output: u64,
-        model: &str,
-        naive_cost: f64,
-    ) {
+    pub fn record_run(&mut self, cost: f64, input: u64, output: u64, model: &str, naive_cost: f64) {
         self.total_cost += cost;
         self.input_tokens += input;
         self.output_tokens += output;

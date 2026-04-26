@@ -61,9 +61,9 @@ mod tests {
 
     #[test]
     fn unicode_preserved() {
-        let lines = vec![Line::from(vec![
-            Span::raw("◆ agent  auditor@v1  ·  ✔ pass"),
-        ])];
+        let lines = vec![Line::from(vec![Span::raw(
+            "◆ agent  auditor@v1  ·  ✔ pass",
+        )])];
         let text = lines_to_plain(&lines);
         assert!(text.contains('◆'));
         assert!(text.contains('✔'));

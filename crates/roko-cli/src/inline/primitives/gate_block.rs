@@ -105,11 +105,16 @@ impl GateBlockData {
                 Span::raw(" "),
                 Span::styled(
                     "gates".to_string(),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{rung_count} rung{}", if rung_count == 1 { "" } else { "s" }),
+                    format!(
+                        "{rung_count} rung{}",
+                        if rung_count == 1 { "" } else { "s" }
+                    ),
                     theme.text(),
                 ),
             ];
@@ -123,7 +128,11 @@ impl GateBlockData {
         // Rungs
         for (i, rung) in self.rungs.iter().enumerate() {
             let is_last = i == self.rungs.len() - 1;
-            let connector = if is_last { symbols::END } else { symbols::BRANCH };
+            let connector = if is_last {
+                symbols::END
+            } else {
+                symbols::BRANCH
+            };
             lines.push(render_rung(theme, connector, rung));
         }
 
@@ -143,7 +152,10 @@ fn render_rung(theme: &Theme, connector: &str, rung: &GateRung) -> Line<'static>
             Span::styled(symbols::PENDING.to_string(), theme.muted()),
             Span::styled(" pending".to_string(), theme.muted()),
         ]),
-        GateStatus::Running { elapsed_s, progress } => {
+        GateStatus::Running {
+            elapsed_s,
+            progress,
+        } => {
             let mut spans = vec![
                 Span::styled(connector.to_string(), theme.muted()),
                 Span::raw(" "),
@@ -159,7 +171,10 @@ fn render_rung(theme: &Theme, connector: &str, rung: &GateRung) -> Line<'static>
             ));
             Line::from(spans)
         }
-        GateStatus::Passed { summary, duration_s } => {
+        GateStatus::Passed {
+            summary,
+            duration_s,
+        } => {
             let mut spans = vec![
                 Span::styled(connector.to_string(), theme.muted()),
                 Span::raw(" "),
@@ -229,11 +244,35 @@ mod tests {
         let data = GateBlockData {
             policy: Some("prod-sec".into()),
             rungs: vec![
-                GateRung { name: "compile".into(), status: GateStatus::Passed { summary: "0 errors".into(), duration_s: 2.1 } },
-                GateRung { name: "test".into(), status: GateStatus::Running { elapsed_s: 3.2, progress: Some("4/11".into()) } },
-                GateRung { name: "clippy".into(), status: GateStatus::Pending },
-                GateRung { name: "diff".into(), status: GateStatus::Failed { reason: "3 files changed".into(), duration_s: 0.5 } },
-                GateRung { name: "verify".into(), status: GateStatus::Skipped },
+                GateRung {
+                    name: "compile".into(),
+                    status: GateStatus::Passed {
+                        summary: "0 errors".into(),
+                        duration_s: 2.1,
+                    },
+                },
+                GateRung {
+                    name: "test".into(),
+                    status: GateStatus::Running {
+                        elapsed_s: 3.2,
+                        progress: Some("4/11".into()),
+                    },
+                },
+                GateRung {
+                    name: "clippy".into(),
+                    status: GateStatus::Pending,
+                },
+                GateRung {
+                    name: "diff".into(),
+                    status: GateStatus::Failed {
+                        reason: "3 files changed".into(),
+                        duration_s: 0.5,
+                    },
+                },
+                GateRung {
+                    name: "verify".into(),
+                    status: GateStatus::Skipped,
+                },
             ],
         };
         let lines = data.to_lines(&theme);

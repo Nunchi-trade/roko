@@ -21,9 +21,7 @@ use crate::task_parser::{TaskValidationIssue, TasksFile};
 // ── Crate helpers ─────────────────────────────────────────────────────
 
 /// Derive a crate name from the task's modified files.
-pub(crate) fn task_crate_name(
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> Option<String> {
+pub(crate) fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
     let mut seen = HashSet::new();
     task_def
         .into_iter()
@@ -481,10 +479,7 @@ pub(crate) fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compos
     }
 }
 
-pub(crate) fn task_def_to_dag_task(
-    task: &crate::task_parser::TaskDef,
-    completed: bool,
-) -> Task {
+pub(crate) fn task_def_to_dag_task(task: &crate::task_parser::TaskDef, completed: bool) -> Task {
     let mut dag_task = Task::new(task.id.clone(), task.title.clone());
     dag_task.status = if completed {
         TaskStatus::Done
