@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/plans", get(list_plans).post(create_plan))
         .route("/plans/{id}", get(get_plan))
+        .route("/plans/{id}/tasks", get(plan_tasks))
         .route("/plans/{id}/execute", post(execute_plan))
         .route("/plans/{id}/status", get(plan_status))
         .route("/plans/{id}/pause", post(pause_plan))
@@ -78,6 +79,33 @@ async fn get_plan(
 ) -> Result<Json<Value>, ApiError> {
     let plan = find_plan(&state.workdir, &id).await?;
     Ok(Json(plan_to_json(&plan)))
+}
+
+/// `GET /api/plans/:id/tasks` — return the task list for a specific plan.
+async fn plan_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let plan = find_plan(&state.workdir, &id).await?;
+    let tasks: Vec<Value> = plan
+        .tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "description": t.description,
+                "depends_on": t.depends_on,
+                "files": t.files,
+                "completed": t.completed,
+                "status": task_status(t),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "plan_id": plan.id,
+        "task_count": tasks.len(),
+        "tasks": tasks,
+    })))
 }
 
 #[derive(Deserialize, Validate)]
