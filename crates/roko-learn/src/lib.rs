@@ -79,9 +79,13 @@
 pub mod active_inference;
 /// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
 pub mod adas;
+/// HDC-based adversarial signal detection and attack prototypes.
+pub mod adversarial;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
+/// Research-oriented bandit shells used to match the learning docs.
+pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
 /// Bayesian confidence updating using Beta-Binomial conjugate model (AS-07).
@@ -93,6 +97,8 @@ pub mod calibration_policy;
 /// Extracted submodules for cascade router types, helpers, and persistence.
 pub mod cascade;
 pub mod cascade_router;
+/// Causal discovery helpers for time-series and DAG extraction.
+pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
