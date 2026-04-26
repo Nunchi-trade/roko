@@ -28,6 +28,6 @@ pub mod tui_bridge;
 pub mod types;
 
 // Re-export the primary entry points.
-pub use event_loop::{run, PlanReport, RunReport};
-pub use plan_loader::{load_plan, load_plans, Plan};
+pub use event_loop::{PlanReport, RunReport, run};
+pub use plan_loader::{Plan, load_plan, load_plans};
 pub use types::RunConfig;

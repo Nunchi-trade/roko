@@ -43,7 +43,7 @@
 
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, TestCount, Verdict};
+use roko_core::{Context, Engram, TestCount, Verdict, Verify};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -247,9 +247,15 @@ impl IntegrationGate {
 }
 
 impl roko_core::Cell for IntegrationGate {
-    fn cell_id(&self) -> &str { "integration-gate" }
-    fn cell_name(&self) -> &str { "IntegrationGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "integration-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "IntegrationGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

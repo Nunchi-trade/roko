@@ -3,8 +3,12 @@
 
 use crate::*;
 
-
-pub(crate) async fn cmd_login(url: &str, api_key_mode: bool, check: bool, dashboard_url: &str) -> Result<i32> {
+pub(crate) async fn cmd_login(
+    url: &str,
+    api_key_mode: bool,
+    check: bool,
+    dashboard_url: &str,
+) -> Result<i32> {
     use roko_cli::credentials;
 
     let url = url.trim_end_matches('/');
@@ -91,7 +95,6 @@ pub(crate) async fn cmd_login(url: &str, api_key_mode: bool, check: bool, dashbo
     // Default: browser-based Privy auth flow.
     cmd_login_browser(url, dashboard_url).await
 }
-
 
 /// Browser-based login: start a localhost callback server, open the
 /// dashboard's `/cli/auth` page, wait for Privy credentials.
@@ -207,7 +210,6 @@ pub(crate) async fn cmd_login_browser(url: &str, dashboard_url: &str) -> Result<
     }
 }
 
-
 /// Read a password from the terminal without echoing characters.
 ///
 /// Uses raw terminal mode via crossterm (already a dependency) to suppress
@@ -245,7 +247,6 @@ pub(crate) fn read_password_from_terminal() -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-
 /// Validate an API key against a roko-serve instance.
 ///
 /// Calls `GET {url}/api/health` with the `X-Api-Key` header.
@@ -270,7 +271,6 @@ pub(crate) async fn validate_credential(url: &str, token: &str) -> Result<bool> 
     }
 }
 
-
 pub(crate) fn cmd_logout() -> Result<i32> {
     use roko_cli::credentials;
 
@@ -283,7 +283,6 @@ pub(crate) fn cmd_logout() -> Result<i32> {
     }
     Ok(EXIT_SUCCESS)
 }
-
 
 pub(crate) async fn cmd_whoami() -> Result<i32> {
     use roko_cli::credentials;
@@ -335,4 +334,3 @@ pub(crate) async fn cmd_whoami() -> Result<i32> {
         }
     }
 }
-

@@ -10,7 +10,7 @@
 //! 4. Channel openness       (Bus delivery confirmation + subscriber reach)
 //! 5. Cognitive diversity    (HDC distance across cohort Engrams)
 
-use crate::{Body, Context, Engram, Kind, React, Provenance, Score};
+use crate::{Body, Context, Engram, Kind, Provenance, React, Score};
 use std::sync::Arc;
 
 /// The five Woolley process variables measured per cohort.

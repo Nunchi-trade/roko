@@ -4,26 +4,27 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::event_bus::Envelope;
+use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 use roko_learn::cascade_router::CascadeStage;
 use roko_learn::cfactor::{AgentDispatchBias, CFactor, CFactorComponents};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 use roko_learn::efficiency::{FleetCFactor, compute_fleet_cfactor};
-use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::episode_logger::Episode;
 use roko_learn::model_router::COLD_START_THRESHOLD;
 use roko_learn::prompt_experiment::{ExperimentStatus, ExperimentStore};
 
+use super::helpers::{read_cfactor_history, read_jsonl_entries};
 use crate::routes::learning::helpers::read_experiment_store;
 use crate::routes::learning::router_state::{CascadeSnapshotData, read_cascade_snapshot};
-use super::helpers::{read_cfactor_history, read_efficiency_events, read_jsonl_entries};
 
 // ── handler functions ────────────────────────────────────────────────
 
@@ -65,10 +66,11 @@ pub async fn engagement(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// `GET /api/metrics/c_factor` — composite C-Factor, component metrics, per-agent, and per-fleet.
 pub async fn c_factor_metrics(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let composite_path = state.workdir.join(".roko/learn/c-factor.jsonl");
-    let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let efficiency_path = projections.feedback.efficiency_path.clone();
 
     let history = read_cfactor_history(&composite_path).await?;
-    let events = read_efficiency_events(&efficiency_path).await?;
+    let events = projections.efficiency_events().to_vec();
     let fleet = compute_fleet_cfactor(&events);
 
     Ok(Json(build_cfactor_metrics_response(
@@ -84,22 +86,29 @@ pub async fn c_factor_metrics(State(state): State<Arc<AppState>>) -> Result<Json
 pub async fn model_efficiency(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     let snapshot = read_cascade_snapshot(&path).await?;
-    let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
-    let events = read_efficiency_events(&efficiency_path).await?;
+    let projections = RuntimeProjectionSet::load(&state).await?;
     Ok(Json(build_model_efficiency_response(
-        &path, snapshot, &events,
+        &path,
+        snapshot,
+        projections.efficiency_events(),
     )))
 }
 
 /// `GET /api/metrics/gate_rate` — passed / total per gate with a trend delta.
 pub async fn gate_rate(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("engrams.jsonl");
-    let entries = read_jsonl_entries(&path).await?;
-    Ok(Json(build_gate_rate_response(&entries)))
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let query = ProjectionQuery::default();
+    Ok(Json(json!({
+        "summary": projections.gate_summary(&query),
+        "history": projections.gate_history(&query),
+        "evidence": projections.evidence(),
+    })))
 }
 
 /// `GET /api/metrics/experiments` — best vs worst variant gap per experiment.
-pub async fn experiments_metric(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+pub async fn experiments_metric(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
     let path = state.workdir.join(".roko/learn/experiments.json");
     let store = read_experiment_store(&path).await?;
     Ok(Json(build_experiment_metrics_response(&path, &store)))
@@ -114,11 +123,11 @@ pub async fn feedback_latency(State(state): State<Arc<AppState>>) -> Result<Json
 
 /// `GET /api/metrics/velocity` — rate of change of success rate over time.
 pub async fn velocity(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko/learn/efficiency.jsonl");
-    let events = read_efficiency_events(&path).await?;
+    let projections = RuntimeProjectionSet::load(&state).await?;
     Ok(Json(json!({
-        "velocity": self_improvement_velocity(&events),
-        "sample_count": events.len(),
+        "velocity": self_improvement_velocity(projections.efficiency_events()),
+        "sample_count": projections.efficiency_events().len(),
+        "evidence": projections.evidence(),
     })))
 }
 
@@ -355,17 +364,14 @@ async fn build_metrics_summary(
     let (period_label, window_days) = parse_period(period);
     let window_start = Utc::now() - Duration::days(i64::try_from(window_days).unwrap_or(7));
 
-    let efficiency_path = state.workdir.join(".roko/learn/efficiency.jsonl");
-    let efficiency_events = read_efficiency_events(&efficiency_path).await?;
+    let projections = RuntimeProjectionSet::load(state).await?;
+    let efficiency_events = projections.efficiency_events().to_vec();
     let efficiency_events: Vec<AgentEfficiencyEvent> = efficiency_events
         .into_iter()
         .filter(|event| event_time(event).is_some_and(|ts| ts >= window_start))
         .collect();
 
-    let episodes_path = state.layout.episodes_path();
-    let episodes = EpisodeLogger::read_all_lossy(&episodes_path)
-        .await
-        .map_err(|e| ApiError::internal(format!("read {}: {e}", episodes_path.display())))?;
+    let episodes = projections.episodes().to_vec();
     let episodes: Vec<Episode> = episodes
         .into_iter()
         .filter(|episode| episode.timestamp >= window_start)

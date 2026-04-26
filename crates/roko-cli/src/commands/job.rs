@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
     let jobs_dir = |wd: &Path| wd.join(".roko").join("jobs");
 
@@ -349,7 +348,7 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
                 };
 
                 let config = resolve_config_for_workdir(cli, &wd)?;
-                let result = run_once(&wd, &config, &prompt).await;
+                let result = run_once(&wd, &config, &prompt, None).await;
                 match result {
                     Ok(report) => {
                         job.status = "completed".to_string();
@@ -389,7 +388,6 @@ pub(crate) async fn cmd_job(cli: &Cli, cmd: JobCmd) -> Result<i32> {
         }
     }
 }
-
 
 /// Resolve a (possibly prefix-truncated) job ID to the full UUID by scanning
 /// `.roko/jobs/*.json`.  Exact matches are preferred; if no exact match is
@@ -436,4 +434,3 @@ pub(crate) fn resolve_job_path(jobs_dir: &Path, id: &str) -> Result<std::path::P
         }
     }
 }
-

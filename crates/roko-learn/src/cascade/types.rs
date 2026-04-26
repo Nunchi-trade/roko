@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use roko_agent::provider::ProviderError;
 use roko_agent::AgentResult;
+use roko_agent::provider::ProviderError;
 use roko_core::agent::ModelSpec;
 use serde::{Deserialize, Serialize};
 

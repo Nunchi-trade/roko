@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -785,7 +784,6 @@ pub(crate) async fn cmd_research(cli: &Cli, cmd: ResearchCmd) -> Result<i32> {
     }
 }
 
-
 pub(crate) fn with_research_provider_model(
     config: &RokoConfig,
     provider_key: &str,
@@ -803,7 +801,6 @@ pub(crate) fn with_research_provider_model(
         .or_insert(model_profile);
     routing_config
 }
-
 
 pub(crate) fn with_perplexity_research_model(
     config: &RokoConfig,
@@ -881,4 +878,3 @@ pub(crate) fn with_perplexity_research_model(
 
     (routing_config, timeout_ms)
 }
-

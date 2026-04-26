@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_dashboard(
     cli: &Cli,
     workdir: Option<PathBuf>,
@@ -44,7 +43,6 @@ pub(crate) async fn cmd_dashboard(
     print!("{output}");
     Ok(EXIT_SUCCESS)
 }
-
 
 pub(crate) async fn render_dashboard_text(
     cli: &Cli,
@@ -88,7 +86,6 @@ pub(crate) async fn render_dashboard_text(
     }
 }
 
-
 pub(crate) fn render_data_page(title: &str, slug: &str, intent: &str, lines: &[String]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{title} ({slug})");
@@ -106,16 +103,13 @@ pub(crate) fn render_data_page(title: &str, slug: &str, intent: &str, lines: &[S
     out
 }
 
-
 pub(crate) fn format_percent(value: f64) -> String {
     format!("{:.1}%", value * 100.0)
 }
 
-
 pub(crate) fn format_currency(value: f64) -> String {
     format!("${value:.4}")
 }
-
 
 pub(crate) fn format_duration(ms: f64) -> String {
     if ms >= 1000.0 {
@@ -125,7 +119,6 @@ pub(crate) fn format_duration(ms: f64) -> String {
         format!("{ms:.0}ms")
     }
 }
-
 
 pub(crate) async fn load_task_metrics(path: PathBuf) -> Vec<TaskMetric> {
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
@@ -145,7 +138,6 @@ pub(crate) async fn load_task_metrics(path: PathBuf) -> Vec<TaskMetric> {
     records
 }
 
-
 pub(crate) async fn load_cfactor_history(path: PathBuf) -> Vec<CFactor> {
     let Ok(text) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
@@ -157,7 +149,6 @@ pub(crate) async fn load_cfactor_history(path: PathBuf) -> Vec<CFactor> {
         .collect()
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DashboardSnapshot {
     episodes: Vec<Episode>,
@@ -166,7 +157,6 @@ pub(crate) struct DashboardSnapshot {
     cfactor_history: Vec<CFactor>,
     cfactor: Option<CFactor>,
 }
-
 
 impl DashboardSnapshot {
     async fn load(workdir: &Path) -> Result<Self> {
@@ -366,7 +356,6 @@ impl DashboardSnapshot {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct DashboardHealthSummary {
     episode_count: usize,
@@ -377,8 +366,6 @@ pub(crate) struct DashboardHealthSummary {
     haiku_share: f64,
 }
 
-
-
 #[cfg(test)]
 pub(crate) async fn dashboard_output(
     cli: &Cli,
@@ -388,4 +375,3 @@ pub(crate) async fn dashboard_output(
 ) -> Result<String> {
     render_dashboard_text(cli, workdir, page, list_pages).await
 }
-

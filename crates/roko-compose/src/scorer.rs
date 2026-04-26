@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::prompt::{PromptSection, SectionPriority};
-use roko_core::{Context, Engram, Score};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Score};
 
 /// Ranks `Engram<PromptSection>` inputs by importance.
 ///

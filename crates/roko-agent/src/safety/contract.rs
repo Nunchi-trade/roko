@@ -568,6 +568,10 @@ mod tests {
         let implementer = AgentContract::load_for_role("implementer").expect("load implementer");
         let reviewer = AgentContract::load_for_role("reviewer").expect("load reviewer");
         let researcher = AgentContract::load_for_role("researcher").expect("load researcher");
+        let architect = AgentContract::load_for_role("architect").expect("load architect");
+        let auditor = AgentContract::load_for_role("auditor").expect("load auditor");
+        let scribe = AgentContract::load_for_role("scribe").expect("load scribe");
+        let auto_fixer = AgentContract::load_for_role("auto-fixer").expect("load auto-fixer");
 
         assert_eq!(implementer.role, "implementer");
         assert!(matches!(
@@ -589,6 +593,19 @@ mod tests {
             researcher.invariants.as_slice(),
             [Invariant::MaxTokensPerTurn(_)]
         ));
+
+        assert_eq!(architect.role, "architect");
+        assert!(!architect.governance.is_empty());
+        assert_eq!(auditor.role, "auditor");
+        assert!(auditor.invariants.contains(&Invariant::NoNetworkAccess));
+        assert_eq!(scribe.role, "scribe");
+        assert!(scribe.invariants.contains(&Invariant::NoNetworkAccess));
+        assert_eq!(auto_fixer.role, "auto-fixer");
+        assert!(
+            auto_fixer
+                .invariants
+                .contains(&Invariant::RequireGateBeforeCommit)
+        );
     }
 
     #[test]

@@ -9,17 +9,20 @@
 //! pattern primitives already present in the workspace.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use chrono::Utc;
+use parking_lot::Mutex;
 use roko_learn::episode_logger::Episode;
 use roko_learn::episode_logger::GateVerdict;
 use roko_learn::pattern_discovery::{EpisodeView, PatternMiner};
 use serde::{Deserialize, Serialize};
 
-use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeTier};
+use crate::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
 
 const DEFAULT_MIN_SUPPORT: usize = 3;
 const DEFAULT_MIN_HEURISTIC_SUPPORT: usize = 5;
@@ -29,6 +32,12 @@ const DEFAULT_HALF_LIFE_DAYS: f64 = 45.0;
 const TIER_PROGRESSION_D1_SOURCE: &str = "tier-progression:d1";
 const TIER_PROGRESSION_D2_SOURCE: &str = "tier-progression:d2";
 const TIER_PROGRESSION_D3_SOURCE: &str = "tier-progression:d3";
+/// Default filename for falsifiable heuristic snapshots.
+pub const DEFAULT_HEURISTICS_FILE: &str = "heuristics.jsonl";
+/// Default filename for heuristic observation receipts.
+pub const DEFAULT_HEURISTIC_OBSERVATIONS_FILE: &str = "heuristic-observations.jsonl";
+/// Default filename for heuristic demotion receipts.
+pub const DEFAULT_HEURISTIC_DEMOTIONS_FILE: &str = "heuristic-demotions.jsonl";
 /// Number of passing verdicts required to promote one tier.
 pub const PROMOTION_SUCCESS_THRESHOLD: usize = 3;
 /// Number of failing verdicts required to demote one tier.
@@ -201,6 +210,333 @@ impl HeuristicRule {
     }
 }
 
+/// Runtime-falsifiable heuristic with explicit when/then/falsifier clauses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Heuristic {
+    /// Stable heuristic identifier.
+    pub id: String,
+    /// Condition pattern or tag expression.
+    pub when: String,
+    /// Expected outcome when the condition applies.
+    pub then: String,
+    /// Text predicate that contradicts `then` when found in gate output.
+    pub falsifier: String,
+    /// Confidence in `0.0..=1.0`.
+    pub confidence: f64,
+    /// Number of gate observations where `when` matched.
+    pub observations: u32,
+    /// Source durable knowledge entry, when this heuristic came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_entry_id: Option<String>,
+    /// Confidence threshold below which the heuristic becomes AntiKnowledge.
+    pub demotion_threshold: f64,
+    /// Timestamp of demotion to AntiKnowledge, if it already happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demoted_at_ms: Option<i64>,
+}
+
+impl Default for Heuristic {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            when: String::new(),
+            then: String::new(),
+            falsifier: String::new(),
+            confidence: 0.7,
+            observations: 0,
+            knowledge_entry_id: None,
+            demotion_threshold: 0.1,
+            demoted_at_ms: None,
+        }
+    }
+}
+
+impl Heuristic {
+    /// Evaluate this heuristic against one gate completion.
+    ///
+    /// Returns the confidence delta. `0.0` means the heuristic did not apply
+    /// or the observation was ambiguous.
+    pub fn evaluate(&mut self, task_tags: &[String], gate_output: &str, gate_passed: bool) -> f64 {
+        if self.demoted_at_ms.is_some() || !self.when_matches(task_tags) {
+            return 0.0;
+        }
+
+        self.observations = self.observations.saturating_add(1);
+        if !gate_passed && self.falsifier_matches(gate_output) {
+            self.confidence = (self.confidence - 0.2).max(0.0);
+            -0.2
+        } else if gate_passed {
+            self.confidence = (self.confidence + 0.05).min(1.0);
+            0.05
+        } else {
+            0.0
+        }
+    }
+
+    /// Return whether this heuristic should be demoted to AntiKnowledge.
+    #[must_use]
+    pub fn should_demote(&self) -> bool {
+        self.demoted_at_ms.is_none()
+            && self.confidence < self.demotion_threshold
+            && self.observations >= 3
+    }
+
+    fn when_matches(&self, task_tags: &[String]) -> bool {
+        let when = self.when.trim().to_ascii_lowercase();
+        if when.is_empty() {
+            return false;
+        }
+        task_tags
+            .iter()
+            .map(|tag| tag.trim().to_ascii_lowercase())
+            .any(|tag| !tag.is_empty() && (when.contains(&tag) || tag.contains(&when)))
+    }
+
+    fn falsifier_matches(&self, gate_output: &str) -> bool {
+        let falsifier = self.falsifier.trim().to_ascii_lowercase();
+        if falsifier.is_empty() {
+            return false;
+        }
+        gate_output.to_ascii_lowercase().contains(&falsifier)
+    }
+}
+
+/// Receipt appended when a heuristic observes a runtime gate completion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeuristicObservation {
+    /// Heuristic that was evaluated.
+    pub heuristic_id: String,
+    /// Confidence delta applied to the heuristic.
+    pub delta: f64,
+    /// Confidence after applying the delta.
+    pub confidence_after: f64,
+    /// Observation count after applying the runtime event.
+    pub observations_after: u32,
+    /// Whether the gate completion passed.
+    pub gate_passed: bool,
+    /// Tags supplied by the task/runtime context.
+    pub task_tags: Vec<String>,
+    /// Timestamp when the observation was recorded.
+    pub observed_at_ms: i64,
+}
+
+/// Receipt appended when a heuristic is converted into AntiKnowledge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeuristicDemotionRecord {
+    /// Heuristic that was demoted.
+    pub heuristic_id: String,
+    /// AntiKnowledge entry created for the demotion.
+    pub anti_knowledge_entry_id: String,
+    /// Confidence at demotion time.
+    pub confidence: f64,
+    /// Observation count at demotion time.
+    pub observations: u32,
+    /// Timestamp when demotion occurred.
+    pub demoted_at_ms: i64,
+}
+
+/// File-backed store for falsifiable runtime heuristics.
+#[derive(Debug, Clone)]
+pub struct HeuristicStore {
+    heuristics_path: PathBuf,
+    observations_path: PathBuf,
+    demotions_path: PathBuf,
+    write_gate: Arc<Mutex<()>>,
+}
+
+impl HeuristicStore {
+    /// Construct a heuristic store from an explicit `heuristics.jsonl` path.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let heuristics_path = path.into();
+        let dir = heuristics_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            heuristics_path,
+            observations_path: dir.join(DEFAULT_HEURISTIC_OBSERVATIONS_FILE),
+            demotions_path: dir.join(DEFAULT_HEURISTIC_DEMOTIONS_FILE),
+            write_gate: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Construct a heuristic store rooted at a `.roko/` directory.
+    #[must_use]
+    pub fn for_roko_dir(roko_dir: impl AsRef<Path>) -> Self {
+        Self::new(
+            roko_dir
+                .as_ref()
+                .join("neuro")
+                .join(DEFAULT_HEURISTICS_FILE),
+        )
+    }
+
+    /// Construct a heuristic store rooted at a workspace directory.
+    #[must_use]
+    pub fn for_workdir(workdir: impl AsRef<Path>) -> Self {
+        Self::for_roko_dir(workdir.as_ref().join(".roko"))
+    }
+
+    /// Path of the heuristic snapshot file.
+    #[must_use]
+    pub fn heuristics_path(&self) -> &Path {
+        &self.heuristics_path
+    }
+
+    /// Path of the append-only observation receipt log.
+    #[must_use]
+    pub fn observations_path(&self) -> &Path {
+        &self.observations_path
+    }
+
+    /// Path of the append-only demotion receipt log.
+    #[must_use]
+    pub fn demotions_path(&self) -> &Path {
+        &self.demotions_path
+    }
+
+    /// Load all current heuristic snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the heuristic file exists but cannot be read.
+    pub fn load_all(&self) -> Result<Vec<Heuristic>> {
+        read_jsonl(&self.heuristics_path)
+    }
+
+    /// Persist the full current heuristic snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be written.
+    pub fn save_all(&self, heuristics: &[Heuristic]) -> Result<()> {
+        let _guard = self.write_gate.lock();
+        rewrite_jsonl(&self.heuristics_path, heuristics)
+    }
+
+    /// Insert or replace a heuristic by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot cannot be read or written.
+    pub fn upsert(&self, heuristic: Heuristic) -> Result<()> {
+        let _guard = self.write_gate.lock();
+        let mut heuristics: Vec<Heuristic> = read_jsonl(&self.heuristics_path)?;
+        if let Some(existing) = heuristics.iter_mut().find(|item| item.id == heuristic.id) {
+            *existing = heuristic;
+        } else {
+            heuristics.push(heuristic);
+        }
+        rewrite_jsonl(&self.heuristics_path, &heuristics)
+    }
+
+    /// Evaluate all active heuristics against a gate completion and append
+    /// observation receipts for every applied delta.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if heuristic persistence fails.
+    pub fn evaluate_all(
+        &self,
+        task_tags: &[String],
+        gate_output: &str,
+        gate_passed: bool,
+    ) -> Result<Vec<HeuristicObservation>> {
+        let _guard = self.write_gate.lock();
+        let mut heuristics: Vec<Heuristic> = read_jsonl(&self.heuristics_path)?;
+        let now_ms = Utc::now().timestamp_millis();
+        let mut observations = Vec::new();
+
+        for heuristic in &mut heuristics {
+            let delta = heuristic.evaluate(task_tags, gate_output, gate_passed);
+            if delta == 0.0 {
+                continue;
+            }
+            observations.push(HeuristicObservation {
+                heuristic_id: heuristic.id.clone(),
+                delta,
+                confidence_after: heuristic.confidence,
+                observations_after: heuristic.observations,
+                gate_passed,
+                task_tags: task_tags.to_vec(),
+                observed_at_ms: now_ms,
+            });
+        }
+
+        if !observations.is_empty() {
+            rewrite_jsonl(&self.heuristics_path, &heuristics)?;
+            append_jsonl_batch(&self.observations_path, &observations)?;
+        }
+        Ok(observations)
+    }
+
+    /// Read append-only heuristic observation receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the observation log exists but cannot be read.
+    pub fn read_observations(&self) -> Result<Vec<HeuristicObservation>> {
+        read_jsonl(&self.observations_path)
+    }
+
+    /// Read append-only heuristic demotion receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the demotion log exists but cannot be read.
+    pub fn read_demotions(&self) -> Result<Vec<HeuristicDemotionRecord>> {
+        read_jsonl(&self.demotions_path)
+    }
+
+    /// Convert heuristics below their demotion threshold into AntiKnowledge.
+    ///
+    /// Demotion is idempotent: heuristics already present in the demotion log
+    /// are skipped on later calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the heuristic or knowledge stores cannot be updated.
+    pub fn demote_expired(
+        &self,
+        knowledge_store: &KnowledgeStore,
+    ) -> Result<Vec<HeuristicDemotionRecord>> {
+        let _guard = self.write_gate.lock();
+        let mut heuristics: Vec<Heuristic> = read_jsonl(&self.heuristics_path)?;
+        let existing_demotions: BTreeSet<String> =
+            read_jsonl::<HeuristicDemotionRecord>(&self.demotions_path)?
+                .into_iter()
+                .map(|record| record.heuristic_id)
+                .collect();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut demotions = Vec::new();
+        let mut anti_entries = Vec::new();
+
+        for heuristic in &mut heuristics {
+            if !heuristic.should_demote() || existing_demotions.contains(&heuristic.id) {
+                continue;
+            }
+            heuristic.demoted_at_ms = Some(now_ms);
+            let anti = anti_knowledge_for_heuristic(heuristic, now_ms);
+            demotions.push(HeuristicDemotionRecord {
+                heuristic_id: heuristic.id.clone(),
+                anti_knowledge_entry_id: anti.id.clone(),
+                confidence: heuristic.confidence,
+                observations: heuristic.observations,
+                demoted_at_ms: now_ms,
+            });
+            anti_entries.push(anti);
+        }
+
+        if !demotions.is_empty() {
+            knowledge_store.ingest(anti_entries)?;
+            rewrite_jsonl(&self.heuristics_path, &heuristics)?;
+            append_jsonl_batch(&self.demotions_path, &demotions)?;
+        }
+        Ok(demotions)
+    }
+}
+
 /// Markdown playbook compiled from the top heuristics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaybookCompilation {
@@ -352,6 +688,25 @@ impl TierProgression {
         }
 
         TierProgressionDecision::NoChange
+    }
+
+    /// Tier promotion threshold aligned to the runtime knowledge lifecycle.
+    ///
+    /// `Transient -> Working` requires 1 pass, `Working -> Consolidated`
+    /// requires 2 passes, and `Consolidated -> Persistent` requires 5 passes.
+    #[must_use]
+    pub const fn promotion_threshold(tier: KnowledgeTier) -> usize {
+        promotion_threshold(tier)
+    }
+
+    /// Rich progression decision using per-tier promotion thresholds.
+    #[must_use]
+    pub fn evaluate_tier_progression_v2(
+        entry: &KnowledgeEntry,
+        pass_count: usize,
+        fail_count: usize,
+    ) -> TierProgressionDecision {
+        evaluate_tier_progression_v2(entry, pass_count, fail_count)
     }
 
     /// Whether an entry should be reviewed for expiry.
@@ -1095,6 +1450,40 @@ fn compare_heuristics(left: &HeuristicRule, right: &HeuristicRule) -> std::cmp::
         .then_with(|| left.id.cmp(&right.id))
 }
 
+/// Return the number of gate passes required to promote from `tier`.
+#[must_use]
+pub const fn promotion_threshold(tier: KnowledgeTier) -> usize {
+    match tier {
+        KnowledgeTier::Transient => 1,
+        KnowledgeTier::Working => 2,
+        KnowledgeTier::Consolidated => 5,
+        KnowledgeTier::Persistent => usize::MAX,
+    }
+}
+
+/// Evaluate tier movement with per-tier promotion thresholds.
+#[must_use]
+pub fn evaluate_tier_progression_v2(
+    entry: &KnowledgeEntry,
+    pass_count: usize,
+    fail_count: usize,
+) -> TierProgressionDecision {
+    if pass_count >= promotion_threshold(entry.tier) {
+        return TierProgressionDecision::Promote(promote_tier(entry.tier));
+    }
+    if fail_count >= DEMOTION_FAILURE_THRESHOLD {
+        if entry.tier == KnowledgeTier::Persistent && !entry.deprecated {
+            return TierProgressionDecision::NoChange;
+        }
+        return TierProgressionDecision::Demote(demote_tier(entry.tier));
+    }
+    if entry_needs_expiry_review(entry) {
+        return TierProgressionDecision::ReviewExpiry;
+    }
+
+    TierProgressionDecision::NoChange
+}
+
 fn promote_tier(current: KnowledgeTier) -> KnowledgeTier {
     match current {
         KnowledgeTier::Transient => KnowledgeTier::Working,
@@ -1185,6 +1574,133 @@ fn first_non_empty<'a>(values: &[&'a str], fallback: &'a str) -> String {
         .find(|value| !value.trim().is_empty())
         .unwrap_or(fallback)
         .to_string()
+}
+
+fn anti_knowledge_for_heuristic(heuristic: &Heuristic, created_at_ms: i64) -> KnowledgeEntry {
+    let content = format!(
+        "Heuristic '{}' was demoted because falsifying runtime observations reduced confidence to {:.3} after {} observations. Expected: {}. Falsifier: {}.",
+        heuristic.when,
+        heuristic.confidence,
+        heuristic.observations,
+        heuristic.then,
+        heuristic.falsifier
+    );
+    let source_episodes = vec![format!("heuristic:{}", heuristic.id)];
+    let tags = vec![
+        "heuristic".to_string(),
+        "falsified".to_string(),
+        "runtime-gate".to_string(),
+        "anti_knowledge".to_string(),
+    ];
+    KnowledgeEntry {
+        id: format!(
+            "anti-heuristic:{:016x}",
+            stable_hash(format!("{}:{created_at_ms}", heuristic.id).as_bytes())
+        ),
+        kind: KnowledgeKind::AntiKnowledge,
+        source: Some("heuristic-falsifier".to_string()),
+        content,
+        confidence: (1.0 - heuristic.confidence).clamp(0.65, 1.0),
+        confidence_weight: -(1.0 - heuristic.confidence).clamp(0.65, 1.0),
+        refuted_insight_id: heuristic
+            .knowledge_entry_id
+            .clone()
+            .or_else(|| Some(heuristic.id.clone())),
+        refutation_evidence: Some(format!(
+            "confidence {:.3} below threshold {:.3} after {} observations",
+            heuristic.confidence, heuristic.demotion_threshold, heuristic.observations
+        )),
+        source_episodes,
+        tags,
+        source_model: None,
+        model_generality: default_model_generality(),
+        created_at: Utc::now(),
+        half_life_days: KnowledgeKind::AntiKnowledge.default_half_life_days(),
+        tier: KnowledgeTier::Working,
+        emotional_tag: None,
+        emotional_provenance: None,
+        hdc_vector: None,
+        confirmation_count: heuristic.observations,
+        distinct_contexts: Vec::new(),
+        deprecated: false,
+        balance: 1.0,
+        frozen: false,
+        catalytic_score: 0,
+    }
+}
+
+fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("read {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<T>(&line) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+fn append_jsonl_batch<T>(path: &Path, values: &[T]) -> Result<()>
+where
+    T: Serialize,
+{
+    if values.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    for value in values {
+        let line = serde_json::to_string(value).context("serialize heuristic receipt")?;
+        writeln!(file, "{line}").context("write heuristic receipt")?;
+    }
+    file.flush().context("flush heuristic receipt")?;
+    file.sync_all().context("sync heuristic receipt")?;
+    Ok(())
+}
+
+fn rewrite_jsonl<T>(path: &Path, values: &[T]) -> Result<()>
+where
+    T: Serialize,
+{
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("jsonl.tmp");
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| format!("open {}", tmp_path.display()))?;
+        for value in values {
+            let line = serde_json::to_string(value).context("serialize heuristic snapshot")?;
+            writeln!(file, "{line}").context("write heuristic snapshot")?;
+        }
+        file.flush().context("flush heuristic snapshot")?;
+        file.sync_all().context("sync heuristic snapshot")?;
+    }
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("replace {} with {}", path.display(), tmp_path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]

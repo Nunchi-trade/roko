@@ -1332,6 +1332,8 @@ pub mod episode_completion;
 #[cfg(feature = "hdc")]
 mod hdc;
 pub mod knowledge_store;
+/// Runtime knowledge lifecycle ingestion and promotion facade.
+pub mod lifecycle;
 /// Temporal knowledge topology -- Allen interval algebra over knowledge states.
 pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
@@ -1343,7 +1345,7 @@ pub use admission::{
     DEFAULT_MIN_ANTI_KNOWLEDGE_CONFIDENCE, EvidencePolarity, KnowledgeAdmissionDecision,
     KnowledgeAdmissionOutcome, KnowledgeAdmissionPolicy, KnowledgeAdmissionReason,
     KnowledgeAdmissionStore, KnowledgeCandidateRecord, KnowledgeEvidence, KnowledgeEvidenceSource,
-    KnowledgeScope,
+    KnowledgeScope, LightAdmissionGate,
 };
 pub use context::{
     ContextAssembler, ContextChunk, ContextSource, EpisodeStore, PadState, ReadFileSpec, TaskInput,
@@ -1358,8 +1360,17 @@ pub use knowledge_store::{
 };
 #[cfg(feature = "hdc")]
 pub use knowledge_store::{MemoryHit, MemoryIndex};
+pub use lifecycle::{
+    DEFAULT_KNOWLEDGE_LIFECYCLE_FILE, KnowledgeLifecycleConfig, KnowledgeLifecycleRecord,
+    RuntimeAdmissionPath, RuntimeEpisodeObservation, RuntimeKnowledgeLifecycle,
+};
 pub use temporal::{
     AllenRelation, KnowledgeEpoch, TemporalIndex, TemporalInterval, TemporalRelation,
+};
+pub use tier_progression::{
+    DEFAULT_HEURISTIC_DEMOTIONS_FILE, DEFAULT_HEURISTIC_OBSERVATIONS_FILE, DEFAULT_HEURISTICS_FILE,
+    Heuristic, HeuristicDemotionRecord, HeuristicObservation, HeuristicStore,
+    evaluate_tier_progression_v2, promotion_threshold,
 };
 
 #[cfg(test)]

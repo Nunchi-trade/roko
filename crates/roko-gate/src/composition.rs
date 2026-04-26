@@ -10,7 +10,7 @@
 //! | [`FallbackGate`] | Try primary; on failure try fallback | first passing verdict |
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::fmt;
 
 // ─── ParallelGate ────────────────────────────────────────────────────────────
@@ -290,7 +290,11 @@ pub struct FallbackGate {
 impl FallbackGate {
     /// Create a fallback gate with the given primary and fallback.
     #[must_use]
-    pub fn new(name: impl Into<String>, primary: Box<dyn Verify>, fallback: Box<dyn Verify>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        primary: Box<dyn Verify>,
+        fallback: Box<dyn Verify>,
+    ) -> Self {
         Self {
             primary,
             fallback,
@@ -370,7 +374,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Verify, Kind, Verdict};
+    use roko_core::{Body, Context, Engram, Kind, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

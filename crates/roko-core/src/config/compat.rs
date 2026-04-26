@@ -249,6 +249,7 @@ fn convert_conductor(m: &MoriConfig) -> ConductorConfig {
             scribe: m.scribe_enabled.unwrap_or(true),
             critic: m.critic_enabled.unwrap_or(true),
         },
+        watchers: d.watchers,
     }
 }
 

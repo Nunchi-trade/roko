@@ -1,9 +1,7 @@
 //! Predictive-foraging primitives: oracle contracts, calibration-aware scoring,
 //! and policy hooks.
 
-use crate::{
-    Budget, ContentHash, Context, Engram, Kind, React, Provenance, Score, error::Result,
-};
+use crate::{Budget, ContentHash, Context, Engram, Kind, Provenance, React, Score, error::Result};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

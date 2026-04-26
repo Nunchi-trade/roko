@@ -23,10 +23,7 @@ pub struct Plan {
 pub fn load_plan(dir: &Path) -> Result<Plan> {
     let tasks_path = dir.join("tasks.toml");
     if !tasks_path.exists() {
-        bail!(
-            "No tasks.toml found in {}",
-            dir.display()
-        );
+        bail!("No tasks.toml found in {}", dir.display());
     }
 
     let id = dir
@@ -38,7 +35,11 @@ pub fn load_plan(dir: &Path) -> Result<Plan> {
         .with_context(|| format!("failed to parse {}", tasks_path.display()))?;
 
     info!(plan_id = %id, task_count = tasks.tasks.len(), "loaded plan");
-    Ok(Plan { id, dir: dir.to_path_buf(), tasks })
+    Ok(Plan {
+        id,
+        dir: dir.to_path_buf(),
+        tasks,
+    })
 }
 
 /// Load plan(s) from a directory.

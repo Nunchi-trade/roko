@@ -7,14 +7,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use roko_orchestrator::ExecutorSnapshot;
+use roko_orchestrator::{ExecutorSnapshot, OrchestratorSnapshot};
 use serde::Serialize;
+
+use super::types::RunnerEvent;
 
 /// Paths for all persistent state files.
 #[derive(Debug, Clone)]
 pub struct PersistPaths {
     /// `.roko/state/executor.json` — executor snapshot.
     pub executor_json: PathBuf,
+    /// `.roko/state/orchestrator.json` — aggregate orchestrator snapshot.
+    pub orchestrator_json: PathBuf,
     /// `.roko/episodes.jsonl` — episode log.
     pub episodes_jsonl: PathBuf,
     /// `.roko/learn/efficiency.jsonl` — efficiency events.
@@ -23,6 +27,8 @@ pub struct PersistPaths {
     pub agent_pids_json: PathBuf,
     /// `.roko/state/events.json` — event log for replay.
     pub events_json: PathBuf,
+    /// `.roko/events.jsonl` — append-only runner event log consumed by TUI/server.
+    pub events_jsonl: PathBuf,
 }
 
 impl PersistPaths {
@@ -34,16 +40,17 @@ impl PersistPaths {
         let runtime = roko.join("runtime");
 
         for dir in [&state, &learn, &runtime] {
-            fs::create_dir_all(dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
 
         Ok(Self {
             executor_json: state.join("executor.json"),
+            orchestrator_json: state.join("orchestrator.json"),
             episodes_jsonl: roko.join("episodes.jsonl"),
             efficiency_jsonl: learn.join("efficiency.jsonl"),
             agent_pids_json: runtime.join("agent-pids.json"),
             events_json: state.join("events.json"),
+            events_jsonl: roko.join("events.jsonl"),
         })
     }
 }
@@ -51,8 +58,7 @@ impl PersistPaths {
 /// Atomically write `content` to `path` via a `.tmp` sibling.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)
-        .with_context(|| format!("writing {}", tmp.display()))?;
+    fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path)
         .with_context(|| format!("renaming {} → {}", tmp.display(), path.display()))?;
     Ok(())
@@ -60,8 +66,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 
 /// Append a JSON line to a JSONL file.
 pub fn append_jsonl(path: &Path, value: &impl Serialize) -> Result<()> {
-    let mut line = serde_json::to_string(value)
-        .context("serializing JSONL value")?;
+    let mut line = serde_json::to_string(value).context("serializing JSONL value")?;
     line.push('\n');
 
     let mut file = OpenOptions::new()
@@ -76,17 +81,31 @@ pub fn append_jsonl(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Append a normalized runner lifecycle event to the durable JSONL log.
+pub fn append_runner_event(paths: &PersistPaths, event: &RunnerEvent) -> Result<()> {
+    append_jsonl(&paths.events_jsonl, event)
+}
+
 /// Save the executor snapshot atomically.
 pub fn save_executor_snapshot(paths: &PersistPaths, snapshot: &ExecutorSnapshot) -> Result<()> {
-    let json = serde_json::to_string_pretty(snapshot)
-        .context("serializing executor snapshot")?;
+    let json = serde_json::to_string_pretty(snapshot).context("serializing executor snapshot")?;
     atomic_write(&paths.executor_json, json.as_bytes())
+}
+
+/// Save the aggregate orchestrator snapshot atomically.
+pub fn save_orchestrator_snapshot(
+    paths: &PersistPaths,
+    snapshot: &OrchestratorSnapshot,
+) -> Result<()> {
+    let json = snapshot
+        .to_json()
+        .context("serializing orchestrator snapshot")?;
+    atomic_write(&paths.orchestrator_json, json.as_bytes())
 }
 
 /// Save the set of live agent PIDs.
 pub fn save_agent_pids(paths: &PersistPaths, pids: &[u32]) -> Result<()> {
-    let json = serde_json::to_string_pretty(&pids)
-        .context("serializing agent PIDs")?;
+    let json = serde_json::to_string_pretty(&pids).context("serializing agent PIDs")?;
     atomic_write(&paths.agent_pids_json, json.as_bytes())
 }
 

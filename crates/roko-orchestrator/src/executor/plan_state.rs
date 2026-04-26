@@ -5,7 +5,7 @@
 //! ([`super::state_machine`]) reads and updates `PlanState` as the plan
 //! progresses through phases.
 
-use roko_core::{PlanPhase, TestCount, Verdict};
+use roko_core::{FailureKind, PhaseKind, PlanPhase, TestCount, Verdict};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -58,6 +58,67 @@ pub struct GateResult {
     /// Structured test counts when this result came from a test gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_count: Option<TestCount>,
+}
+
+/// Resume directive derived from a plan's current phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanResumeDirective {
+    /// Plan is not terminal and should continue from its current phase.
+    ContinueActive,
+    /// Plan completed successfully and should not be requeued.
+    TerminalComplete,
+    /// Plan was skipped by policy/operator and should not be requeued.
+    TerminalSkipped,
+    /// Plan failed terminally but can be automatically requeued on resume.
+    RetryTerminalFailure {
+        /// Structured failure kind that caused the terminal phase.
+        failure: FailureKind,
+        /// Recommended cooldown before retrying.
+        cooldown_secs: u64,
+    },
+    /// Plan failed terminally and should wait for manual repair.
+    AwaitManualRepair {
+        /// Structured failure kind that requires manual repair.
+        failure: FailureKind,
+    },
+}
+
+impl PlanResumeDirective {
+    /// Whether this directive represents a retryable terminal state.
+    #[must_use]
+    pub const fn is_retryable_terminal(&self) -> bool {
+        matches!(self, Self::RetryTerminalFailure { .. })
+    }
+
+    /// Whether a runner should place the plan back in the execution queue.
+    #[must_use]
+    pub const fn should_requeue(&self) -> bool {
+        matches!(
+            self,
+            Self::ContinueActive | Self::RetryTerminalFailure { .. }
+        )
+    }
+
+    /// Cooldown seconds associated with a retryable terminal failure.
+    #[must_use]
+    pub const fn cooldown_secs(&self) -> Option<u64> {
+        match self {
+            Self::RetryTerminalFailure { cooldown_secs, .. } => Some(*cooldown_secs),
+            _ => None,
+        }
+    }
+
+    /// Structured failure kind, when this directive was derived from a failure.
+    #[must_use]
+    pub const fn failure(&self) -> Option<&FailureKind> {
+        match self {
+            Self::RetryTerminalFailure { failure, .. } | Self::AwaitManualRepair { failure } => {
+                Some(failure)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl GateResult {
@@ -142,6 +203,33 @@ impl PlanState {
         self.current_phase.is_terminal()
     }
 
+    /// Classify how this plan should behave when a runner resumes.
+    #[must_use]
+    pub fn resume_directive(&self) -> PlanResumeDirective {
+        match &self.current_phase {
+            PlanPhase::Failed { reason } if reason.requires_manual_repair() => {
+                PlanResumeDirective::AwaitManualRepair {
+                    failure: reason.clone(),
+                }
+            }
+            PlanPhase::Failed { reason } if reason.auto_retry_on_resume() => {
+                PlanResumeDirective::RetryTerminalFailure {
+                    failure: reason.clone(),
+                    cooldown_secs: reason.retry_cooldown_secs(),
+                }
+            }
+            phase if phase.kind() == PhaseKind::Complete => PlanResumeDirective::TerminalComplete,
+            phase if phase.kind() == PhaseKind::Skipped => PlanResumeDirective::TerminalSkipped,
+            _ => PlanResumeDirective::ContinueActive,
+        }
+    }
+
+    /// Whether this plan is terminal but can be auto-retried on resume.
+    #[must_use]
+    pub fn is_retryable_terminal(&self) -> bool {
+        self.resume_directive().is_retryable_terminal()
+    }
+
     /// Whether all gate results collected so far have passed.
     #[must_use]
     pub fn all_gates_passed(&self) -> bool {
@@ -172,6 +260,20 @@ impl PlanState {
         self.merge_attempts = 0;
         self.paused = false;
         self.started_at_ms = current_timestamp_ms();
+    }
+
+    /// Requeue a retryable terminal failure for execution.
+    ///
+    /// Returns the directive that authorized the requeue. Non-retryable
+    /// terminal states and active states are left unchanged.
+    pub fn requeue_retryable_terminal(&mut self) -> Option<PlanResumeDirective> {
+        let directive = self.resume_directive();
+        if directive.is_retryable_terminal() {
+            self.restart_for_replan();
+            Some(directive)
+        } else {
+            None
+        }
     }
 }
 

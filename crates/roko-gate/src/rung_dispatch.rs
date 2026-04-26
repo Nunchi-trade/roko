@@ -21,7 +21,7 @@ use crate::rung_selector::Rung;
 use crate::symbol_gate::SymbolGate;
 use crate::test_gate::TestGate;
 use crate::verify_chain_gate::{VERIFY_SCRIPT_TAG, VerifyChainGate};
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::path::PathBuf;
 use std::sync::Arc;
 

@@ -7,7 +7,9 @@
 use roko_agent::AgentResult;
 use roko_core::{AgentRole, TaskCategory};
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
-use roko_neuro::{EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
+use roko_neuro::{
+    EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier,
+};
 use roko_runtime::lifecycle::{
     AgentLifecycleState, LifecycleTransition, LifecycleTransitionReason,
 };
@@ -260,8 +262,8 @@ pub(crate) fn record_lifecycle_knowledge(
 
     // Route through admission controller when available (A2).
     let _ = admission; // Admission integration uses submit_candidate with full candidate records;
-                       // lifecycle entries use direct write for now since building a full
-                       // KnowledgeCandidateRecord from a KnowledgeEntry requires evidence chains.
+    // lifecycle entries use direct write for now since building a full
+    // KnowledgeCandidateRecord from a KnowledgeEntry requires evidence chains.
     if let Err(err) = knowledge_store.add(entry) {
         tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
     }
@@ -565,10 +567,7 @@ pub(crate) fn build_knowledge_routing_advice(
                     .source_model
                     .as_deref()
                     .is_some_and(|sm| sm.eq_ignore_ascii_case(slug))
-                || entry
-                    .tags
-                    .iter()
-                    .any(|t| t.eq_ignore_ascii_case(slug));
+                || entry.tags.iter().any(|t| t.eq_ignore_ascii_case(slug));
             if !content_matches {
                 continue;
             }
@@ -586,9 +585,7 @@ pub(crate) fn build_knowledge_routing_advice(
 
         if supporting > 0 {
             let reason = if negative_count > 0 && positive_count > 0 {
-                format!(
-                    "{positive_count} positive + {negative_count} negative entries for {slug}"
-                )
+                format!("{positive_count} positive + {negative_count} negative entries for {slug}")
             } else if negative_count > 0 {
                 format!("{negative_count} anti-knowledge entries for {slug}")
             } else {

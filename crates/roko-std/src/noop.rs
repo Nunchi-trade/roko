@@ -7,11 +7,11 @@
 //! code should never block on missing implementations.
 
 use async_trait::async_trait;
-use roko_core::{
-    Body, Budget, Compose, Context, Engram, Verify, Kind, Outcome, React, Route, Score,
-    Selection, Verdict, error::Result,
-};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{
+    Body, Budget, Compose, Context, Engram, Kind, Outcome, React, Route, Score, Selection, Verdict,
+    Verify, error::Result,
+};
 
 /// A scorer that returns `Score::NEUTRAL` for every signal.
 #[derive(Debug, Clone, Default)]
@@ -30,9 +30,15 @@ impl ScoreFn for NoOpScorer {
 pub struct NoOpGate;
 
 impl roko_core::Cell for NoOpGate {
-    fn cell_id(&self) -> &str { "noop-gate" }
-    fn cell_name(&self) -> &str { "NoOpGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "noop-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "NoOpGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

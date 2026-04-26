@@ -8,10 +8,10 @@
 //! This is the "Rung 1" gate from Mori's 6-rung verification ladder: the
 //! cheapest check that proves the code at least compiles.
 
-use crate::compile_errors::{classify_gate_failure, render_failure_classification};
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -58,9 +58,15 @@ impl CompileGate {
 }
 
 impl roko_core::Cell for CompileGate {
-    fn cell_id(&self) -> &str { "compile-gate" }
-    fn cell_name(&self) -> &str { "CompileGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "compile-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "CompileGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]
@@ -104,15 +110,22 @@ impl Verify for CompileGate {
         let output = match timeout(Duration::from_millis(self.timeout_ms), cmd.output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
-                return Verdict::fail(&self.name, format!("spawn failed: {e}"))
-                    .with_duration(started.elapsed().as_millis() as u64);
+                let elapsed = started.elapsed().as_millis() as u64;
+                let reason = format!("spawn failed: {e}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
             Err(_) => {
-                return Verdict::fail(
-                    &self.name,
-                    format!("timed out after {} ms", self.timeout_ms),
-                )
-                .with_duration(started.elapsed().as_millis() as u64);
+                let elapsed = started.elapsed().as_millis() as u64;
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
         };
 
@@ -131,7 +144,8 @@ impl Verify for CompileGate {
                 .with_duration(elapsed)
         } else {
             let reason = summarize_errors(&detail, 3);
-            let classification = classify_gate_failure(&self.name, &detail);
+            let classification =
+                structured_gate_failure(&self.name, &detail, reason.clone(), elapsed);
             Verdict::fail(&self.name, reason)
                 .with_detail(detail)
                 .with_error_digest(render_failure_classification(&classification))

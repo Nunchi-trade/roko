@@ -34,7 +34,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, TestCount, Verdict};
+use roko_core::{Context, Engram, TestCount, Verdict, Verify};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -236,9 +236,15 @@ impl GeneratedTestGate {
 }
 
 impl roko_core::Cell for GeneratedTestGate {
-    fn cell_id(&self) -> &str { "generated-test-gate" }
-    fn cell_name(&self) -> &str { "GeneratedTestGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "generated-test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "GeneratedTestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

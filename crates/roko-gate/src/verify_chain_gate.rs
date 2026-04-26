@@ -38,7 +38,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -174,9 +174,15 @@ impl VerifyChainGate {
 }
 
 impl roko_core::Cell for VerifyChainGate {
-    fn cell_id(&self) -> &str { "verify-chain-gate" }
-    fn cell_name(&self) -> &str { "VerifyChainGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "verify-chain-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "VerifyChainGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

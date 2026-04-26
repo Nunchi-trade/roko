@@ -6,10 +6,10 @@
 //! short-circuit gate pipeline so cheap lint failures preempt expensive
 //! test runs.
 
-use crate::compile_errors::{classify_gate_failure, render_failure_classification};
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -56,9 +56,15 @@ impl ClippyGate {
 }
 
 impl roko_core::Cell for ClippyGate {
-    fn cell_id(&self) -> &str { "clippy-gate" }
-    fn cell_name(&self) -> &str { "ClippyGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "clippy-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "ClippyGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]
@@ -111,16 +117,21 @@ impl Verify for ClippyGate {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(&self.name, format!("spawn failed: {e}"))
+                let reason = format!("spawn failed: {e}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
                     .with_duration(elapsed);
             }
             Err(_) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(
-                    &self.name,
-                    format!("timed out after {} ms", self.timeout_ms),
-                )
-                .with_duration(elapsed);
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
         };
 
@@ -139,7 +150,8 @@ impl Verify for ClippyGate {
                 .with_duration(elapsed)
         } else {
             let reason = summarize_lint_issues(&detail, 3);
-            let classification = classify_gate_failure(&self.name, &detail);
+            let classification =
+                structured_gate_failure(&self.name, &detail, reason.clone(), elapsed);
             Verdict::fail(&self.name, reason)
                 .with_detail(detail)
                 .with_error_digest(render_failure_classification(&classification))

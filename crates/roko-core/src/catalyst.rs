@@ -1,7 +1,7 @@
 //! Catalyst scoring for downstream-impact-aware ranking.
 
-use crate::{Context, Engram, Score};
 use crate::traits::Score as ScoreTrait;
+use crate::{Context, Engram, Score};
 use std::sync::Arc;
 
 /// Observed downstream impact for one signal.

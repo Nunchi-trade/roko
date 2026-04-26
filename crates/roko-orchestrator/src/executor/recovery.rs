@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use roko_core::{PhaseKind, PlanPhase};
 use serde::{Deserialize, Serialize};
 
+use super::plan_state::PlanResumeDirective;
 use super::snapshot::ExecutorSnapshot;
 use crate::event_log::{EventEntry, EventKind};
 
@@ -58,7 +59,7 @@ pub enum WarningSeverity {
 }
 
 /// A non-fatal inconsistency detected during recovery validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryWarning {
     /// The plan that the warning pertains to, if any.
     pub plan_id: String,
@@ -85,6 +86,79 @@ pub struct PlanPhaseInfo {
     pub files_changed: Vec<String>,
 }
 
+impl PlanPhaseInfo {
+    /// Classify how this recovered plan should behave on resume.
+    #[must_use]
+    pub fn resume_directive(&self) -> PlanResumeDirective {
+        match &self.phase {
+            PlanPhase::Failed { reason } if reason.requires_manual_repair() => {
+                PlanResumeDirective::AwaitManualRepair {
+                    failure: reason.clone(),
+                }
+            }
+            PlanPhase::Failed { reason } if reason.auto_retry_on_resume() => {
+                PlanResumeDirective::RetryTerminalFailure {
+                    failure: reason.clone(),
+                    cooldown_secs: reason.retry_cooldown_secs(),
+                }
+            }
+            phase if phase.kind() == PhaseKind::Complete => PlanResumeDirective::TerminalComplete,
+            phase if phase.kind() == PhaseKind::Skipped => PlanResumeDirective::TerminalSkipped,
+            _ => PlanResumeDirective::ContinueActive,
+        }
+    }
+}
+
+/// A recovered plan paired with the resume directive derived from its phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveredPlanResume {
+    /// Stable plan identifier.
+    pub plan_id: String,
+    /// Phase recovered for the plan.
+    pub phase: PlanPhase,
+    /// Iteration recovered for the plan.
+    pub iteration: u32,
+    /// Resume behavior the runner should apply.
+    pub directive: PlanResumeDirective,
+    /// Earliest timestamp at which retry should occur, when retryable.
+    pub retry_after_ms: Option<u64>,
+}
+
+/// Resume plan derived from a recovered state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryResumePlan {
+    /// Non-terminal plans that should continue from their recovered phase.
+    pub active: Vec<RecoveredPlanResume>,
+    /// Terminal failures that can be requeued automatically.
+    pub retryable_terminal: Vec<RecoveredPlanResume>,
+    /// Terminal failures that require manual repair before requeue.
+    pub manual_repair: Vec<RecoveredPlanResume>,
+    /// Plans already completed successfully.
+    pub completed: Vec<String>,
+    /// Plans skipped by policy/operator.
+    pub skipped: Vec<String>,
+    /// Non-fatal recovery warnings discovered during validation.
+    pub warnings: Vec<RecoveryWarning>,
+}
+
+impl RecoveryResumePlan {
+    /// Whether there is any plan the runner can continue or retry.
+    #[must_use]
+    pub fn has_runnable_work(&self) -> bool {
+        !self.active.is_empty() || !self.retryable_terminal.is_empty()
+    }
+
+    /// Plan IDs that should appear in the executor queue on resume.
+    #[must_use]
+    pub fn queueable_plan_ids(&self) -> Vec<String> {
+        self.active
+            .iter()
+            .chain(self.retryable_terminal.iter())
+            .map(|plan| plan.plan_id.clone())
+            .collect()
+    }
+}
+
 // ─── RecoveredState ─────────────────────────────────────────────────────
 
 /// The full state reconstructed by crash recovery.
@@ -108,6 +182,66 @@ impl RecoveredState {
             queue_order: Vec::new(),
             last_sequence: 0,
             recovery_timestamp_ms: timestamp_ms,
+        }
+    }
+
+    /// Build a typed resume plan from the recovered state.
+    #[must_use]
+    pub fn resume_plan(&self, now_ms: u64) -> RecoveryResumePlan {
+        let mut active = Vec::new();
+        let mut retryable_terminal = Vec::new();
+        let mut manual_repair = Vec::new();
+        let mut completed = Vec::new();
+        let mut skipped = Vec::new();
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut ids = Vec::new();
+        for id in &self.queue_order {
+            if self.plan_states.contains_key(id) && seen.insert(id.clone()) {
+                ids.push(id.clone());
+            }
+        }
+        let mut missing: Vec<_> = self
+            .plan_states
+            .keys()
+            .filter(|id| !seen.contains(*id))
+            .cloned()
+            .collect();
+        missing.sort();
+        ids.extend(missing);
+
+        for id in ids {
+            let info = &self.plan_states[&id];
+            let directive = info.resume_directive();
+            let retry_after_ms = directive
+                .cooldown_secs()
+                .map(|secs| now_ms.saturating_add(secs.saturating_mul(1_000)));
+            let resume = RecoveredPlanResume {
+                plan_id: info.plan_id.clone(),
+                phase: info.phase.clone(),
+                iteration: info.iteration,
+                directive: directive.clone(),
+                retry_after_ms,
+            };
+
+            match directive {
+                PlanResumeDirective::ContinueActive => active.push(resume),
+                PlanResumeDirective::RetryTerminalFailure { .. } => {
+                    retryable_terminal.push(resume);
+                }
+                PlanResumeDirective::AwaitManualRepair { .. } => manual_repair.push(resume),
+                PlanResumeDirective::TerminalComplete => completed.push(info.plan_id.clone()),
+                PlanResumeDirective::TerminalSkipped => skipped.push(info.plan_id.clone()),
+            }
+        }
+
+        RecoveryResumePlan {
+            active,
+            retryable_terminal,
+            manual_repair,
+            completed,
+            skipped,
+            warnings: RecoveryEngine::validate_recovery(self),
         }
     }
 }
@@ -151,6 +285,12 @@ impl RecoveryEngine {
         let snapshot = ExecutorSnapshot::from_json(snapshot_json)
             .map_err(|e| RecoveryError::CorruptedSnapshot(format!("JSON parse error: {e}")))?;
 
+        Ok(self.recover_from_executor_snapshot(snapshot))
+    }
+
+    /// Recover orchestrator state from an already-deserialized executor snapshot.
+    #[must_use]
+    pub fn recover_from_executor_snapshot(&self, snapshot: ExecutorSnapshot) -> RecoveredState {
         let now_ms = current_timestamp_ms();
 
         let mut plan_states = HashMap::with_capacity(snapshot.plan_states.len());
@@ -172,12 +312,12 @@ impl RecoveryEngine {
             );
         }
 
-        Ok(RecoveredState {
+        RecoveredState {
             plan_states,
             queue_order: snapshot.queue_order,
             last_sequence: 0, // snapshot does not track event sequence
             recovery_timestamp_ms: now_ms,
-        })
+        }
     }
 
     /// Recover orchestrator state by replaying a slice of event-log entries.
@@ -344,6 +484,12 @@ impl RecoveryEngine {
         }
 
         warnings
+    }
+
+    /// Convenience wrapper for [`RecoveredState::resume_plan`].
+    #[must_use]
+    pub fn build_resume_plan(state: &RecoveredState, now_ms: u64) -> RecoveryResumePlan {
+        state.resume_plan(now_ms)
     }
 }
 

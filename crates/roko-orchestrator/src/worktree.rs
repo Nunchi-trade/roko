@@ -69,7 +69,8 @@ pub struct WorktreeHandle {
 }
 
 /// Health of a tracked worktree (§15.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WorktreeHealth {
     /// Path exists and the expected branch is checked out.
     Ok,
@@ -79,6 +80,34 @@ pub enum WorktreeHealth {
     StaleLock,
     /// HEAD is not on the expected branch (detached or switched).
     Detached,
+}
+
+/// Serializable registry snapshot for tracked worktrees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeSnapshot {
+    /// Active handles known to the manager when the snapshot was taken.
+    pub handles: Vec<WorktreeHandle>,
+    /// Configured live-worktree budget at snapshot time.
+    pub max_live: Option<usize>,
+    /// Configured idle TTL in milliseconds.
+    pub idle_ttl_ms: u64,
+    /// Unix epoch milliseconds when the snapshot was produced.
+    pub timestamp_ms: i64,
+}
+
+/// Health and isolation metadata for a tracked worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeIsolationStatus {
+    /// The tracked worktree handle.
+    pub handle: WorktreeHandle,
+    /// Filesystem/git health of the worktree.
+    pub health: WorktreeHealth,
+    /// Milliseconds since the worktree was last touched.
+    pub idle_ms: u64,
+    /// Whether the handle exceeds the configured idle TTL.
+    pub reclaimable: bool,
+    /// Whether the worktree path exists on disk.
+    pub path_exists: bool,
 }
 
 /// Errors returned by [`WorktreeManager`].
@@ -147,6 +176,32 @@ impl WorktreeManager {
             config: Arc::new(config),
             active: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Restore a manager registry from a snapshot.
+    ///
+    /// This does not create or remove git worktrees. It only reconstructs the
+    /// in-memory registry so callers can validate and reconcile handles with
+    /// [`isolation_statuses`](Self::isolation_statuses).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorktreeError::InvalidId`] if any snapshot handle contains an
+    /// invalid id.
+    pub fn from_snapshot(
+        config: WorktreeConfig,
+        snapshot: WorktreeSnapshot,
+    ) -> Result<Self, WorktreeError> {
+        let mut active = HashMap::with_capacity(snapshot.handles.len());
+        for handle in snapshot.handles {
+            validate_id(&handle.id)?;
+            active.insert(handle.id.clone(), handle);
+        }
+
+        Ok(Self {
+            config: Arc::new(config),
+            active: Arc::new(Mutex::new(active)),
+        })
     }
 
     /// Compute the path the manager would use for `id`. This is a pure
@@ -341,6 +396,23 @@ impl WorktreeManager {
         Ok(out)
     }
 
+    /// Snapshot the in-memory worktree registry.
+    ///
+    /// The snapshot intentionally records the registry, not the result of
+    /// `git worktree list`. Use [`isolation_statuses`](Self::isolation_statuses)
+    /// after restore to detect missing or unhealthy paths.
+    #[must_use]
+    pub fn snapshot(&self, timestamp_ms: i64) -> WorktreeSnapshot {
+        let mut handles: Vec<_> = self.active.lock().values().cloned().collect();
+        handles.sort_by(|a, b| a.id.cmp(&b.id));
+        WorktreeSnapshot {
+            handles,
+            max_live: self.config.max_live,
+            idle_ttl_ms: duration_millis_u64(self.config.idle_ttl),
+            timestamp_ms,
+        }
+    }
+
     /// Number of active worktrees currently tracked in memory.
     #[must_use]
     pub fn active_count(&self) -> usize {
@@ -398,14 +470,61 @@ impl WorktreeManager {
             .output()
             .await?;
 
-        if output.status.success() {
-            let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if current != handle.branch {
-                return Ok(WorktreeHealth::Detached);
-            }
+        if !output.status.success() {
+            return Err(WorktreeError::GitFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+
+        let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if current != handle.branch {
+            return Ok(WorktreeHealth::Detached);
         }
 
         Ok(WorktreeHealth::Ok)
+    }
+
+    /// Return full isolation metadata for one tracked worktree.
+    ///
+    /// This performs the same real git/FS health checks as
+    /// [`check_health`](Self::check_health) and adds idle/reclaimability
+    /// metadata used by resume/recovery flows.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`check_health`](Self::check_health).
+    pub async fn isolation_status(
+        &self,
+        id: &str,
+    ) -> Result<WorktreeIsolationStatus, WorktreeError> {
+        let health = self.check_health(id).await?;
+        let handle = self
+            .get(id)
+            .ok_or_else(|| WorktreeError::NotFound(id.to_string()))?;
+        Ok(self.status_from_handle(handle, health))
+    }
+
+    /// Return full isolation metadata for every tracked worktree.
+    ///
+    /// Statuses are sorted by worktree id. If a git probe fails for one
+    /// worktree, the error is returned so callers can fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`WorktreeError`] produced while checking individual
+    /// worktree health.
+    pub async fn isolation_statuses(&self) -> Result<Vec<WorktreeIsolationStatus>, WorktreeError> {
+        let ids: Vec<String> = {
+            let mut ids: Vec<_> = self.active.lock().keys().cloned().collect();
+            ids.sort();
+            ids
+        };
+
+        let mut statuses = Vec::with_capacity(ids.len());
+        for id in ids {
+            statuses.push(self.isolation_status(&id).await?);
+        }
+        Ok(statuses)
     }
 
     /// Evict worktrees whose `last_active_ms` is older than
@@ -541,6 +660,29 @@ impl WorktreeManager {
         }
         Ok(())
     }
+
+    fn status_from_handle(
+        &self,
+        handle: WorktreeHandle,
+        health: WorktreeHealth,
+    ) -> WorktreeIsolationStatus {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let idle_ms = u64::try_from(now_ms.saturating_sub(handle.last_active_ms)).unwrap_or(0);
+        let ttl_ms = duration_millis_u64(self.config.idle_ttl);
+        let reclaimable = idle_ms > ttl_ms;
+        let path_exists = handle.path.exists();
+        WorktreeIsolationStatus {
+            handle,
+            health,
+            idle_ms,
+            reclaimable,
+            path_exists,
+        }
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn validate_id(id: &str) -> Result<(), WorktreeError> {

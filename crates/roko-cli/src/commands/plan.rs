@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     match cmd {
         PlanCmd::List { workdir } => {
@@ -150,129 +149,102 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let task_timeout_secs = config.executor.task_timeout_secs;
             let state_hub = roko_core::shared_state_hub();
 
+            // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
+            // Explicit --resume-plan paths are honored by copying to the standard location.
+            if let Some(ref snap_path) = resume_plan {
+                let snap_path = if snap_path.is_relative() {
+                    wd.join(snap_path)
+                } else {
+                    snap_path.clone()
+                };
+                let standard = wd.join(".roko").join("state").join("executor.json");
+                if snap_path != standard && snap_path.exists() {
+                    let _ = std::fs::create_dir_all(standard.parent().unwrap());
+                    let _ = std::fs::copy(&snap_path, &standard);
+                }
+            }
+
             // Create the shared metric registry and register standard metrics.
             let metrics = std::sync::Arc::new(roko_core::obs::MetricRegistry::new());
             roko_core::obs::register_standard_metrics(&metrics);
 
-            let mut runner = if let Some(snap_path) = resume_plan {
-                let snap_path = if snap_path.is_relative() {
-                    wd.join(snap_path)
-                } else {
-                    snap_path
-                };
-                let state_dir = wd.join(".roko").join("state");
-                let exec_json = std::fs::read_to_string(&snap_path)
-                    .map_err(|e| anyhow!("read snapshot {}: {e}", snap_path.display()))?;
-                let snapshot = roko_cli::snapshot_migrate::load_executor_snapshot(&exec_json)
-                    .map_err(|e| anyhow!("bad snapshot {}: {e}", snap_path.display()))?;
-                let discovered_plans = roko_orchestrator::discover_plans(&plans_dir)
-                    .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
-                roko_cli::snapshot_reconcile::reconcile_snapshot_vs_plans(
-                    &snapshot,
-                    &discovered_plans,
-                    &snap_path,
-                    &plans_dir,
-                )?;
-                // Try to load the event log from alongside the executor snapshot.
-                let events_path = state_dir.join("events.json");
-                if events_path.exists() {
-                    let log_json = std::fs::read_to_string(&events_path)
-                        .map_err(|e| anyhow!("read event log {}: {e}", events_path.display()))?;
-                    roko_cli::PlanRunner::from_snapshots(
-                        &exec_json,
-                        &log_json,
-                        &wd,
-                        config,
-                        metrics,
-                        cli.no_replan,
-                    )
-                    .await?
-                } else {
-                    roko_cli::PlanRunner::from_snapshot(
-                        &exec_json,
-                        &wd,
-                        config,
-                        metrics,
-                        cli.no_replan,
-                    )
-                    .await?
-                }
-            } else {
-                roko_cli::PlanRunner::from_plans_dir(
-                    &plans_dir,
-                    &wd,
-                    config,
-                    metrics,
-                    cli.no_replan,
-                )
-                .await?
-            };
-            runner.set_claude_resume_session(cli.resume.clone());
-            runner.set_state_hub(state_hub.sender());
-            if let Some(retries) = max_retries {
-                runner.set_max_retries_override(retries);
+            // ── Runner v2 for all plan run modes ────────────────────
+            // Ensure git repo exists — agents need git tools to work.
+            if !wd.join(".git").exists() {
+                eprintln!("▸ No git repo found — initializing for agent tooling");
+                let _ = std::process::Command::new("git")
+                    .args(["init"])
+                    .current_dir(&wd)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = std::process::Command::new("git")
+                    .args(["add", "-A"])
+                    .current_dir(&wd)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "commit",
+                        "-m",
+                        "init (auto-created by roko)",
+                        "--allow-empty",
+                    ])
+                    .current_dir(&wd)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
             }
 
+            let plans = roko_cli::runner::plan_loader::load_plans(&plans_dir)?;
+            let roko_config: roko_core::config::schema::RokoConfig =
+                std::fs::read_to_string(wd.join("roko.toml"))
+                    .ok()
+                    .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
+                    .unwrap_or_default();
+            let run_config = roko_cli::runner::RunConfig {
+                workdir: wd.clone(),
+                plan_dir: plans_dir.clone(),
+                model: roko_config.agent.default_model.clone(),
+                timeout_secs: task_timeout_secs,
+                max_retries: max_retries.unwrap_or(2),
+                approval,
+                dangerously_skip_permissions: true,
+                mcp_config: None,
+                resume_session: cli.resume.clone(),
+                max_gate_rung: if roko_config.gates.skip_tests { 1 } else { 2 },
+                claude_program: roko_config
+                    .agent
+                    .command
+                    .clone()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("claude")),
+                max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
+                max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
+                clippy_enabled: roko_config.gates.clippy_enabled,
+                skip_tests: roko_config.gates.skip_tests,
+                roko_config: Some(std::sync::Arc::new(roko_config.clone())),
+            };
+
+            // Optionally spawn the approval TUI.
             if approval {
                 if !std::io::stdout().is_terminal() {
                     anyhow::bail!("approval mode requires an interactive terminal");
                 }
 
-                // ── Runner v2: direct RunState, streaming output ──────────
-                // Bypasses the old DashboardEvent indirection that lost fields
-                // (model, task titles, tokens). Uses mori's pattern instead.
-
-                // Ensure git repo exists — agents need git tools to work.
-                if !wd.join(".git").exists() {
-                    eprintln!("▸ No git repo found — initializing for agent tooling");
-                    let _ = std::process::Command::new("git")
-                        .args(["init"])
-                        .current_dir(&wd)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::process::Command::new("git")
-                        .args(["add", "-A"])
-                        .current_dir(&wd)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::process::Command::new("git")
-                        .args(["commit", "-m", "init (auto-created by roko)", "--allow-empty"])
-                        .current_dir(&wd)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
+                // Redirect stderr to a log file so the runner's tracing output
+                // doesn't corrupt the TUI's raw terminal display.
+                let stderr_log_path = wd.join(".roko").join("runner-stderr.log");
+                let _ = std::fs::create_dir_all(stderr_log_path.parent().unwrap_or(&wd));
+                #[cfg(unix)]
+                if let Ok(log_file) = std::fs::File::create(&stderr_log_path) {
+                    use std::os::unix::io::AsRawFd;
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        libc::dup2(log_file.as_raw_fd(), 2);
+                    }
                 }
-
-                let plans = roko_cli::runner::plan_loader::load_plans(&plans_dir)?;
-                let roko_config: roko_core::config::schema::RokoConfig =
-                    std::fs::read_to_string(wd.join("roko.toml"))
-                        .ok()
-                        .and_then(|s| roko_core::config::schema::RokoConfig::from_toml(&s).ok())
-                        .unwrap_or_default();
-                let run_config = roko_cli::runner::RunConfig {
-                    workdir: wd.clone(),
-                    plan_dir: plans_dir.clone(),
-                    model: roko_config.agent.default_model.clone(),
-                    timeout_secs: task_timeout_secs,
-                    max_retries: max_retries.unwrap_or(2),
-                    approval: true,
-                    dangerously_skip_permissions: true,
-                    mcp_config: None,
-                    resume_session: cli.resume.clone(),
-                    max_gate_rung: if roko_config.gates.skip_tests { 1 } else { 2 },
-                    claude_program: roko_config
-                        .agent
-                        .command
-                        .clone()
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::path::PathBuf::from("claude")),
-                    max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
-                    max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
-                    clippy_enabled: roko_config.gates.clippy_enabled,
-                    skip_tests: roko_config.gates.skip_tests,
-                };
 
                 let state_hub_for_tui = state_hub.clone();
                 let workdir_for_tui = wd.clone();
@@ -289,22 +261,39 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                         }
                     })
                     .context("spawn approval TUI thread")?;
+            }
 
-                let cancel = tokio_util::sync::CancellationToken::new();
-                let cancel_for_signal = cancel.clone();
-                tokio::spawn(async move {
-                    let _ = tokio::signal::ctrl_c().await;
-                    cancel_for_signal.cancel();
-                });
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel_for_signal = cancel.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                cancel_for_signal.cancel();
+            });
 
-                let v2_report = roko_cli::runner::event_loop::run(
-                    plans,
-                    &run_config,
-                    &state_hub,
-                    cancel,
-                )
-                .await?;
+            let v2_report =
+                roko_cli::runner::event_loop::run(plans, &run_config, &state_hub, cancel).await?;
 
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "succeeded": v2_report.all_succeeded(),
+                        "total_tasks": v2_report.total_tasks,
+                        "tasks_completed": v2_report.tasks_completed,
+                        "tasks_failed": v2_report.tasks_failed,
+                        "total_cost_usd": v2_report.total_cost_usd,
+                        "total_agent_calls": v2_report.total_agent_calls,
+                        "duration_secs": v2_report.duration.as_secs(),
+                        "plans": v2_report.plans.iter().map(|p| serde_json::json!({
+                            "plan_id": p.plan_id,
+                            "completed": p.completed,
+                            "tasks_completed": p.tasks_completed,
+                            "tasks_failed": p.tasks_failed,
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .unwrap_or_default()
+                );
+            } else if !cli.quiet {
                 eprintln!(
                     "\n▸ Plan complete: {}/{} tasks, ${:.2}, {}s",
                     v2_report.tasks_completed,
@@ -312,73 +301,16 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     v2_report.total_cost_usd,
                     v2_report.duration.as_secs()
                 );
-                return Ok(if v2_report.all_succeeded() {
-                    EXIT_SUCCESS
-                } else {
-                    EXIT_AGENT_FAILURE
-                });
-            }
-
-            let report = runner.run(&plans_dir).await?;
-
-            // State is auto-saved during and after the run.
-            let snap_path = wd.join(".roko").join("state").join("executor.json");
-
-            if cli.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "succeeded": report.all_succeeded(),
-                        "total_agent_calls": report.total_agent_calls,
-                        "total_gate_runs": report.total_gate_runs,
-                        "fleet_cfactor": report.fleet_cfactor,
-                        "plans": report.plans.iter().map(|p| serde_json::json!({
-                            "plan_id": p.plan_id,
-                            "succeeded": p.succeeded,
-                            "agent_calls": p.agent_calls,
-                        })).collect::<Vec<_>>(),
-                    }))
-                    .unwrap_or_default()
-                );
-            } else if !cli.quiet {
-                println!("Orchestration complete:");
-                for p in &report.plans {
-                    let status = if p.succeeded { "✓" } else { "✗" };
-                    println!(
-                        "  {status} {} — {} agent calls, {} gate results",
-                        p.plan_id,
-                        p.agent_calls,
-                        p.gate_results.len()
+                for p in &v2_report.plans {
+                    let status = if p.completed { "✓" } else { "✗" };
+                    eprintln!(
+                        "  {status} {} — {}/{} tasks",
+                        p.plan_id, p.tasks_completed, p.tasks_total,
                     );
                 }
-                println!(
-                    "\nTotal: {} agent calls, {} gate runs. Overall: {}",
-                    report.total_agent_calls,
-                    report.total_gate_runs,
-                    if report.all_succeeded() {
-                        "SUCCESS"
-                    } else {
-                        "FAILED"
-                    }
-                );
-                if let Some(fleet) = &report.fleet_cfactor {
-                    println!(
-                        "fleet c-factor: {:.3} | plans={} | agents={} | turns={}",
-                        fleet.overall, fleet.plan_count, fleet.agent_count, fleet.observation_count
-                    );
-                    println!(
-                        "  multi_agent={:.3} pass={:.3} cost={:.3} speed={:.3} turn={:.3}",
-                        fleet.components.multi_agent_coverage,
-                        fleet.components.pass_rate,
-                        fleet.components.cost_efficiency,
-                        fleet.components.speed,
-                        fleet.components.turn_taking_equality
-                    );
-                }
-                println!("Snapshot saved to {}", snap_path.display());
             }
 
-            Ok(if report.all_succeeded() {
+            Ok(if v2_report.all_succeeded() {
                 EXIT_SUCCESS
             } else {
                 EXIT_FAILURE
@@ -592,7 +524,6 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
     }
 }
 
-
 /// Parse and display a plan directory without executing anything.
 pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
     let plans = roko_orchestrator::discover_plans(plans_dir)
@@ -766,7 +697,6 @@ pub(crate) async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32>
     Ok(EXIT_SUCCESS)
 }
 
-
 pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> Result<i32> {
     let current_dir =
         std::env::current_dir().context("resolve current directory for plan validation")?;
@@ -791,7 +721,6 @@ pub(crate) fn cmd_plan_validate(dir: &Path, strict: bool, json_output: bool) -> 
     Ok(report.exit_code(strict))
 }
 
-
 pub(crate) fn find_plan_source_document(plan_dir: &Path) -> Result<PathBuf> {
     for candidate in ["source-prd.md", "prd-extract.md", "plan.md"] {
         let path = plan_dir.join(candidate);
@@ -806,7 +735,6 @@ pub(crate) fn find_plan_source_document(plan_dir: &Path) -> Result<PathBuf> {
     )
 }
 
-
 pub(crate) fn normalize_task_title(title: &str) -> String {
     title
         .chars()
@@ -817,7 +745,6 @@ pub(crate) fn normalize_task_title(title: &str) -> String {
         .join(" ")
         .to_lowercase()
 }
-
 
 pub(crate) fn preserve_completed_task_status(
     old_tasks: Option<&roko_cli::task_parser::TasksFile>,
@@ -871,4 +798,3 @@ pub(crate) fn preserve_completed_task_status(
 
     regenerated
 }
-

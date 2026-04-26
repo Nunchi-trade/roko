@@ -15,9 +15,17 @@ pub const TASK_OUTPUT_KIND: &str = "conductor.agent_output";
 /// Fraction of the timeout that triggers the early warning.
 pub const ALERT_THRESHOLD: f64 = 0.80;
 
-/// Fires when the latest task output exceeds 80% of its timeout.
-#[derive(Debug, Clone, Default)]
-pub struct TimeOverrunWatcher;
+/// Fires when the latest task output exceeds a configured fraction of its timeout.
+#[derive(Debug, Clone)]
+pub struct TimeOverrunWatcher {
+    alert_threshold: f64,
+}
+
+impl Default for TimeOverrunWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct TaskTimingEvent {
@@ -31,7 +39,17 @@ impl TimeOverrunWatcher {
     /// Create a new instance.
     #[must_use]
     pub const fn new() -> Self {
-        Self
+        Self {
+            alert_threshold: ALERT_THRESHOLD,
+        }
+    }
+
+    /// Create with a custom alert threshold in `[0.0, 1.0]`.
+    #[must_use]
+    pub fn with_alert_threshold(alert_threshold: f64) -> Self {
+        Self {
+            alert_threshold: alert_threshold.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -47,13 +65,13 @@ fn extract_timing_event(signal: &Engram) -> Option<TaskTimingEvent> {
     signal.body.as_json::<TaskTimingEvent>().ok()
 }
 
-fn exceeds_threshold(duration_ms: u64, timeout_secs: u64) -> bool {
+fn exceeds_threshold(duration_ms: u64, timeout_secs: u64, alert_threshold: f64) -> bool {
     if timeout_secs == 0 {
         return false;
     }
 
     let timeout_ms = timeout_secs.saturating_mul(1000);
-    duration_ms.saturating_mul(5) > timeout_ms.saturating_mul(4)
+    (duration_ms as f64) > (timeout_ms as f64 * alert_threshold)
 }
 
 impl React for TimeOverrunWatcher {
@@ -70,7 +88,7 @@ impl React for TimeOverrunWatcher {
             return Vec::new();
         };
 
-        if !exceeds_threshold(event.duration_ms, event.timeout_secs) {
+        if !exceeds_threshold(event.duration_ms, event.timeout_secs, self.alert_threshold) {
             return Vec::new();
         }
 
@@ -93,7 +111,7 @@ impl React for TimeOverrunWatcher {
                 .tag("task_id", event.task)
                 .tag("duration_ms", event.duration_ms.to_string())
                 .tag("timeout_secs", event.timeout_secs.to_string())
-                .tag("threshold", ALERT_THRESHOLD.to_string())
+                .tag("threshold", self.alert_threshold.to_string())
                 .tag("ratio", format!("{ratio:.3}"))
                 .build(),
         ]

@@ -683,6 +683,26 @@ impl KnowledgeStore {
             .collect())
     }
 
+    /// Return the maximum lightweight similarity between `candidate` and
+    /// existing durable entries.
+    ///
+    /// The score is deterministic and file-local: tag Jaccard overlap plus
+    /// content keyword Jaccard overlap. It is intended for admission
+    /// pre-filtering, not semantic ranking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backing store cannot be read.
+    pub fn max_similarity(&self, candidate: &KnowledgeEntry) -> Result<f64> {
+        let entries = self.read_all()?;
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.id != candidate.id)
+            .map(|entry| entry_similarity(entry, candidate))
+            .fold(0.0, f64::max)
+            .clamp(0.0, 1.0))
+    }
+
     fn query_hits_filtered<F>(
         &self,
         topic: &str,
@@ -1132,6 +1152,42 @@ impl KnowledgeStore {
             }
         })?;
         Ok(found)
+    }
+
+    /// NEURO-10: Reinforce a batch of entries in one store rewrite.
+    ///
+    /// Returns the number of entries found and reinforced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn reinforce_batch(
+        &self,
+        entry_ids: &[&str],
+        signal: crate::ReinforcementSignal,
+        novelty: f64,
+    ) -> Result<usize> {
+        if entry_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let id_set = entry_ids
+            .iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>();
+        if id_set.is_empty() {
+            return Ok(0);
+        }
+
+        self.update_entries(|entry| {
+            if id_set.contains(entry.id.as_str()) {
+                entry.reinforce(signal, novelty);
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// Score knowledge entries by prediction utility (P0-34).
@@ -1910,6 +1966,40 @@ fn score_entry_for_query(
             hdc_similarity: hdc,
         },
     })
+}
+
+fn entry_similarity(existing: &KnowledgeEntry, candidate: &KnowledgeEntry) -> f64 {
+    if existing
+        .content
+        .trim()
+        .eq_ignore_ascii_case(candidate.content.trim())
+        && !existing.content.trim().is_empty()
+    {
+        return 1.0;
+    }
+
+    let existing_tags: HashSet<String> = existing.tags.iter().map(|tag| normalize(tag)).collect();
+    let candidate_tags: HashSet<String> = candidate.tags.iter().map(|tag| normalize(tag)).collect();
+    let tag_score = jaccard_similarity(&existing_tags, &candidate_tags);
+
+    let existing_terms: HashSet<String> = tokenize(&existing.content).into_iter().collect();
+    let candidate_terms: HashSet<String> = tokenize(&candidate.content).into_iter().collect();
+    let keyword_score = jaccard_similarity(&existing_terms, &candidate_terms);
+
+    (tag_score * 0.4 + keyword_score * 0.6).clamp(0.0, 1.0)
+}
+
+fn jaccard_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 0.0;
+    }
+    let intersection = left.intersection(right).count() as f64;
+    let union = left.union(right).count() as f64;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 /// Compare two knowledge entries for topic-level similarity using tag

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,7 +39,9 @@ pub async fn cascade_router(State(state): State<Arc<AppState>>) -> Result<Json<V
 }
 
 /// `GET /api/learn/cascade` — summarize `.roko/learn/cascade-router.json`.
-pub async fn cascade(State(state): State<Arc<AppState>>) -> Result<Json<CascadeResponse>, ApiError> {
+pub async fn cascade(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CascadeResponse>, ApiError> {
     let path = state.workdir.join(".roko/learn/cascade-router.json");
     let snapshot = read_cascade_snapshot(&path).await?;
     Ok(Json(build_cascade_response(&path, snapshot)))

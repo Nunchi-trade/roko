@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn dispatch_knowledge(cli: &Cli, cmd: KnowledgeCmd) -> Result<i32> {
     match cmd {
         KnowledgeCmd::Query { topic, workdir } => {
@@ -80,7 +79,6 @@ pub(crate) async fn dispatch_knowledge(cli: &Cli, cmd: KnowledgeCmd) -> Result<i
     }
 }
 
-
 pub(crate) async fn dispatch_knowledge_dream(cli: &Cli, cmd: KnowledgeDreamCmd) -> Result<i32> {
     match cmd {
         KnowledgeDreamCmd::Run { workdir } => cmd_dream(cli, DreamCmdLegacy::Run { workdir }).await,
@@ -156,7 +154,6 @@ pub(crate) async fn dispatch_knowledge_dream(cli: &Cli, cmd: KnowledgeDreamCmd) 
     }
 }
 
-
 pub(crate) fn dispatch_knowledge_custody(cli: &Cli, cmd: KnowledgeCustodyCmd) -> Result<()> {
     match cmd {
         KnowledgeCustodyCmd::List { limit, workdir } => {
@@ -174,7 +171,6 @@ pub(crate) fn dispatch_knowledge_custody(cli: &Cli, cmd: KnowledgeCustodyCmd) ->
     }
     Ok(())
 }
-
 
 pub(crate) async fn cmd_archive(
     cli: &Cli,
@@ -250,7 +246,6 @@ pub(crate) async fn cmd_archive(
     Ok(EXIT_SUCCESS)
 }
 
-
 /// Parse a human duration string like "30d" or "7d" or "24h" to milliseconds.
 pub(crate) fn parse_duration_to_ms(s: &str) -> Option<i64> {
     let s = s.trim();
@@ -267,7 +262,6 @@ pub(crate) fn parse_duration_to_ms(s: &str) -> Option<i64> {
         _ => None,
     }
 }
-
 
 pub(crate) async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
     match cmd {
@@ -685,7 +679,6 @@ pub(crate) async fn cmd_neuro(cli: &Cli, cmd: NeuroCmd) -> Result<i32> {
     }
 }
 
-
 pub(crate) async fn cmd_dream(cli: &Cli, cmd: DreamCmdLegacy) -> Result<i32> {
     match cmd {
         DreamCmdLegacy::Run { workdir } => {
@@ -781,7 +774,6 @@ pub(crate) async fn cmd_dream(cli: &Cli, cmd: DreamCmdLegacy) -> Result<i32> {
     }
 }
 
-
 pub(crate) fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunner> {
     let cli_config = resolve_config_for_workdir(cli, workdir)?;
     Ok(DreamRunner::new(
@@ -803,7 +795,6 @@ pub(crate) fn build_dream_runner(cli: &Cli, workdir: &Path) -> Result<DreamRunne
         },
     ))
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NeuroTransferReport {
@@ -897,7 +888,6 @@ pub(crate) fn backup_neuro_store(
         entries_filtered: 0,
     })
 }
-
 
 pub(crate) fn restore_neuro_store(
     workdir: &Path,
@@ -996,7 +986,6 @@ pub(crate) fn restore_neuro_store(
     })
 }
 
-
 pub(crate) fn neuro_live_files(workdir: &Path) -> NeuroFileSet {
     let store = KnowledgeStore::for_workdir(workdir);
     NeuroFileSet {
@@ -1005,14 +994,12 @@ pub(crate) fn neuro_live_files(workdir: &Path) -> NeuroFileSet {
     }
 }
 
-
 pub(crate) fn neuro_snapshot_files(root: &Path) -> NeuroFileSet {
     NeuroFileSet {
         knowledge: root.join(NEURO_KNOWLEDGE_FILE),
         confirmations: root.join(NEURO_CONFIRMATIONS_FILE),
     }
 }
-
 
 pub(crate) fn sync_neuro_store_files(
     source: &NeuroFileSet,
@@ -1035,7 +1022,6 @@ pub(crate) fn sync_neuro_store_files(
     )
 }
 
-
 pub(crate) fn ensure_neuro_directory(path: &Path, operation: &str) -> Result<()> {
     if path.exists() && !path.is_dir() {
         bail!(
@@ -1048,8 +1034,12 @@ pub(crate) fn ensure_neuro_directory(path: &Path, operation: &str) -> Result<()>
     Ok(())
 }
 
-
-pub(crate) fn copy_neuro_file(source: &Path, destination: &Path, force: bool, operation: &str) -> Result<()> {
+pub(crate) fn copy_neuro_file(
+    source: &Path,
+    destination: &Path,
+    force: bool,
+    operation: &str,
+) -> Result<()> {
     if !source.exists() {
         bail!("{operation} source file not found: {}", source.display());
     }
@@ -1068,7 +1058,6 @@ pub(crate) fn copy_neuro_file(source: &Path, destination: &Path, force: bool, op
     })?;
     Ok(())
 }
-
 
 pub(crate) fn sync_optional_neuro_file(
     source: &Path,
@@ -1099,7 +1088,6 @@ pub(crate) fn sync_optional_neuro_file(
     Ok(false)
 }
 
-
 pub(crate) const NEURO_KNOWLEDGE_FILE: &str = "knowledge.jsonl";
 pub(crate) const NEURO_CONFIRMATIONS_FILE: &str = "knowledge-confirmations.jsonl";
 
@@ -1108,5 +1096,3 @@ pub(crate) struct NeuroFileSet {
     pub(crate) knowledge: PathBuf,
     pub(crate) confirmations: PathBuf,
 }
-
-

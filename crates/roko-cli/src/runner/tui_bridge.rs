@@ -6,6 +6,8 @@
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::state_hub::StateHubSender;
 
+use super::types::RunnerEvent;
+
 /// Publishes runner events to the TUI / dashboard via `StateHub`.
 #[derive(Clone)]
 pub struct TuiBridge {
@@ -43,6 +45,22 @@ impl TuiBridge {
         });
     }
 
+    /// A task changed phase.
+    pub fn task_phase_changed(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        old_phase: &str,
+        new_phase: &str,
+    ) {
+        self.sender.publish(DashboardEvent::TaskPhaseChanged {
+            plan_id: plan_id.to_string(),
+            task_id: task_id.to_string(),
+            old_phase: old_phase.to_string(),
+            new_phase: new_phase.to_string(),
+        });
+    }
+
     /// A task has completed.
     pub fn task_completed(&self, plan_id: &str, task_id: &str, outcome: &str) {
         self.sender.publish(DashboardEvent::TaskCompleted {
@@ -53,11 +71,11 @@ impl TuiBridge {
     }
 
     /// An agent has been spawned.
-    pub fn agent_spawned(&self, agent_id: &str, role: &str) {
+    pub fn agent_spawned(&self, agent_id: &str, role: &str, model: &str) {
         self.sender.publish(DashboardEvent::AgentSpawned {
             agent_id: agent_id.to_string(),
             role: role.to_string(),
-            model: String::new(),
+            model: model.to_string(),
         });
     }
 
@@ -109,6 +127,17 @@ impl TuiBridge {
     pub fn error(&self, message: &str) {
         self.sender.publish(DashboardEvent::Error {
             message: message.to_string(),
+        });
+    }
+
+    /// Publish a typed runner lifecycle event into the dashboard event log.
+    pub fn runner_event(&self, event: &RunnerEvent) {
+        self.sender.publish(DashboardEvent::EventLogEntry {
+            timestamp_ms: event.timestamp_ms(),
+            event_type: event.event_type().to_string(),
+            plan_id: event.plan_id().unwrap_or_default().to_string(),
+            task_id: event.task_id().unwrap_or_default().to_string(),
+            message: event.message(),
         });
     }
 }

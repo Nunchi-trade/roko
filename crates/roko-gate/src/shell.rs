@@ -5,9 +5,10 @@
 //! hooks). It never consults the input signal's body beyond reading a
 //! [`GatePayload`] if present (for `working_dir` and environment).
 
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -54,9 +55,15 @@ impl ShellGate {
 }
 
 impl roko_core::Cell for ShellGate {
-    fn cell_id(&self) -> &str { "shell-gate" }
-    fn cell_name(&self) -> &str { "ShellGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "shell-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "ShellGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]
@@ -85,13 +92,21 @@ impl Verify for ShellGate {
         let elapsed = started.elapsed().as_millis() as u64;
 
         match result {
-            Err(_timeout) => Verdict::fail(
-                &self.name,
-                format!("timed out after {} ms", self.timeout_ms),
-            )
-            .with_duration(elapsed),
+            Err(_timeout) => {
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed)
+            }
             Ok(Err(io_err)) => {
-                Verdict::fail(&self.name, format!("spawn failed: {io_err}")).with_duration(elapsed)
+                let reason = format!("spawn failed: {io_err}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed)
             }
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -110,8 +125,12 @@ impl Verify for ShellGate {
                         .status
                         .code()
                         .map_or_else(|| "terminated by signal".into(), |c| c.to_string());
-                    Verdict::fail(&self.name, format!("exit code: {code}"))
+                    let reason = format!("exit code: {code}");
+                    let classification =
+                        structured_gate_failure(&self.name, &combined, reason.clone(), elapsed);
+                    Verdict::fail(&self.name, reason)
                         .with_detail(combined)
+                        .with_error_digest(render_failure_classification(&classification))
                         .with_duration(elapsed)
                 }
             }
@@ -154,6 +173,12 @@ mod tests {
         let v = gate.verify(&empty_signal(), &Context::at(0)).await;
         assert!(!v.passed);
         assert!(v.reason.contains("exit code"));
+        let digest = v.error_digest.as_deref().expect("structured digest");
+        let classification: crate::compile_errors::GateFailureClassification =
+            serde_json::from_str(digest).expect("digest parses");
+        assert_eq!(classification.gate, "shell:false");
+        assert_eq!(classification.summary, v.reason);
+        assert_eq!(classification.duration_ms, Some(v.duration_ms));
     }
 
     #[tokio::test]

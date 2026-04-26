@@ -34,8 +34,24 @@ pub struct LearningBidder {
     pub subsystem_id: SubsystemId,
     /// Beta-posterior parameters keyed by section name.
     pub section_betas: HashMap<String, (f64, f64)>,
+    /// Cost-effectiveness observations keyed by section name.
+    #[serde(default)]
+    pub section_costs: HashMap<String, SectionCostStats>,
     /// Prior value used before any observations are recorded.
     pub prior_bid: f64,
+}
+
+/// Accumulated cost statistics for one section within a [`LearningBidder`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SectionCostStats {
+    /// Total attributed cost across included turns.
+    pub total_cost_usd: f64,
+    /// Total estimated prompt tokens across included turns.
+    pub total_tokens: usize,
+    /// Included-turn observations carrying cost data.
+    pub observation_count: u32,
+    /// Number of included observations whose downstream gate passed.
+    pub passes: u32,
 }
 
 impl LearningBidder {
@@ -45,6 +61,7 @@ impl LearningBidder {
         Self {
             subsystem_id,
             section_betas: HashMap::new(),
+            section_costs: HashMap::new(),
             prior_bid,
         }
     }
@@ -64,6 +81,12 @@ impl LearningBidder {
         sampled_track_record * relevance.max(0.0) * self.prior_bid.max(0.0)
     }
 
+    /// Compute a bid that incorporates historical cost-effectiveness.
+    #[must_use]
+    pub fn bid_with_cost(&self, section_name: &str, relevance: f64) -> f64 {
+        self.bid(section_name, relevance) * self.cost_effectiveness_factor(section_name)
+    }
+
     /// Update the posterior after observing one task outcome.
     pub fn update(&mut self, section_name: &str, was_included: bool, gate_passed: bool) {
         if !was_included {
@@ -79,6 +102,70 @@ impl LearningBidder {
         } else {
             entry.1 += 1.0;
         }
+    }
+
+    /// Update posterior and attributed-cost statistics after one observed turn.
+    pub fn update_with_cost(
+        &mut self,
+        section_name: &str,
+        was_included: bool,
+        gate_passed: bool,
+        attributed_cost_usd: f64,
+        estimated_tokens: usize,
+    ) {
+        self.update(section_name, was_included, gate_passed);
+        if !was_included || estimated_tokens == 0 {
+            return;
+        }
+
+        let entry = self
+            .section_costs
+            .entry(section_name.to_string())
+            .or_default();
+        entry.total_cost_usd += attributed_cost_usd.max(0.0);
+        entry.total_tokens = entry.total_tokens.saturating_add(estimated_tokens);
+        entry.observation_count = entry.observation_count.saturating_add(1);
+        if gate_passed {
+            entry.passes = entry.passes.saturating_add(1);
+        }
+    }
+
+    /// Minimum observed outcomes across sections known to this bidder.
+    #[must_use]
+    pub fn observation_count(&self) -> u32 {
+        let beta_min = self
+            .section_betas
+            .values()
+            .map(|(alpha, beta)| ((*alpha + *beta - 2.0).max(0.0)) as u32)
+            .min();
+        let cost_min = self
+            .section_costs
+            .values()
+            .map(|stats| stats.observation_count)
+            .min();
+
+        match (beta_min, cost_min) {
+            (Some(beta), Some(cost)) => beta.min(cost),
+            (Some(beta), None) => beta,
+            (None, Some(cost)) => cost,
+            (None, None) => 0,
+        }
+    }
+
+    fn cost_effectiveness_factor(&self, section_name: &str) -> f64 {
+        let Some(stats) = self.section_costs.get(section_name) else {
+            return 1.0;
+        };
+        if stats.observation_count < 3 || stats.total_tokens == 0 {
+            return 1.0;
+        }
+
+        let pass_rate = stats.passes as f64 / stats.observation_count as f64;
+        let cost_per_1k_tokens = stats.total_cost_usd.max(0.0) / stats.total_tokens as f64 * 1000.0;
+        let cost_efficiency = 1.0 / (1.0 + cost_per_1k_tokens);
+        let quality = (0.7 * pass_rate + 0.3 * cost_efficiency).clamp(0.0, 1.0);
+
+        (0.5 + quality * 1.5).clamp(0.5, 2.0)
     }
 }
 
@@ -425,6 +512,37 @@ mod tests {
         let after = bidder.bid("task_context", 0.8);
 
         assert!(after >= before);
+    }
+
+    #[test]
+    fn learning_bidder_cost_factor_is_neutral_without_data() {
+        let bidder = LearningBidder::new(SubsystemId::TaskContext, 1.0);
+
+        assert_eq!(
+            bidder.bid_with_cost("task_context", 0.8),
+            bidder.bid("task_context", 0.8)
+        );
+    }
+
+    #[test]
+    fn learning_bidder_rewards_cheap_effective_sections() {
+        let mut bidder = LearningBidder::new(SubsystemId::TaskContext, 1.0);
+        for _ in 0..5 {
+            bidder.update_with_cost("task_context", true, true, 0.0001, 400);
+        }
+
+        assert!(bidder.bid_with_cost("task_context", 0.8) > bidder.bid("task_context", 0.8));
+        assert_eq!(bidder.observation_count(), 5);
+    }
+
+    #[test]
+    fn learning_bidder_penalizes_expensive_ineffective_sections() {
+        let mut bidder = LearningBidder::new(SubsystemId::TaskContext, 1.0);
+        for _ in 0..5 {
+            bidder.update_with_cost("task_context", true, false, 2.0, 100);
+        }
+
+        assert!(bidder.bid_with_cost("task_context", 0.8) < bidder.bid("task_context", 0.8));
     }
 
     #[test]

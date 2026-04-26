@@ -78,6 +78,84 @@ pub enum GateFailureAction {
     NeedsHuman,
 }
 
+/// Coarse task-level failure kind used for retry policy decisions.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailureKind {
+    /// A re-run may succeed without changing code.
+    Transient,
+    /// The agent needs to change code or inputs before retrying.
+    Permanent,
+    /// Resource exhaustion or unavailable local capacity; retrying immediately is unsafe.
+    Resource,
+    /// The verification contract/script/plan shape needs repair before retrying.
+    Structural,
+}
+
+impl GateFailureKind {
+    /// Whether this failure kind can be retried automatically.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transient | Self::Permanent | Self::Structural)
+    }
+
+    /// Cooldown before retry, in seconds.
+    #[must_use]
+    pub const fn retry_cooldown_secs(&self) -> u64 {
+        match self {
+            Self::Transient => 2,
+            Self::Permanent => 0,
+            Self::Resource => 0,
+            Self::Structural => 5,
+        }
+    }
+
+    /// Whether retry input should include the full structured error digest.
+    #[must_use]
+    pub const fn needs_error_digest(&self) -> bool {
+        matches!(self, Self::Permanent | Self::Structural)
+    }
+
+    /// Whether this failure should be persisted as learning/reflection evidence.
+    #[must_use]
+    pub const fn generates_reflection(&self) -> bool {
+        matches!(self, Self::Permanent | Self::Structural)
+    }
+
+    /// Whether verify-script regeneration should be considered before retry.
+    #[must_use]
+    pub const fn needs_verify_regen(&self) -> bool {
+        matches!(self, Self::Structural)
+    }
+}
+
+/// Retry inputs derived from a structured gate failure.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GateRetryPolicy {
+    /// Whether the orchestrator may retry this failure.
+    pub retryable: bool,
+    /// Cooldown before retry, in seconds.
+    pub cooldown_secs: u64,
+    /// Whether the retry prompt should include the structured error digest.
+    pub include_error_digest: bool,
+    /// Whether this failure should produce learning/reflection evidence.
+    pub generate_reflection: bool,
+    /// Whether verify-chain/script regeneration should be attempted.
+    pub regenerate_verify: bool,
+}
+
+impl From<&GateFailureKind> for GateRetryPolicy {
+    fn from(kind: &GateFailureKind) -> Self {
+        Self {
+            retryable: kind.is_retryable(),
+            cooldown_secs: kind.retry_cooldown_secs(),
+            include_error_digest: kind.needs_error_digest(),
+            generate_reflection: kind.generates_reflection(),
+            regenerate_verify: kind.needs_verify_regen(),
+        }
+    }
+}
+
 /// A single structured compile error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompileError {
@@ -104,6 +182,15 @@ pub struct GateFailureClassification {
     pub gate: String,
     /// Primary class for retry and remediation decisions.
     pub primary: FailureClass,
+    /// Coarse retry-policy failure kind.
+    #[serde(default = "default_failure_kind")]
+    pub failure_kind: GateFailureKind,
+    /// Retry behavior derived from [`failure_kind`](Self::failure_kind).
+    #[serde(default = "default_retry_policy")]
+    pub retry_policy: GateRetryPolicy,
+    /// Concise human-readable failure summary.
+    #[serde(default)]
+    pub summary: String,
     /// All observed classes in stable order.
     pub classes: Vec<FailureClass>,
     /// Structured compiler diagnostics when available.
@@ -125,8 +212,27 @@ pub struct GateFailureClassification {
     /// Blocking findings to preserve in retry/replan records.
     #[serde(default)]
     pub blocking_findings: Vec<String>,
+    /// Gate execution duration in milliseconds, when known.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     /// Short excerpt preserving enough original output for debugging.
     pub raw_excerpt: String,
+}
+
+impl GateFailureClassification {
+    /// Attach a concise summary.
+    #[must_use]
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// Attach observed gate duration.
+    #[must_use]
+    pub const fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
 }
 
 /// Summary of all compile errors from a build.
@@ -472,9 +578,16 @@ pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassificat
         .filter_map(blocking_finding_for_class)
         .collect();
 
+    let raw_excerpt: String = output.chars().take(2000).collect();
+    let failure_kind = classify_failure_kind(&primary, &classes, &recommended_action, &raw_excerpt);
+    let retry_policy = GateRetryPolicy::from(&failure_kind);
+
     GateFailureClassification {
         gate: gate.to_string(),
         primary,
+        failure_kind,
+        retry_policy,
+        summary: String::new(),
         classes,
         compile_errors: summary.errors,
         error_count: summary.error_count,
@@ -484,8 +597,22 @@ pub fn classify_gate_failure(gate: &str, output: &str) -> GateFailureClassificat
         recommended_action,
         replan_candidate,
         blocking_findings,
-        raw_excerpt: output.chars().take(2000).collect(),
+        duration_ms: None,
+        raw_excerpt,
     }
+}
+
+/// Classify and enrich a gate failure in one step.
+#[must_use]
+pub fn structured_gate_failure(
+    gate: &str,
+    output: &str,
+    summary: impl Into<String>,
+    duration_ms: u64,
+) -> GateFailureClassification {
+    classify_gate_failure(gate, output)
+        .with_summary(summary)
+        .with_duration_ms(duration_ms)
 }
 
 /// Render a structured classification as stable pretty JSON.
@@ -526,6 +653,80 @@ fn looks_missing_dependency_or_feature(lower: &str) -> bool {
         || lower.contains("does not have these features")
         || lower.contains("does not have feature")
         || lower.contains("package `") && lower.contains("depends on") && lower.contains("feature")
+}
+
+fn classify_failure_kind(
+    primary: &FailureClass,
+    classes: &[FailureClass],
+    recommended_action: &GateFailureAction,
+    raw_excerpt: &str,
+) -> GateFailureKind {
+    let lower = raw_excerpt.to_ascii_lowercase();
+    if looks_resource_failure(&lower) {
+        return GateFailureKind::Resource;
+    }
+    if matches!(recommended_action, GateFailureAction::NeedsReplan)
+        || matches!(
+            primary,
+            FailureClass::UnsafeStubOrPassBehavior
+                | FailureClass::ArchitecturalConflictRequiresReplan
+        )
+    {
+        return GateFailureKind::Structural;
+    }
+    if matches!(recommended_action, GateFailureAction::Blocked) && !looks_likely_transient(&lower) {
+        return GateFailureKind::Resource;
+    }
+    if classes.contains(&FailureClass::ExternalEnvironment) && looks_likely_transient(&lower) {
+        return GateFailureKind::Transient;
+    }
+    if matches!(primary, FailureClass::Unknown) {
+        return classify_failure_kind_from_raw(&lower);
+    }
+    GateFailureKind::Permanent
+}
+
+fn classify_failure_kind_from_raw(lower: &str) -> GateFailureKind {
+    if looks_resource_failure(lower) {
+        GateFailureKind::Resource
+    } else if looks_likely_transient(lower) {
+        GateFailureKind::Transient
+    } else if lower.contains("verify script")
+        || lower.contains("acceptance contract")
+        || lower.contains("impossible")
+    {
+        GateFailureKind::Structural
+    } else {
+        GateFailureKind::Permanent
+    }
+}
+
+fn looks_resource_failure(lower: &str) -> bool {
+    lower.contains("out of memory")
+        || lower.contains("oom")
+        || lower.contains("no space left")
+        || lower.contains("disk full")
+        || lower.contains("too many open files")
+        || lower.contains("cannot allocate memory")
+}
+
+fn looks_likely_transient(lower: &str) -> bool {
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("temporary failure")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("flaky")
+        || lower.contains("intermittent")
+        || lower.contains("race condition")
+}
+
+fn default_failure_kind() -> GateFailureKind {
+    GateFailureKind::Permanent
+}
+
+fn default_retry_policy() -> GateRetryPolicy {
+    GateRetryPolicy::from(&GateFailureKind::Permanent)
 }
 
 fn looks_external_environment_failure(lower: &str) -> bool {
@@ -737,8 +938,52 @@ error[E0308]: mismatched types
             "thread 'foo' panicked at assertion failed: left == right\ntest result: FAILED. 9 passed; 1 failed",
         );
         assert_eq!(failure.primary, FailureClass::TestExpectationFailure);
+        assert_eq!(failure.failure_kind, GateFailureKind::Permanent);
+        assert!(failure.retry_policy.retryable);
+        assert!(failure.retry_policy.include_error_digest);
         assert_eq!(failure.recommended_action, GateFailureAction::Retry);
         assert!(!failure.replan_candidate);
+    }
+
+    #[test]
+    fn failure_kind_drives_retry_policy() {
+        let transient = classify_gate_failure("shell:flake", "timed out after 100 ms");
+        assert_eq!(transient.failure_kind, GateFailureKind::Transient);
+        assert_eq!(transient.retry_policy.cooldown_secs, 2);
+        assert!(!transient.retry_policy.include_error_digest);
+
+        let resource =
+            classify_gate_failure("compile:cargo", "out of memory: cannot allocate memory");
+        assert_eq!(resource.failure_kind, GateFailureKind::Resource);
+        assert!(!resource.retry_policy.retryable);
+
+        let structural = classify_gate_failure(
+            "verify_chain",
+            "verify script impossible acceptance contract requires replan",
+        );
+        assert_eq!(structural.failure_kind, GateFailureKind::Structural);
+        assert!(structural.retry_policy.regenerate_verify);
+    }
+
+    #[test]
+    fn structured_gate_failure_preserves_retry_inputs() {
+        let classification = structured_gate_failure(
+            "compile:cargo",
+            "error[E0308]: mismatched types",
+            "error[E0308]: mismatched types",
+            123,
+        );
+
+        assert_eq!(classification.summary, "error[E0308]: mismatched types");
+        assert_eq!(classification.duration_ms, Some(123));
+        assert_eq!(classification.failure_kind, GateFailureKind::Permanent);
+        assert!(classification.retry_policy.generate_reflection);
+
+        let rendered = render_failure_classification(&classification);
+        let reparsed: GateFailureClassification =
+            serde_json::from_str(&rendered).expect("rendered classification parses");
+        assert_eq!(reparsed.duration_ms, Some(123));
+        assert_eq!(reparsed.retry_policy, classification.retry_policy);
     }
 
     #[test]

@@ -7,25 +7,33 @@ pub(crate) mod router_state;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::ApiError;
+use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 use roko_gate::adaptive_threshold::AdaptiveThresholds;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::runtime_feedback::read_efficiency_events;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/c-factor/trend", get(router_state::cfactor_trend))
         .route("/learning/efficiency", get(efficiency))
         .route("/learn/efficiency", get(efficiency))
-        .route("/learning/cascade-router", get(router_state::cascade_router))
-        .route("/learn/cascade-router", get(router_state::cascade_router))
+        .route("/learning/costs", get(costs))
+        .route("/learn/costs", get(costs))
+        .route("/learning/provider-outcomes", get(provider_outcomes))
+        .route("/learn/provider-outcomes", get(provider_outcomes))
+        .route("/learning/retries", get(retries))
+        .route("/learn/retries", get(retries))
+        .route("/learning/runtime-feedback", get(runtime_feedback))
+        .route("/learn/runtime-feedback", get(runtime_feedback))
+        .route("/learning/cascade-router", get(learn_router_snapshot))
+        .route("/learn/cascade-router", get(learn_router_snapshot))
         .route("/learning/cascade", get(router_state::cascade))
         .route("/learning/cost-tiers", get(router_state::cost_tiers))
         .route("/learn/cost-tiers", get(router_state::cost_tiers))
@@ -46,17 +54,61 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn efficiency(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<EfficiencyResponse>, ApiError> {
-    let path = state.workdir.join(".roko/learn/efficiency.jsonl");
-    let events = read_efficiency_events(&path)
-        .await
-        .map_err(|e| ApiError::internal(format!("read {}: {e}", path.display())))?;
-    Ok(Json(build_efficiency_response(&events)))
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(build_efficiency_response_with_evidence(
+        projections.efficiency_events(),
+        projections.evidence(),
+    )))
+}
+
+/// `GET /api/learning/costs` — canonical runtime cost projection.
+async fn costs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(projections.project("cost_state", &query)?))
+}
+
+/// `GET /api/learning/provider-outcomes` — provider/model outcome proof surface.
+async fn provider_outcomes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(projections.project("provider_state", &query)?))
+}
+
+/// `GET /api/learning/retries` — retry attempt proof surface.
+async fn retries(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(projections.project("retry_state", &query)?))
+}
+
+/// `GET /api/learning/runtime-feedback` — joined feedback store overview.
+async fn runtime_feedback(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(projections.project("runtime_feedback", &query)?))
 }
 
 /// `GET /api/learning/gate-thresholds` — read `.roko/learn/gate-thresholds.json`.
 async fn gate_thresholds(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko/learn/gate-thresholds.json");
-    helpers::read_json_file(&path).await
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let learning = projections.project("learning_policy_state", &ProjectionQuery::default())?;
+    let node = learning
+        .get("gate_thresholds")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(Json(source_projection_payload(
+        node,
+        projections.evidence(),
+    )))
 }
 
 /// `GET /api/learn/adaptive-thresholds` — summarize `.roko/learn/gate-thresholds.json`.
@@ -72,20 +124,37 @@ async fn adaptive_thresholds(
 async fn learn_router_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko/learn/cascade-router.json");
-    helpers::read_json_file(&path).await
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let learning = projections.project("learning_policy_state", &ProjectionQuery::default())?;
+    let node = learning
+        .get("cascade_router")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(Json(source_projection_payload(
+        node,
+        projections.evidence(),
+    )))
 }
 
 /// `GET /api/executor/state` — return the executor snapshot as JSON.
 async fn executor_state(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko/state/executor.json");
-    helpers::read_json_file(&path).await
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(
+        projections.project("executor_state", &ProjectionQuery::default())?,
+    ))
 }
 
 // ── helpers ──────────────────────────────────────────────────────────
 
 /// Aggregate efficiency events into task-level cost and timing metrics.
 fn build_efficiency_response(events: &[AgentEfficiencyEvent]) -> EfficiencyResponse {
+    build_efficiency_response_with_evidence(events, json!({"state": "not_loaded"}))
+}
+
+fn build_efficiency_response_with_evidence(
+    events: &[AgentEfficiencyEvent],
+    evidence: Value,
+) -> EfficiencyResponse {
     let mut tasks: HashMap<TaskKey, TaskEfficiencyAggregate> = HashMap::new();
 
     for (index, event) in events.iter().enumerate() {
@@ -156,6 +225,55 @@ fn build_efficiency_response(events: &[AgentEfficiencyEvent]) -> EfficiencyRespo
             total_duration_ms as f64 / task_count
         },
         cost_trend,
+        tasks: task_summaries,
+        evidence,
+    }
+}
+
+fn source_projection_payload(node: Value, evidence: Value) -> Value {
+    let projection_state = node
+        .get("state")
+        .cloned()
+        .unwrap_or_else(|| Value::String("unknown".to_string()));
+    let source = node
+        .get("source")
+        .cloned()
+        .or_else(|| node.get("path").cloned())
+        .unwrap_or(Value::Null);
+    let raw = node.get("value").cloned();
+
+    if let Some(Value::Object(mut map)) = raw.clone() {
+        map.entry("projection_state".to_string())
+            .or_insert(projection_state);
+        if !source.is_null() {
+            map.entry("source".to_string()).or_insert(source);
+        }
+        map.entry("value".to_string())
+            .or_insert(raw.unwrap_or(Value::Null));
+        map.insert("evidence".to_string(), evidence);
+        return Value::Object(map);
+    }
+
+    if let Some(value) = raw {
+        return json!({
+            "projection_state": projection_state,
+            "source": source,
+            "value": value,
+            "evidence": evidence,
+        });
+    }
+
+    match node {
+        Value::Object(mut map) => {
+            map.insert("evidence".to_string(), evidence);
+            Value::Object(map)
+        }
+        other => json!({
+            "projection_state": projection_state,
+            "source": source,
+            "value": other,
+            "evidence": evidence,
+        }),
     }
 }
 
@@ -246,6 +364,8 @@ struct EfficiencyResponse {
     tokens_per_task: f64,
     avg_task_duration: f64,
     cost_trend: Vec<CostTrendPoint>,
+    tasks: Vec<TaskEfficiencySummary>,
+    evidence: Value,
 }
 
 /// Structured API response for `GET /api/learn/adaptive-thresholds`.
@@ -487,12 +607,14 @@ mod tests {
     async fn experiments_returns_empty_store_when_missing() -> Result<(), Box<dyn Error>> {
         let (_dir, state) = test_state()?;
 
-        let response = experiments::experiments(State(state)).await.map_err(|err| {
-            anyhow!(
-                "missing experiments endpoint should succeed: {}",
-                err.message
-            )
-        })?;
+        let response = experiments::experiments(State(state))
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "missing experiments endpoint should succeed: {}",
+                    err.message
+                )
+            })?;
         let body = response.0;
 
         assert_eq!(body.running_experiments, 0);
@@ -666,7 +788,10 @@ mod tests {
     #[test]
     fn cfactor_trend_window_defaults_to_24h_and_supports_7d() {
         use chrono::Duration;
-        assert_eq!(router_state::parse_cfactor_trend_window(None), (Duration::hours(1), 24));
+        assert_eq!(
+            router_state::parse_cfactor_trend_window(None),
+            (Duration::hours(1), 24)
+        );
         assert_eq!(
             router_state::parse_cfactor_trend_window(Some("24h")),
             (Duration::hours(1), 24)

@@ -32,7 +32,7 @@
 //!   with a reason of the form `"Fact check: 2/4 claims verified (50%)"`
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -156,9 +156,15 @@ impl FactCheckGate {
 }
 
 impl roko_core::Cell for FactCheckGate {
-    fn cell_id(&self) -> &str { "fact-check-gate" }
-    fn cell_name(&self) -> &str { "FactCheckGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "fact-check-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "FactCheckGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

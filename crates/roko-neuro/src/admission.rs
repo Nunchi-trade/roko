@@ -27,6 +27,49 @@ pub const DEFAULT_KNOWLEDGE_CANDIDATES_FILE: &str = "knowledge-candidates.jsonl"
 /// Default filename for admission decisions.
 pub const DEFAULT_KNOWLEDGE_ADMISSION_DECISIONS_FILE: &str = "knowledge-admission-decisions.jsonl";
 
+/// Lightweight admission pre-filter for single runtime observations.
+///
+/// This gate is intentionally cheaper than the evidence-based
+/// [`KnowledgeAdmissionStore`]. It lets trusted, novel, sufficiently
+/// confident gate-backed observations enter the durable store immediately,
+/// while ambiguous observations can still be preserved as candidates for the
+/// full admission pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LightAdmissionGate {
+    /// Minimum candidate confidence required for fast-path admission.
+    pub min_confidence: f64,
+    /// Minimum novelty required for fast-path admission, computed as
+    /// `1.0 - max_similarity`.
+    pub min_novelty: f64,
+    /// Minimum trust weight required for the source channel.
+    pub min_source_trust: f64,
+}
+
+impl Default for LightAdmissionGate {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.5,
+            min_novelty: 0.3,
+            min_source_trust: 0.65,
+        }
+    }
+}
+
+impl LightAdmissionGate {
+    /// Evaluate a candidate against confidence, novelty, and source-trust
+    /// requirements.
+    ///
+    /// `similarity` should be the maximum known similarity to an existing
+    /// durable entry, in `0.0..=1.0`. Values outside this range are clamped.
+    #[must_use]
+    pub fn evaluate(&self, confidence: f64, similarity: f64, source_trust: f64) -> bool {
+        let novelty = 1.0 - similarity.clamp(0.0, 1.0);
+        confidence.clamp(0.0, 1.0) >= self.min_confidence.clamp(0.0, 1.0)
+            && novelty >= self.min_novelty.clamp(0.0, 1.0)
+            && source_trust.clamp(0.0, 1.0) >= self.min_source_trust.clamp(0.0, 1.0)
+    }
+}
+
 /// Source channel for one evidence item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

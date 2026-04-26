@@ -13,7 +13,6 @@ pub(crate) const fn edit_target(global: bool, project: bool) -> EditTarget {
     }
 }
 
-
 pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
     match cmd {
         ConfigCmd::Init {
@@ -195,7 +194,6 @@ pub(crate) async fn dispatch_config(cli: &Cli, cmd: ConfigCmd) -> Result<()> {
     }
 }
 
-
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct ProviderHealthSnapshot {
     #[serde(default)]
@@ -275,7 +273,6 @@ pub(crate) async fn cmd_provider_list(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-
 pub(crate) fn cmd_provider_health(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
     let configured = configured_providers(&config);
@@ -315,7 +312,6 @@ pub(crate) fn cmd_provider_health(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-
 pub(crate) async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Result<()> {
     let config = load_roko_config(workdir)?;
     let providers = configured_providers(&config);
@@ -348,7 +344,6 @@ pub(crate) async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Re
         ProviderKind::CursorAcp => run_cursor_provider_test(provider_name, provider).await,
     }
 }
-
 
 pub(crate) async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
@@ -420,7 +415,6 @@ pub(crate) async fn cmd_provider_test_all(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
-
 pub(crate) fn cmd_model_list(workdir: &Path) -> Result<()> {
     let config = load_roko_config(workdir)?;
     let models = configured_models(&config);
@@ -445,7 +439,6 @@ pub(crate) fn cmd_model_list(workdir: &Path) -> Result<()> {
     print!("{}", format_model_rows(&rows));
     Ok(())
 }
-
 
 pub(crate) fn cmd_model_route(
     workdir: &Path,
@@ -535,7 +528,6 @@ pub(crate) fn cmd_model_route(
     );
     Ok(())
 }
-
 
 pub(crate) async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
     let workdir = match &cmd {
@@ -770,8 +762,9 @@ pub(crate) async fn cmd_plugin(cli: &Cli, cmd: PluginCmd) -> Result<i32> {
     }
 }
 
-
-pub(crate) fn configured_providers(config: &RokoConfig) -> std::collections::HashMap<String, ProviderConfig> {
+pub(crate) fn configured_providers(
+    config: &RokoConfig,
+) -> std::collections::HashMap<String, ProviderConfig> {
     if !config.providers.is_empty() {
         return config.providers.clone();
     }
@@ -791,11 +784,11 @@ pub(crate) fn configured_providers(config: &RokoConfig) -> std::collections::Has
     std::collections::HashMap::new()
 }
 
-
-pub(crate) fn configured_models(config: &RokoConfig) -> std::collections::HashMap<String, ModelProfile> {
+pub(crate) fn configured_models(
+    config: &RokoConfig,
+) -> std::collections::HashMap<String, ModelProfile> {
     config.effective_models()
 }
-
 
 pub(crate) fn select_provider_test_model(
     config: &RokoConfig,
@@ -817,7 +810,6 @@ pub(crate) fn select_provider_test_model(
     candidates.into_iter().next()
 }
 
-
 pub(crate) async fn inspect_provider(
     client: &reqwest::Client,
     provider_name: &str,
@@ -829,8 +821,10 @@ pub(crate) async fn inspect_provider(
     }
 }
 
-
-pub(crate) fn inspect_cli_provider(provider_name: &str, provider: &ProviderConfig) -> ProviderListRow {
+pub(crate) fn inspect_cli_provider(
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> ProviderListRow {
     let command = provider
         .command
         .as_deref()
@@ -849,7 +843,6 @@ pub(crate) fn inspect_cli_provider(provider_name: &str, provider: &ProviderConfi
         status,
     }
 }
-
 
 pub(crate) async fn inspect_http_provider(
     client: &reqwest::Client,
@@ -909,7 +902,6 @@ pub(crate) async fn inspect_http_provider(
     }
 }
 
-
 pub(crate) async fn probe_base_url(client: &reqwest::Client, base_url: &str) -> Option<String> {
     match client.head(base_url).send().await {
         Ok(_) => None,
@@ -917,7 +909,6 @@ pub(crate) async fn probe_base_url(client: &reqwest::Client, base_url: &str) -> 
         Err(_) => Some("unreachable".to_string()),
     }
 }
-
 
 pub(crate) fn command_available(command: &str) -> bool {
     let command = command.trim();
@@ -932,7 +923,6 @@ pub(crate) fn command_available(command: &str) -> bool {
 
     roko_cli::config::command_on_path(command)
 }
-
 
 pub(crate) fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
@@ -952,7 +942,6 @@ pub(crate) fn executable_file(path: &Path) -> bool {
         true
     }
 }
-
 
 pub(crate) fn format_provider_rows(rows: &[ProviderListRow]) -> String {
     let mut widths = [
@@ -1001,7 +990,6 @@ pub(crate) fn format_provider_rows(rows: &[ProviderListRow]) -> String {
     out
 }
 
-
 pub(crate) fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> ModelListRow {
     ModelListRow {
         model: model_name.to_string(),
@@ -1014,7 +1002,6 @@ pub(crate) fn build_model_list_row(model_name: &str, profile: &ModelProfile) -> 
         cost: format_model_cost(profile),
     }
 }
-
 
 pub(crate) fn format_model_rows(rows: &[ModelListRow]) -> String {
     let mut widths = [
@@ -1087,7 +1074,6 @@ pub(crate) fn format_model_rows(rows: &[ModelListRow]) -> String {
     out
 }
 
-
 pub(crate) fn format_context_window(tokens: u64) -> String {
     if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
         format!("{}M", tokens / 1_000_000)
@@ -1104,11 +1090,9 @@ pub(crate) fn format_context_window(tokens: u64) -> String {
     }
 }
 
-
 pub(crate) fn format_bool_capability(value: bool) -> &'static str {
     if value { "✓" } else { "✗" }
 }
-
 
 pub(crate) fn format_model_cost(profile: &ModelProfile) -> String {
     match (profile.cost_input_per_m, profile.cost_output_per_m) {
@@ -1118,7 +1102,6 @@ pub(crate) fn format_model_cost(profile: &ModelProfile) -> String {
         (None, None) => "—".to_string(),
     }
 }
-
 
 pub(crate) async fn run_openai_compat_provider_test(
     provider_name: &str,
@@ -1233,7 +1216,6 @@ pub(crate) async fn run_openai_compat_provider_test(
     Ok(())
 }
 
-
 pub(crate) fn openai_compat_test_endpoint(provider: &ProviderConfig) -> String {
     format!(
         "{}/chat/completions",
@@ -1245,8 +1227,10 @@ pub(crate) fn openai_compat_test_endpoint(provider: &ProviderConfig) -> String {
     )
 }
 
-
-pub(crate) fn estimate_provider_test_cost(model: &ModelProfile, usage: &roko_agent::Usage) -> Option<f64> {
+pub(crate) fn estimate_provider_test_cost(
+    model: &ModelProfile,
+    usage: &roko_agent::Usage,
+) -> Option<f64> {
     let mut cost = 0.0;
     let mut priced = false;
 
@@ -1270,7 +1254,6 @@ pub(crate) fn estimate_provider_test_cost(model: &ModelProfile, usage: &roko_age
     priced.then_some(cost)
 }
 
-
 pub(crate) fn format_provider_test_duration(duration: Duration) -> String {
     if duration.as_secs_f64() >= 1.0 {
         format!("{:.1}s", duration.as_secs_f64())
@@ -1278,7 +1261,6 @@ pub(crate) fn format_provider_test_duration(duration: Duration) -> String {
         format!("{}ms", duration.as_millis())
     }
 }
-
 
 pub(crate) async fn run_anthropic_provider_test(
     provider_name: &str,
@@ -1369,7 +1351,6 @@ pub(crate) async fn run_anthropic_provider_test(
     Ok(())
 }
 
-
 pub(crate) async fn run_claude_cli_provider_test(
     provider_name: &str,
     provider: &ProviderConfig,
@@ -1409,7 +1390,6 @@ pub(crate) async fn run_claude_cli_provider_test(
     println!("  \u{2713} Provider '{provider_name}' is working");
     Ok(())
 }
-
 
 pub(crate) async fn run_gemini_provider_test(
     provider_name: &str,
@@ -1505,8 +1485,10 @@ pub(crate) async fn run_gemini_provider_test(
     Ok(())
 }
 
-
-pub(crate) async fn run_cursor_provider_test(provider_name: &str, provider: &ProviderConfig) -> Result<()> {
+pub(crate) async fn run_cursor_provider_test(
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> Result<()> {
     let base_url = provider
         .base_url
         .as_deref()
@@ -1556,7 +1538,6 @@ pub(crate) async fn run_cursor_provider_test(provider_name: &str, provider: &Pro
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RouteComplexity {
     pub(crate) band: TaskComplexityBand,
@@ -1577,7 +1558,6 @@ pub(crate) fn parse_agent_role(input: Option<&str>) -> Result<AgentRole> {
         })
         .ok_or_else(|| anyhow!("unknown role '{input}'"))
 }
-
 
 pub(crate) fn parse_route_complexity(input: Option<&str>) -> Result<RouteComplexity> {
     let Some(input) = input.map(str::trim).filter(|input| !input.is_empty()) else {
@@ -1608,7 +1588,6 @@ pub(crate) fn parse_route_complexity(input: Option<&str>) -> Result<RouteComplex
     }
 }
 
-
 pub(crate) fn normalize_route_token(input: &str) -> String {
     input
         .chars()
@@ -1616,7 +1595,6 @@ pub(crate) fn normalize_route_token(input: &str) -> String {
         .flat_map(char::to_lowercase)
         .collect()
 }
-
 
 pub(crate) fn resolve_requested_model_slug(
     requested_model: &str,
@@ -1641,8 +1619,9 @@ pub(crate) fn resolve_requested_model_slug(
     None
 }
 
-
-pub(crate) fn model_aliases_by_slug(models: &HashMap<String, ModelProfile>) -> HashMap<String, String> {
+pub(crate) fn model_aliases_by_slug(
+    models: &HashMap<String, ModelProfile>,
+) -> HashMap<String, String> {
     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
     for (model_key, profile) in models {
         grouped
@@ -1664,14 +1643,12 @@ pub(crate) fn model_aliases_by_slug(models: &HashMap<String, ModelProfile>) -> H
     aliases
 }
 
-
 pub(crate) fn display_model_name(aliases: &HashMap<String, String>, slug: &str) -> String {
     aliases
         .get(slug)
         .cloned()
         .unwrap_or_else(|| slug.to_string())
 }
-
 
 pub(crate) fn model_provider_map(
     models: &HashMap<String, ModelProfile>,
@@ -1688,7 +1665,6 @@ pub(crate) fn model_provider_map(
     }
     providers
 }
-
 
 pub(crate) fn available_model_candidates(
     model_slugs: &[String],
@@ -1708,13 +1684,11 @@ pub(crate) fn available_model_candidates(
         .collect()
 }
 
-
 pub(crate) fn provider_is_available(health: Option<&ProviderHealth>, now_ms: i64) -> bool {
     health
         .map(|snapshot| effective_circuit_state(snapshot, now_ms) != CircuitState::Open)
         .unwrap_or(true)
 }
-
 
 pub(crate) fn format_model_route_explanation(
     requested_model: &str,
@@ -1858,7 +1832,6 @@ pub(crate) fn format_model_route_explanation(
     out
 }
 
-
 pub(crate) fn format_route_stage(stage: roko_learn::cascade_router::CascadeStage) -> &'static str {
     match stage {
         roko_learn::cascade_router::CascadeStage::Static => "Static",
@@ -1866,7 +1839,6 @@ pub(crate) fn format_route_stage(stage: roko_learn::cascade_router::CascadeStage
         roko_learn::cascade_router::CascadeStage::Ucb => "UCB",
     }
 }
-
 
 pub(crate) fn describe_alpha(alpha: f64) -> &'static str {
     if alpha <= 0.10 {
@@ -1878,7 +1850,6 @@ pub(crate) fn describe_alpha(alpha: f64) -> &'static str {
     }
 }
 
-
 pub(crate) fn normalized_latency_for_model(
     model_slug: &str,
     provider: &str,
@@ -1889,7 +1860,6 @@ pub(crate) fn normalized_latency_for_model(
     (sla_ms > 0.0).then(|| (stats.total_latency_ema_ms / sla_ms).min(1.0))
 }
 
-
 pub(crate) fn default_latency_sla_for_slug(slug: &str) -> u64 {
     if slug.contains("haiku") {
         10_000
@@ -1899,7 +1869,6 @@ pub(crate) fn default_latency_sla_for_slug(slug: &str) -> u64 {
         30_000
     }
 }
-
 
 pub(crate) fn format_provider_health_note(health: Option<&ProviderHealth>, now_ms: i64) -> String {
     let Some(health) = health else {
@@ -1920,13 +1889,11 @@ pub(crate) fn format_provider_health_note(health: Option<&ProviderHealth>, now_m
     }
 }
 
-
 pub(crate) fn cascade_router_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("cascade-router.json")
 }
-
 
 pub(crate) fn provider_health_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
@@ -1934,15 +1901,15 @@ pub(crate) fn provider_health_path(workdir: &Path) -> PathBuf {
         .join("provider-health.json")
 }
 
-
 pub(crate) fn latency_stats_path(workdir: &Path) -> PathBuf {
     RokoLayout::for_project(workdir)
         .learn_dir()
         .join("latency-stats.json")
 }
 
-
-pub(crate) fn load_provider_health_snapshot(path: &Path) -> Result<HashMap<String, ProviderHealth>> {
+pub(crate) fn load_provider_health_snapshot(
+    path: &Path,
+) -> Result<HashMap<String, ProviderHealth>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -1953,8 +1920,9 @@ pub(crate) fn load_provider_health_snapshot(path: &Path) -> Result<HashMap<Strin
     Ok(snapshot.providers)
 }
 
-
-pub(crate) fn load_latency_stats_by_provider(path: &Path) -> Result<HashMap<String, ProviderLatencySummary>> {
+pub(crate) fn load_latency_stats_by_provider(
+    path: &Path,
+) -> Result<HashMap<String, ProviderLatencySummary>> {
     if !path.exists() {
         return Ok(HashMap::new());
     }
@@ -1973,7 +1941,6 @@ pub(crate) fn load_latency_stats_by_provider(path: &Path) -> Result<HashMap<Stri
 
     Ok(providers)
 }
-
 
 pub(crate) fn build_provider_health_row(
     provider: &str,
@@ -2030,7 +1997,6 @@ pub(crate) fn build_provider_health_row(
     }
 }
 
-
 pub(crate) fn effective_circuit_state(health: &ProviderHealth, now_ms: i64) -> CircuitState {
     match health.state {
         CircuitState::Open if health.cooldown_until.is_some_and(|until| now_ms >= until) => {
@@ -2040,7 +2006,6 @@ pub(crate) fn effective_circuit_state(health: &ProviderHealth, now_ms: i64) -> C
     }
 }
 
-
 pub(crate) fn format_circuit_state(state: CircuitState) -> &'static str {
     match state {
         CircuitState::Closed => "CLOSED",
@@ -2049,8 +2014,11 @@ pub(crate) fn format_circuit_state(state: CircuitState) -> &'static str {
     }
 }
 
-
-pub(crate) fn format_cooldown(health: Option<&ProviderHealth>, state: CircuitState, now_ms: i64) -> String {
+pub(crate) fn format_cooldown(
+    health: Option<&ProviderHealth>,
+    state: CircuitState,
+    now_ms: i64,
+) -> String {
     let Some(health) = health else {
         return "—".to_string();
     };
@@ -2066,7 +2034,6 @@ pub(crate) fn format_cooldown(health: Option<&ProviderHealth>, state: CircuitSta
         .map(format_remaining_ms)
         .unwrap_or_else(|| "—".to_string())
 }
-
 
 pub(crate) fn format_provider_health_rows(rows: &[ProviderHealthRow]) -> String {
     let mut widths = [
@@ -2133,7 +2100,6 @@ pub(crate) fn format_provider_health_rows(rows: &[ProviderHealthRow]) -> String 
     out
 }
 
-
 pub(crate) fn format_latency_p50(ms: f64) -> String {
     if ms >= 500.0 {
         format!("{:.1}s", ms / 1000.0)
@@ -2142,18 +2108,15 @@ pub(crate) fn format_latency_p50(ms: f64) -> String {
     }
 }
 
-
 pub(crate) fn format_remaining_ms(ms: i64) -> String {
     let secs = (ms.max(0) + 999) / 1000;
     format!("{} left", format_compact_duration(secs))
 }
 
-
 pub(crate) fn format_timestamp_age(timestamp_ms: i64, now_ms: i64) -> String {
     let secs = now_ms.saturating_sub(timestamp_ms).max(0) / 1000;
     format!("{} ago", format_compact_duration(secs))
 }
-
 
 pub(crate) fn format_compact_duration(secs: i64) -> String {
     match secs {
@@ -2164,12 +2127,10 @@ pub(crate) fn format_compact_duration(secs: i64) -> String {
     }
 }
 
-
 pub(crate) fn file_modified_ms(path: &Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     system_time_to_ms(modified)
 }
-
 
 pub(crate) fn system_time_to_ms(timestamp: SystemTime) -> Option<i64> {
     timestamp
@@ -2178,11 +2139,9 @@ pub(crate) fn system_time_to_ms(timestamp: SystemTime) -> Option<i64> {
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
 }
 
-
 pub(crate) fn unix_ms_now() -> i64 {
     system_time_to_ms(SystemTime::now()).unwrap_or(0)
 }
-
 
 pub(crate) fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
     match (left, right) {
@@ -2193,7 +2152,6 @@ pub(crate) fn max_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderListRow {
     pub(crate) provider: String,
@@ -2201,7 +2159,6 @@ pub(crate) struct ProviderListRow {
     pub(crate) base_url: String,
     pub(crate) status: String,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelListRow {
@@ -2215,7 +2172,6 @@ pub(crate) struct ModelListRow {
     pub(crate) cost: String,
 }
 
-
 pub(crate) const PROVIDER_FAILURE_THRESHOLD: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2228,5 +2184,3 @@ pub(crate) struct ProviderHealthRow {
     pub(crate) error_rate: String,
     pub(crate) last_check: String,
 }
-
-

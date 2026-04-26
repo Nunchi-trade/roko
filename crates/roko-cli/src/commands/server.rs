@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
     use agent_serve::{run_agent_create, run_agent_start, run_agent_stop};
 
@@ -127,7 +126,6 @@ pub(crate) async fn cmd_up(cli: &Cli, workdir: PathBuf) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-
 pub(crate) async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     match cmd {
@@ -168,7 +166,6 @@ pub(crate) async fn cmd_daemon(cli: &Cli, cmd: DaemonCmd) -> Result<i32> {
     }
 }
 
-
 pub(crate) async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
     match cmd {
         DeployCmd::Railway {
@@ -180,7 +177,6 @@ pub(crate) async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
         DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
     }
 }
-
 
 pub(crate) async fn cmd_deploy_railway(
     cli: &Cli,
@@ -334,7 +330,6 @@ pub(crate) async fn cmd_deploy_railway(
     Ok(EXIT_SUCCESS)
 }
 
-
 pub(crate) async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
 
@@ -343,7 +338,6 @@ pub(crate) async fn cmd_deploy_fly(cli: &Cli, workdir: Option<PathBuf>) -> Resul
 
     Ok(EXIT_SUCCESS)
 }
-
 
 pub(crate) async fn cmd_deploy_docker(
     cli: &Cli,
@@ -360,7 +354,6 @@ pub(crate) async fn cmd_deploy_docker(
     Ok(EXIT_SUCCESS)
 }
 
-
 /// Load persisted Railway project context from `.roko/state/railway.json`.
 pub(crate) fn load_railway_context(
     workdir: &Path,
@@ -369,7 +362,6 @@ pub(crate) fn load_railway_context(
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
 }
-
 
 /// Persist Railway project context to `.roko/state/railway.json` so that
 /// subsequent deploys (including worker deploys) reuse the same project.
@@ -385,7 +377,6 @@ pub(crate) fn save_railway_context(
     info!(path = %path.display(), "persisted Railway project context");
     Ok(())
 }
-
 
 /// Load an agent template by name and serialize it to JSON bytes for worker env.
 pub(crate) fn load_template_for_deploy(workdir: &Path, name: &str) -> Result<Vec<u8>> {
@@ -403,14 +394,12 @@ pub(crate) fn load_template_for_deploy(workdir: &Path, name: &str) -> Result<Vec
     serde_json::to_vec(&template).context("serialize template for worker env")
 }
 
-
 pub(crate) fn write_fly_toml(workdir: &Path) -> Result<PathBuf> {
     let path = workdir.join("fly.toml");
     std::fs::write(&path, FLY_TOML_TEMPLATE)
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
-
 
 pub(crate) fn resolve_docker_registry(workdir: &Path, registry: Option<String>) -> Result<String> {
     if let Some(registry) = registry {
@@ -438,7 +427,6 @@ pub(crate) fn resolve_docker_registry(workdir: &Path, registry: Option<String>) 
     Ok(registry.trim().trim_end_matches('/').to_string())
 }
 
-
 pub(crate) async fn run_release_build(workdir: &Path) -> Result<()> {
     let workdir = workdir.to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
@@ -461,7 +449,6 @@ pub(crate) async fn run_release_build(workdir: &Path) -> Result<()> {
 
     Ok(())
 }
-
 
 pub(crate) async fn register_deployment_github_webhooks(
     webhooks: &[ServeDeployWebhookConfig],
@@ -542,7 +529,6 @@ pub(crate) async fn register_deployment_github_webhooks(
     Ok(())
 }
 
-
 pub(crate) async fn register_github_webhook(
     github: &octocrab::Octocrab,
     owner: &str,
@@ -594,7 +580,6 @@ pub(crate) async fn register_github_webhook(
     Ok(())
 }
 
-
 pub(crate) fn git_remote_slug(workdir: &Path) -> Result<String> {
     let remote = run_command_output(workdir, "git", &["remote", "get-url", "origin"])?;
     let remote = remote.trim();
@@ -615,7 +600,6 @@ pub(crate) fn git_remote_slug(workdir: &Path) -> Result<String> {
     Ok(slug)
 }
 
-
 pub(crate) fn git_current_branch(workdir: &Path) -> Result<String> {
     let branch = run_command_output(workdir, "git", &["branch", "--show-current"])?;
     let branch = branch.trim();
@@ -624,7 +608,6 @@ pub(crate) fn git_current_branch(workdir: &Path) -> Result<String> {
     }
     Ok(branch.to_string())
 }
-
 
 pub(crate) fn collect_railway_env_vars() -> std::collections::HashMap<String, String> {
     const NAMES: &[&str] = &[
@@ -648,7 +631,6 @@ pub(crate) fn collect_railway_env_vars() -> std::collections::HashMap<String, St
     vars
 }
 
-
 pub(crate) fn run_command_status(workdir: &Path, program: &str, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new(program)
         .args(args)
@@ -662,7 +644,6 @@ pub(crate) fn run_command_status(workdir: &Path, program: &str, args: &[&str]) -
 
     Ok(())
 }
-
 
 pub(crate) fn run_command_output(workdir: &Path, program: &str, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(program)
@@ -678,7 +659,6 @@ pub(crate) fn run_command_output(workdir: &Path, program: &str, args: &[&str]) -
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
-
 
 pub(crate) const FLY_TOML_TEMPLATE: &str = r#"app = "roko-agent"
 primary_region = "iad"
@@ -704,4 +684,3 @@ method = "GET"
 source = "roko_data"
 destination = "/data/.roko"
 "#;
-

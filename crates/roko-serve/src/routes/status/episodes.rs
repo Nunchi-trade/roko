@@ -2,29 +2,24 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ApiError;
+use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 
-use super::helpers::{read_jsonl_entries, MAX_JSONL_RESULTS};
+use super::helpers::{MAX_JSONL_RESULTS, read_jsonl_entries};
 
-/// `GET /api/episodes` — read episodes JSONL as a JSON array.
-pub async fn episodes(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.layout.episodes_path();
-    let entries = read_jsonl_entries(&path).await?;
-    let capped: Vec<Value> = entries
-        .into_iter()
-        .rev()
-        .take(MAX_JSONL_RESULTS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    Ok(Json(Value::Array(capped)))
+/// `GET /api/episodes` — normalized episode proof rows from canonical projections.
+pub async fn episodes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ProjectionQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(Value::Array(projections.episode_items(&query))))
 }
 
 #[derive(Deserialize)]

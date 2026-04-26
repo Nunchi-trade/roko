@@ -48,8 +48,6 @@
 
 pub mod affect;
 pub mod agent;
-/// The Cell trait — universal computation unit for all protocol implementations.
-pub mod cell;
 /// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
 pub mod arbitration;
 pub mod attestation;
@@ -58,6 +56,8 @@ pub mod build;
 /// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
 pub mod bus_backends;
 pub mod catalyst;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;

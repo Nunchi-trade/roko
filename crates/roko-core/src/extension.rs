@@ -467,9 +467,7 @@ impl ExtensionChain {
     }
 
     /// Initialize all extensions in order.
-    pub async fn init_all(
-        &mut self,
-    ) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
+    pub async fn init_all(&mut self) -> Vec<(String, Box<dyn std::error::Error + Send + Sync>)> {
         let mut errors = Vec::new();
         for ext in &mut self.extensions {
             if let Err(e) = ext.on_init().await {

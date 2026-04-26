@@ -20,6 +20,7 @@ use crate::watchers::{
 use parking_lot::Mutex;
 use roko_core::{
     Body, CognitiveSignal, ConductorDecision, ConductorEvaluation, Context, Engram, Kind, React,
+    config::schema::ConductorConfig,
 };
 use roko_learn::provider_health::ProviderHealthTracker;
 use serde::{Deserialize, Serialize};
@@ -91,33 +92,109 @@ impl Default for Conductor {
     }
 }
 
+fn default_watchers() -> Vec<Box<dyn React>> {
+    vec![
+        Box::new(GhostTurnWatcher::default()),
+        Box::new(ReviewLoopWatcher::default()),
+        Box::new(IterationLoopWatcher::default()),
+        Box::new(TestFailureBudgetWatcher::default()),
+        Box::new(CompileFailRepeatWatcher::default()),
+        Box::new(ContextWindowPressureWatcher::default()),
+        Box::new(SpecDriftWatcher::default()),
+        Box::new(CostOverrunWatcher::default()),
+        Box::new(TimeOverrunWatcher::new()),
+        Box::new(StuckPatternWatcher::default()),
+    ]
+}
+
+fn configured_watchers(config: &ConductorConfig) -> Vec<Box<dyn React>> {
+    let thresholds = &config.watchers;
+    vec![
+        Box::new(
+            thresholds
+                .ghost_turn
+                .as_ref()
+                .map(|cfg| GhostTurnWatcher::new(cfg.max_consecutive.max(1)))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .review_loop
+                .as_ref()
+                .map(|cfg| ReviewLoopWatcher::new(cfg.max_rejections.max(1)))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .iteration_loop
+                .as_ref()
+                .map(|cfg| IterationLoopWatcher::new(cfg.max_iterations.max(1)))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .test_failure_budget
+                .as_ref()
+                .map(|cfg| TestFailureBudgetWatcher::new(cfg.min_failure_increase.max(1)))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .compile_fail_repeat
+                .as_ref()
+                .map(|cfg| CompileFailRepeatWatcher::new(cfg.max_repeats.max(1)))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .context_window_pressure
+                .as_ref()
+                .map(|cfg| ContextWindowPressureWatcher::new(cfg.critical_threshold))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .spec_drift
+                .as_ref()
+                .map(|cfg| SpecDriftWatcher::new(cfg.max_ratio))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .cost_overrun
+                .as_ref()
+                .map(|cfg| CostOverrunWatcher::new(cfg.critical_usd))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .time_overrun
+                .as_ref()
+                .map(|cfg| TimeOverrunWatcher::with_alert_threshold(cfg.alert_ratio))
+                .unwrap_or_default(),
+        ),
+        Box::new(
+            thresholds
+                .stuck_pattern
+                .as_ref()
+                .map(|cfg| StuckPatternWatcher::new(cfg.max_identical_actions.max(1)))
+                .unwrap_or_default(),
+        ),
+    ]
+}
+
 impl Conductor {
     /// Create a conductor with all default watchers and the worst-severity policy.
     #[must_use]
     pub fn new() -> Self {
-        let watchers: Vec<Box<dyn React>> = vec![
-            Box::new(GhostTurnWatcher::default()),
-            Box::new(ReviewLoopWatcher::default()),
-            Box::new(IterationLoopWatcher::default()),
-            Box::new(TestFailureBudgetWatcher::default()),
-            Box::new(CompileFailRepeatWatcher::default()),
-            Box::new(ContextWindowPressureWatcher::default()),
-            Box::new(SpecDriftWatcher::default()),
-            Box::new(CostOverrunWatcher::default()),
-            Box::new(TimeOverrunWatcher::new()),
-            Box::new(StuckPatternWatcher::default()),
-        ];
+        Self::with_watchers(default_watchers())
+    }
 
-        Self {
-            watchers,
-            policy: Box::new(WorstSeverityPolicy),
-            circuit_breaker: CircuitBreaker::default(),
-            routing_bias: Mutex::new(RoutingBias::default()),
-            provider_health: None,
-            threshold_learner: Mutex::new(ThresholdLearner::new()),
-            pattern_detector: Mutex::new(PatternDetector::default()),
-            last_compound_patterns: Mutex::new(Vec::new()),
-        }
+    /// Create a conductor from user configuration, materializing watcher
+    /// thresholds from `[conductor.watchers.*]`.
+    #[must_use]
+    pub fn from_config(config: &ConductorConfig) -> Self {
+        Self::with_watchers(configured_watchers(config))
     }
 
     /// Convenience helper for periodic watcher checks.

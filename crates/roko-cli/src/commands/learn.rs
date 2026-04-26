@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn dispatch_learn(cli: &Cli, cmd: LearnCmd) -> Result<i32> {
     match cmd {
         LearnCmd::All { workdir } => {
@@ -37,9 +36,12 @@ pub(crate) async fn dispatch_learn(cli: &Cli, cmd: LearnCmd) -> Result<i32> {
     }
 }
 
-
 /// `roko tune [subsystem]` — display and optionally adjust adaptive thresholds.
-pub(crate) async fn cmd_tune(workdir: &std::path::Path, subsystem: &str, dry_run: bool) -> Result<i32> {
+pub(crate) async fn cmd_tune(
+    workdir: &std::path::Path,
+    subsystem: &str,
+    dry_run: bool,
+) -> Result<i32> {
     match subsystem {
         "gates" => {
             let path = workdir.join(".roko/learn/gate-thresholds.json");
@@ -85,7 +87,6 @@ pub(crate) async fn cmd_tune(workdir: &std::path::Path, subsystem: &str, dry_run
     Ok(EXIT_SUCCESS)
 }
 
-
 /// `roko learn [what]` — display learning subsystem state.
 pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i32> {
     let show_all = what == "all";
@@ -103,7 +104,11 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
     }
 
     if show_all || what == "episodes" {
-        print_learn_episodes(workdir);
+        print_learn_episodes(workdir).await;
+    }
+
+    if show_all {
+        print_learn_knowledge(workdir).await;
     }
 
     if !show_all && !["router", "experiments", "efficiency", "episodes"].contains(&what) {
@@ -115,7 +120,6 @@ pub(crate) async fn cmd_learn(workdir: &std::path::Path, what: &str) -> Result<i
 
     Ok(EXIT_SUCCESS)
 }
-
 
 pub(crate) fn print_learn_router(workdir: &std::path::Path) {
     let path = workdir.join(".roko/learn/cascade-router.json");
@@ -176,7 +180,6 @@ pub(crate) fn print_learn_router(workdir: &std::path::Path) {
     }
 }
 
-
 pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
     // Prompt experiments
     let prompt_path = workdir.join(".roko/learn/experiments.json");
@@ -220,11 +223,9 @@ pub(crate) fn print_learn_experiments(workdir: &std::path::Path) {
     }
 }
 
-
 #[allow(clippy::cast_precision_loss)]
 pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
-    let path = workdir.join(".roko/learn/efficiency.jsonl");
-    let events = match read_efficiency_events(&path).await {
+    let events = match roko_learn::runtime_feedback::read_project_efficiency_events(workdir).await {
         Ok(events) => events,
         Err(_) => {
             println!("Efficiency log: empty");
@@ -285,19 +286,14 @@ pub(crate) async fn print_learn_efficiency(workdir: &std::path::Path) {
     }
 }
 
-
-pub(crate) fn print_learn_episodes(workdir: &std::path::Path) {
-    let path = workdir.join(".roko/episodes.jsonl");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        println!("Episodes: none");
-        return;
+pub(crate) async fn print_learn_episodes(workdir: &std::path::Path) {
+    let episodes = match roko_learn::runtime_feedback::read_project_episodes_lossy(workdir).await {
+        Ok(episodes) => episodes,
+        Err(_) => {
+            println!("Episodes: none");
+            return;
+        }
     };
-
-    let episodes: Vec<Episode> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
 
     if episodes.is_empty() {
         println!("Episodes: none");
@@ -358,3 +354,19 @@ pub(crate) fn print_learn_episodes(workdir: &std::path::Path) {
     }
 }
 
+pub(crate) async fn print_learn_knowledge(workdir: &std::path::Path) {
+    let Ok(snapshot) = roko_learn::runtime_feedback::read_project_learning_snapshot(workdir).await
+    else {
+        println!("Knowledge: unreadable");
+        return;
+    };
+    if snapshot.knowledge_entries == 0 {
+        println!("Knowledge: none");
+    } else {
+        println!(
+            "Knowledge: {} durable entries at {}",
+            snapshot.knowledge_entries,
+            snapshot.knowledge_path.display()
+        );
+    }
+}

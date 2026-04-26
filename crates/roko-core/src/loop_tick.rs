@@ -21,8 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Budget, Compose, Context, Engram, Verify, React, Query, Route, Store, Verdict,
-    error::Result,
+    Budget, Compose, Context, Engram, Query, React, Route, Store, Verdict, Verify, error::Result,
 };
 
 /// Configuration for a single tick of the universal loop (IF-04).

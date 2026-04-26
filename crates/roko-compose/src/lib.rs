@@ -28,12 +28,15 @@ pub mod context_assembler;
 pub mod context_mesh;
 pub mod context_provider;
 pub mod conventions;
+pub mod cost_attribution;
 pub mod enrichment;
 pub mod foraging;
+pub mod gate_feedback;
 pub mod prompt;
 pub mod prompt_hints;
 pub mod role_prompts;
 pub mod scorer;
+pub mod strategy;
 pub mod symbol_resolver;
 pub mod system_prompt_builder;
 pub mod task_brief;
@@ -46,7 +49,8 @@ pub use attention::{
 };
 pub use auction::{
     AffectModulation, AuctionDiagnostics, FairnessConfig, LearningBidder, SectionAllocation,
-    SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation, is_pareto_optimal, vcg_allocate,
+    SectionCostStats, SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation,
+    is_pareto_optimal, vcg_allocate,
 };
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
 pub use budget_predictor::{BudgetPredictor, SectionInfluence, TaskFeatures};
@@ -66,12 +70,15 @@ pub use context_provider::{
     TaskRequirementsBidder, VerifySpec, is_local_model, pheromone_context,
 };
 pub use conventions::{ProjectConventions, detect_conventions};
+pub use cost_attribution::{CostAttribution, SectionCost};
 pub use foraging::{
     MultiPatchForager, RetrievalSignal, SourceForagingProfile, estimate_context_sufficiency,
     should_stop_searching, social_foraging_boost,
 };
+pub use gate_feedback::{GateFeedback, MAX_GATE_FEEDBACK_LINES};
 pub use prompt::{
-    AttentionBidder, CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer,
+    AttentionBidder, COMPOSITION_MANIFEST_TAG, CacheLayer, CompositionManifest, ContextStrategy,
+    ExcludedSectionMeta, IncludedSectionMeta, Placement, PromptBuild, PromptComposer,
     PromptSection, SectionPriority, estimate_tokens,
 };
 pub use prompt_hints::prompt_hints_for;
@@ -83,6 +90,7 @@ pub use role_prompts::{
     tool_allowlist_instructions,
 };
 pub use scorer::{ActiveInferenceScorer, GoalDirectedHeuristicScorer, SectionScorer};
+pub use strategy::{CompositionStrategy, DEFAULT_VCG_WARMUP_OBSERVATIONS};
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
     ConductorTemplate, PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate,

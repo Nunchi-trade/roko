@@ -14,6 +14,7 @@
 //! | 3. Domain context | Project-specific knowledge | Session (semi-stable) |
 //! | 3c. Active signals | Pheromone / stigmergic guidance | Session (semi-stable) |
 //! | 4. Task context | Current task details | Task (volatile) |
+//! | 4b. Gate feedback | Prior verification failure digest | Dynamic |
 //! | 5. Tool instructions | Available tools and usage | System (stable) |
 //! | 6. Relevant techniques | Learned playbooks and skills | Task (volatile) |
 //! | 7. Anti-patterns | What NOT to do | Task (volatile) |
@@ -22,7 +23,7 @@
 //! The builder emits sections in cache-layer order, with optional cache
 //! alignment markers between stability tiers. Layers 1 + 2 + 5 form the
 //! prefix-cacheable "system" tier; layers 3 and 3c form the "session" tier;
-//! layers 4 + 6 + 7 are per-task; layer 8 is dynamic tone/focus guidance.
+//! layers 4 + 6 + 7 are per-task; layers 4b + 8 are dynamic retry/tone guidance.
 //!
 //! # Design
 //!
@@ -38,10 +39,10 @@ use crate::prompt::{
 };
 use crate::templates::common::PromptBudget;
 use crate::token_counter::TokenCounter;
-use crate::{ContextChunk, PadState};
+use crate::{ContextChunk, GateFeedback, PadState};
 use roko_core::tool::ToolDef;
-use roko_core::{Budget, Compose, Context, Engram, Result};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{Budget, Compose, Context, Engram, Result};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -71,6 +72,8 @@ pub struct SystemPromptBuilder {
     pheromones: Vec<ContextChunk>,
     /// Layer 4: Task context — current task details.
     task: Option<String>,
+    /// Layer 4b: Prior gate failure feedback for retry attempts.
+    gate_feedback: Vec<String>,
     /// Layer 5: Tool instructions — available tools and how to use them.
     tools: Option<String>,
     /// Layer 6: Relevant skills — learned techniques to prefer for this task.
@@ -139,6 +142,7 @@ impl SystemPromptBuilder {
             context: None,
             pheromones: Vec::new(),
             task: None,
+            gate_feedback: Vec::new(),
             tools: None,
             relevant_skills: Vec::new(),
             relevant_playbooks: Vec::new(),
@@ -185,6 +189,50 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn with_task(mut self, task: impl Into<String>) -> Self {
         self.task = Some(normalize_owned(task));
+        self
+    }
+
+    /// Add structured retry feedback from a previous gate failure.
+    #[must_use]
+    pub fn with_gate_feedback(mut self, feedback: GateFeedback) -> Self {
+        let rendered = normalize_owned(feedback.render_prompt_section());
+        if !rendered.is_empty() {
+            self.gate_feedback.push(rendered);
+        }
+        self
+    }
+
+    /// Parse raw gate output and add bounded retry feedback when present.
+    #[must_use]
+    pub fn with_raw_gate_feedback(mut self, raw_output: &str, rung: u32) -> Self {
+        if let Some(feedback) = GateFeedback::from_raw(raw_output, rung) {
+            let rendered = normalize_owned(feedback.render_prompt_section());
+            if !rendered.is_empty() {
+                self.gate_feedback.push(rendered);
+            }
+        }
+        self
+    }
+
+    /// Add multiple structured retry-feedback entries.
+    #[must_use]
+    pub fn with_gate_feedback_entries(mut self, feedback: &[GateFeedback]) -> Self {
+        for entry in feedback {
+            let rendered = normalize_owned(entry.render_prompt_section());
+            if !rendered.is_empty() {
+                self.gate_feedback.push(rendered);
+            }
+        }
+        self
+    }
+
+    /// Add pre-rendered retry feedback from a caller-owned parser.
+    #[must_use]
+    pub fn with_gate_feedback_text(mut self, feedback: impl Into<String>) -> Self {
+        let feedback = normalize_owned(feedback);
+        if !feedback.is_empty() {
+            self.gate_feedback.push(feedback);
+        }
         self
     }
 
@@ -385,7 +433,7 @@ impl SystemPromptBuilder {
     /// [`PromptAssembler`](crate::templates::assembly::PromptAssembler).
     #[must_use]
     pub fn build_sections(&self) -> Vec<PromptSection> {
-        let mut sections = Vec::with_capacity(10);
+        let mut sections = Vec::with_capacity(11);
 
         // Layer 1: Role Identity (with optional temperament guidance)
         let role_content = if let Some(temperament) = self.temperament {
@@ -492,6 +540,21 @@ impl SystemPromptBuilder {
             }
         }
 
+        // Layer 4b: Retry Gate Feedback
+        if !self.gate_feedback.is_empty() {
+            let feedback = self.gate_feedback.join("\n\n");
+            if let Some(section) = self.apply_budget_profile(
+                PromptSection::new("gate_feedback", feedback)
+                    .with_priority(self.effective_priority("gate_feedback", SectionPriority::High))
+                    .with_cache_layer(CacheLayer::Volatile)
+                    .with_placement(Placement::End)
+                    .with_bidder(AttentionBidder::IterationMemory)
+                    .with_hard_cap(1_500),
+            ) {
+                sections.push(section);
+            }
+        }
+
         // Layer 6: Relevant Techniques
         if let Some(skills) = self.relevant_techniques_section() {
             sections.push(skills);
@@ -564,6 +627,9 @@ impl SystemPromptBuilder {
             count += 1;
         }
         if self.task.as_ref().is_some_and(|s| !s.is_empty()) {
+            count += 1;
+        }
+        if !self.gate_feedback.is_empty() {
             count += 1;
         }
         if self.tools.as_ref().is_some_and(|s| !s.is_empty()) {
@@ -754,6 +820,7 @@ impl SystemPromptBuilder {
         match section_name {
             "conventions" | "tool_instructions" | "anti_patterns" => Some(budget.instructions),
             "domain_context" | "context_layer" | "pheromone_signals" => Some(budget.context),
+            "gate_feedback" => Some(budget.context),
             "relevant_techniques" => Some(budget.skills),
             _ => None,
         }
@@ -1012,6 +1079,13 @@ fn render_section(section: &PromptSection) -> String {
         "anti_patterns" => format!("## Anti-Patterns\n\n{}", section.content),
         "affect_guidance" => format!("## Affect Guidance\n\n{}", section.content),
         "task_context" => format!("## Current Task\n\n{}", section.content),
+        "gate_feedback" => {
+            if section.content.trim_start().starts_with("## ") {
+                section.content.clone()
+            } else {
+                format!("## Gate Feedback\n\n{}", section.content)
+            }
+        }
         _ => section.content.clone(),
     }
 }
@@ -1119,10 +1193,11 @@ fn section_order_rank(name: &str) -> u8 {
         "context_layer" => 4,
         "pheromone_signals" => 5,
         "task_context" => 6,
-        "relevant_techniques" => 7,
-        "anti_patterns" => 8,
-        "affect_guidance" => 9,
-        _ => 10,
+        "gate_feedback" => 7,
+        "relevant_techniques" => 8,
+        "anti_patterns" => 9,
+        "affect_guidance" => 10,
+        _ => 11,
     }
 }
 
@@ -1491,6 +1566,28 @@ mod tests {
         let sections = SystemPromptBuilder::new("Role").build_sections();
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].name, "role_identity");
+    }
+
+    #[test]
+    fn gate_feedback_builds_volatile_iteration_memory_layer() {
+        let sections = SystemPromptBuilder::new("Role")
+            .with_task("Fix failed verification")
+            .with_raw_gate_feedback(
+                "noise\nerror[E0425]: cannot find value\n --> src/lib.rs:7:5",
+                3,
+            )
+            .build_sections();
+
+        let feedback = sections
+            .iter()
+            .find(|section| section.name == "gate_feedback")
+            .expect("gate feedback section");
+        assert_eq!(feedback.cache_layer, CacheLayer::Volatile);
+        assert_eq!(feedback.placement, Placement::End);
+        assert_eq!(feedback.bidder, AttentionBidder::IterationMemory);
+        assert!(feedback.content.contains("Gate rung: 3"));
+        assert!(feedback.content.contains("error[E0425]"));
+        assert!(!feedback.content.contains("noise"));
     }
 
     #[test]

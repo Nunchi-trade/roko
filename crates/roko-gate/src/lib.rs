@@ -75,6 +75,7 @@
     clippy::struct_field_names,
     clippy::suboptimal_flops,
     clippy::too_many_lines,
+    clippy::unnecessary_literal_bound,
     clippy::unreadable_literal
 )]
 
@@ -138,8 +139,9 @@ pub use code_exec::{
 pub use compile::CompileGate;
 pub use compile_errors::{
     CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureAction,
-    GateFailureClassification, classify_error_code, classify_gate_failure, parse_cargo_json,
-    parse_plain_stderr, render_failure_classification,
+    GateFailureClassification, GateFailureKind, GateRetryPolicy, classify_error_code,
+    classify_gate_failure, parse_cargo_json, parse_plain_stderr, render_failure_classification,
+    structured_gate_failure,
 };
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};

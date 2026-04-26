@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) fn cmd_explain(topic: &str, depth: u8) {
     use roko_cli::explain;
     let depth = depth.clamp(1, 3);
@@ -25,7 +24,6 @@ pub(crate) fn cmd_explain(topic: &str, depth: u8) {
     }
 }
 
-
 pub(crate) fn cmd_repl(cli: &Cli) -> Result<i32> {
     let session_id = cli
         .resume
@@ -40,7 +38,6 @@ pub(crate) fn cmd_repl(cli: &Cli) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-
 pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
     let mode = OneshotMode::new(prompt.to_string())
         .with_json(cli.json)
@@ -51,7 +48,7 @@ pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
     let mut config = resolve_config(cli)?;
     apply_resume_session_override(&mut config, cli.resume.clone());
 
-    let report = run_once(&workdir, &config, &mode.prepare().prompt).await?;
+    let report = run_once(&workdir, &config, &mode.prepare().prompt, None).await?;
     let result = mode.format_result(
         report.overall_success(),
         &format!(
@@ -64,7 +61,6 @@ pub(crate) async fn cmd_oneshot(cli: &Cli, prompt: &str) -> Result<i32> {
     }
     Ok(result.exit_code)
 }
-
 
 pub(crate) async fn cmd_pipe(cli: &Cli) -> Result<i32> {
     let pipe = PipeMode::new().with_json(cli.json).with_quiet(cli.quiet);
@@ -91,7 +87,6 @@ pub(crate) async fn cmd_pipe(cli: &Cli) -> Result<i32> {
     cmd_oneshot(cli, &input.text).await
 }
 
-
 pub(crate) async fn cmd_headless(cli: &Cli) -> Result<i32> {
     let workdir = resolve_workdir(cli);
     prepare_runtime_hooks(&workdir, cli.quiet);
@@ -99,8 +94,11 @@ pub(crate) async fn cmd_headless(cli: &Cli) -> Result<i32> {
     Ok(EXIT_SUCCESS)
 }
 
-
-pub(crate) async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_init(
+    path: Option<PathBuf>,
+    cloud: bool,
+    profile: Option<String>,
+) -> Result<()> {
     let target = path.unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&target)
         .await
@@ -175,7 +173,10 @@ pub(crate) async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option
 
     println!("initialized roko workspace at {}", target.display());
     println!("detected project domain: {domain}");
-    println!("suggested gates: {}", crate::commands::prd::domain_gate_hint(domain));
+    println!(
+        "suggested gates: {}",
+        crate::commands::prd::domain_gate_hint(domain)
+    );
     println!(
         "agent command set to \"claude\". \
          Edit roko.toml [agent] command to use a different agent CLI."
@@ -195,12 +196,38 @@ pub(crate) async fn cmd_init(path: Option<PathBuf>, cloud: bool, profile: Option
     Ok(())
 }
 
-
-pub(crate) async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String) -> Result<i32> {
+pub(crate) async fn cmd_run(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    prompt: String,
+    serve: bool,
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
     let mut config = resolve_config_for_workdir(cli, &workdir)?;
     apply_resume_session_override(&mut config, cli.resume.clone());
+
+    // Optionally start the HTTP control plane for external observability.
+    let server_guard: Option<(
+        std::sync::Arc<roko_serve::state::AppState>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    )> = if serve {
+        let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
+        let runtime =
+            roko_cli::serve_runtime::RokoCliRuntime::new(config.clone(), repo_registry).into_arc();
+        let (state, handle) =
+            roko_serve::start_server_background(workdir.clone(), runtime, None, None).await?;
+        if !cli.quiet {
+            eprintln!("▸ HTTP server started on :6677");
+        }
+        Some((state, handle))
+    } else {
+        None
+    };
+
+    // When --serve is active, share the server's StateHub so DashboardEvents
+    // from run_once() flow to the HTTP server's SSE/WebSocket/snapshot endpoints.
+    let external_hub = server_guard.as_ref().map(|(state, _)| &*state.state_hub);
 
     if !cli.quiet {
         println!(
@@ -209,7 +236,7 @@ pub(crate) async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String)
             config.gates.len()
         );
     }
-    let report = run_once(&workdir, &config, &prompt).await?;
+    let report = run_once(&workdir, &config, &prompt, external_hub).await?;
 
     if cli.json {
         println!(
@@ -241,13 +268,18 @@ pub(crate) async fn cmd_run(cli: &Cli, workdir: Option<PathBuf>, prompt: String)
         println!("signals      : {}", report.total_signals);
     }
 
+    // Shut down the HTTP server if it was started.
+    if let Some((state, handle)) = server_guard {
+        state.cancel.cancel();
+        let _ = handle.await;
+    }
+
     if report.overall_success() {
         Ok(EXIT_SUCCESS)
     } else {
         Ok(EXIT_AGENT_FAILURE)
     }
 }
-
 
 pub(crate) async fn cmd_status(
     cli: &Cli,
@@ -290,7 +322,10 @@ pub(crate) async fn cmd_status(
         None
     };
     let cfactor_history = if cfactor_snapshot.is_some() {
-        crate::commands::dashboard::load_cfactor_history(workdir.join(".roko").join("learn").join("c-factor.jsonl")).await
+        crate::commands::dashboard::load_cfactor_history(
+            workdir.join(".roko").join("learn").join("c-factor.jsonl"),
+        )
+        .await
     } else {
         Vec::new()
     };
@@ -605,8 +640,11 @@ pub(crate) async fn cmd_status(
     Ok(())
 }
 
-
-pub(crate) async fn cmd_doctor(cli: &Cli, workdir: Option<PathBuf>, serve_url: Option<String>) -> Result<i32> {
+pub(crate) async fn cmd_doctor(
+    cli: &Cli,
+    workdir: Option<PathBuf>,
+    serve_url: Option<String>,
+) -> Result<i32> {
     let report = roko_cli::doctor::run_doctor(&roko_cli::doctor::DoctorOptions {
         workdir: workdir.unwrap_or_else(|| resolve_workdir(cli)),
         config_override: cli.config.clone(),
@@ -622,7 +660,6 @@ pub(crate) async fn cmd_doctor(cli: &Cli, workdir: Option<PathBuf>, serve_url: O
 
     Ok(report.exit_code())
 }
-
 
 pub(crate) fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) -> String {
     let mut entries = costs
@@ -646,8 +683,11 @@ pub(crate) fn format_cost_breakdown(costs: &HashMap<String, f64>, limit: usize) 
         .join(", ")
 }
 
-
-pub(crate) async fn cmd_replay(workdir: Option<PathBuf>, hash: String, forensic: bool) -> Result<i32> {
+pub(crate) async fn cmd_replay(
+    workdir: Option<PathBuf>,
+    hash: String,
+    forensic: bool,
+) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| PathBuf::from("."));
     let substrate = FileSubstrate::open(workdir.join(".roko"))
         .await
@@ -706,7 +746,6 @@ pub(crate) async fn cmd_replay(workdir: Option<PathBuf>, hash: String, forensic:
     Ok(EXIT_SUCCESS)
 }
 
-
 pub(crate) fn cmd_inject(
     cli: &Cli,
     session: String,
@@ -733,7 +772,6 @@ pub(crate) fn cmd_inject(
 
     Ok(EXIT_SUCCESS)
 }
-
 
 pub(crate) fn cmd_index(cli: &Cli, cmd: IndexCmd) -> Result<i32> {
     let workdir = resolve_workdir(cli);
@@ -887,7 +925,6 @@ pub(crate) fn cmd_index(cli: &Cli, cmd: IndexCmd) -> Result<i32> {
     }
 }
 
-
 pub(crate) fn parse_symbol_kind(s: &str) -> Result<roko_core::language::SymbolKind> {
     use roko_core::language::SymbolKind;
     match s.to_lowercase().as_str() {
@@ -905,7 +942,6 @@ pub(crate) fn parse_symbol_kind(s: &str) -> Result<roko_core::language::SymbolKi
     }
 }
 
-
 pub(crate) fn print_completions(shell: CompletionShell) {
     let words = completion_words();
     let subcommand_map = nested_subcommand_words();
@@ -916,7 +952,6 @@ pub(crate) fn print_completions(shell: CompletionShell) {
         CompletionShell::Fish => print_fish_completions(&words, &subcommand_map, &dynamic),
     }
 }
-
 
 pub(crate) fn completion_words() -> Vec<String> {
     let mut command = Cli::command();
@@ -929,7 +964,6 @@ pub(crate) fn completion_words() -> Vec<String> {
     words.dedup();
     words
 }
-
 
 /// Collect nested subcommand names for each top-level command.
 pub(crate) fn nested_subcommand_words() -> Vec<(String, Vec<String>)> {
@@ -948,7 +982,6 @@ pub(crate) fn nested_subcommand_words() -> Vec<(String, Vec<String>)> {
     }
     result
 }
-
 
 /// Scan the filesystem for dynamic completion words (plan names, PRD slugs).
 pub(crate) fn dynamic_completion_words() -> Vec<(String, Vec<String>)> {
@@ -989,7 +1022,6 @@ pub(crate) fn dynamic_completion_words() -> Vec<(String, Vec<String>)> {
     result
 }
 
-
 /// Global flag names for flag completion (UX-1c).
 pub(crate) fn completion_flag_words() -> Vec<String> {
     let mut command = Cli::command();
@@ -1002,7 +1034,6 @@ pub(crate) fn completion_flag_words() -> Vec<String> {
     flags.dedup();
     flags
 }
-
 
 pub(crate) fn print_bash_completions(
     words: &[String],
@@ -1048,7 +1079,6 @@ pub(crate) fn print_bash_completions(
     println!(r#"}}"#);
     println!(r#"complete -F _roko roko"#);
 }
-
 
 pub(crate) fn print_zsh_completions(
     words: &[String],
@@ -1097,7 +1127,6 @@ pub(crate) fn print_zsh_completions(
     println!(r#"_roko "$@""#);
 }
 
-
 pub(crate) fn print_fish_completions(
     words: &[String],
     subcommands: &[(String, Vec<String>)],
@@ -1127,7 +1156,6 @@ pub(crate) fn print_fish_completions(
     }
 }
 
-
 pub(crate) fn resolved_capture_model(agent_command: &str, model: Option<&str>) -> String {
     if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
         return model.to_string();
@@ -1138,7 +1166,6 @@ pub(crate) fn resolved_capture_model(agent_command: &str, model: Option<&str>) -
         "unknown-model".to_string()
     }
 }
-
 
 pub(crate) fn capture_provider(agent_command: &str, resolved_model: &str) -> String {
     let command = agent_command.trim();
@@ -1160,7 +1187,6 @@ pub(crate) fn capture_provider(agent_command: &str, resolved_model: &str) -> Str
     }
 }
 
-
 pub(crate) fn capture_role(task_kind: &str) -> &'static str {
     if task_kind.starts_with("research-") {
         "Researcher"
@@ -1168,7 +1194,6 @@ pub(crate) fn capture_role(task_kind: &str) -> &'static str {
         "Strategist"
     }
 }
-
 
 pub(crate) fn capture_task_category(task_kind: &str) -> &'static str {
     if task_kind.starts_with("research-") {
@@ -1180,7 +1205,6 @@ pub(crate) fn capture_task_category(task_kind: &str) -> &'static str {
     }
 }
 
-
 pub(crate) fn capture_complexity_band(task_kind: &str) -> &'static str {
     if task_kind == "research-analyze" {
         "standard"
@@ -1191,14 +1215,12 @@ pub(crate) fn capture_complexity_band(task_kind: &str) -> &'static str {
     }
 }
 
-
 pub(crate) fn capture_plan_id(task_id: &str) -> Option<&str> {
     task_id
         .rsplit(':')
         .next()
         .filter(|segment| !segment.is_empty())
 }
-
 
 pub(crate) fn build_capture_episode(
     agent_command: &str,
@@ -1284,7 +1306,6 @@ pub(crate) fn build_capture_episode(
     (episode, provider)
 }
 
-
 pub(crate) async fn persist_capture_episode(
     workdir: &Path,
     agent_command: &str,
@@ -1325,4 +1346,3 @@ pub(crate) async fn persist_capture_episode(
         .map_err(|e| anyhow!("record learning feedback: {e}"))?;
     Ok(())
 }
-

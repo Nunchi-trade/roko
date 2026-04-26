@@ -10,8 +10,8 @@
 //! Non-verdict engrams receive a neutral score so the scorer composes cleanly
 //! with other scorers in a `SumScorer` or `MulScorer` chain.
 
-use roko_core::{Context, Engram, Kind, Score};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Kind, Score};
 
 /// Weights for verdict scoring dimensions.
 #[derive(Debug, Clone)]

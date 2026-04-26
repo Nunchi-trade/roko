@@ -843,7 +843,7 @@ mod tests {
         let files = scaffold_substrate("redis", dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
-        assert!(content.contains("RedisSubstrate"));
+        assert!(content.contains("RedisStore"));
         assert!(content.contains("impl Store for"));
     }
 

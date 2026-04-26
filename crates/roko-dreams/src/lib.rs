@@ -49,6 +49,7 @@ pub mod imagination;
 pub mod phase2;
 pub mod rehearsal;
 pub mod replay;
+pub mod routing_advice;
 pub mod runner;
 pub mod staging;
 pub mod threat;
@@ -68,11 +69,16 @@ pub use replay::{
     DreamReplayBatch, DreamReplayMode, DreamReplayPolicy, MattarDawConfig, ReplayUtility,
     compute_replay_utility, select_replay_episodes, select_replay_episodes_with_affect,
 };
+pub use routing_advice::{
+    DREAM_ROUTING_ADVICE_PATH, DreamRoutingAdvice, PatternSummary, RoutingRecommendation,
+    dream_advice_to_routing_bias, dream_routing_advice_path, generate_routing_advice,
+    load_dream_routing_advice, relevant_pattern_summaries, save_dream_routing_advice,
+};
 pub use runner::{
     BusPulseTriggerConfig, DreamAgentConfig, DreamBudget, DreamConfig, DreamEngine,
     DreamHeartbeatPolicy, DreamHeartbeatReport, DreamLoopConfig, DreamReport, DreamRunner,
     DreamRuntimeControls, DreamSchedulePolicy, DreamTrigger, Episode, Insight, IntensiveMode,
-    build_dream_review_dispatcher,
+    PlanCompletionTriggerPolicy, build_dream_review_dispatcher,
 };
 pub use staging::{ConfidenceStage, StagingBuffer, StagingEntry};
 pub use threat::{ThreatScenario, enumerate_threats, threat_warning_entries};

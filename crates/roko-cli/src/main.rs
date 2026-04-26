@@ -312,6 +312,9 @@ Examples:
         /// Override the working directory (default: cwd).
         #[arg(long)]
         workdir: Option<PathBuf>,
+        /// Start the HTTP control plane alongside the run for external observability.
+        #[arg(long)]
+        serve: bool,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
     #[command(after_help = "\
@@ -1825,7 +1828,6 @@ fn tracing_log_directive_from(rust_log: Option<String>, roko_log: Option<String>
         .unwrap_or_else(|| "roko=info".to_string())
 }
 
-
 async fn dispatch(mut cli: Cli) -> Result<i32> {
     if let Some(command) = cli.command.take() {
         return dispatch_subcommand(command, &cli).await;
@@ -1844,16 +1846,30 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
 
 async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
     match command {
-        Command::Init { path, cloud, profile } => {
+        Command::Init {
+            path,
+            cloud,
+            profile,
+        } => {
             commands::util::cmd_init(path, cloud, profile).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Run { prompt, workdir } => commands::util::cmd_run(cli, workdir, prompt).await,
-        Command::Status { workdir, cfactor, surfaces } => {
+        Command::Run {
+            prompt,
+            workdir,
+            serve,
+        } => commands::util::cmd_run(cli, workdir, prompt, serve).await,
+        Command::Status {
+            workdir,
+            cfactor,
+            surfaces,
+        } => {
             commands::util::cmd_status(cli, workdir, cfactor, surfaces).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Doctor { workdir, serve_url } => commands::util::cmd_doctor(cli, workdir, serve_url).await,
+        Command::Doctor { workdir, serve_url } => {
+            commands::util::cmd_doctor(cli, workdir, serve_url).await
+        }
         Command::Plan { cmd } => {
             let result = commands::plan::cmd_plan(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());
@@ -1898,7 +1914,12 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             commands::server::cmd_up(cli, wd).await
         }
-        Command::Serve { bind, port, workdir, tui } => {
+        Command::Serve {
+            bind,
+            port,
+            workdir,
+            tui,
+        } => {
             let wd = workdir.clone().unwrap_or_else(|| resolve_workdir(cli));
             let config = resolve_config_for_workdir(cli, &wd)?;
             let repo_registry = RepoRegistry::load(&config, &wd).unwrap_or_default();
@@ -1907,7 +1928,15 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 let (state, server_handle) =
                     roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
                 let hub = state.state_hub.clone();
-                let tui_result = commands::dashboard::cmd_dashboard(cli, Some(wd), None, false, false, Some(hub)).await;
+                let tui_result = commands::dashboard::cmd_dashboard(
+                    cli,
+                    Some(wd),
+                    None,
+                    false,
+                    false,
+                    Some(hub),
+                )
+                .await;
                 state.cancel.cancel();
                 match server_handle.await {
                     Ok(Ok(())) => {}
@@ -1926,7 +1955,14 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             roko_cli::worker::run_worker(port).await?;
             Ok(EXIT_SUCCESS)
         }
-        Command::Dashboard { page, list_pages, text, workdir, high_contrast, reduced_motion } => {
+        Command::Dashboard {
+            page,
+            list_pages,
+            text,
+            workdir,
+            high_contrast,
+            reduced_motion,
+        } => {
             #[allow(unsafe_code)]
             if high_contrast {
                 unsafe { std::env::set_var("ROKO_HIGH_CONTRAST", "1") };
@@ -1939,15 +1975,30 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         }
         // ── Vision loop ───────────────────────────────────────────
         Command::VisionLoop {
-            target_file, goal, url, max_iter, target_score,
-            consecutive_target, regression_threshold, model,
-            viewport_width, viewport_height, wait_ms,
+            target_file,
+            goal,
+            url,
+            max_iter,
+            target_score,
+            consecutive_target,
+            regression_threshold,
+            model,
+            viewport_width,
+            viewport_height,
+            wait_ms,
         } => {
             let config = roko_cli::vision_loop::VisionLoopConfig {
-                target_file, goal, url,
-                max_iterations: max_iter, target_score, consecutive_target,
-                regression_threshold, model_key: model,
-                viewport_width, viewport_height, wait_ms,
+                target_file,
+                goal,
+                url,
+                max_iterations: max_iter,
+                target_score,
+                consecutive_target,
+                regression_threshold,
+                model_key: model,
+                viewport_width,
+                viewport_height,
+                wait_ms,
             };
             let result = roko_cli::vision_loop::cmd_vision_loop(config).await?;
             println!("Vision loop complete: {}", result.stop_reason);
@@ -1958,28 +2009,55 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             println!("  run ID: {}", result.run_id);
             Ok(EXIT_SUCCESS)
         }
-        Command::Replay { hash, workdir, forensic } => commands::util::cmd_replay(workdir, hash, forensic).await,
-        Command::Inject { session, kind, payload, workdir } => commands::util::cmd_inject(cli, session, &kind, payload, workdir),
+        Command::Replay {
+            hash,
+            workdir,
+            forensic,
+        } => commands::util::cmd_replay(workdir, hash, forensic).await,
+        Command::Inject {
+            session,
+            kind,
+            payload,
+            workdir,
+        } => commands::util::cmd_inject(cli, session, &kind, payload, workdir),
         Command::Completions { shell } => {
             commands::util::print_completions(shell);
             Ok(EXIT_SUCCESS)
         }
-        Command::New { type_name, name, output } => {
+        Command::New {
+            type_name,
+            name,
+            output,
+        } => {
             let output_dir = output.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             match roko_cli::scaffold::scaffold(&type_name, &name, &output_dir) {
                 Ok(files) => {
-                    println!("scaffolded `{type_name}` as `{name}` ({} file{})", files.len(), if files.len() == 1 { "" } else { "s" });
-                    for f in &files { println!("  {}", f.display()); }
+                    println!(
+                        "scaffolded `{type_name}` as `{name}` ({} file{})",
+                        files.len(),
+                        if files.len() == 1 { "" } else { "s" }
+                    );
+                    for f in &files {
+                        println!("  {}", f.display());
+                    }
                     Ok(EXIT_SUCCESS)
                 }
-                Err(e) => { eprintln!("error: {e}"); Ok(EXIT_SYSTEM_ERROR) }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    Ok(EXIT_SYSTEM_ERROR)
+                }
             }
         }
         Command::Explain { topic, depth } => {
             commands::util::cmd_explain(&topic, depth);
             Ok(EXIT_SUCCESS)
         }
-        Command::Login { url, api_key, check, dashboard_url } => commands::auth::cmd_login(&url, api_key, check, &dashboard_url).await,
+        Command::Login {
+            url,
+            api_key,
+            check,
+            dashboard_url,
+        } => commands::auth::cmd_login(&url, api_key, check, &dashboard_url).await,
         Command::Logout => commands::auth::cmd_logout(),
         Command::Whoami => commands::auth::cmd_whoami().await,
     }
@@ -2346,20 +2424,17 @@ fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use commands::config_cmd::{
-        ProviderListRow, ProviderHealthRow, ProviderLatencySummary,
-        ModelListRow, PROVIDER_FAILURE_THRESHOLD,
-        format_provider_rows, format_provider_health_rows, format_model_rows,
-        build_model_list_row, build_provider_health_row,
-        select_provider_test_model,
+        ModelListRow, PROVIDER_FAILURE_THRESHOLD, ProviderHealthRow, ProviderLatencySummary,
+        ProviderListRow, build_model_list_row, build_provider_health_row, format_model_rows,
+        format_provider_health_rows, format_provider_rows, select_provider_test_model,
     };
+    use commands::dashboard::dashboard_output;
     use commands::knowledge::{
-        NEURO_KNOWLEDGE_FILE, NEURO_CONFIRMATIONS_FILE,
-        backup_neuro_store, restore_neuro_store,
+        NEURO_CONFIRMATIONS_FILE, NEURO_KNOWLEDGE_FILE, backup_neuro_store, restore_neuro_store,
     };
     use commands::util::persist_capture_episode;
-    use commands::dashboard::dashboard_output;
-    use clap::Parser;
     use roko_core::ConfigHash;
     use tempfile::tempdir;
     use tokio::fs;

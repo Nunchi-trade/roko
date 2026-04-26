@@ -203,9 +203,7 @@ fn default_integrative_pipeline() -> PipelineBandConfig {
     PipelineBandConfig::integrative()
 }
 
-fn deserialize_integrative_pipeline<'de, D>(
-    deserializer: D,
-) -> Result<PipelineBandConfig, D::Error>
+fn deserialize_integrative_pipeline<'de, D>(deserializer: D) -> Result<PipelineBandConfig, D::Error>
 where
     D: Deserializer<'de>,
 {

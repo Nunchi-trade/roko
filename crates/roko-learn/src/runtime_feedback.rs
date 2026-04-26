@@ -5,6 +5,7 @@
 //! subsystems in a consistent order.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,7 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -105,6 +107,14 @@ pub struct LearningPaths {
     pub task_metrics_jsonl: PathBuf,
     /// Append-only efficiency events JSONL file.
     pub efficiency_jsonl: PathBuf,
+    /// Append-only normalized efficiency summaries JSONL file.
+    pub efficiency_summaries_jsonl: PathBuf,
+    /// Append-only gate outcome JSONL file.
+    pub gate_outcomes_jsonl: PathBuf,
+    /// Append-only retry outcome JSONL file.
+    pub retry_outcomes_jsonl: PathBuf,
+    /// Append-only knowledge seed JSONL file for neuro ingestion.
+    pub knowledge_seeds_jsonl: PathBuf,
     /// Persisted latency registry snapshot.
     pub latency_stats_json: PathBuf,
     /// Append-only C-Factor history JSONL file.
@@ -140,6 +150,10 @@ impl LearningPaths {
             playbook_rules_toml: root.join("playbook-rules.toml"),
             task_metrics_jsonl: root.join("task-metrics.jsonl"),
             efficiency_jsonl: root.join("efficiency.jsonl"),
+            efficiency_summaries_jsonl: root.join("efficiency-summaries.jsonl"),
+            gate_outcomes_jsonl: root.join("gate-outcomes.jsonl"),
+            retry_outcomes_jsonl: root.join("retry-outcomes.jsonl"),
+            knowledge_seeds_jsonl: root.join("knowledge-seeds.jsonl"),
             latency_stats_json: root.join("latency-stats.json"),
             cfactor_jsonl: root.join("c-factor.jsonl"),
             cascade_router_json: root.join("cascade-router.json"),
@@ -322,6 +336,442 @@ pub struct LearningUpdate {
     pub reflection_candidate_updated: ApplyStatus,
     /// Whether a provider/model outcome record was persisted.
     pub provider_model_outcome_recorded: ApplyStatus,
+    /// Whether a normalized efficiency summary was persisted.
+    pub efficiency_summary_recorded: ApplyStatus,
+    /// Number of gate outcome records persisted.
+    pub gate_outcomes_recorded: usize,
+    /// Whether a retry outcome record was persisted.
+    pub retry_outcome_recorded: ApplyStatus,
+    /// Whether a knowledge seed was persisted.
+    pub knowledge_seed_recorded: ApplyStatus,
+}
+
+/// Current schema version for runtime feedback JSONL records.
+pub const RUNTIME_FEEDBACK_SCHEMA_VERSION: u32 = 1;
+
+/// Granularity represented by an efficiency summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EfficiencyScope {
+    /// One provider/model turn.
+    Turn,
+    /// One task attempt, typically closed by a gate result.
+    Task,
+    /// One whole runner invocation or plan run.
+    Run,
+}
+
+impl Default for EfficiencyScope {
+    fn default() -> Self {
+        Self::Task
+    }
+}
+
+/// Normalized cost/token/latency summary for query surfaces.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EfficiencySummaryRecord {
+    /// JSON schema version.
+    pub schema_version: u32,
+    /// ISO-8601 timestamp for the observation.
+    pub timestamp: String,
+    /// Summary granularity.
+    pub scope: EfficiencyScope,
+    /// Optional runner/session/run identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Stable episode identifier when this summary came from an episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_id: Option<String>,
+    /// Plan identifier.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier.
+    #[serde(default)]
+    pub task_id: String,
+    /// Agent identifier.
+    #[serde(default)]
+    pub agent_id: String,
+    /// Agent role/profile label.
+    #[serde(default)]
+    pub role: String,
+    /// Provider/backend identifier.
+    #[serde(default)]
+    pub provider: String,
+    /// Model slug.
+    #[serde(default)]
+    pub model: String,
+    /// Retry/turn iteration number.
+    #[serde(default)]
+    pub iteration: u32,
+    /// Input tokens.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Reasoning/thinking tokens when available.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    /// Cache-read tokens.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Cache-write tokens.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// Total input plus output tokens.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Observed cost in USD.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Estimated cost without cache discount.
+    #[serde(default)]
+    pub cost_usd_without_cache: f64,
+    /// Cache hit rate in `[0.0, 1.0]`.
+    #[serde(default)]
+    pub cache_hit_rate: f64,
+    /// Wall-clock duration in milliseconds.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Time to first token in milliseconds.
+    #[serde(default)]
+    pub time_to_first_token_ms: u64,
+    /// Number of tools exposed to the agent.
+    #[serde(default)]
+    pub tools_available: u32,
+    /// Number of tools used by the agent.
+    #[serde(default)]
+    pub tools_used: u32,
+    /// Number of tool calls observed.
+    #[serde(default)]
+    pub tool_calls: u32,
+    /// Whether the closing gate passed, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_passed: Option<bool>,
+    /// Outcome label such as `success`, `failure`, or provider finish reason.
+    #[serde(default)]
+    pub outcome: String,
+    /// Number of prompt sections represented in this summary.
+    #[serde(default)]
+    pub prompt_section_count: u32,
+    /// Total prompt tokens represented in this summary.
+    #[serde(default)]
+    pub total_prompt_tokens: u64,
+    /// Extra forward-compatible metadata.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+/// One durable gate outcome emitted by the runner or derived from an episode.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateOutcomeRecord {
+    /// JSON schema version.
+    pub schema_version: u32,
+    /// ISO-8601 timestamp for the observation.
+    pub timestamp: String,
+    /// Optional runner/session/run identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Stable episode identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_id: Option<String>,
+    /// Plan identifier.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier.
+    #[serde(default)]
+    pub task_id: String,
+    /// Gate identifier, such as `compile`, `clippy`, or `test`.
+    #[serde(default)]
+    pub gate_name: String,
+    /// Gate family or effect kind, such as `gate` or `plan_verify`.
+    #[serde(default)]
+    pub gate_kind: String,
+    /// Gate rung number.
+    #[serde(default)]
+    pub rung: u32,
+    /// Whether the gate passed.
+    #[serde(default)]
+    pub passed: bool,
+    /// Optional numeric score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// Gate duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Retry attempt/iteration associated with this gate.
+    #[serde(default)]
+    pub attempt: u32,
+    /// Runner-level failure classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    /// Short error digest/signature, never raw gate output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_digest: Option<String>,
+    /// Provider/backend identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Short human-readable summary.
+    #[serde(default)]
+    pub summary: String,
+    /// Extra forward-compatible metadata.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+/// Retry lifecycle status emitted by the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryOutcomeStatus {
+    /// A retry was scheduled but has not started yet.
+    Scheduled,
+    /// A retry attempt started.
+    Started,
+    /// A retry eventually passed its terminal gate.
+    Succeeded,
+    /// Retry budget was exhausted.
+    Exhausted,
+    /// Retry was skipped because the failure was non-retryable.
+    NotRetryable,
+    /// Retry was cancelled by operator/runtime shutdown.
+    Cancelled,
+}
+
+impl Default for RetryOutcomeStatus {
+    fn default() -> Self {
+        Self::Scheduled
+    }
+}
+
+/// One retry-policy outcome, append-only and queryable by plan/task.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetryOutcomeRecord {
+    /// JSON schema version.
+    pub schema_version: u32,
+    /// ISO-8601 timestamp for the observation.
+    pub timestamp: String,
+    /// Optional runner/session/run identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Stable episode identifier when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode_id: Option<String>,
+    /// Plan identifier.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier.
+    #[serde(default)]
+    pub task_id: String,
+    /// Gate identifier that triggered the retry decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_name: Option<String>,
+    /// Attempt number after the decision.
+    #[serde(default)]
+    pub attempt: u32,
+    /// Configured maximum attempts when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// Retry status.
+    pub status: RetryOutcomeStatus,
+    /// Whether the triggering failure was retryable.
+    #[serde(default)]
+    pub retryable: bool,
+    /// Runner-level failure classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    /// Cooldown before next retry, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_ms: Option<u64>,
+    /// Provider/backend identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Short reason for the decision.
+    #[serde(default)]
+    pub reason: String,
+    /// Next runner action, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+    /// Extra forward-compatible metadata.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+/// Evidence item supporting a knowledge seed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeSeedEvidence {
+    /// Evidence source type, such as `episode` or `gate`.
+    pub source_type: String,
+    /// Stable source identifier.
+    pub source_id: String,
+    /// Outcome label associated with the evidence.
+    pub outcome: String,
+    /// Evidence weight in `[0.0, 1.0]`.
+    pub weight: f64,
+}
+
+/// Lightweight, dependency-free knowledge candidate emitted by runtime feedback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeSeedRecord {
+    /// JSON schema version.
+    pub schema_version: u32,
+    /// Stable deterministic seed id.
+    pub seed_id: String,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// Knowledge kind label compatible with `roko-neuro` (`insight`, `warning`, etc.).
+    pub kind: String,
+    /// Candidate knowledge content.
+    pub content: String,
+    /// Starting confidence in `[0.0, 1.0]`.
+    pub confidence: f64,
+    /// Signed retrieval weight seed.
+    pub confidence_weight: f64,
+    /// Episode ids that support the seed.
+    #[serde(default)]
+    pub source_episodes: Vec<String>,
+    /// Source model when the seed may be model-specific.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+    /// Generality across model families (`1.0` = fully general).
+    pub model_generality: f64,
+    /// Topic tags for retrieval and admission filtering.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Plan identifier.
+    #[serde(default)]
+    pub plan_id: String,
+    /// Task identifier.
+    #[serde(default)]
+    pub task_id: String,
+    /// Evidence that caused this seed to be emitted.
+    #[serde(default)]
+    pub evidence: Vec<KnowledgeSeedEvidence>,
+    /// Extra forward-compatible metadata.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub metadata: serde_json::Value,
+}
+
+/// Normalized runner event accepted by the runtime feedback facade.
+#[derive(Debug, Clone)]
+pub enum RunnerFeedbackEvent {
+    /// A completed run should be persisted and fanned out to all derived feedback logs.
+    CompletedRun {
+        /// Completed-run input.
+        input: Box<CompletedRunInput>,
+    },
+    /// A raw episode should be appended and projected into derived feedback logs.
+    Episode {
+        /// Episode record.
+        episode: Episode,
+    },
+    /// A raw efficiency event should be appended and projected into summaries.
+    EfficiencyEvent {
+        /// Efficiency event.
+        event: AgentEfficiencyEvent,
+        /// Summary scope for the derived record.
+        scope: EfficiencyScope,
+    },
+    /// A provider/model outcome should be appended directly.
+    ProviderModelOutcome {
+        /// Provider/model outcome record.
+        outcome: ProviderModelOutcomeRecord,
+    },
+    /// A normalized efficiency summary should be appended directly.
+    EfficiencySummary {
+        /// Efficiency summary record.
+        summary: EfficiencySummaryRecord,
+    },
+    /// A gate outcome should be appended directly.
+    GateOutcome {
+        /// Gate outcome record.
+        outcome: GateOutcomeRecord,
+    },
+    /// A retry outcome should be appended directly.
+    RetryOutcome {
+        /// Retry outcome record.
+        outcome: RetryOutcomeRecord,
+    },
+    /// A knowledge seed should be appended directly.
+    KnowledgeSeed {
+        /// Knowledge seed record.
+        seed: KnowledgeSeedRecord,
+    },
+}
+
+/// Counts of append-only records written by a feedback facade call.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeFeedbackWrite {
+    /// Completed-run update when a completed run was recorded.
+    pub learning_update: Option<LearningUpdate>,
+    /// Number of raw efficiency events appended.
+    pub efficiency_events: usize,
+    /// Number of provider/model outcomes appended directly by the facade.
+    pub provider_model_outcomes: usize,
+    /// Number of efficiency summaries appended.
+    pub efficiency_summaries: usize,
+    /// Number of gate outcomes appended.
+    pub gate_outcomes: usize,
+    /// Number of retry outcomes appended.
+    pub retry_outcomes: usize,
+    /// Number of knowledge seeds appended.
+    pub knowledge_seeds: usize,
+    /// Whether an episode was appended directly by the facade.
+    pub episode_appended: bool,
+}
+
+impl RuntimeFeedbackWrite {
+    fn merge(&mut self, other: Self) {
+        self.efficiency_events += other.efficiency_events;
+        self.provider_model_outcomes += other.provider_model_outcomes;
+        self.efficiency_summaries += other.efficiency_summaries;
+        self.gate_outcomes += other.gate_outcomes;
+        self.retry_outcomes += other.retry_outcomes;
+        self.knowledge_seeds += other.knowledge_seeds;
+        self.episode_appended |= other.episode_appended;
+        if self.learning_update.is_none() {
+            self.learning_update = other.learning_update;
+        }
+    }
+}
+
+/// Query filters for append-only runtime feedback logs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeFeedbackQuery {
+    /// Filter by plan id.
+    pub plan_id: Option<String>,
+    /// Filter by task id.
+    pub task_id: Option<String>,
+    /// Filter by episode id.
+    pub episode_id: Option<String>,
+    /// Filter by provider/backend.
+    pub provider: Option<String>,
+    /// Filter by model slug.
+    pub model: Option<String>,
+    /// Keep only the latest N records after filtering.
+    pub limit: Option<usize>,
+}
+
+/// Query result spanning all canonical runtime feedback streams.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeFeedbackSnapshot {
+    /// Episode records.
+    pub episodes: Vec<Episode>,
+    /// Provider/model outcome records.
+    pub provider_model_outcomes: Vec<ProviderModelOutcomeRecord>,
+    /// Efficiency summary records.
+    pub efficiency_summaries: Vec<EfficiencySummaryRecord>,
+    /// Gate outcome records.
+    pub gate_outcomes: Vec<GateOutcomeRecord>,
+    /// Retry outcome records.
+    pub retry_outcomes: Vec<RetryOutcomeRecord>,
+    /// Knowledge seed records.
+    pub knowledge_seeds: Vec<KnowledgeSeedRecord>,
 }
 
 /// Errors produced by [`LearningRuntime`].
@@ -339,6 +789,348 @@ pub enum LearningRuntimeError {
     /// JSON serialization/parsing errors.
     #[error("learning runtime serde error: {0}")]
     Serde(#[from] serde_json::Error),
+}
+
+impl EfficiencySummaryRecord {
+    /// Build a task-level summary from a completed episode.
+    #[must_use]
+    pub fn from_episode(episode: &Episode) -> Self {
+        let provider = episode_provider(episode);
+        let model = episode_model(episode);
+        let total_tokens = if episode.tokens_used > 0 {
+            episode.tokens_used
+        } else {
+            episode
+                .usage
+                .input_tokens
+                .saturating_add(episode.usage.output_tokens)
+        };
+        let prompt_section_count = prompt_section_count_from_episode(episode);
+
+        Self {
+            schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
+            timestamp: episode.completed_at.to_rfc3339(),
+            scope: EfficiencyScope::Task,
+            run_id: episode_run_id(episode),
+            episode_id: Some(episode_source_id(episode).to_string()),
+            plan_id: extra_string(episode, "plan_id").unwrap_or_default(),
+            task_id: episode.task_id.clone(),
+            agent_id: episode.agent_id.clone(),
+            role: episode_role(episode),
+            provider,
+            model,
+            iteration: extra_u64(episode, "iteration")
+                .or_else(|| extra_u64(episode, "retry_count"))
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
+            input_tokens: episode.usage.input_tokens,
+            output_tokens: episode.usage.output_tokens,
+            reasoning_tokens: extra_u64(episode, "reasoning_tokens").unwrap_or(0),
+            cache_read_tokens: episode.usage.cache_read_tokens,
+            cache_write_tokens: episode.usage.cache_write_tokens,
+            total_tokens,
+            cost_usd: episode.usage.cost_usd,
+            cost_usd_without_cache: episode.usage.cost_usd_without_cache,
+            cache_hit_rate: ratio_u64(episode.usage.cache_read_tokens, episode.usage.input_tokens),
+            duration_ms: episode.usage.wall_ms,
+            time_to_first_token_ms: extra_u64(episode, "time_to_first_token_ms").unwrap_or(0),
+            tools_available: extra_u64(episode, "tools_available")
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
+            tools_used: extra_u64(episode, "tools_used")
+                .unwrap_or(episode.external_actions.len() as u64)
+                .min(u64::from(u32::MAX)) as u32,
+            tool_calls: episode.external_actions.len().min(u32::MAX as usize) as u32,
+            gate_passed: Some(episode.success),
+            outcome: if episode.success {
+                "success".to_string()
+            } else {
+                episode
+                    .failure_reason
+                    .clone()
+                    .unwrap_or_else(|| "failure".to_string())
+            },
+            prompt_section_count,
+            total_prompt_tokens: extra_u64(episode, "total_prompt_tokens").unwrap_or(0),
+            metadata: serde_json::json!({
+                "source": "episode",
+                "kind": episode.kind.clone(),
+                "trigger_kind": episode.trigger_kind.clone(),
+                "gate_count": episode.gate_verdicts.len(),
+            }),
+        }
+    }
+
+    /// Build a summary from an existing efficiency event.
+    #[must_use]
+    pub fn from_efficiency_event(event: &AgentEfficiencyEvent, scope: EfficiencyScope) -> Self {
+        Self {
+            schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
+            timestamp: if event.timestamp.trim().is_empty() {
+                Utc::now().to_rfc3339()
+            } else {
+                event.timestamp.clone()
+            },
+            scope,
+            run_id: non_empty_string(event.plan_id.as_str()),
+            episode_id: None,
+            plan_id: event.plan_id.clone(),
+            task_id: event.task_id.clone(),
+            agent_id: event.agent_id.clone(),
+            role: event.role.clone(),
+            provider: event.backend.clone(),
+            model: latency_model_slug(event).to_string(),
+            iteration: event.iteration,
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            reasoning_tokens: event.reasoning_tokens,
+            cache_read_tokens: event.cache_read_tokens,
+            cache_write_tokens: event.cache_write_tokens,
+            total_tokens: event.total_tokens(),
+            cost_usd: event.cost_usd,
+            cost_usd_without_cache: event.cost_usd_without_cache,
+            cache_hit_rate: event.cache_hit_rate(),
+            duration_ms: event.duration_ms.max(event.wall_time_ms),
+            time_to_first_token_ms: event.time_to_first_token_ms,
+            tools_available: event.tools_available,
+            tools_used: event.tools_used,
+            tool_calls: event.tool_calls.len().min(u32::MAX as usize) as u32,
+            gate_passed: Some(event.gate_passed),
+            outcome: if event.outcome.trim().is_empty() {
+                if event.gate_passed {
+                    "success".to_string()
+                } else {
+                    "failure".to_string()
+                }
+            } else {
+                event.outcome.clone()
+            },
+            prompt_section_count: event.prompt_sections.len().min(u32::MAX as usize) as u32,
+            total_prompt_tokens: event.total_prompt_tokens,
+            metadata: serde_json::json!({
+                "source": "efficiency_event",
+                "frequency": event.frequency,
+                "strategy_attempted": event.strategy_attempted.clone(),
+                "gate_errors": event.gate_errors.clone(),
+            }),
+        }
+    }
+}
+
+impl GateOutcomeRecord {
+    /// Build gate outcome records from an episode's gate verdicts.
+    #[must_use]
+    pub fn from_episode(episode: &Episode) -> Vec<Self> {
+        let provider = non_empty_string(episode_provider(episode).as_str());
+        let model = non_empty_string(episode_model(episode).as_str());
+        let plan_id = extra_string(episode, "plan_id").unwrap_or_default();
+        let run_id = episode_run_id(episode);
+        let episode_id = Some(episode_source_id(episode).to_string());
+        let attempt = extra_u64(episode, "iteration")
+            .or_else(|| extra_u64(episode, "retry_count"))
+            .unwrap_or(0)
+            .min(u64::from(u32::MAX)) as u32;
+        let duration_ms = nonzero_u64(extra_u64(episode, "gate_duration_ms").unwrap_or(0));
+
+        episode
+            .gate_verdicts
+            .iter()
+            .enumerate()
+            .map(|(idx, verdict)| Self {
+                schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
+                timestamp: episode.completed_at.to_rfc3339(),
+                run_id: run_id.clone(),
+                episode_id: episode_id.clone(),
+                plan_id: plan_id.clone(),
+                task_id: episode.task_id.clone(),
+                gate_name: verdict.gate.clone(),
+                gate_kind: extra_string(episode, "gate_kind").unwrap_or_else(|| "gate".into()),
+                rung: extra_u64(episode, "rung")
+                    .unwrap_or(idx as u64)
+                    .min(u64::from(u32::MAX)) as u32,
+                passed: verdict.passed,
+                score: extra_f64(episode, "gate_score").map(|score| score as f32),
+                duration_ms,
+                attempt,
+                failure_kind: extra_string(episode, "failure_kind"),
+                error_digest: verdict.signature.clone(),
+                provider: provider.clone(),
+                model: model.clone(),
+                summary: verdict.signature.clone().unwrap_or_default(),
+                metadata: serde_json::json!({
+                    "source": "episode",
+                    "episode_kind": episode.kind.clone(),
+                }),
+            })
+            .collect()
+    }
+}
+
+impl RetryOutcomeRecord {
+    /// Build a retry outcome from episode metadata when the runner supplied retry fields.
+    #[must_use]
+    pub fn from_episode(episode: &Episode) -> Option<Self> {
+        let status = retry_status_from_episode(episode)?;
+        let provider = non_empty_string(episode_provider(episode).as_str());
+        let model = non_empty_string(episode_model(episode).as_str());
+
+        Some(Self {
+            schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
+            timestamp: episode.completed_at.to_rfc3339(),
+            run_id: episode_run_id(episode),
+            episode_id: Some(episode_source_id(episode).to_string()),
+            plan_id: extra_string(episode, "plan_id").unwrap_or_default(),
+            task_id: episode.task_id.clone(),
+            gate_name: extra_string(episode, "gate_name").or_else(|| {
+                episode
+                    .gate_verdicts
+                    .iter()
+                    .find(|verdict| !verdict.passed)
+                    .map(|verdict| verdict.gate.clone())
+            }),
+            attempt: extra_u64(episode, "retry_attempt")
+                .or_else(|| extra_u64(episode, "iteration"))
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
+            max_attempts: extra_u64(episode, "max_retries")
+                .map(|value| value.min(u64::from(u32::MAX)) as u32),
+            status,
+            retryable: extra_bool(episode, "retryable").unwrap_or(matches!(
+                status,
+                RetryOutcomeStatus::Scheduled
+                    | RetryOutcomeStatus::Started
+                    | RetryOutcomeStatus::Succeeded
+            )),
+            failure_kind: extra_string(episode, "failure_kind"),
+            cooldown_ms: extra_u64(episode, "retry_cooldown_ms"),
+            provider,
+            model,
+            reason: extra_string(episode, "retry_reason")
+                .or_else(|| episode.failure_reason.clone())
+                .unwrap_or_default(),
+            next_action: extra_string(episode, "retry_next_action"),
+            metadata: serde_json::json!({
+                "source": "episode",
+                "episode_success": episode.success,
+            }),
+        })
+    }
+}
+
+impl KnowledgeSeedRecord {
+    /// Build a deterministic knowledge seed from a successful episode.
+    #[must_use]
+    pub fn from_successful_episode(episode: &Episode) -> Option<Self> {
+        if !episode.success {
+            return None;
+        }
+
+        let source_id = episode_source_id(episode).to_string();
+        let plan_id = extra_string(episode, "plan_id").unwrap_or_default();
+        let task_category = extra_string(episode, "task_category")
+            .unwrap_or_else(|| episode.trigger_kind.clone())
+            .trim()
+            .to_string();
+        let role = episode_role(episode);
+        let provider = episode_provider(episode);
+        let model = episode_model(episode);
+        let gate_names = episode
+            .gate_verdicts
+            .iter()
+            .map(|verdict| verdict.gate.clone())
+            .filter(|gate| !gate.trim().is_empty())
+            .collect::<Vec<_>>();
+        let files = extra_string_vec(episode, "files")
+            .or_else(|| extra_string_vec(episode, "files_changed"))
+            .unwrap_or_default();
+        let gates_label = if gate_names.is_empty() {
+            "terminal success".to_string()
+        } else {
+            gate_names.join(", ")
+        };
+        let files_label = if files.is_empty() {
+            "no file scope recorded".to_string()
+        } else {
+            files.join(", ")
+        };
+        let task_label = if episode.task_id.trim().is_empty() {
+            "unknown task"
+        } else {
+            episode.task_id.as_str()
+        };
+        let content = format!(
+            "Successful {task_category} task {task_label} used role {role}, provider {provider}, model {model}, and passed {gates_label}. File scope: {files_label}."
+        );
+        let confidence = (0.70
+            + (gate_names.len().min(5) as f64 * 0.025)
+            + if model.is_empty() { 0.0 } else { 0.02 })
+        .clamp(0.70, 0.85);
+        let kind = if gate_names.len() >= 2 {
+            "strategy_fragment"
+        } else {
+            "insight"
+        }
+        .to_string();
+        let seed_id = format!(
+            "ks-{}",
+            stable_hash_hex(&[
+                kind.as_str(),
+                source_id.as_str(),
+                episode.task_id.as_str(),
+                model.as_str(),
+                content.as_str(),
+            ])
+        );
+        let mut tags = extra_string_vec(episode, "task_tags").unwrap_or_default();
+        tags.extend([
+            "runtime-success".to_string(),
+            task_category.clone(),
+            role.clone(),
+            provider.clone(),
+        ]);
+        tags.retain(|tag| !tag.trim().is_empty());
+        tags.iter_mut()
+            .for_each(|tag| *tag = tag.trim().to_ascii_lowercase());
+        tags.sort();
+        tags.dedup();
+
+        Some(Self {
+            schema_version: RUNTIME_FEEDBACK_SCHEMA_VERSION,
+            seed_id,
+            created_at: episode.completed_at.to_rfc3339(),
+            kind,
+            content,
+            confidence,
+            confidence_weight: confidence,
+            source_episodes: vec![source_id.clone()],
+            source_model: non_empty_string(model.as_str()),
+            model_generality: if model.is_empty() { 0.75 } else { 0.35 },
+            tags,
+            plan_id,
+            task_id: episode.task_id.clone(),
+            evidence: vec![KnowledgeSeedEvidence {
+                source_type: "episode".to_string(),
+                source_id,
+                outcome: "success".to_string(),
+                weight: confidence,
+            }],
+            metadata: serde_json::json!({
+                "provider": provider,
+                "model": model,
+                "role": role,
+                "task_category": task_category,
+                "gate_names": gate_names,
+                "files": files,
+                "tokens": {
+                    "input": episode.usage.input_tokens,
+                    "output": episode.usage.output_tokens,
+                    "cache_read": episode.usage.cache_read_tokens,
+                    "cache_write": episode.usage.cache_write_tokens,
+                },
+                "cost_usd": episode.usage.cost_usd,
+            }),
+        })
+    }
 }
 
 /// Runtime orchestrator for `roko-learn` subsystems.
@@ -690,6 +1482,74 @@ impl LearningRuntime {
         self.episode_completion_hook = Some(Arc::new(hook));
     }
 
+    /// Consume one normalized runner event and append all canonical feedback records.
+    ///
+    /// Runner and serve code should prefer this facade over writing individual
+    /// JSONL files directly. It keeps provider/model outcomes, summaries, gate
+    /// outcomes, retry outcomes, and knowledge seeds in the same schema family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an enabled append fails.
+    pub async fn record_runner_event(
+        &self,
+        event: RunnerFeedbackEvent,
+    ) -> Result<RuntimeFeedbackWrite, LearningRuntimeError> {
+        let mut write = RuntimeFeedbackWrite::default();
+
+        match event {
+            RunnerFeedbackEvent::CompletedRun { input } => {
+                let update = self.record_completed_run(*input).await?;
+                write.provider_model_outcomes +=
+                    usize::from(update.provider_model_outcome_recorded == ApplyStatus::Applied);
+                write.efficiency_summaries +=
+                    usize::from(update.efficiency_summary_recorded == ApplyStatus::Applied);
+                write.gate_outcomes += update.gate_outcomes_recorded;
+                write.retry_outcomes +=
+                    usize::from(update.retry_outcome_recorded == ApplyStatus::Applied);
+                write.knowledge_seeds +=
+                    usize::from(update.knowledge_seed_recorded == ApplyStatus::Applied);
+                write.learning_update = Some(update);
+            }
+            RunnerFeedbackEvent::Episode { episode } => {
+                self.append_episode(&episode).await?;
+                write.episode_appended = true;
+                write.merge(self.append_derived_episode_feedback(&episode, true).await?);
+            }
+            RunnerFeedbackEvent::EfficiencyEvent { event, scope } => {
+                let provider_model_outcome =
+                    ProviderModelOutcomeRecord::from_efficiency_event(&event).is_some();
+                self.append_efficiency_event_with_scope(&event, scope)
+                    .await?;
+                write.efficiency_events = 1;
+                write.efficiency_summaries = 1;
+                write.provider_model_outcomes = usize::from(provider_model_outcome);
+            }
+            RunnerFeedbackEvent::ProviderModelOutcome { outcome } => {
+                self.append_provider_model_outcome(&outcome).await?;
+                write.provider_model_outcomes = 1;
+            }
+            RunnerFeedbackEvent::EfficiencySummary { summary } => {
+                self.append_efficiency_summary(&summary).await?;
+                write.efficiency_summaries = 1;
+            }
+            RunnerFeedbackEvent::GateOutcome { outcome } => {
+                self.append_gate_outcome(&outcome).await?;
+                write.gate_outcomes = 1;
+            }
+            RunnerFeedbackEvent::RetryOutcome { outcome } => {
+                self.append_retry_outcome(&outcome).await?;
+                write.retry_outcomes = 1;
+            }
+            RunnerFeedbackEvent::KnowledgeSeed { seed } => {
+                self.append_knowledge_seed(&seed).await?;
+                write.knowledge_seeds = 1;
+            }
+        }
+
+        Ok(write)
+    }
+
     /// Append an efficiency event to the JSONL log.
     ///
     /// # Errors
@@ -699,17 +1559,103 @@ impl LearningRuntime {
         &self,
         event: &AgentEfficiencyEvent,
     ) -> Result<(), LearningRuntimeError> {
-        let mut line = serde_json::to_string(event)?;
-        line.push('\n');
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.paths.efficiency_jsonl)
-            .await?;
-        f.write_all(line.as_bytes()).await?;
-        f.flush().await?;
+        self.append_efficiency_event_with_scope(event, EfficiencyScope::Turn)
+            .await
+    }
+
+    async fn append_efficiency_event_with_scope(
+        &self,
+        event: &AgentEfficiencyEvent,
+        scope: EfficiencyScope,
+    ) -> Result<(), LearningRuntimeError> {
+        append_jsonl_record(&self.paths.efficiency_jsonl, event).await?;
         self.record_latency_from_efficiency_event(event)?;
         self.record_section_effectiveness_from_efficiency_event(event)?;
+        let summary = EfficiencySummaryRecord::from_efficiency_event(event, scope);
+        self.append_efficiency_summary(&summary).await?;
+        if let Some(outcome) = ProviderModelOutcomeRecord::from_efficiency_event(event) {
+            self.append_provider_model_outcome(&outcome).await?;
+        }
+        Ok(())
+    }
+
+    /// Append a normalized efficiency summary to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization or write failure.
+    pub async fn append_efficiency_summary(
+        &self,
+        summary: &EfficiencySummaryRecord,
+    ) -> Result<(), LearningRuntimeError> {
+        append_jsonl_record(&self.paths.efficiency_summaries_jsonl, summary).await?;
+        Ok(())
+    }
+
+    /// Append a provider/model outcome to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization or write failure.
+    pub async fn append_provider_model_outcome(
+        &self,
+        outcome: &ProviderModelOutcomeRecord,
+    ) -> Result<(), LearningRuntimeError> {
+        self.provider_model_outcomes.append(outcome).await?;
+        Ok(())
+    }
+
+    /// Append a gate outcome to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization or write failure.
+    pub async fn append_gate_outcome(
+        &self,
+        outcome: &GateOutcomeRecord,
+    ) -> Result<(), LearningRuntimeError> {
+        append_jsonl_record(&self.paths.gate_outcomes_jsonl, outcome).await?;
+        Ok(())
+    }
+
+    /// Append multiple gate outcomes to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on the first serialization or write failure.
+    pub async fn append_gate_outcomes(
+        &self,
+        outcomes: &[GateOutcomeRecord],
+    ) -> Result<(), LearningRuntimeError> {
+        for outcome in outcomes {
+            self.append_gate_outcome(outcome).await?;
+        }
+        Ok(())
+    }
+
+    /// Append a retry outcome to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization or write failure.
+    pub async fn append_retry_outcome(
+        &self,
+        outcome: &RetryOutcomeRecord,
+    ) -> Result<(), LearningRuntimeError> {
+        append_jsonl_record(&self.paths.retry_outcomes_jsonl, outcome).await?;
+        Ok(())
+    }
+
+    /// Append a knowledge seed to the JSONL log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization or write failure.
+    pub async fn append_knowledge_seed(
+        &self,
+        seed: &KnowledgeSeedRecord,
+    ) -> Result<(), LearningRuntimeError> {
+        append_jsonl_record(&self.paths.knowledge_seeds_jsonl, seed).await?;
         Ok(())
     }
 
@@ -764,6 +1710,68 @@ impl LearningRuntime {
         read_provider_model_outcomes(&self.paths.provider_model_outcomes_jsonl)
             .await
             .map_err(LearningRuntimeError::Io)
+    }
+
+    /// Read all persisted efficiency summaries.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read.
+    pub async fn read_efficiency_summaries(
+        &self,
+    ) -> Result<Vec<EfficiencySummaryRecord>, LearningRuntimeError> {
+        read_efficiency_summaries(&self.paths.efficiency_summaries_jsonl).await
+    }
+
+    /// Read all persisted gate outcomes.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read.
+    pub async fn read_gate_outcomes(&self) -> Result<Vec<GateOutcomeRecord>, LearningRuntimeError> {
+        read_gate_outcomes(&self.paths.gate_outcomes_jsonl).await
+    }
+
+    /// Read all persisted retry outcomes.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read.
+    pub async fn read_retry_outcomes(
+        &self,
+    ) -> Result<Vec<RetryOutcomeRecord>, LearningRuntimeError> {
+        read_retry_outcomes(&self.paths.retry_outcomes_jsonl).await
+    }
+
+    /// Read all persisted knowledge seeds.
+    ///
+    /// Returns an empty vec if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log cannot be opened or read.
+    pub async fn read_knowledge_seeds(
+        &self,
+    ) -> Result<Vec<KnowledgeSeedRecord>, LearningRuntimeError> {
+        read_knowledge_seeds(&self.paths.knowledge_seeds_jsonl).await
+    }
+
+    /// Query all canonical runtime feedback streams for this runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an existing log cannot be opened or read.
+    pub async fn query_feedback(
+        &self,
+        query: &RuntimeFeedbackQuery,
+    ) -> Result<RuntimeFeedbackSnapshot, LearningRuntimeError> {
+        read_runtime_feedback_snapshot(&self.paths, query).await
     }
 
     /// Return rolling provider/model pass-rate summaries.
@@ -850,6 +1858,41 @@ impl LearningRuntime {
         Ok(())
     }
 
+    async fn append_derived_episode_feedback(
+        &self,
+        episode: &Episode,
+        include_provider_model_outcome: bool,
+    ) -> Result<RuntimeFeedbackWrite, LearningRuntimeError> {
+        let mut write = RuntimeFeedbackWrite::default();
+
+        if include_provider_model_outcome
+            && let Some(outcome) = ProviderModelOutcomeRecord::from_episode(episode, None)
+        {
+            self.append_provider_model_outcome(&outcome).await?;
+            write.provider_model_outcomes = 1;
+        }
+
+        let summary = EfficiencySummaryRecord::from_episode(episode);
+        self.append_efficiency_summary(&summary).await?;
+        write.efficiency_summaries = 1;
+
+        let gate_outcomes = GateOutcomeRecord::from_episode(episode);
+        self.append_gate_outcomes(&gate_outcomes).await?;
+        write.gate_outcomes = gate_outcomes.len();
+
+        if let Some(retry_outcome) = RetryOutcomeRecord::from_episode(episode) {
+            self.append_retry_outcome(&retry_outcome).await?;
+            write.retry_outcomes = 1;
+        }
+
+        if let Some(seed) = KnowledgeSeedRecord::from_successful_episode(episode) {
+            self.append_knowledge_seed(&seed).await?;
+            write.knowledge_seeds = 1;
+        }
+
+        Ok(write)
+    }
+
     /// Persist one completed run and update all available learning subsystems.
     ///
     /// The function is intentionally tolerant of missing optional fields:
@@ -928,6 +1971,20 @@ impl LearningRuntime {
         ) {
             self.provider_model_outcomes.append(&outcome).await?;
             update.provider_model_outcome_recorded = ApplyStatus::Applied;
+        }
+
+        let derived_feedback = self
+            .append_derived_episode_feedback(&input.episode, false)
+            .await?;
+        if derived_feedback.efficiency_summaries > 0 {
+            update.efficiency_summary_recorded = ApplyStatus::Applied;
+        }
+        update.gate_outcomes_recorded = derived_feedback.gate_outcomes;
+        if derived_feedback.retry_outcomes > 0 {
+            update.retry_outcome_recorded = ApplyStatus::Applied;
+        }
+        if derived_feedback.knowledge_seeds > 0 {
+            update.knowledge_seed_recorded = ApplyStatus::Applied;
         }
 
         if let Some(playbook_id) = input.playbook_id {
@@ -1344,6 +2401,125 @@ fn extra_f64(episode: &Episode, key: &str) -> Option<f64> {
     episode.extra.get(key).and_then(serde_json::Value::as_f64)
 }
 
+fn extra_u64(episode: &Episode, key: &str) -> Option<u64> {
+    episode.extra.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn extra_bool(episode: &Episode, key: &str) -> Option<bool> {
+    episode.extra.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn extra_string_vec(episode: &Episode, key: &str) -> Option<Vec<String>> {
+    let values = episode.extra.get(key)?.as_array()?;
+    let out = values
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    (!out.is_empty()).then_some(out)
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn nonzero_u64(value: u64) -> Option<u64> {
+    (value > 0).then_some(value)
+}
+
+fn ratio_u64(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn episode_model(episode: &Episode) -> String {
+    non_empty_string(&episode.model)
+        .or_else(|| extra_string(episode, "model"))
+        .or_else(|| extra_string(episode, "model_used"))
+        .unwrap_or_default()
+}
+
+fn episode_provider(episode: &Episode) -> String {
+    non_empty_string(&episode.backend)
+        .or_else(|| extra_string(episode, "provider"))
+        .or_else(|| extra_string(episode, "backend"))
+        .unwrap_or_else(|| "unknown-provider".to_string())
+}
+
+fn episode_role(episode: &Episode) -> String {
+    extra_string(episode, "role")
+        .or_else(|| extra_string(episode, "role_id"))
+        .or_else(|| non_empty_string(&episode.agent_template))
+        .unwrap_or_else(|| "unknown-role".to_string())
+}
+
+fn episode_run_id(episode: &Episode) -> Option<String> {
+    extra_string(episode, "run_id")
+        .or_else(|| extra_string(episode, "session_id"))
+        .or_else(|| non_empty_string(&episode.episode_id))
+}
+
+fn prompt_section_count_from_episode(episode: &Episode) -> u32 {
+    episode
+        .prompt_composition
+        .as_ref()
+        .and_then(|value| value.get("sections"))
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, |sections| sections.len().min(u32::MAX as usize) as u32)
+}
+
+fn retry_status_from_episode(episode: &Episode) -> Option<RetryOutcomeStatus> {
+    if let Some(raw) =
+        extra_string(episode, "retry_status").or_else(|| extra_string(episode, "retry_outcome"))
+    {
+        return parse_retry_status(&raw);
+    }
+    if extra_bool(episode, "retry_scheduled") == Some(true) {
+        return Some(RetryOutcomeStatus::Scheduled);
+    }
+    if extra_bool(episode, "retry_started") == Some(true) {
+        return Some(RetryOutcomeStatus::Started);
+    }
+    if extra_bool(episode, "retry_exhausted") == Some(true) {
+        return Some(RetryOutcomeStatus::Exhausted);
+    }
+    if extra_bool(episode, "retry_not_retryable") == Some(true) {
+        return Some(RetryOutcomeStatus::NotRetryable);
+    }
+    None
+}
+
+fn parse_retry_status(raw: &str) -> Option<RetryOutcomeStatus> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "scheduled" => Some(RetryOutcomeStatus::Scheduled),
+        "started" => Some(RetryOutcomeStatus::Started),
+        "succeeded" | "success" | "passed" => Some(RetryOutcomeStatus::Succeeded),
+        "exhausted" | "retries_exhausted" => Some(RetryOutcomeStatus::Exhausted),
+        "not_retryable" | "non_retryable" => Some(RetryOutcomeStatus::NotRetryable),
+        "cancelled" | "canceled" => Some(RetryOutcomeStatus::Cancelled),
+        _ => None,
+    }
+}
+
+fn stable_hash_hex(parts: &[&str]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for part in parts {
+        for byte in part.as_bytes().iter().copied().chain([0xff]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 fn episode_source_id(episode: &Episode) -> &str {
     if episode.episode_id.trim().is_empty() {
         &episode.id
@@ -1529,6 +2705,85 @@ fn compute_regression_report(
 pub async fn read_efficiency_events(
     path: &Path,
 ) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
+    read_jsonl_lossy(path).await
+}
+
+/// Read normalized efficiency summaries from a JSONL file.
+///
+/// Missing files produce an empty vector and malformed lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error only for file open/read failures.
+pub async fn read_efficiency_summaries(
+    path: &Path,
+) -> Result<Vec<EfficiencySummaryRecord>, LearningRuntimeError> {
+    read_jsonl_lossy(path).await
+}
+
+/// Read gate outcomes from a JSONL file.
+///
+/// Missing files produce an empty vector and malformed lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error only for file open/read failures.
+pub async fn read_gate_outcomes(
+    path: &Path,
+) -> Result<Vec<GateOutcomeRecord>, LearningRuntimeError> {
+    read_jsonl_lossy(path).await
+}
+
+/// Read retry outcomes from a JSONL file.
+///
+/// Missing files produce an empty vector and malformed lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error only for file open/read failures.
+pub async fn read_retry_outcomes(
+    path: &Path,
+) -> Result<Vec<RetryOutcomeRecord>, LearningRuntimeError> {
+    read_jsonl_lossy(path).await
+}
+
+/// Read knowledge seeds from a JSONL file.
+///
+/// Missing files produce an empty vector and malformed lines are skipped.
+///
+/// # Errors
+///
+/// Returns an error only for file open/read failures.
+pub async fn read_knowledge_seeds(
+    path: &Path,
+) -> Result<Vec<KnowledgeSeedRecord>, LearningRuntimeError> {
+    read_jsonl_lossy(path).await
+}
+
+async fn append_jsonl_record<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<(), LearningRuntimeError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut line = serde_json::to_string(value)?;
+    line.push('\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(line.as_bytes()).await?;
+    file.sync_data().await?;
+    Ok(())
+}
+
+async fn read_jsonl_lossy<T>(path: &Path) -> Result<Vec<T>, LearningRuntimeError>
+where
+    T: DeserializeOwned,
+{
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1541,11 +2796,364 @@ pub async fn read_efficiency_events(
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
-            out.push(event);
+        if let Ok(record) = serde_json::from_str::<T>(trimmed) {
+            out.push(record);
         }
     }
     Ok(out)
+}
+
+/// Learning artifacts discovered for a project workdir.
+///
+/// This is intentionally read-only and tolerant. It lets HTTP and CLI surfaces
+/// show runner-produced durable feedback even while different runtimes still
+/// write episodes to legacy and current locations.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectLearningSnapshot {
+    /// Episode records found across known episode JSONL locations.
+    pub episodes: Vec<Episode>,
+    /// Efficiency events from `.roko/learn/efficiency.jsonl`.
+    pub efficiency_events: Vec<AgentEfficiencyEvent>,
+    /// Provider/model outcomes from `.roko/learn/provider-model-outcomes.jsonl`.
+    pub provider_model_outcomes: Vec<ProviderModelOutcomeRecord>,
+    /// Efficiency summaries from `.roko/learn/efficiency-summaries.jsonl`.
+    pub efficiency_summaries: Vec<EfficiencySummaryRecord>,
+    /// Gate outcomes from `.roko/learn/gate-outcomes.jsonl`.
+    pub gate_outcomes: Vec<GateOutcomeRecord>,
+    /// Retry outcomes from `.roko/learn/retry-outcomes.jsonl`.
+    pub retry_outcomes: Vec<RetryOutcomeRecord>,
+    /// Knowledge seeds from `.roko/learn/knowledge-seeds.jsonl`.
+    pub knowledge_seeds: Vec<KnowledgeSeedRecord>,
+    /// Parsed cascade router snapshot from `.roko/learn/cascade-router.json`.
+    pub cascade_router: Option<serde_json::Value>,
+    /// Number of durable knowledge entries in `.roko/neuro/knowledge.jsonl`.
+    pub knowledge_entries: usize,
+    /// Episode files that existed and were read.
+    pub episode_paths: Vec<PathBuf>,
+    /// Efficiency log path.
+    pub efficiency_path: PathBuf,
+    /// Provider/model outcome log path.
+    pub provider_model_outcomes_path: PathBuf,
+    /// Efficiency summary log path.
+    pub efficiency_summaries_path: PathBuf,
+    /// Gate outcome log path.
+    pub gate_outcomes_path: PathBuf,
+    /// Retry outcome log path.
+    pub retry_outcomes_path: PathBuf,
+    /// Knowledge seed log path.
+    pub knowledge_seeds_path: PathBuf,
+    /// Cascade router snapshot path.
+    pub cascade_router_path: PathBuf,
+    /// Durable knowledge JSONL path.
+    pub knowledge_path: PathBuf,
+}
+
+/// Return known episode JSONL locations for `workdir`, newest canonical path
+/// first, followed by legacy locations.
+#[must_use]
+pub fn project_episode_paths(workdir: impl AsRef<Path>) -> Vec<PathBuf> {
+    let roko = workdir.as_ref().join(".roko");
+    vec![
+        roko.join("memory").join("episodes.jsonl"),
+        roko.join("episodes.jsonl"),
+        roko.join("learn").join("episodes.jsonl"),
+    ]
+}
+
+/// Read all valid project episodes from known JSONL locations, de-duplicating
+/// records that appear in more than one location.
+///
+/// # Errors
+///
+/// Returns an error only for filesystem read failures from an existing file.
+pub async fn read_project_episodes_lossy(
+    workdir: impl AsRef<Path>,
+) -> Result<Vec<Episode>, LearningRuntimeError> {
+    let mut episodes = Vec::new();
+    let mut seen = HashSet::new();
+    for path in project_episode_paths(workdir) {
+        if !path.exists() {
+            continue;
+        }
+        for episode in EpisodeLogger::read_all_lossy(&path).await? {
+            let key = episode_dedupe_key(&episode);
+            if seen.insert(key) {
+                episodes.push(episode);
+            }
+        }
+    }
+    Ok(episodes)
+}
+
+/// Read project efficiency events from `.roko/learn/efficiency.jsonl`.
+///
+/// # Errors
+///
+/// Returns an error if the efficiency log cannot be read.
+pub async fn read_project_efficiency_events(
+    workdir: impl AsRef<Path>,
+) -> Result<Vec<AgentEfficiencyEvent>, LearningRuntimeError> {
+    read_efficiency_events(&workdir.as_ref().join(".roko/learn/efficiency.jsonl")).await
+}
+
+/// Read the current project learning artifacts for CLI/API presentation.
+///
+/// # Errors
+///
+/// Returns an error if an existing artifact cannot be read.
+pub async fn read_project_learning_snapshot(
+    workdir: impl AsRef<Path>,
+) -> Result<ProjectLearningSnapshot, LearningRuntimeError> {
+    let workdir = workdir.as_ref();
+    let roko = workdir.join(".roko");
+    let efficiency_path = roko.join("learn").join("efficiency.jsonl");
+    let provider_model_outcomes_path = roko.join("learn").join("provider-model-outcomes.jsonl");
+    let efficiency_summaries_path = roko.join("learn").join("efficiency-summaries.jsonl");
+    let gate_outcomes_path = roko.join("learn").join("gate-outcomes.jsonl");
+    let retry_outcomes_path = roko.join("learn").join("retry-outcomes.jsonl");
+    let knowledge_seeds_path = roko.join("learn").join("knowledge-seeds.jsonl");
+    let cascade_router_path = roko.join("learn").join("cascade-router.json");
+    let knowledge_path = roko.join("neuro").join("knowledge.jsonl");
+
+    let episodes = read_project_episodes_lossy(workdir).await?;
+    let episode_paths = project_episode_paths(workdir)
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
+    let efficiency_events = read_efficiency_events(&efficiency_path).await?;
+    let provider_model_outcomes = read_provider_model_outcomes(&provider_model_outcomes_path)
+        .await
+        .map_err(LearningRuntimeError::Io)?;
+    let efficiency_summaries = read_efficiency_summaries(&efficiency_summaries_path).await?;
+    let gate_outcomes = read_gate_outcomes(&gate_outcomes_path).await?;
+    let retry_outcomes = read_retry_outcomes(&retry_outcomes_path).await?;
+    let knowledge_seeds = read_knowledge_seeds(&knowledge_seeds_path).await?;
+    let cascade_router = match tokio::fs::read_to_string(&cascade_router_path).await {
+        Ok(contents) => serde_json::from_str(&contents).ok(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(LearningRuntimeError::Io(err)),
+    };
+    let knowledge_entries = count_jsonl_records(&knowledge_path).await?;
+
+    Ok(ProjectLearningSnapshot {
+        episodes,
+        efficiency_events,
+        provider_model_outcomes,
+        efficiency_summaries,
+        gate_outcomes,
+        retry_outcomes,
+        knowledge_seeds,
+        cascade_router,
+        knowledge_entries,
+        episode_paths,
+        efficiency_path,
+        provider_model_outcomes_path,
+        efficiency_summaries_path,
+        gate_outcomes_path,
+        retry_outcomes_path,
+        knowledge_seeds_path,
+        cascade_router_path,
+        knowledge_path,
+    })
+}
+
+/// Query canonical feedback logs under `paths`.
+///
+/// # Errors
+///
+/// Returns an error if an existing log cannot be opened or read.
+pub async fn read_runtime_feedback_snapshot(
+    paths: &LearningPaths,
+    query: &RuntimeFeedbackQuery,
+) -> Result<RuntimeFeedbackSnapshot, LearningRuntimeError> {
+    let mut episodes = EpisodeLogger::read_all_lossy(&paths.episodes_jsonl).await?;
+    episodes.retain(|episode| episode_matches_query(episode, query));
+    apply_latest_limit(&mut episodes, query.limit);
+
+    let mut provider_model_outcomes =
+        read_provider_model_outcomes(&paths.provider_model_outcomes_jsonl)
+            .await
+            .map_err(LearningRuntimeError::Io)?;
+    provider_model_outcomes.retain(|record| provider_model_outcome_matches_query(record, query));
+    apply_latest_limit(&mut provider_model_outcomes, query.limit);
+
+    let mut efficiency_summaries =
+        read_efficiency_summaries(&paths.efficiency_summaries_jsonl).await?;
+    efficiency_summaries.retain(|record| efficiency_summary_matches_query(record, query));
+    apply_latest_limit(&mut efficiency_summaries, query.limit);
+
+    let mut gate_outcomes = read_gate_outcomes(&paths.gate_outcomes_jsonl).await?;
+    gate_outcomes.retain(|record| gate_outcome_matches_query(record, query));
+    apply_latest_limit(&mut gate_outcomes, query.limit);
+
+    let mut retry_outcomes = read_retry_outcomes(&paths.retry_outcomes_jsonl).await?;
+    retry_outcomes.retain(|record| retry_outcome_matches_query(record, query));
+    apply_latest_limit(&mut retry_outcomes, query.limit);
+
+    let mut knowledge_seeds = read_knowledge_seeds(&paths.knowledge_seeds_jsonl).await?;
+    knowledge_seeds.retain(|record| knowledge_seed_matches_query(record, query));
+    apply_latest_limit(&mut knowledge_seeds, query.limit);
+
+    Ok(RuntimeFeedbackSnapshot {
+        episodes,
+        provider_model_outcomes,
+        efficiency_summaries,
+        gate_outcomes,
+        retry_outcomes,
+        knowledge_seeds,
+    })
+}
+
+/// Query canonical project feedback logs using default `.roko/learn` paths.
+///
+/// This reads episodes from all known project episode locations, then reads the
+/// canonical derived feedback streams from `.roko/learn`.
+///
+/// # Errors
+///
+/// Returns an error if an existing log cannot be opened or read.
+pub async fn read_project_runtime_feedback_snapshot(
+    workdir: impl AsRef<Path>,
+    query: &RuntimeFeedbackQuery,
+) -> Result<RuntimeFeedbackSnapshot, LearningRuntimeError> {
+    let workdir = workdir.as_ref();
+    let paths = LearningPaths::under(workdir.join(".roko").join("learn"));
+    let mut snapshot = read_runtime_feedback_snapshot(&paths, query).await?;
+
+    let mut project_episodes = read_project_episodes_lossy(workdir).await?;
+    project_episodes.retain(|episode| episode_matches_query(episode, query));
+    apply_latest_limit(&mut project_episodes, query.limit);
+    snapshot.episodes = project_episodes;
+
+    Ok(snapshot)
+}
+
+fn apply_latest_limit<T>(items: &mut Vec<T>, limit: Option<usize>) {
+    let Some(limit) = limit else {
+        return;
+    };
+    if items.len() > limit {
+        let drop_count = items.len() - limit;
+        items.drain(0..drop_count);
+    }
+}
+
+fn query_matches(value: &str, expected: &Option<String>) -> bool {
+    expected
+        .as_deref()
+        .is_none_or(|expected| value.trim() == expected.trim())
+}
+
+fn query_matches_option(value: Option<&str>, expected: &Option<String>) -> bool {
+    expected
+        .as_deref()
+        .is_none_or(|expected| value.is_some_and(|value| value.trim() == expected.trim()))
+}
+
+fn episode_matches_query(episode: &Episode, query: &RuntimeFeedbackQuery) -> bool {
+    query_matches(
+        extra_string(episode, "plan_id")
+            .unwrap_or_default()
+            .as_str(),
+        &query.plan_id,
+    ) && query_matches(&episode.task_id, &query.task_id)
+        && query_matches(episode_source_id(episode), &query.episode_id)
+        && query_matches(episode_provider(episode).as_str(), &query.provider)
+        && query_matches(episode_model(episode).as_str(), &query.model)
+}
+
+fn provider_model_outcome_matches_query(
+    record: &ProviderModelOutcomeRecord,
+    query: &RuntimeFeedbackQuery,
+) -> bool {
+    query_matches_option(record.run_id.as_deref(), &query.plan_id)
+        && query_matches(&record.task_id, &query.task_id)
+        && query_matches_option(record.run_id.as_deref(), &query.episode_id)
+        && query_matches(&record.provider, &query.provider)
+        && query_matches(&record.model, &query.model)
+}
+
+fn efficiency_summary_matches_query(
+    record: &EfficiencySummaryRecord,
+    query: &RuntimeFeedbackQuery,
+) -> bool {
+    query_matches(&record.plan_id, &query.plan_id)
+        && query_matches(&record.task_id, &query.task_id)
+        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
+        && query_matches(&record.provider, &query.provider)
+        && query_matches(&record.model, &query.model)
+}
+
+fn gate_outcome_matches_query(record: &GateOutcomeRecord, query: &RuntimeFeedbackQuery) -> bool {
+    query_matches(&record.plan_id, &query.plan_id)
+        && query_matches(&record.task_id, &query.task_id)
+        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
+        && query_matches_option(record.provider.as_deref(), &query.provider)
+        && query_matches_option(record.model.as_deref(), &query.model)
+}
+
+fn retry_outcome_matches_query(record: &RetryOutcomeRecord, query: &RuntimeFeedbackQuery) -> bool {
+    query_matches(&record.plan_id, &query.plan_id)
+        && query_matches(&record.task_id, &query.task_id)
+        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
+        && query_matches_option(record.provider.as_deref(), &query.provider)
+        && query_matches_option(record.model.as_deref(), &query.model)
+}
+
+fn knowledge_seed_matches_query(
+    record: &KnowledgeSeedRecord,
+    query: &RuntimeFeedbackQuery,
+) -> bool {
+    let provider = record
+        .metadata
+        .get("provider")
+        .and_then(serde_json::Value::as_str);
+    let model = record.source_model.as_deref().or_else(|| {
+        record
+            .metadata
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+    });
+    query_matches(&record.plan_id, &query.plan_id)
+        && query_matches(&record.task_id, &query.task_id)
+        && query
+            .episode_id
+            .as_deref()
+            .is_none_or(|episode_id| record.source_episodes.iter().any(|id| id == episode_id))
+        && query_matches_option(provider, &query.provider)
+        && query_matches_option(model, &query.model)
+}
+
+fn episode_dedupe_key(episode: &Episode) -> String {
+    if !episode.episode_id.is_empty() {
+        return format!("episode_id:{}", episode.episode_id);
+    }
+    if !episode.id.is_empty() {
+        return format!("id:{}", episode.id);
+    }
+    format!(
+        "fallback:{}:{}:{}:{}",
+        episode.agent_id,
+        episode.task_id,
+        episode.timestamp.to_rfc3339(),
+        episode.model
+    )
+}
+
+async fn count_jsonl_records(path: &Path) -> Result<usize, LearningRuntimeError> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(LearningRuntimeError::Io(err)),
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut count = 0;
+    while let Some(line) = lines.next_line().await? {
+        if !line.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Compute the current C-Factor snapshot for `learn_root` and append it to the
@@ -1858,6 +3466,7 @@ mod tests {
     use crate::prompt_experiment::{PromptExperiment, PromptVariant};
     use chrono::Utc;
     use roko_core::metric::{ConfigHash, TaskMetric};
+    use serde::Serialize;
     use tempfile::TempDir;
 
     fn sample_episode(success: bool) -> Episode {
@@ -1933,6 +3542,15 @@ mod tests {
         m.context_tokens = 400;
         m.cache_hit_rate = 0.0;
         m
+    }
+
+    fn write_jsonl<T: Serialize>(path: impl AsRef<Path>, values: &[T]) {
+        let mut contents = String::new();
+        for value in values {
+            contents.push_str(&serde_json::to_string(value).unwrap());
+            contents.push('\n');
+        }
+        std::fs::write(path, contents).unwrap();
     }
 
     fn sample_pattern_episode(success: bool, suffix: &str) -> Episode {
@@ -2039,6 +3657,68 @@ mod tests {
         assert_eq!(excluded.excluded_trials, 1);
         assert_eq!(excluded.excluded_passes, 1);
         assert!(runtime.paths().section_effects_json.exists());
+    }
+
+    #[tokio::test]
+    async fn project_learning_snapshot_reads_episode_efficiency_router_and_knowledge_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let workdir = tmp.path();
+        let roko = workdir.join(".roko");
+        let memory_dir = roko.join("memory");
+        let learn_dir = roko.join("learn");
+        let neuro_dir = roko.join("neuro");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::create_dir_all(&learn_dir).unwrap();
+        std::fs::create_dir_all(&neuro_dir).unwrap();
+
+        let mut memory_episode = sample_episode(true);
+        memory_episode.id = "episode-memory".to_string();
+        memory_episode.episode_id = "episode-memory".to_string();
+        memory_episode.task_id = "task-memory".to_string();
+        let duplicate_episode = memory_episode.clone();
+        let mut legacy_episode = sample_episode(false);
+        legacy_episode.id = "episode-legacy".to_string();
+        legacy_episode.episode_id = "episode-legacy".to_string();
+        legacy_episode.task_id = "task-legacy".to_string();
+
+        write_jsonl(memory_dir.join("episodes.jsonl"), &[memory_episode]);
+        write_jsonl(
+            roko.join("episodes.jsonl"),
+            &[duplicate_episode, legacy_episode],
+        );
+
+        let efficiency_event = AgentEfficiencyEvent {
+            agent_id: "agent-1".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            model_used: "claude-sonnet-4-5".to_string(),
+            gate_passed: true,
+            cost_usd: 0.25,
+            ..AgentEfficiencyEvent::default()
+        };
+        write_jsonl(learn_dir.join("efficiency.jsonl"), &[efficiency_event]);
+        std::fs::write(
+            learn_dir.join("cascade-router.json"),
+            serde_json::json!({"confidence_stats": {"claude-sonnet-4-5": {"trials": 1}}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            neuro_dir.join("knowledge.jsonl"),
+            "{\"id\":\"k1\"}\n{\"id\":\"k2\"}\n",
+        )
+        .unwrap();
+
+        let snapshot = read_project_learning_snapshot(workdir).await.unwrap();
+
+        assert_eq!(
+            snapshot.episodes.len(),
+            2,
+            "duplicate episode should be skipped"
+        );
+        assert_eq!(snapshot.efficiency_events.len(), 1);
+        assert_eq!(snapshot.knowledge_entries, 2);
+        assert!(snapshot.cascade_router.is_some());
+        assert_eq!(snapshot.episode_paths.len(), 2);
     }
 
     #[tokio::test]

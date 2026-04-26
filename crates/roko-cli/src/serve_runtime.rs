@@ -1,10 +1,13 @@
 //! [`CliRuntime`] implementation backed by the real CLI internals.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
 use roko_serve::runtime::{
@@ -13,9 +16,9 @@ use roko_serve::runtime::{
 };
 
 use crate::config::{Config, RepoRegistry};
-use crate::orchestrate::PlanRunner;
 use crate::prd;
 use crate::run::run_once;
+use crate::runner::types::{GateCompletionKind, RunnerEvent};
 use crate::status::collect_session_status;
 use crate::tui::DashboardScaffold;
 use crate::workspace_paths;
@@ -43,7 +46,7 @@ impl RokoCliRuntime {
 #[async_trait]
 impl CliRuntime for RokoCliRuntime {
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
-        let report = run_once(workdir, &self.config, prompt).await?;
+        let report = run_once(workdir, &self.config, prompt, None).await?;
         Ok(RunResult {
             success: report.overall_success(),
             output_text: report.output_text,
@@ -82,9 +85,12 @@ impl CliRuntime for RokoCliRuntime {
         let workdir = workdir.to_path_buf();
         let plan_target = plan_target.to_path_buf();
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || run_plan_on_local_runtime(workdir, plan_target, config))
-            .await
-            .map_err(|err| anyhow::anyhow!("plan execution worker failed: {err}"))?
+        let repo_registry = self.repo_registry.clone();
+        tokio::task::spawn_blocking(move || {
+            run_plan_on_local_runtime(workdir, plan_target, config, repo_registry)
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("plan execution worker failed: {err}"))?
     }
 
     fn session_status(&self, workdir: PathBuf) -> SessionStatusInfo {
@@ -135,6 +141,7 @@ fn run_plan_on_local_runtime(
     workdir: PathBuf,
     plan_target: PathBuf,
     config: Config,
+    repo_registry: RepoRegistry,
 ) -> anyhow::Result<PlanExecutionResult> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -142,29 +149,26 @@ fn run_plan_on_local_runtime(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let execution_root = prepare_plan_execution_root(&workdir, &plan_target)?;
-        let metrics = Arc::new(roko_core::obs::MetricRegistry::new());
-        roko_core::obs::register_standard_metrics(&metrics);
-        let mut runner =
-            PlanRunner::from_plans_dir(&execution_root, &workdir, config, metrics, false).await?;
-        let report = runner.run(&execution_root).await?;
-        let gate_results = report
-            .plans
+        ensure_git_repo_for_runner(&workdir);
+
+        let plans = crate::runner::plan_loader::load_plans(&execution_root)?;
+        let plan_ids = plans
             .iter()
-            .flat_map(|plan| {
-                plan.gate_results
-                    .iter()
-                    .map(move |(gate, passed)| RuntimeGateResult {
-                        gate: format!("{}:{gate}", plan.plan_id),
-                        passed: *passed,
-                        detail: if *passed {
-                            "gate passed".to_string()
-                        } else {
-                            "gate failed".to_string()
-                        },
-                    })
-            })
-            .collect::<Vec<_>>();
-        let output_text = Some(render_plan_execution_summary(&report));
+            .map(|plan| plan.id.clone())
+            .collect::<BTreeSet<_>>();
+        let roko_config = load_effective_roko_config(&workdir, &repo_registry)?;
+        let run_config = build_runner_config(&workdir, &execution_root, &config, roko_config);
+        let events_offset = runner_events_offset(&workdir);
+        let state_hub = roko_core::shared_state_hub();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let report = crate::runner::run(plans, &run_config, &state_hub, cancel).await?;
+        let gate_results = collect_runner_gate_results(&workdir, events_offset, &plan_ids)
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "failed to collect runner gate evidence");
+                Vec::new()
+            });
+        let output_text = Some(render_plan_execution_summary(&report, gate_results.len()));
 
         Ok(PlanExecutionResult {
             success: report.all_succeeded(),
@@ -270,16 +274,33 @@ fn prepare_plan_execution_root(workdir: &Path, plan_target: &Path) -> anyhow::Re
         workdir.join(plan_target)
     };
 
-    if absolute_target.is_dir()
-        && !absolute_target.join("plan.md").is_file()
-        && !absolute_target.join("tasks.toml").is_file()
-    {
+    if absolute_target.is_dir() && !absolute_target.join("tasks.toml").is_file() {
         return Ok(absolute_target);
     }
 
-    let plan_base = plan_target
+    let copy_source = if absolute_target.is_file() {
+        let parent = absolute_target.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "plan target has no parent directory: {}",
+                absolute_target.display()
+            )
+        })?;
+        if !parent.join("tasks.toml").is_file() {
+            anyhow::bail!(
+                "runner v2 requires a tasks.toml plan directory; file target is not inside one: {}",
+                absolute_target.display()
+            );
+        }
+        parent.to_path_buf()
+    } else if absolute_target.is_dir() {
+        absolute_target.clone()
+    } else {
+        anyhow::bail!("plan target does not exist: {}", absolute_target.display());
+    };
+
+    let plan_base = copy_source
         .file_stem()
-        .or_else(|| plan_target.file_name())
+        .or_else(|| copy_source.file_name())
         .and_then(|name| name.to_str())
         .map(sanitize_plan_base)
         .filter(|name| !name.is_empty())
@@ -291,21 +312,349 @@ fn prepare_plan_execution_root(workdir: &Path, plan_target: &Path) -> anyhow::Re
         .join(format!("{plan_base}-{}", unique_suffix()));
     std::fs::create_dir_all(&run_root)?;
 
-    if absolute_target.is_dir() {
-        copy_dir_recursive(&absolute_target, &run_root.join(&plan_base))?;
-    } else if absolute_target.is_file() {
-        let file_name = absolute_target.file_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "plan target has no file name: {}",
-                absolute_target.display()
-            )
-        })?;
-        std::fs::copy(&absolute_target, run_root.join(file_name))?;
-    } else {
-        anyhow::bail!("plan target does not exist: {}", absolute_target.display());
-    }
+    copy_dir_recursive(&copy_source, &run_root.join(&plan_base))?;
 
     Ok(run_root)
+}
+
+fn ensure_git_repo_for_runner(workdir: &Path) {
+    if workdir.join(".git").exists() {
+        return;
+    }
+
+    tracing::info!(workdir = %workdir.display(), "initializing git repo for runner tooling");
+    for args in [
+        &["init"][..],
+        &["add", "-A"][..],
+        &[
+            "commit",
+            "-m",
+            "init (auto-created by roko)",
+            "--allow-empty",
+        ][..],
+    ] {
+        let _ = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+fn load_effective_roko_config(
+    workdir: &Path,
+    repo_registry: &RepoRegistry,
+) -> anyhow::Result<RokoConfig> {
+    let mut config = if let Some(config) = load_roko_config_file(&workdir.join("roko.toml"))? {
+        config
+    } else if let Some(config) = repo_roko_config_for_workdir(workdir, repo_registry) {
+        config
+    } else {
+        load_roko_config_file(&workdir.join(".roko").join("roko.toml"))?.unwrap_or_default()
+    };
+
+    crate::config::merge_global_providers(&mut config);
+    config.apply_process_env();
+    Ok(config)
+}
+
+fn load_roko_config_file(path: &Path) -> anyhow::Result<Option<RokoConfig>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let config =
+        RokoConfig::from_toml(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(config))
+}
+
+fn repo_roko_config_for_workdir(
+    workdir: &Path,
+    repo_registry: &RepoRegistry,
+) -> Option<RokoConfig> {
+    let canonical_workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    repo_registry
+        .repos()
+        .iter()
+        .find(|entry| canonical_workdir == entry.root || canonical_workdir.starts_with(&entry.root))
+        .and_then(|entry| entry.roko_config.clone())
+}
+
+fn build_runner_config(
+    workdir: &Path,
+    plan_dir: &Path,
+    cli_config: &Config,
+    roko_config: RokoConfig,
+) -> crate::runner::RunConfig {
+    let model = non_empty_string(&roko_config.agent.default_model)
+        .or_else(|| cli_config.agent.model.clone())
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let claude_program = roko_config
+        .agent
+        .command
+        .as_deref()
+        .and_then(non_empty_string)
+        .or_else(|| non_empty_string(&cli_config.agent.command))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("claude"));
+
+    crate::runner::RunConfig {
+        workdir: workdir.to_path_buf(),
+        plan_dir: plan_dir.to_path_buf(),
+        model,
+        timeout_secs: cli_config.executor.task_timeout_secs,
+        max_retries: cli_config.executor.max_auto_fix_iterations,
+        approval: false,
+        dangerously_skip_permissions: true,
+        mcp_config: cli_config.agent.mcp_config.clone(),
+        resume_session: None,
+        max_gate_rung: if roko_config.gates.skip_tests { 1 } else { 2 },
+        claude_program,
+        max_plan_usd: f64::from(roko_config.budget.max_plan_usd),
+        max_turn_usd: f64::from(roko_config.budget.max_turn_usd),
+        clippy_enabled: roko_config.gates.clippy_enabled,
+        skip_tests: roko_config.gates.skip_tests,
+        roko_config: Some(Arc::new(roko_config)),
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn runner_events_offset(workdir: &Path) -> u64 {
+    std::fs::metadata(runner_events_path(workdir))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn runner_events_path(workdir: &Path) -> PathBuf {
+    workdir.join(".roko").join("events.jsonl")
+}
+
+fn collect_runner_gate_results(
+    workdir: &Path,
+    offset: u64,
+    plan_ids: &BTreeSet<String>,
+) -> anyhow::Result<Vec<RuntimeGateResult>> {
+    let events = read_runner_events_since(&runner_events_path(workdir), offset)?;
+    if events.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parsed = events
+        .lines()
+        .filter_map(|line| {
+            serde_json::from_str::<RunnerEvent>(line)
+                .map_err(|err| {
+                    tracing::debug!(error = %err, "skipping malformed runner event");
+                    err
+                })
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    let run_ids = matching_run_ids(&parsed, plan_ids);
+    let mut final_results = BTreeMap::new();
+
+    for event in parsed {
+        let RunnerEvent::GateCompleted {
+            run_id,
+            attempt,
+            kind,
+            rung,
+            passed,
+            duration_ms,
+            output,
+            verdicts,
+            ..
+        } = event
+        else {
+            continue;
+        };
+
+        if !run_ids.is_empty() && !run_ids.contains(&run_id) {
+            continue;
+        }
+        if !plan_ids.contains(&attempt.plan_id) {
+            continue;
+        }
+
+        let kind_label = gate_kind_label(kind);
+        if verdicts.is_empty() {
+            let gate_name = "gate".to_string();
+            let key = gate_evidence_key(
+                &attempt.plan_id,
+                &attempt.task_id,
+                kind_label,
+                rung,
+                &gate_name,
+            );
+            final_results.insert(
+                key,
+                RuntimeGateResult {
+                    gate: gate_evidence_label(
+                        &attempt.plan_id,
+                        &attempt.task_id,
+                        kind_label,
+                        rung,
+                        &gate_name,
+                    ),
+                    passed,
+                    detail: gate_detail(
+                        kind_label,
+                        attempt.attempt,
+                        rung,
+                        duration_ms,
+                        None,
+                        None,
+                        &output,
+                    ),
+                },
+            );
+            continue;
+        }
+
+        for verdict in verdicts {
+            let key = gate_evidence_key(
+                &attempt.plan_id,
+                &attempt.task_id,
+                kind_label,
+                rung,
+                &verdict.gate_name,
+            );
+            final_results.insert(
+                key,
+                RuntimeGateResult {
+                    gate: gate_evidence_label(
+                        &attempt.plan_id,
+                        &attempt.task_id,
+                        kind_label,
+                        rung,
+                        &verdict.gate_name,
+                    ),
+                    passed: verdict.passed,
+                    detail: gate_detail(
+                        kind_label,
+                        attempt.attempt,
+                        rung,
+                        duration_ms,
+                        Some(verdict.summary.as_str()),
+                        verdict.error_digest.as_deref(),
+                        &output,
+                    ),
+                },
+            );
+        }
+    }
+
+    Ok(final_results.into_values().collect())
+}
+
+fn read_runner_events_since(path: &Path, offset: u64) -> anyhow::Result<String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(err) => return Err(err).with_context(|| format!("open {}", path.display())),
+    };
+    let len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    file.seek(SeekFrom::Start(offset.min(len)))
+        .with_context(|| format!("seek {}", path.display()))?;
+
+    let mut events = String::new();
+    file.read_to_string(&mut events)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(events)
+}
+
+fn matching_run_ids(events: &[RunnerEvent], plan_ids: &BTreeSet<String>) -> BTreeSet<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let RunnerEvent::RunStarted {
+                run_id,
+                plan_ids: event_plan_ids,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let event_plan_ids = event_plan_ids.iter().cloned().collect::<BTreeSet<_>>();
+            (event_plan_ids.len() == plan_ids.len()
+                && event_plan_ids
+                    .iter()
+                    .all(|plan_id| plan_ids.contains(plan_id)))
+            .then(|| run_id.clone())
+        })
+        .collect()
+}
+
+fn gate_kind_label(kind: GateCompletionKind) -> &'static str {
+    match kind {
+        GateCompletionKind::Gate => "gate",
+        GateCompletionKind::PlanVerify => "plan_verify",
+    }
+}
+
+fn gate_evidence_key(
+    plan_id: &str,
+    task_id: &str,
+    kind: &str,
+    rung: u32,
+    gate_name: &str,
+) -> (String, String, String, u32, String) {
+    (
+        plan_id.to_string(),
+        task_id.to_string(),
+        kind.to_string(),
+        rung,
+        gate_name.to_string(),
+    )
+}
+
+fn gate_evidence_label(
+    plan_id: &str,
+    task_id: &str,
+    kind: &str,
+    rung: u32,
+    gate_name: &str,
+) -> String {
+    format!("{plan_id}:{task_id}:{kind}:{rung}:{gate_name}")
+}
+
+fn gate_detail(
+    kind: &str,
+    attempt: u32,
+    rung: u32,
+    duration_ms: u64,
+    summary: Option<&str>,
+    error_digest: Option<&str>,
+    output: &str,
+) -> String {
+    let evidence = summary
+        .and_then(non_empty_string)
+        .or_else(|| error_digest.and_then(non_empty_string))
+        .or_else(|| first_non_empty_line(output))
+        .unwrap_or_else(|| "gate completed".to_string());
+    format!("{kind} attempt {attempt}, rung {rung}, {duration_ms}ms: {evidence}")
+}
+
+fn first_non_empty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
@@ -349,28 +698,34 @@ fn unique_suffix() -> String {
     format!("{}-{millis}", std::process::id())
 }
 
-fn render_plan_execution_summary(report: &crate::orchestrate::OrchestrationReport) -> String {
+fn render_plan_execution_summary(report: &crate::runner::RunReport, gate_count: usize) -> String {
     let mut lines = vec![format!(
-        "plan execution {}: {} agent calls, {} gate runs",
+        "plan execution {}: {}/{} tasks, {} failed, {} agent calls, ${:.2}, {}s, {} gate results",
         if report.all_succeeded() {
             "succeeded"
         } else {
             "failed"
         },
+        report.tasks_completed,
+        report.total_tasks,
+        report.tasks_failed,
         report.total_agent_calls,
-        report.total_gate_runs
+        report.total_cost_usd,
+        report.duration.as_secs(),
+        gate_count
     )];
     for plan in &report.plans {
         lines.push(format!(
-            "{}: {} ({} agent calls, {} gate results)",
+            "{}: {} ({}/{} tasks, {} failed)",
             plan.plan_id,
-            if plan.succeeded {
-                "succeeded"
+            if plan.completed {
+                "completed"
             } else {
-                "failed"
+                "incomplete"
             },
-            plan.agent_calls,
-            plan.gate_results.len()
+            plan.tasks_completed,
+            plan.tasks_total,
+            plan.tasks_failed
         ));
     }
     lines.join("\n")

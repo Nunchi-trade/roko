@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Body, Budget, Compose, Context, Decay, Engram, Verify, Kind, React, Provenance, Query, Result,
-    Score, Store, Verdict, loop_tick,
+    Body, Budget, Compose, Context, Decay, Engram, Kind, Provenance, Query, React, Result, Score,
+    Store, Verdict, Verify, loop_tick,
 };
 use roko_std::{FirstRouter, MemorySubstrate, NoOpPolicy};
 use std::sync::Arc;

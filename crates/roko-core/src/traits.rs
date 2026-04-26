@@ -7,11 +7,11 @@
 //!
 //! See [crate docs](crate) for the universal loop that composes them.
 
-use crate::{
-    Budget, ContentHash, Context, Datum, Engram, Outcome, PolicyOutputs, Pulse, Query,
-    Selection, TopicFilter, Verdict, error::Result,
-};
 use crate::score::Score as ScoreValue;
+use crate::{
+    Budget, ContentHash, Context, Datum, Engram, Outcome, PolicyOutputs, Pulse, Query, Selection,
+    TopicFilter, Verdict, error::Result,
+};
 use async_trait::async_trait;
 use roko_primitives::HdcVector;
 

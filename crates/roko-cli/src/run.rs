@@ -12,7 +12,7 @@ use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
-use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
+use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
@@ -25,8 +25,8 @@ use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Compose, Context, Engram, Verify, Kind, Provenance, StateHub,
-    Store, Verdict,
+    AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, StateHub, Store, Verdict,
+    Verify,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
@@ -71,8 +71,16 @@ impl RunReport {
 /// - Runs every gate in the config in declaration order; each gate sees the
 ///   same `GatePayload` pointing at `workdir`.
 /// - Records an Episode signal and persists everything.
+///
+/// If `external_hub` is provided, events are published to it (e.g. for HTTP
+/// observability via `roko run --serve`). Otherwise a local hub is created.
 #[allow(clippy::too_many_lines)]
-pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Result<RunReport> {
+pub async fn run_once(
+    workdir: &Path,
+    config: &Config,
+    prompt_text: &str,
+    external_hub: Option<&StateHub>,
+) -> Result<RunReport> {
     let substrate_dir = workdir.join(".roko");
     let substrate = FileSubstrate::open(substrate_dir)
         .await
@@ -80,9 +88,15 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
 
     let ctx = Context::now();
 
-    // Create a local StateHub for emitting DashboardEvents to the event log.
+    // Use the external StateHub if provided, otherwise create a local one.
     let events_path = workdir.join(".roko").join("events.jsonl");
-    let event_hub = StateHub::with_event_log(64, &events_path);
+    let local_hub;
+    let event_hub: &StateHub = if let Some(hub) = external_hub {
+        hub
+    } else {
+        local_hub = StateHub::with_event_log(64, &events_path);
+        &local_hub
+    };
 
     // Seed prompt sections: system role + user prompt + any injected files.
     let mut sections: Vec<Engram> = Vec::with_capacity(2 + config.prompt.files.len());
@@ -306,32 +320,90 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     })
 }
 
-fn build_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String {
+fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> String {
+    let role = &config.prompt.role;
     let workspace = "Single-shot execution through `roko run`.";
+    let context_window_tokens = config.prompt.token_budget.max(4_096);
     parse_agent_role(role).map_or_else(
         || {
-            build_role_system_prompt(
+            build_role_system_prompt_validated(
                 AgentRole::Implementer,
                 TaskContext::new(prompt_text)
                     .with_workspace(workspace)
-                    .with_domain_notes(format!("User-configured role text: {role}")),
+                    .with_domain_notes(format!(
+                        "User-configured role text: {role}\n\n{}",
+                        gate_policy_context(config)
+                    )),
                 tools_csv,
                 PromptBuildOptions {
                     extra_conventions: Some(format!(
-                        "Treat the configured role hint literally: {role}"
+                        "Treat the configured role hint literally: {role}\n\n{}",
+                        gate_policy_context(config)
                     )),
                     ..PromptBuildOptions::default()
                 },
+                context_window_tokens,
+                None,
             )
+            .unwrap_or_else(|_| fallback_system_prompt(role, prompt_text, tools_csv))
         },
         |agent_role| {
-            build_role_system_prompt(
+            build_role_system_prompt_validated(
                 agent_role,
-                TaskContext::new(prompt_text).with_workspace(workspace),
+                TaskContext::new(prompt_text)
+                    .with_workspace(workspace)
+                    .with_domain_notes(gate_policy_context(config)),
                 tools_csv,
-                PromptBuildOptions::default(),
+                PromptBuildOptions {
+                    extra_conventions: Some(gate_policy_context(config)),
+                    ..PromptBuildOptions::default()
+                },
+                context_window_tokens,
+                None,
             )
+            .unwrap_or_else(|_| fallback_system_prompt(role, prompt_text, tools_csv))
         },
+    )
+}
+
+fn gate_policy_context(config: &Config) -> String {
+    if config.gates.is_empty() {
+        return "Verification gates: none configured. Still perform the smallest relevant local check before finishing.".to_string();
+    }
+
+    let mut context =
+        String::from("Verification gates configured for this run. Optimize for passing them:");
+    for gate in &config.gates {
+        match gate {
+            GateConfig::Shell { program, args, .. } => {
+                context.push_str("\n- shell: `");
+                context.push_str(program);
+                for arg in args {
+                    context.push(' ');
+                    context.push_str(arg);
+                }
+                context.push('`');
+            }
+            GateConfig::Compile { build_system, .. } => {
+                context.push_str("\n- compile gate for build system: ");
+                context.push_str(build_system);
+            }
+            GateConfig::Clippy { build_system, .. } => {
+                context.push_str("\n- lint gate for build system: ");
+                context.push_str(build_system);
+            }
+            GateConfig::Test { build_system, .. } => {
+                context.push_str("\n- test gate for build system: ");
+                context.push_str(build_system);
+            }
+        }
+    }
+    context
+}
+
+fn fallback_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String {
+    format!(
+        "You are a {role} agent.\n\n## Current Task\n\n{prompt_text}\n\n## Tool Instructions\n\nAvailable tools: {tools_csv}\n\n## Project Conventions\n\nMake minimal, targeted changes and run relevant verification before finishing."
     )
 }
 
@@ -405,7 +477,7 @@ async fn dispatch_agent(
 
     if has_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
-        let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
+        let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let model = config
             .agent
             .model
@@ -442,7 +514,7 @@ async fn dispatch_agent(
     } else if config.agent.command == "claude" {
         // Claude CLI keeps its own prompt/tool/settings wiring internally.
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
-        let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, &tools_csv);
+        let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
         let optional_resume = optional_resume_session_id(config, resume_from_args);
         let model = config
@@ -602,7 +674,7 @@ async fn run_ollama_agentic_single(
     );
     let tool_loop = ToolLoop::new(translator, dispatcher, backend);
 
-    let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
+    let system_prompt = build_system_prompt(config, prompt_text, "");
     let external_actions = Arc::new(RwLock::new(Vec::new()));
     let tool_ctx =
         ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
@@ -756,7 +828,7 @@ async fn run_anthropic_api_tool_loop(
 
     let tool_loop = ToolLoop::new(translator, dispatcher, backend).with_on_turn(on_turn);
 
-    let system_prompt = build_system_prompt(&config.prompt.role, prompt_text, "");
+    let system_prompt = build_system_prompt(config, prompt_text, "");
     let external_actions = Arc::new(RwLock::new(Vec::new()));
     let tool_ctx =
         ToolContext::testing(workdir).with_external_actions(Arc::clone(&external_actions));
@@ -1345,6 +1417,32 @@ mod tests {
             ..r
         };
         assert!(!r.overall_success());
+    }
+
+    #[test]
+    fn run_system_prompt_contains_composed_layers_and_gates() {
+        let mut config = Config::default();
+        config.prompt.role = "implementer".into();
+        config.prompt.token_budget = 8_000;
+        config.gates = vec![GateConfig::Compile {
+            build_system: "cargo".into(),
+            timeout_ms: 60_000,
+        }];
+
+        let prompt = build_system_prompt(
+            &config,
+            "Implement bounded prompt assembly.",
+            "Read,Edit,Bash",
+        );
+
+        assert!(prompt.contains("## Project Conventions"));
+        assert!(prompt.contains("## Tool Instructions"));
+        assert!(prompt.contains("## Domain Context"));
+        assert!(prompt.contains("## Current Task"));
+        assert!(prompt.contains("Implement bounded prompt assembly."));
+        assert!(prompt.contains("Verification gates configured for this run"));
+        assert!(prompt.contains("compile gate for build system: cargo"));
+        assert!(prompt.contains("Read,Edit,Bash"));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+{
+  "role": "auto-fixer",
+  "invariants": [
+    { "MaxTokensPerTurn": 8000 },
+    "RequireGateBeforeCommit"
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 6 },
+    { "MaxConsecutiveFailures": 3 },
+    { "RequireToolBeforeEdit": "read_file" }
+  ],
+  "recovery": [
+    { "trigger": "contract_violation", "action": "Abort" }
+  ]
+}

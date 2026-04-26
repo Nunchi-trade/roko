@@ -24,7 +24,7 @@
 //! *independent* pipelines is a concern one level up.
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, TestCount, Verdict};
+use roko_core::{Context, Engram, TestCount, Verdict, Verify};
 use std::fmt;
 use std::time::Instant;
 
@@ -193,9 +193,15 @@ fn render_step_line(index: usize, inner: &Verdict) -> String {
 }
 
 impl roko_core::Cell for GatePipeline {
-    fn cell_id(&self) -> &str { "gate-pipeline" }
-    fn cell_name(&self) -> &str { "GatePipeline" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "gate-pipeline"
+    }
+    fn cell_name(&self) -> &str {
+        "GatePipeline"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]
@@ -635,7 +641,7 @@ fn build_aggregate_verdict(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Verify, Kind, TestCount, Verdict};
+    use roko_core::{Body, Context, Engram, Kind, TestCount, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

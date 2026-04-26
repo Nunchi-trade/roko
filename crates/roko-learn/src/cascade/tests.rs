@@ -12,15 +12,17 @@ use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
 use crate::routing_log::{RoutingDecisionMeta, RoutingLogger};
 use async_trait::async_trait;
 use chrono::Utc;
+use roko_agent::AgentResult;
 use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
 use roko_core::agent::AgentRole;
 use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{BehavioralState, Body, DaimonPolicy, Engram, Kind, OperatingFrequency, Temperament};
+use roko_core::{
+    BehavioralState, Body, DaimonPolicy, Engram, Kind, OperatingFrequency, Temperament,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tempfile::tempdir;
-use roko_agent::AgentResult;
 
 fn test_slugs() -> Vec<String> {
     vec![
@@ -347,8 +349,7 @@ fn low_affect_confidence_prefers_opus_over_sonnet() {
     let high_confidence = cascade.route(&ctx);
     // High confidence allows routing to cheaper models
     assert!(
-        ["claude-haiku-3-5", "claude-sonnet-4-5"]
-            .contains(&high_confidence.primary.slug.as_str()),
+        ["claude-haiku-3-5", "claude-sonnet-4-5"].contains(&high_confidence.primary.slug.as_str()),
         "high confidence should allow cheaper model, got: {}",
         high_confidence.primary.slug
     );
@@ -1329,8 +1330,7 @@ fn perplexity_observations_include_citations_latency_and_total_cost() {
 
 #[test]
 fn perplexity_observations_persist_across_save_and_load() {
-    let cascade =
-        CascadeRouter::new(vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()]);
+    let cascade = CascadeRouter::new(vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()]);
     let mut ctx = default_ctx();
     ctx.role = AgentRole::Researcher;
     ctx.task_category = TaskCategory::Research;
@@ -1424,8 +1424,7 @@ fn pareto_pruning_reduces_alpha_for_dominated_models() {
             < f64::EPSILON
     );
     assert!(
-        (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1)
-            .abs()
+        (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1).abs()
             < f64::EPSILON
     );
 }

@@ -3,29 +3,25 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
+use crate::projection_contract::{ProjectionQuery, RuntimeProjectionSet};
 use crate::state::AppState;
 
 use super::helpers::{
-    MAX_JSONL_RESULTS, extract_gate_duration_ms, extract_gate_name,
-    extract_gate_passed, extract_gate_rung, is_gate_result_kind, read_jsonl_entries,
+    MAX_JSONL_RESULTS, extract_gate_duration_ms, extract_gate_name, extract_gate_passed,
+    extract_gate_rung, is_gate_result_kind, read_jsonl_entries,
 };
 use super::metrics::ratio;
 
-/// `GET /api/gates/summary` — aggregate gate verdicts from `.roko/engrams.jsonl`.
+/// `GET /api/gates/summary` — aggregate gate verdicts from canonical projections.
 pub async fn gate_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("engrams.jsonl");
-    let entries = read_jsonl_entries(&path).await?;
-    let mut summary = summarize_gate_entries(&entries);
-    if let Some(obj) = summary.as_object_mut() {
-        obj.insert("rungs".to_string(), json!(summarize_gate_rungs(&entries)));
-    }
-    Ok(Json(summary))
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    Ok(Json(projections.gate_summary(&ProjectionQuery::default())))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -41,21 +37,13 @@ pub async fn gates_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GateHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("engrams.jsonl");
-    let entries = read_jsonl_entries(&path).await?;
-    let gate_filter = query.gate.as_deref();
-    let limit = query.limit.unwrap_or(100).min(MAX_JSONL_RESULTS);
-    let mut history = build_recent_gate_history(&entries, gate_filter);
-    let total = history.len();
-    history.truncate(limit);
-
-    Ok(Json(json!({
-        "source": path.display().to_string(),
-        "gate": gate_filter,
-        "limit": limit,
-        "total": total,
-        "history": history,
-    })))
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let query = ProjectionQuery {
+        gate: query.gate,
+        limit: query.limit.map(|limit| limit.min(MAX_JSONL_RESULTS)),
+        ..ProjectionQuery::default()
+    };
+    Ok(Json(projections.gate_history(&query)))
 }
 
 /// `GET /api/gates/:gate_name/history` — time series of pass/fail results for one gate.
@@ -63,53 +51,89 @@ pub async fn gate_history(
     State(state): State<Arc<AppState>>,
     Path(gate_name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let path = state.workdir.join(".roko").join("engrams.jsonl");
-    let entries = read_jsonl_entries(&path).await?;
-    let mut history: Vec<Value> = entries
-        .into_iter()
-        .filter(|entry| extract_gate_name(entry).as_deref() == Some(gate_name.as_str()))
-        .filter_map(|entry| {
-            let passed = extract_gate_passed(&entry)?;
-            Some(json!({
-                "signal_id": entry.get("id").cloned().unwrap_or(Value::Null),
-                "created_at_ms": entry.get("created_at_ms").cloned().unwrap_or(Value::Null),
-                "gate": gate_name,
-                "passed": passed,
-                "duration_ms": extract_gate_duration_ms(&entry).unwrap_or(0),
-                "plan_id": entry.pointer("/tags/plan_id").cloned().or_else(|| entry.pointer("/body/data/plan_id").cloned()).unwrap_or(Value::Null),
-                "task_id": entry.pointer("/tags/task_id").cloned().or_else(|| entry.pointer("/body/data/task_id").cloned()).unwrap_or(Value::Null),
-                "rung": entry.pointer("/tags/rung").cloned().or_else(|| entry.pointer("/body/data/rung").cloned()).unwrap_or(Value::Null),
-            }))
-        })
-        .collect();
-
-    if history.is_empty() {
+    let projections = RuntimeProjectionSet::load(&state).await?;
+    let query = ProjectionQuery {
+        gate: Some(gate_name.clone()),
+        limit: Some(MAX_JSONL_RESULTS),
+        ..ProjectionQuery::default()
+    };
+    let history = projections.gate_history(&query);
+    let total = history.get("total").and_then(Value::as_u64).unwrap_or(0);
+    if total == 0 {
         return Err(ApiError::not_found(format!("gate '{gate_name}' not found")));
     }
 
-    history.sort_by(|a, b| {
-        let a_ts = a
-            .get("created_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or(i64::MIN);
-        let b_ts = b
-            .get("created_at_ms")
-            .and_then(Value::as_i64)
-            .unwrap_or(i64::MIN);
-        a_ts.cmp(&b_ts).then_with(|| {
-            let a_id = a.get("signal_id").and_then(Value::as_str).unwrap_or("");
-            let b_id = b.get("signal_id").and_then(Value::as_str).unwrap_or("");
-            a_id.cmp(b_id)
-        })
-    });
-
-    Ok(Json(json!({
-        "gate": gate_name,
-        "history": history,
-    })))
+    Ok(Json(history))
 }
 
 // ── private helpers ──────────────────────────────────────────────────
+
+async fn read_gate_entries(state: &AppState) -> Result<Vec<Value>, ApiError> {
+    let mut entries =
+        read_jsonl_entries(&state.workdir.join(".roko").join("engrams.jsonl")).await?;
+    let runner_events =
+        read_jsonl_entries(&state.workdir.join(".roko").join("events.jsonl")).await?;
+    entries.extend(runner_events.iter().flat_map(runner_gate_entries));
+    Ok(entries)
+}
+
+fn gate_sources(state: &AppState) -> Vec<String> {
+    [".roko/engrams.jsonl", ".roko/events.jsonl"]
+        .into_iter()
+        .map(|path| state.workdir.join(path).display().to_string())
+        .collect()
+}
+
+fn runner_gate_entries(event: &Value) -> Vec<Value> {
+    if event.get("type").and_then(Value::as_str) != Some("gate.completed") {
+        return Vec::new();
+    }
+
+    let plan_id = event.get("plan_id").cloned().unwrap_or(Value::Null);
+    let task_id = event.get("task_id").cloned().unwrap_or(Value::Null);
+    let rung = event.get("rung").cloned().unwrap_or(Value::Null);
+    let duration_ms = event.get("duration_ms").cloned().unwrap_or(Value::Null);
+    let timestamp = event.get("timestamp").cloned().unwrap_or(Value::Null);
+
+    event
+        .get("verdicts")
+        .and_then(Value::as_array)
+        .map(|verdicts| {
+            verdicts
+                .iter()
+                .map(|verdict| {
+                    let gate = verdict.get("gate").cloned().unwrap_or(Value::Null);
+                    let passed = verdict.get("passed").cloned().unwrap_or(Value::Null);
+                    json!({
+                        "id": Value::Null,
+                        "created_at_ms": Value::Null,
+                        "timestamp": timestamp,
+                        "kind": "gate_verdict",
+                        "tags": {
+                            "gate": gate,
+                            "passed": passed.as_bool().map(|value| value.to_string()).unwrap_or_default(),
+                            "plan_id": plan_id,
+                            "task_id": task_id,
+                            "rung": rung,
+                            "duration_ms": duration_ms,
+                        },
+                        "body": {
+                            "data": {
+                                "gate": gate,
+                                "passed": passed,
+                                "plan_id": plan_id,
+                                "task_id": task_id,
+                                "rung": rung,
+                                "duration_ms": duration_ms,
+                                "summary": verdict.get("summary").cloned().unwrap_or(Value::Null),
+                            }
+                        }
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Default)]
 struct GateSummaryAcc {

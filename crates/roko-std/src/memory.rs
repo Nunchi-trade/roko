@@ -60,9 +60,15 @@ impl MemorySubstrate {
 }
 
 impl roko_core::Cell for MemorySubstrate {
-    fn cell_id(&self) -> &str { "memory-substrate" }
-    fn cell_name(&self) -> &str { "MemorySubstrate" }
-    fn protocols(&self) -> &[&str] { &["Store"] }
+    fn cell_id(&self) -> &str {
+        "memory-substrate"
+    }
+    fn cell_name(&self) -> &str {
+        "MemorySubstrate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Store"]
+    }
 }
 
 #[async_trait]

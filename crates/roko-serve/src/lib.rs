@@ -1132,7 +1132,10 @@ fn start_cold_archival_timer(state: Arc<AppState>) -> JoinHandle<()> {
                     debug!("cold archival tick: no engrams to archive");
                 }
                 Ok(n) => {
-                    info!("cold archival tick: archived {n} engram(s) to {}", roko_dir.join("cold").display());
+                    info!(
+                        "cold archival tick: archived {n} engram(s) to {}",
+                        roko_dir.join("cold").display()
+                    );
                 }
                 Err(err) => {
                     warn!(error = %err, "cold archival tick failed");

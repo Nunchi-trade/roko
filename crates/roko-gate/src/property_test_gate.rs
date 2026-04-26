@@ -17,7 +17,7 @@
 
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, TestCount, Verdict};
+use roko_core::{Context, Engram, TestCount, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -158,9 +158,15 @@ impl PropertyTestGate {
 }
 
 impl roko_core::Cell for PropertyTestGate {
-    fn cell_id(&self) -> &str { "property-test-gate" }
-    fn cell_name(&self) -> &str { "PropertyTestGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "property-test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "PropertyTestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

@@ -2045,7 +2045,11 @@ impl TuiState {
                     .or_default()
                     .push(TaskEntry {
                         id: task.task_id.clone(),
-                        name: if task.title.is_empty() { task.task_id.clone() } else { task.title.clone() },
+                        name: if task.title.is_empty() {
+                            task.task_id.clone()
+                        } else {
+                            task.title.clone()
+                        },
                         status,
                         agent_id: None,
                     });

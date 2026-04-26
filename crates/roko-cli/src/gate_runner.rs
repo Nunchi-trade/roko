@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use roko_core::{Context, Engram, Verify, TaskDomain, Verdict};
+use roko_core::{Context, Engram, TaskDomain, Verdict, Verify};
 use roko_gate::generated_test_gate::ArtifactStore as GeneratedArtifactStore;
 use roko_gate::rung_selector::Rung;
 use roko_gate::{AcceptanceDecision, AcceptanceOutcome, NoStubEvidence};
@@ -133,10 +133,7 @@ pub(crate) fn scan_no_stub_evidence(workdir: &Path, production_paths: &[String])
 }
 
 /// Format a human-readable summary of an acceptance decision that did not pass.
-pub(crate) fn format_acceptance_decision(
-    task_id: &str,
-    decision: &AcceptanceDecision,
-) -> String {
+pub(crate) fn format_acceptance_decision(task_id: &str, decision: &AcceptanceDecision) -> String {
     let mut out = format!(
         "task {task_id} acceptance outcome {:?} did not pass",
         decision.outcome

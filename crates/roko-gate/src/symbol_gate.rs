@@ -33,7 +33,7 @@
 //! ```
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -199,9 +199,15 @@ impl SymbolGate {
 }
 
 impl roko_core::Cell for SymbolGate {
-    fn cell_id(&self) -> &str { "symbol-gate" }
-    fn cell_name(&self) -> &str { "SymbolGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "symbol-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "SymbolGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

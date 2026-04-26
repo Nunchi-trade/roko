@@ -13,7 +13,7 @@ use crate::costs_db::CostTable;
 use crate::model_router::RoutingContext;
 
 use super::types::{
-    CascadeStage, CACHE_AFFINITY_BONUS, CONFIDENCE_TO_UCB_THRESHOLD, HYSTERESIS_THRESHOLD,
+    CACHE_AFFINITY_BONUS, CONFIDENCE_TO_UCB_THRESHOLD, CascadeStage, HYSTERESIS_THRESHOLD,
 };
 use crate::model_router::COLD_START_THRESHOLD;
 
@@ -364,10 +364,7 @@ pub(crate) fn thinking_filtered_candidates(
     }
 }
 
-pub(crate) fn pick_tier_extreme(
-    candidates: &[String],
-    prefer_strongest: bool,
-) -> Option<String> {
+pub(crate) fn pick_tier_extreme(candidates: &[String], prefer_strongest: bool) -> Option<String> {
     let mut iter = candidates.iter();
     let first = iter.next()?.clone();
     let mut best = first;

@@ -49,9 +49,7 @@ pub(crate) fn effective_context_window_tokens(config: &Config) -> usize {
 
 // ─── Task dispatch conventions ───────────────────────────────────────────
 
-pub(crate) fn task_dispatch_conventions(
-    task_def: Option<&task_parser::TaskDef>,
-) -> Option<String> {
+pub(crate) fn task_dispatch_conventions(task_def: Option<&task_parser::TaskDef>) -> Option<String> {
     let task_def = task_def?;
     let mut sections = Vec::new();
 
@@ -162,9 +160,7 @@ pub(crate) fn build_system_prompt_with_context_validated(
 
 // ─── Context layer builder ───────────────────────────────────────────────
 
-pub(crate) fn build_relevant_context_layer(
-    context_sections: &[PromptSection],
-) -> Option<String> {
+pub(crate) fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<String> {
     let non_empty_sections = context_sections
         .iter()
         .map(|section| section.content.trim())
@@ -587,15 +583,105 @@ pub(crate) fn load_prior_task_outputs(
 /// Extract meaningful keywords from a task description for code search.
 pub(crate) fn extract_task_keywords(description: &str) -> Vec<String> {
     static STOP_WORDS: &[&str] = &[
-        "the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "is", "are", "was",
-        "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "shall", "can", "need", "must", "it", "its", "this",
-        "that", "these", "those", "with", "from", "by", "as", "into", "not", "no", "if", "then",
-        "else", "when", "where", "which", "who", "what", "how", "all", "each", "every", "both",
-        "few", "more", "most", "other", "some", "such", "only", "own", "same", "so", "than",
-        "too", "very", "just", "but", "also", "about", "above", "after", "before", "between",
-        "through", "during", "up", "down", "out", "over", "under", "again", "further",
-        "implement", "add", "create", "make", "use", "update", "fix", "change", "ensure",
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "and",
+        "or",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "must",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "with",
+        "from",
+        "by",
+        "as",
+        "into",
+        "not",
+        "no",
+        "if",
+        "then",
+        "else",
+        "when",
+        "where",
+        "which",
+        "who",
+        "what",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "but",
+        "also",
+        "about",
+        "above",
+        "after",
+        "before",
+        "between",
+        "through",
+        "during",
+        "up",
+        "down",
+        "out",
+        "over",
+        "under",
+        "again",
+        "further",
+        "implement",
+        "add",
+        "create",
+        "make",
+        "use",
+        "update",
+        "fix",
+        "change",
+        "ensure",
     ];
 
     description

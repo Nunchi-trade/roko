@@ -33,7 +33,7 @@
 //! (vacuous-change detection).
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Verify, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -116,9 +116,15 @@ impl Default for DiffGate {
 }
 
 impl roko_core::Cell for DiffGate {
-    fn cell_id(&self) -> &str { "diff-gate" }
-    fn cell_name(&self) -> &str { "DiffGate" }
-    fn protocols(&self) -> &[&str] { &["Verify"] }
+    fn cell_id(&self) -> &str {
+        "diff-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "DiffGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
 }
 
 #[async_trait]

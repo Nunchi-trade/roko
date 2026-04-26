@@ -9,8 +9,8 @@ pub(super) mod metrics;
 
 use std::sync::Arc;
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 
 use crate::state::AppState;
 
@@ -42,6 +42,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/retention", get(health::retention_handler))
         .route("/parity", get(health::parity_handler))
         .route("/statehub/snapshot", get(health::statehub_snapshot))
+        .route("/statehub/events", get(health::statehub_events))
 }
 
 #[cfg(test)]
@@ -132,7 +133,9 @@ mod tests {
                 let Some(passed) = helpers::extract_gate_passed(entry) else {
                     continue;
                 };
-                let acc = by_gate.entry(gate_name).or_insert((0u64, 0u64, 0.0f64, None::<Value>));
+                let acc = by_gate
+                    .entry(gate_name)
+                    .or_insert((0u64, 0u64, 0.0f64, None::<Value>));
                 acc.0 += 1;
                 if passed {
                     acc.1 += 1;
@@ -143,17 +146,30 @@ mod tests {
 
             let summary: std::collections::BTreeMap<String, Value> = by_gate
                 .into_iter()
-                .filter_map(|(gate, (total_runs, passed_runs, total_duration_ms, last_run))| {
-                    let last_run = last_run?;
-                    let pass_rate = if total_runs == 0 { 0.0 } else { passed_runs as f64 / total_runs as f64 };
-                    let avg_duration_ms = if total_runs == 0 { 0.0 } else { total_duration_ms / total_runs as f64 };
-                    Some((gate, serde_json::json!({
-                        "total_runs": total_runs,
-                        "pass_rate": pass_rate,
-                        "avg_duration_ms": avg_duration_ms,
-                        "last_run": last_run,
-                    })))
-                })
+                .filter_map(
+                    |(gate, (total_runs, passed_runs, total_duration_ms, last_run))| {
+                        let last_run = last_run?;
+                        let pass_rate = if total_runs == 0 {
+                            0.0
+                        } else {
+                            passed_runs as f64 / total_runs as f64
+                        };
+                        let avg_duration_ms = if total_runs == 0 {
+                            0.0
+                        } else {
+                            total_duration_ms / total_runs as f64
+                        };
+                        Some((
+                            gate,
+                            serde_json::json!({
+                                "total_runs": total_runs,
+                                "pass_rate": pass_rate,
+                                "avg_duration_ms": avg_duration_ms,
+                                "last_run": last_run,
+                            }),
+                        ))
+                    },
+                )
                 .collect();
             serde_json::to_value(summary).unwrap_or_else(|_| serde_json::json!({}))
         };
@@ -282,7 +298,13 @@ mod tests {
             .await
             .expect("read body");
         let payload: Value = serde_json::from_slice(&body).expect("parse gate history response");
-        assert_eq!(payload["source"], signals.display().to_string());
+        assert!(
+            payload["sources"]
+                .as_array()
+                .expect("sources should be an array")
+                .iter()
+                .any(|source| source.as_str() == Some(signals.display().to_string().as_str()))
+        );
         assert_eq!(payload["total"], 3);
         assert_eq!(payload["limit"], 2);
         assert_eq!(
@@ -610,9 +632,12 @@ mod tests {
             .await
             .expect("write corrupt signals");
 
-        let err = episodes::signals(State(state), Query(episodes::SignalQuery { limit: Some(1) }))
-            .await
-            .expect_err("corrupt signals should fail");
+        let err = episodes::signals(
+            State(state),
+            Query(episodes::SignalQuery { limit: Some(1) }),
+        )
+        .await
+        .expect_err("corrupt signals should fail");
 
         assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }

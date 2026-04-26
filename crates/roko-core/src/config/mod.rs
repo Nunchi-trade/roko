@@ -35,15 +35,18 @@ pub use presets::Preset;
 pub use schema::{
     AgentBudget, AgentConfig, AgentDefinition, AgentMode, AgentRoleToggles, AgentThresholds,
     ApiKeyEntry, AttentionConfig, BudgetConfig, CURRENT_SCHEMA_VERSION, ChainConfig,
-    ConductorConfig, DataLlmConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig,
-    GeminiConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, LearningConfig, ModelProfile,
-    OneirographyConfig, PerplexityConfig, PipelineBandConfig, PipelineConfig,
-    PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig, ProviderRouting,
-    RewardWeights, RokoConfig, RoleOverride, RoutingAlgorithm, RoutingConfig, RoutingOverrides,
-    RoutingRewardWeightsConfig, SafetySetting, SchedulerConfig, SchedulerCronConfig, RelayConfig,
-    ServeAuthConfig, ServeConfig, ServeDeployConfig, ServeDeployWebhookConfig, ServerConfig,
+    CompileFailRepeatConfig, ConductorConfig, ContextWindowPressureConfig, CostOverrunConfig,
+    DataLlmConfig, DemurrageConfig, DeployConfig, EnergyConfig, GatesConfig, GeminiConfig,
+    GhostTurnConfig, GithubWebhookConfig, GoalsConfig, ImmuneConfig, IterationLoopConfig,
+    LearningConfig, ModelProfile, OneirographyConfig, PerplexityConfig, PipelineBandConfig,
+    PipelineConfig, PipelineReviewerMode, PrdConfig, ProjectConfig, ProviderConfig,
+    ProviderRouting, RelayConfig, ReviewLoopConfig, RewardWeights, RokoConfig, RoleOverride,
+    RoutingAlgorithm, RoutingConfig, RoutingOverrides, RoutingRewardWeightsConfig, SafetySetting,
+    SchedulerConfig, SchedulerCronConfig, ServeAuthConfig, ServeConfig, ServeDeployConfig,
+    ServeDeployWebhookConfig, ServerConfig, SpecDriftConfig, StuckPatternConfig,
     SubscriptionConfig, SubscriptionFilterConfig, SubscriptionTrigger, TemporalConfig,
-    ToolProfileConfig, ToolsConfig, TuiConfig, WatcherConfig, WatcherPathConfig, WebhooksConfig,
+    TestFailureBudgetConfig, TimeOverrunConfig, ToolProfileConfig, ToolsConfig, TuiConfig,
+    WatcherConfig, WatcherPathConfig, WatcherThresholds, WebhooksConfig,
 };
 
 /// Error returned when loading a `roko.toml` file from disk.

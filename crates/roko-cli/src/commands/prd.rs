@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     use roko_cli::agent_config::{command_from_config, load_gateway_env, model_from_config};
     use roko_cli::agent_exec::{AgentExecOpts, run_agent_capture_silent};
@@ -329,7 +328,6 @@ pub(crate) async fn cmd_prd(cli: &Cli, cmd: PrdCmd) -> Result<i32> {
     }
 }
 
-
 /// Find a PRD by slug in either published or drafts.
 pub(crate) fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
     if let Some(path) = roko_cli::workspace_paths::find_prd_path(workdir, slug) {
@@ -337,7 +335,6 @@ pub(crate) fn find_prd(workdir: &Path, slug: &str) -> Result<PathBuf> {
     }
     anyhow::bail!("PRD not found: {slug} (checked published/ and drafts/)");
 }
-
 
 /// Auto-detect the project domain from file patterns in the target directory.
 pub(crate) fn detect_project_domain(target: &Path) -> &'static str {
@@ -361,7 +358,6 @@ pub(crate) fn detect_project_domain(target: &Path) -> &'static str {
     }
 }
 
-
 /// Verify configuration hint based on domain profile.
 pub(crate) fn domain_gate_hint(domain: &str) -> &'static str {
     match domain {
@@ -374,4 +370,3 @@ pub(crate) fn domain_gate_hint(domain: &str) -> &'static str {
         _ => "compile, test, lint (configure in roko.toml)",
     }
 }
-

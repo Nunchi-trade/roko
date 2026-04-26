@@ -1,7 +1,7 @@
 //! `EpisodePolicy` — emits an Episode signal that ties a prompt, an agent
 //! output, and a set of gate verdicts together into one replayable record.
 
-use roko_core::{Body, Context, Decay, Engram, Kind, React, Provenance};
+use roko_core::{Body, Context, Decay, Engram, Kind, Provenance, React};
 
 /// A policy that wraps a full run (prompt → agent → gates) in one Episode signal.
 ///

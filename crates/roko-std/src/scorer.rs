@@ -12,8 +12,8 @@
 //! ]);
 //! ```
 
-use roko_core::{Context, Engram, Score};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Score};
 
 /// Sum several scorers element-wise (aggregates evidence).
 pub struct SumScorer {

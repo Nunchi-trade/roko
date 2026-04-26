@@ -194,10 +194,17 @@ fn matches_query(signal: &Engram, q: &Query, ctx: &Context) -> bool {
     true
 }
 
+#[allow(clippy::unnecessary_literal_bound)]
 impl roko_core::Cell for FileSubstrate {
-    fn cell_id(&self) -> &str { "file-substrate" }
-    fn cell_name(&self) -> &str { "FileSubstrate" }
-    fn protocols(&self) -> &[&str] { &["Store"] }
+    fn cell_id(&self) -> &str {
+        "file-substrate"
+    }
+    fn cell_name(&self) -> &str {
+        "FileSubstrate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Store"]
+    }
 }
 
 #[async_trait]

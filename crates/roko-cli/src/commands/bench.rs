@@ -3,7 +3,6 @@
 
 use crate::*;
 
-
 pub(crate) async fn cmd_bench(cli: &Cli, cmd: BenchCmd) -> Result<i32> {
     match cmd {
         BenchCmd::Swe {
@@ -48,4 +47,3 @@ pub(crate) async fn cmd_bench(cli: &Cli, cmd: BenchCmd) -> Result<i32> {
         }
     }
 }
-

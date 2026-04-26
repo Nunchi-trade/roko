@@ -44,31 +44,30 @@ pub use crate::cascade::types::{
 };
 
 use crate::cascade::helpers::{
-    apply_cache_affinity, behavioral_state_tier_shift, conductor_load_tier_shift,
-    context_overflow_fallback_for_model, cost_pressure_factor, default_latency_sla,
-    default_role_model_table, estimate_total_cost_usd, fallback_chain_for_model,
-    infer_shadow_routing_context, is_free_tier_gemini_model, low_confidence_tier_bonus,
-    model_tier_rank, pareto_adjusted_alpha, pareto_cost_proxy,
+    ProviderHealthSnapshotKey, ThinkingPreference, apply_cache_affinity,
+    behavioral_state_tier_shift, conductor_load_tier_shift, context_overflow_fallback_for_model,
+    cost_pressure_factor, default_latency_sla, default_role_model_table, estimate_total_cost_usd,
+    fallback_chain_for_model, infer_shadow_routing_context, is_free_tier_gemini_model,
+    low_confidence_tier_bonus, model_tier_rank, pareto_adjusted_alpha, pareto_cost_proxy,
     pareto_latency_proxy, parse_agent_role, pick_available_static_slug, pick_tier_extreme,
     routing_tier_bias_factor, select_with_hysteresis, shadow_quality_score, slug_to_tier,
     slugs_match, stage_for_observations, target_tier_rank, temperament_exploration_multiplier,
     temperament_tier_shift, thinking_filtered_candidates, thinking_preference,
-    ProviderHealthSnapshotKey, ThinkingPreference,
 };
 use crate::cascade::persistence::{
     CascadeSnapshot, PersistedModelStats, detect_version_changes, migrated_confidence_stats,
     remap_role_table_entry,
 };
 use crate::cascade::types::{
-    GeminiObservationTotals, ModelStats, ParetoFrontierState, PerplexityObservationTotals,
-    StageTracking, HIGH_CFACTOR_THRESHOLD, LOW_AFFECT_CONFIDENCE_THRESHOLD,
-    LOW_CFACTOR_THRESHOLD, OVERRIDE_LEARNING_RATE, PARETO_RECOMPUTE_INTERVAL,
+    GeminiObservationTotals, HIGH_CFACTOR_THRESHOLD, LOW_AFFECT_CONFIDENCE_THRESHOLD,
+    LOW_CFACTOR_THRESHOLD, ModelStats, OVERRIDE_LEARNING_RATE, PARETO_RECOMPUTE_INTERVAL,
+    ParetoFrontierState, PerplexityObservationTotals, StageTracking,
 };
 use crate::cfactor::{AgentDispatchBias, CFactor};
 use crate::latency::LatencyTracker;
 use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{
-    CandidateArmScore, LinUCBRouter, RoutingContext, compute_routing_reward_v2, CONTEXT_DIM,
+    CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext, compute_routing_reward_v2,
 };
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
@@ -97,9 +96,15 @@ pub struct CascadeRouter {
 }
 
 impl roko_core::Cell for CascadeRouter {
-    fn cell_id(&self) -> &str { "cascade-router" }
-    fn cell_name(&self) -> &str { "CascadeRouter" }
-    fn protocols(&self) -> &[&str] { &["Route"] }
+    fn cell_id(&self) -> &str {
+        "cascade-router"
+    }
+    fn cell_name(&self) -> &str {
+        "CascadeRouter"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Route"]
+    }
 }
 
 impl CascadeRouter {
@@ -908,7 +913,14 @@ impl CascadeRouter {
         };
         let raw_reward = if success { 1.0 } else { 0.0 };
         let dampened_reward = raw_reward * OVERRIDE_LEARNING_RATE;
-        self.observe_internal(&ctx.to_features(), model_idx, dampened_reward, success, None, None);
+        self.observe_internal(
+            &ctx.to_features(),
+            model_idx,
+            dampened_reward,
+            success,
+            None,
+            None,
+        );
         true
     }
 
@@ -1239,7 +1251,9 @@ impl CascadeRouter {
             }
         }
         explanation.candidates.sort_by(|a, b| {
-            b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug))
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.slug.cmp(&b.slug))
         });
         if let Some(new_top) = explanation.candidates.first() {
             if !slugs_match(&new_top.slug, &explanation.selected_slug) {
@@ -1541,7 +1555,11 @@ impl CascadeRouter {
             );
         }
 
-        let default_slug = self.model_slugs.first().cloned().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        let default_slug = self
+            .model_slugs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
         let slug = if ctx.task_category == TaskCategory::Research {
             self.model_slugs
                 .iter()

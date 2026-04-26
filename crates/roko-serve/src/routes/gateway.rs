@@ -838,9 +838,7 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
 
     // Derive routing context from runtime state where available.
     let active_agents = state.operations.read().await.len() as u32;
-    let has_prior_failure = hints
-        .has_prior_failure
-        .unwrap_or(iteration > 1);
+    let has_prior_failure = hints.has_prior_failure.unwrap_or(iteration > 1);
 
     let routing_ctx = RoutingContext {
         task_category,
@@ -1134,7 +1132,9 @@ mod tests {
             has_prior_failure: Some(true),
             ..Default::default()
         };
-        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
         assert!(derived, "explicit true should be respected");
 
         // When not set, iteration > 1 implies prior failure.
@@ -1143,7 +1143,9 @@ mod tests {
             has_prior_failure: None,
             ..Default::default()
         };
-        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
         assert!(derived, "iteration 3 implies prior failure");
 
         // Iteration 1 with no explicit flag = no prior failure.
@@ -1152,7 +1154,9 @@ mod tests {
             has_prior_failure: None,
             ..Default::default()
         };
-        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
         assert!(!derived, "iteration 1 means no prior failure");
     }
 
@@ -1176,7 +1180,10 @@ mod tests {
         );
 
         let ops_count = state.operations.read().await.len() as u32;
-        assert_eq!(ops_count, 1, "active_agents should reflect operations count");
+        assert_eq!(
+            ops_count, 1,
+            "active_agents should reflect operations count"
+        );
 
         // Clean up.
         state.operations.write().await.remove("test-op");

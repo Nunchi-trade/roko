@@ -10,6 +10,18 @@ use super::types::AgentEvent;
 /// Process a single agent event, updating state and publishing to TUI.
 pub fn handle_agent_event(event: &AgentEvent, state: &mut RunState, tui: &TuiBridge) {
     match event {
+        AgentEvent::Started {
+            agent_id: _,
+            provider,
+            model,
+            pid,
+        } => {
+            state.agent_active = true;
+            state.agent_model = model.clone();
+            state.agent_provider = provider.clone();
+            state.agent_pid = *pid;
+        }
+
         AgentEvent::SystemInit { session_id, model } => {
             state.agent_active = true;
             state.agent_model = model.clone();
@@ -60,6 +72,7 @@ pub fn handle_agent_event(event: &AgentEvent, state: &mut RunState, tui: &TuiBri
             is_error,
         } => {
             state.agent_active = false;
+            state.agent_turn_completed = true;
             if let Some(sid) = session_id {
                 state.session_id = Some(sid.clone());
             }
@@ -82,7 +95,9 @@ pub fn handle_agent_event(event: &AgentEvent, state: &mut RunState, tui: &TuiBri
         }
 
         AgentEvent::Error { message } => {
-            state.agent_output.push_str(&format!("\n[error: {message}]\n"));
+            state
+                .agent_output
+                .push_str(&format!("\n[error: {message}]\n"));
             tui.error(message);
         }
 

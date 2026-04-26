@@ -63,9 +63,9 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, Verify, Kind,
+    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Store,
-    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict,
+    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict, Verify,
     score_model_for_task,
 };
 use roko_core::{
@@ -83,9 +83,9 @@ use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     AcceptanceDecision, AcceptanceEvidence, AcceptanceOutcome, ArtifactStore as GateArtifactStore,
     ClippyGate, CompileGate, FailureClass, GateEvidence, GateFailureAction, GateRatchet,
-    ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict,
-    RecoveryEvidence, ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle,
-    ShellGate, StructuredOutputEvidence, TestGate, VerdictPublisher,
+    ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict, RecoveryEvidence,
+    ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle, ShellGate,
+    StructuredOutputEvidence, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
     classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
@@ -167,6 +167,12 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken as TokioCancellationToken;
 use tracing::{Instrument, info_span, instrument};
 
+use crate::agent_config::{
+    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
+};
+use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
+use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
+use crate::config::Config;
 use crate::dispatch_helpers::{
     TASK_FAILURE_OUTPUT_TAIL_LINES, apply_section_effectiveness_to_prompt_section,
     build_daimon_context_section, build_relevant_context_layer, build_system_prompt,
@@ -174,8 +180,17 @@ use crate::dispatch_helpers::{
     claude_tool_allowlist, claude_tool_allowlist_with, code_context_for_task,
     default_task_category, effective_context_window_tokens, extract_task_symbols,
     file_contains_public_api, load_prior_task_outputs, save_task_output, tail_output_lines,
-    task_def_to_dag_task, task_def_to_input, task_read_cli_args,
-    truncate_doc_snippet, truncate_output, with_task_failure_context,
+    task_def_to_dag_task, task_def_to_input, task_read_cli_args, truncate_doc_snippet,
+    truncate_output, with_task_failure_context,
+};
+use crate::heartbeat::{
+    HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
+    persist_heartbeat_snapshot,
+};
+use crate::knowledge_helpers::{
+    apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
+    build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
+    record_lifecycle_knowledge, render_neuro_chunk,
 };
 use crate::learning_helpers::{
     TurnLearningFeedback, apply_concluded_experiment_overrides, build_task_playbook,
@@ -183,21 +198,6 @@ use crate::learning_helpers::{
     load_efficiency_signals_sync, load_or_create_playbook_store, load_or_create_skill_library,
     load_recent_signals, playbook_query_context, publish_turn_learning_feedback,
     render_prior_experience, warn_if_distillation_disabled,
-};
-use crate::knowledge_helpers::{
-    apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
-    build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
-    record_lifecycle_knowledge, render_neuro_chunk,
-};
-use crate::agent_config::{
-    synthesize_claude_cli_config, synthesize_known_protocol_config, synthesize_subprocess_config,
-};
-use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
-use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
-use crate::config::Config;
-use crate::heartbeat::{
-    HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
-    persist_heartbeat_snapshot,
 };
 use crate::plan::plans_dir;
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
@@ -666,7 +666,6 @@ fn scrub_agent_result(result: &AgentResult, policy: &ScrubPolicy) -> AgentResult
     }
 }
 
-
 fn state_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("state")
 }
@@ -822,7 +821,6 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
         Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
     }
 }
-
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
     let path = workdir.join("roko.toml");
@@ -2082,7 +2080,6 @@ impl WatcherRunner {
     }
 }
 
-
 fn select_prompt_skills(
     skill_library: &SkillLibrary,
     task_def: Option<&crate::task_parser::TaskDef>,
@@ -2162,7 +2159,6 @@ fn learned_query_context(
     }
 }
 
-
 fn routing_budget_pressure(
     budget: &crate::config::BudgetConfig,
     plan_spent: f64,
@@ -2219,8 +2215,6 @@ fn cascade_routing_bias_from_conductor(
         reason: bias.reason.clone(),
     }
 }
-
-
 
 /// Enrich a task with search context from Perplexity Sonar before dispatch.
 ///
@@ -3820,8 +3814,7 @@ impl PlanRunner {
         } else {
             (
                 plans_dir.as_ref(),
-                discover_plans(plans_dir)
-                    .map_err(|e| anyhow!("plan discovery failed: {e}"))?,
+                discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?,
             )
         };
 
@@ -10414,9 +10407,11 @@ impl PlanRunner {
                     AgentRole::Implementer,
                     task_def.as_ref(),
                 );
-                self.learning
-                    .cascade_router()
-                    .record_override_outcome(&model, &ctx, result.success);
+                self.learning.cascade_router().record_override_outcome(
+                    &model,
+                    &ctx,
+                    result.success,
+                );
                 tracing::debug!(
                     plan_id = %plan_id,
                     task_id = %task_id,
@@ -15853,12 +15848,7 @@ impl PlanRunner {
         });
 
         // Publish agent output to the event bus so the TUI can display it.
-        let output_text = result
-            .output
-            .body
-            .as_text()
-            .unwrap_or_default()
-            .to_string();
+        let output_text = result.output.body.as_text().unwrap_or_default().to_string();
         if !output_text.is_empty() {
             self.emit_server_event(crate::serve::events::ServerEvent::AgentOutput {
                 agent_id: format!("{plan_id}:{task}"),
@@ -16573,7 +16563,11 @@ impl PlanRunner {
 
     /// Build gate steps for a non-code domain. Uses task verify steps, config
     /// domain_gates, or a pass-through ShellGate as fallback.
-    fn domain_gate_steps(&self, plan_id: &str, domain: &TaskDomain) -> Vec<(Rung, Box<dyn Verify>)> {
+    fn domain_gate_steps(
+        &self,
+        plan_id: &str,
+        domain: &TaskDomain,
+    ) -> Vec<(Rung, Box<dyn Verify>)> {
         let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
 
         // 1. Check for per-task verify steps.
@@ -17716,7 +17710,6 @@ impl PlanRunner {
     }
 }
 
-
 impl PlanRunner {
     fn build_context_assembler_sections(
         &self,
@@ -17812,10 +17805,6 @@ impl PlanRunner {
         (sections, knowledge_ids)
     }
 }
-
-
-
-
 
 fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     let mut changed: Vec<String> = status
@@ -18284,7 +18273,10 @@ fn execution_event_summary(
         } => (
             "gate_result".to_string(),
             task_id.clone(),
-            format!("Verify {gate}: {}", if *passed { "passed" } else { "failed" }),
+            format!(
+                "Verify {gate}: {}",
+                if *passed { "passed" } else { "failed" }
+            ),
         ),
         _ => ("execution".to_string(), String::new(), String::new()),
     }
@@ -18417,8 +18409,6 @@ fn detect_cost_anomaly_override(
     }
 }
 
-
-
 fn prompt_section_meta_from_sections(
     sections: &[Engram],
     prompt: &Engram,
@@ -18450,7 +18440,6 @@ fn prompt_section_meta_from_sections(
         })
         .collect()
 }
-
 
 impl PlanRunner {
     // ── MultiAgentPool accessors (AGT-07) ────────────────────────────
@@ -18744,7 +18733,6 @@ impl PlanRunner {
         )
     }
 }
-
 
 /// Summary of how tightly a review output stays anchored to the task spec.
 #[derive(Debug, Clone, PartialEq)]

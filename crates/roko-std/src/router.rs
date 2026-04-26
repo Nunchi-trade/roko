@@ -4,8 +4,8 @@
 //! Thompson sampling) live in `roko-learn`.
 
 use parking_lot::Mutex;
-use roko_core::{Context, Engram, Outcome, Route, Selection};
 use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Outcome, Route, Selection};
 use std::sync::Arc;
 
 /// Picks the first candidate (deterministic, no-state).
