@@ -120,7 +120,8 @@ fn render_markdown_transcript(
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     // Header
-    md.push_str(&format!("# {symbols::START} roko run · `{run_id}`\n\n"));
+    let start = symbols::START;
+    md.push_str(&format!("# {start} roko run · `{run_id}`\n\n"));
     md.push_str(&format!(
         "**agent** {agent} · **role** {role} · **{now}**\n\n"
     ));
