@@ -219,15 +219,13 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             let cascade_router = std::sync::Arc::new(
                 roko_learn::cascade_router::CascadeRouter::load_or_new(&router_path, model_slugs),
             );
-            let extension_chain = std::sync::Arc::new(
-                tokio::sync::Mutex::new(roko_core::extension::ExtensionChain::new()),
-            );
-            let connector_registry = std::sync::Arc::new(
-                std::sync::Mutex::new(roko_core::ConnectorRegistry::new()),
-            );
-            let feed_registry = std::sync::Arc::new(
-                std::sync::Mutex::new(roko_core::FeedRegistry::new()),
-            );
+            let extension_chain = std::sync::Arc::new(tokio::sync::Mutex::new(
+                roko_core::extension::ExtensionChain::new(),
+            ));
+            let connector_registry =
+                std::sync::Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
+            let feed_registry =
+                std::sync::Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));
             let bandit_policy = std::sync::Arc::new(std::sync::Mutex::new(
                 roko_learn::contextual_bandit::ContextualBanditPolicy::new({
                     let mut cfg = roko_learn::contextual_bandit::BanditPolicyConfig::default();
@@ -235,6 +233,46 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                     cfg
                 }),
             ));
+
+            // ── Wire dispatch / feedback / projection facades ──────────────
+            //
+            // The new module families are activated alongside the legacy
+            // emit paths: every runner event also lands on the projection
+            // broadcast and (when applicable) on the feedback fan-out.
+            // Sinks write into `.roko/`, mirroring what the legacy helper
+            // path does so resume / dashboard data stays consistent.
+            let run_uuid = uuid::Uuid::new_v4().to_string();
+            let projection = std::sync::Arc::new(roko_cli::runner::projection::Projection::new(
+                run_uuid.clone(),
+            ));
+            let episodes_path = wd.join(".roko").join("episodes.jsonl");
+            let knowledge_path = wd.join(".roko").join("learn").join("knowledge_candidates.jsonl");
+            let conductor_path = wd.join(".roko").join("conductor").join("observations.jsonl");
+            let dream_path = wd.join(".roko").join("learn").join("dream_triggers.jsonl");
+            // Best-effort directory creation — the sinks' own
+            // `create_dir_all` will retry on first append.
+            let _ = std::fs::create_dir_all(wd.join(".roko").join("learn"));
+            let _ = std::fs::create_dir_all(wd.join(".roko").join("conductor"));
+            let feedback_facade = std::sync::Arc::new(
+                roko_cli::runtime_feedback::FeedbackFacade::new()
+                    .with_sink(std::sync::Arc::new(
+                        roko_cli::runtime_feedback::EpisodeSink::at(&episodes_path),
+                    ))
+                    .with_sink(std::sync::Arc::new(
+                        roko_cli::runtime_feedback::RoutingObservationSink::new(
+                            cascade_router.clone(),
+                        ),
+                    ))
+                    .with_sink(std::sync::Arc::new(
+                        roko_cli::runtime_feedback::KnowledgeIngestionSink::at(&knowledge_path),
+                    ))
+                    .with_sink(std::sync::Arc::new(
+                        roko_cli::runtime_feedback::ConductorObservationSink::at(&conductor_path),
+                    ))
+                    .with_sink(std::sync::Arc::new(
+                        roko_cli::runtime_feedback::DreamTriggerSink::at(&dream_path),
+                    )),
+            );
 
             let run_config = roko_cli::runner::RunConfig {
                 workdir: wd.clone(),
@@ -267,6 +305,8 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 connector_registry: Some(connector_registry),
                 feed_registry: Some(feed_registry),
                 bandit_policy: Some(bandit_policy),
+                feedback_facade: Some(feedback_facade),
+                projection: Some(projection),
             };
 
             // Optionally spawn the approval TUI.

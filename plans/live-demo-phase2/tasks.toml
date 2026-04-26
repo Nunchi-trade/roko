@@ -1,0 +1,53 @@
+[meta]
+plan = "live-demo-phase2"
+total = 2
+done = 0
+status = "ready"
+max_parallel = 1
+skip_enrichment = true
+
+[[task]]
+id = "T1-add-farewell"
+title = "Add farewell helper function to roko-std greeting module"
+status = "ready"
+tier = "mechanical"
+prompt = """Add a public helper function `format_farewell(name: &str) -> String` to the existing file
+`crates/roko-std/src/greeting.rs` that returns `format!("Goodbye, {name}! See you next time.")`.
+
+Keep the change minimal — just add the one function below the existing `format_greeting` function.
+Do NOT modify any other files."""
+role = "implementer"
+files = ["crates/roko-std/src/greeting.rs"]
+depends_on = []
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-std"
+
+[[task]]
+id = "T2-add-farewell-test"
+title = "Add unit test for farewell helper function in roko-std greeting"
+status = "ready"
+tier = "mechanical"
+prompt = """Add a unit test for the `format_farewell` function in `crates/roko-std/src/greeting.rs`.
+
+Add this test to the existing `#[cfg(test)] mod tests` block:
+```rust
+#[test]
+fn test_format_farewell() {
+    assert_eq!(format_farewell("World"), "Goodbye, World! See you next time.");
+}
+```
+
+Do NOT modify any other files. Keep the change minimal."""
+role = "implementer"
+files = ["crates/roko-std/src/greeting.rs"]
+depends_on = ["T1-add-farewell"]
+
+[[task.verify]]
+phase = "compile"
+command = "cargo check -p roko-std"
+
+[[task.verify]]
+phase = "test"
+command = "cargo test -p roko-std -- greeting"

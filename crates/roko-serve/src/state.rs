@@ -417,6 +417,9 @@ pub struct AppState {
     pub gateway_model_counters: RwLock<HashMap<String, Arc<GatewayModelCounters>>>,
     /// Per-batch progress counters keyed by batch id.
     pub batch_progress: RwLock<HashMap<String, Arc<BatchProgress>>>,
+
+    /// PTY-backed terminal sessions for the web UI.
+    pub terminal_sessions: crate::terminal::SessionManager,
 }
 
 impl AppState {
@@ -445,8 +448,9 @@ impl AppState {
         strategy_space: StrategySpaceDefinition,
     ) -> Self {
         let layout = RokoLayout::for_project(&workdir);
-        let signal_root = layout.root().to_path_buf();
-        let affect_path = affect_state_path(layout.root());
+        let layout_root = layout.root().to_path_buf();
+        let signal_root = layout_root.clone();
+        let affect_path = affect_state_path(&layout_root);
         let cancel = CancelToken::new();
         let supervisor = Arc::new(ProcessSupervisor::new(cancel.child()));
         let subscriptions = SubscriptionRegistry::load_from_project(&workdir, &roko_config);
@@ -458,7 +462,7 @@ impl AppState {
 
         // Create StateHub with on-disk event log so all published events
         // persist to `.roko/events.jsonl` for replay by standalone consumers.
-        let event_log_path = layout.root().join("events.jsonl");
+        let event_log_path = layout_root.join("events.jsonl");
         let state_hub = roko_core::SharedStateHub::new(roko_core::StateHub::with_event_log(
             1024,
             &event_log_path,
@@ -508,6 +512,7 @@ impl AppState {
             cascade_router: RwLock::new(None),
             gateway_model_counters: RwLock::new(HashMap::new()),
             batch_progress: RwLock::new(HashMap::new()),
+            terminal_sessions: crate::terminal::SessionManager::new(layout_root),
         }
     }
 

@@ -331,7 +331,7 @@ impl ClaudeCliAgent {
         if let Some(tools) = &self.allowed_tools
             && !tools.is_empty()
         {
-            cmd.arg("--allowedTools").arg(tools);
+            cmd.arg("--tools").arg(tools);
         }
         if let Some(mcp_config) = self.discovered_mcp_config() {
             cmd.arg("--mcp-config").arg(mcp_config);
@@ -353,6 +353,8 @@ impl ClaudeCliAgent {
         }
         cmd.env("CARGO_INCREMENTAL", "0");
         cmd.env("CARGO_BUILD_JOBS", "2");
+        // Prevent "nested session" detection when spawning from within Claude Code.
+        cmd.env_remove("CLAUDECODE");
         cmd
     }
 
