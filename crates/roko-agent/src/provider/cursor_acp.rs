@@ -196,6 +196,8 @@ mod tests {
             command: None,
             args: None,
             timeout_ms: Some(1_500),
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
             extra_headers: None,
             max_concurrent: None,
         };

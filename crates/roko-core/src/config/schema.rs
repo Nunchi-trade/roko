@@ -381,6 +381,8 @@ impl RokoConfig {
                 command: Some(claude_command),
                 args: self.agent.args.clone(),
                 timeout_ms: self.agent.timeout_ms,
+                ttft_timeout_ms: None,
+                connect_timeout_ms: None,
                 extra_headers: None,
                 max_concurrent: None,
             },
@@ -398,6 +400,8 @@ impl RokoConfig {
                     command: None,
                     args: None,
                     timeout_ms: self.agent.timeout_ms,
+                    ttft_timeout_ms: None,
+                    connect_timeout_ms: None,
                     extra_headers: None,
                     max_concurrent: None,
                 },
@@ -723,9 +727,18 @@ pub struct ProviderConfig {
     /// Arguments passed to the CLI command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-    /// Request timeout in milliseconds.
+    /// Hard per-request timeout in milliseconds (default 120 000 ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Time-to-first-token timeout in milliseconds (default 15 000 ms).
+    ///
+    /// If the provider has not emitted a single token within this window,
+    /// the request is aborted and a fallback may be tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_timeout_ms: Option<u64>,
+    /// TCP connection timeout in milliseconds (default 5 000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<u64>,
     /// Extra headers to inject on outbound requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_headers: Option<HashMap<String, String>>,
@@ -2205,6 +2218,8 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
             extra_headers: None,
             max_concurrent: None,
         };
@@ -2226,6 +2241,8 @@ max_concurrent = 4
             command: None,
             args: None,
             timeout_ms: None,
+            ttft_timeout_ms: None,
+            connect_timeout_ms: None,
             extra_headers: None,
             max_concurrent: None,
         };
