@@ -6,16 +6,16 @@
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
+**Prerequisites**: [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `refactoring-prd/09-innovations.md` §XIX.D, `bardo-backup/tmp/agent-chain/04-hdc.md`, `bardo-backup/prd/shared/hdc-vsa.md`
 
 ---
 
 ## Abstract
 
-The HDC (Hyperdimensional Computing) on-chain precompile is the core technical innovation of the Korai chain. It provides native EVM support for 10,240-bit Binary Spatter Code (BSC) vectors — the same encoding used by `roko-primitives` for local knowledge representation. This means an Engram's HDC fingerprint can be computed locally by an agent, posted to the Korai chain, and queried by any other agent using the same mathematical operations, with no encoding translation.
+The HDC (Hyperdimensional Computing) on-chain precompile is the core technical innovation of the Nunchi chain. It provides native EVM support for 10,240-bit Binary Spatter Code (BSC) vectors — the same encoding used by `roko-primitives` for local knowledge representation. This means an Engram's HDC fingerprint can be computed locally by an agent, posted to the Nunchi chain, and queried by any other agent using the same mathematical operations, with no encoding translation.
 
-The precompile achieves approximately 400 gas for a top-K=20 similarity search against the on-chain knowledge index. This is orders of magnitude cheaper than implementing the same operations in Solidity (which would cost millions of gas for the bitwise operations on 1,280-byte vectors). The precompile is a **custom Korai feature** — it does not exist on Ethereum mainnet or any standard EVM chain. Development and testing use mirage-rs, which emulates the precompile's behavior in-process.
+The precompile achieves approximately 400 gas for a top-K=20 similarity search against the on-chain knowledge index. This is orders of magnitude cheaper than implementing the same operations in Solidity (which would cost millions of gas for the bitwise operations on 1,280-byte vectors). The precompile is a **custom Nunchi feature** — it does not exist on Ethereum mainnet or any standard EVM chain. Development and testing use mirage-rs, which emulates the precompile's behavior in-process.
 
 This document specifies the HDC vector format, the precompile interface, the three-tier search architecture, gas metering, and the relationship between local and on-chain HDC operations.
 
@@ -52,14 +52,14 @@ The dimensionality is chosen for a balance of precision and efficiency:
 
 The recommended threshold for cross-domain knowledge resonance detection is **0.526**, which guarantees < 1% overall false positive rate even when scanning 100K stored vectors.
 
-- **Storage**: 1,280 bytes per vector. 100K entries = ~128 MB of vector data. Manageable for on-chain storage at Korai's scale.
+- **Storage**: 1,280 bytes per vector. 100K entries = ~128 MB of vector data. Manageable for on-chain storage at Nunchi's scale.
 - **SIMD acceleration**: 10,240 bits = 160 × 64-bit words. Hamming distance computation via POPCNT instruction: ~160 × 1 cycle = ~160 cycles on modern CPUs. This is the basis for the ~400 gas estimate.
 
 ---
 
 ## Precompile Interface
 
-The HDC precompile is deployed at a reserved Korai address (0xA01). It exposes four operations:
+The HDC precompile is deployed at a reserved Nunchi address (0xA01). It exposes four operations:
 
 ### 1. `hdc_similarity(a: bytes1280, b: bytes1280) -> uint256`
 
@@ -150,9 +150,9 @@ The critical property: **a vector encoded locally by `roko-primitives` produces 
 1. Agent observes pattern during task execution
 2. Agent's NeuroStore distills pattern into knowledge entry (Insight)
 3. roko-primitives encodes the Insight as a 10,240-bit HDC vector
-4. Agent posts the vector + metadata to Korai via korai_submitKnowledge
+4. Agent posts the vector + metadata to Nunchi via nunchi_submitKnowledge
 5. On-chain HDC index stores the vector
-6. Other agents query via korai_queryKnowledge → hdc_topk precompile
+6. Other agents query via nunchi_queryKnowledge → hdc_topk precompile
 7. Matching entries returned with similarity scores
 8. Querying agent imports the knowledge into its local NeuroStore
 ```
@@ -177,7 +177,7 @@ For comparison, a SHA-256 hash costs 60 gas on Ethereum. The HDC precompile oper
 
 ### Feasibility Concern
 
-The HDC precompile is a **custom Korai feature**. It does not exist on mainnet Ethereum or any standard EVM. The gas estimates above are theoretical — they need benchmarking on the actual Korai validator implementation. Specific concerns:
+The HDC precompile is a **custom Nunchi feature**. It does not exist on mainnet Ethereum or any standard EVM. The gas estimates above are theoretical — they need benchmarking on the actual Nunchi validator implementation. Specific concerns:
 
 1. **Index size**: As the knowledge base grows to 1M+ entries, the three-tier search architecture must maintain sub-millisecond latency. The Bloom filter and approximate tier are designed for this, but need empirical validation.
 2. **State bloat**: Each 10,240-bit vector occupies 1,280 bytes of state. 100K entries = ~128 MB. 1M entries = ~1.28 GB. Pruning strategies (demurrage-based expiration of unconfirmed entries) are necessary.
@@ -251,7 +251,7 @@ At larger scales, the three-tier architecture bounds cost growth:
 
 ### Stylus Implementation Path
 
-For Korai deployed as an Arbitrum Orbit L3, HDC operations can be implemented as **Stylus contracts** rather than native precompiles. Stylus compiles Rust to WASM and runs alongside the EVM with shared state and ABI-compatible cross-calls.
+For Nunchi deployed as an Arbitrum Orbit L3, HDC operations can be implemented as **Stylus contracts** rather than native precompiles. Stylus compiles Rust to WASM and runs alongside the EVM with shared state and ABI-compatible cross-calls.
 
 ```rust
 // Stylus HDC contract — Rust compiled to WASM
@@ -420,14 +420,14 @@ pub struct OptimisticHdcResult {
     pub index_root: [u8; 32],
     /// Claimed top-K results: (vector_id, similarity_score)
     pub results: Vec<(u256, u64)>,
-    /// Submitter's passport ID
+    /// Submitter's agent ID
     pub submitter: u256,
     /// Bond posted by submitter (slashed if fraud proven)
     pub bond: U256,
     /// Block number when result was submitted
     pub submitted_at: u64,
     /// Challenge window duration in blocks
-    pub challenge_window: u64,  // default: 100 blocks (~40s on Korai)
+    pub challenge_window: u64,  // default: 100 blocks (~40s on Nunchi)
 }
 
 /// Fraud proof: challenger demonstrates a result entry is incorrect
@@ -475,7 +475,7 @@ pub struct TeeAttestation {
 
 **Performance**: TEE enclaves execute at native CPU speed — a top-K search over 100K vectors completes in ~16ms (same as the precompile estimate). The attestation proves the computation ran correctly on unmodified code.
 
-**Trust model**: Requires trusting Intel/AMD silicon and their attestation PKI. Not trustless like ZK, but dramatically faster and cheaper. Suitable for Korai's T2 FABRIC aggregation tier (see [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md)).
+**Trust model**: Requires trusting Intel/AMD silicon and their attestation PKI. Not trustless like ZK, but dramatically faster and cheaper. Suitable for Nunchi's aggregation tier.
 
 ### Approach Comparison
 
@@ -550,7 +550,7 @@ The recommended threshold for cross-domain resonance is 0.526 (see False Positiv
 - `mirage-rs/src/chain/hnsw.rs`: HNSW approximate nearest neighbor index for development
 
 **Not yet built (Tier 6, deferred):**
-- Native EVM precompile implementation for Korai validators
+- Native EVM precompile implementation for Nunchi validators
 - On-chain HDC index state management
 - Bloom filter tier for pre-screening
 - Approximate tier (1,024-bit downprojection)
@@ -562,6 +562,6 @@ The recommended threshold for cross-domain resonance is 0.526 (see False Positiv
 ## Cross-References
 
 - See [00-vision-and-framing.md](./00-vision-and-framing.md) for the three-level knowledge architecture
-- See [02-korai-token-economics.md](./02-korai-token-economics.md) for knowledge posting/query fees
+- See [02-nunchi-token-economics.md](./02-nunchi-token-economics.md) for knowledge posting/query fees
 - See topic [06-neuro](../06-neuro/INDEX.md) for the HDC encoding shared between local and on-chain
 - See topic [00-architecture](../00-architecture/INDEX.md) for BSC vector format in Engrams

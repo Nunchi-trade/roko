@@ -1,6 +1,6 @@
-# Korai Chain Specification
+# Nunchi Chain Specification
 
-> A dedicated EVM chain for agent knowledge coordination: 400ms block time, agents as first-class citizens, HDC native precompile.
+> A dedicated EVM chain with simplex consensus for agent knowledge coordination: 50ms block time, agents as first-class citizens, ERC-8004 native identity, HDC native precompile.
 
 
 > **Implementation**: Built
@@ -13,39 +13,39 @@
 
 ## Abstract
 
-Korai is a custom EVM chain purpose-built for agent coordination. Unlike general-purpose L1/L2 chains, Korai treats agents as first-class citizens with dedicated identity registries, reputation systems, and economic mechanisms designed for autonomous non-human actors. The chain features a native HDC (Hyperdimensional Computing) precompile that enables 10,240-bit vector similarity search at approximately 400 gas — making collective knowledge queries economically viable as on-chain operations.
+Nunchi is a custom EVM chain with simplex consensus, purpose-built for agent coordination. Unlike general-purpose L1/L2 chains, Nunchi treats agents as first-class citizens with native ERC-8004 identity, reputation systems, and economic mechanisms designed for autonomous non-human actors. The chain features a native HDC (Hyperdimensional Computing) precompile that enables 10,240-bit vector similarity search at approximately 400 gas — making collective knowledge queries economically viable as on-chain operations.
 
-Korai exists because existing EVM chains lack three critical capabilities: (1) native HDC vector operations at acceptable gas costs, (2) agent-specific identity standards (ERC-8004 Korai Passport), and (3) economic mechanisms (demurrage tokens, quality-weighted knowledge markets) designed for machine participants rather than human traders. The chain's 400ms block time enables sub-second coordination cycles that match the Gamma frequency (~5-15s) of the universal cognitive loop.
+Nunchi exists because existing EVM chains lack three critical capabilities: (1) native HDC vector operations at acceptable gas costs, (2) native ERC-8004 identity implemented to its full spec, and (3) economic mechanisms (demurrage tokens, quality-weighted knowledge markets) designed for machine participants rather than human traders. The chain's 50ms block time enables sub-second coordination cycles that match the Gamma frequency (~5-15s) of the universal cognitive loop.
 
-This document specifies the Korai mainnet architecture, block structure, state model, and RPC methods. The Daeji testnet mirrors this specification with a separate token (DAEJI) for development and testing.
+This document specifies the Nunchi mainnet architecture, block structure, state model, and RPC methods. The Nunchi Testnet testnet mirrors this specification with a separate token (NUNCHI_TEST) for development and testing.
 
 ---
 
 ## Chain Parameters
 
-| Parameter | Korai Mainnet | Daeji Testnet |
+| Parameter | Nunchi Mainnet | Nunchi Testnet Testnet |
 |---|---|---|
-| **Chain name** | Korai | Daeji |
-| **Token** | KORAI | DAEJI |
-| **Block time** | 400ms target | 400ms target |
-| **Consensus** | Validator set (details TBD — Tier 6 design) | Single sequencer (development mode) |
-| **EVM version** | Shanghai + Korai extensions | Shanghai + Korai extensions |
+| **Chain name** | Nunchi | Nunchi Testnet |
+| **Token** | NUNCHI | NUNCHI_TEST |
+| **Block time** | 50ms target | 50ms target |
+| **Consensus** | Simplex consensus | Simplex consensus (single sequencer for dev) |
+| **EVM version** | Shanghai + Nunchi extensions | Shanghai + Nunchi extensions |
 | **Native precompiles** | HDC similarity search (0xA01), Agent Registry (0xA02) | Same |
 | **Block gas limit** | TBD (capacity planning needed at 10K+ agents) | 30M (Ethereum default) |
 | **Chain ID** | TBD (to be registered) | TBD (testnet chain ID) |
 
 ### Block Structure
 
-Korai blocks follow the standard Ethereum block structure with extensions for agent coordination. Each block header includes the standard fields (number, hash, parent hash, timestamp, state root, receipts root, logs bloom) plus Korai-specific metadata.
+Nunchi blocks follow the standard Ethereum block structure with extensions for agent coordination. Each block header includes the standard fields (number, hash, parent hash, timestamp, state root, receipts root, logs bloom) plus Nunchi-specific metadata.
 
-The Daeji chain specification describes a more advanced 5-phase block structure (Oracle → Accrual → Liquidation → Trading → Settlement), inspired by SpecPool-EVM architecture with Kauri consensus. This represents the full production design; initial deployment uses a simpler sequential block model.
+The Nunchi Testnet chain specification describes a more advanced 5-phase block structure (Oracle → Accrual → Liquidation → Trading → Settlement), inspired by SpecPool-EVM architecture with Kauri consensus. This represents the full production design; initial deployment uses a simpler sequential block model.
 
 ### State Model
 
-The Korai state model extends the standard EVM account model with agent-specific state:
+The Nunchi state model extends the standard EVM account model with agent-specific state:
 
 1. **Standard EVM accounts** — EOAs and contracts, identical to Ethereum
-2. **Agent Passport state** — ERC-721 soulbound NFTs storing agent identity, capabilities, reputation, and stake (see [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md))
+2. **Agent identity state** — Native ERC-8004 identity storing agent capabilities, reputation, and stake (see [06-erc-8004-registries.md](./06-erc-8004-registries.md))
 3. **Knowledge entries** — HDC-encoded Engram summaries stored in the HDC index contract, queryable via the native precompile
 4. **Pheromone state** — Typed coordination signals with decay counters, decremented each block
 5. **Job market state** — Active BountySpecs, escrowed funds, job lifecycle states
@@ -55,27 +55,27 @@ The Korai state model extends the standard EVM account model with agent-specific
 
 ## RPC Methods
 
-Korai extends the standard Ethereum JSON-RPC with custom methods for agent coordination. Standard methods (`eth_blockNumber`, `eth_getBlockByHash`, `eth_call`, `eth_sendRawTransaction`, etc.) work identically to Ethereum.
+Nunchi extends the standard Ethereum JSON-RPC with custom methods for agent coordination. Standard methods (`eth_blockNumber`, `eth_getBlockByHash`, `eth_call`, `eth_sendRawTransaction`, etc.) work identically to Ethereum.
 
 ### Custom RPC Methods
 
 | Method | Parameters | Returns | Description |
 |---|---|---|---|
-| `korai_registerPassport` | `(AgentPassport)` | `(passportId: uint256)` | Register a new agent on-chain. Mints a soulbound ERC-721 Korai Passport. |
-| `korai_getPassport` | `(passportId: uint256)` | `(AgentPassport)` | Retrieve an agent's full passport including capabilities, reputation, tier, and stake. |
-| `korai_queryAgentsByCapability` | `(capabilityBitmask: u64)` | `(Vec<passportId>)` | Find all agents with matching capabilities. |
-| `korai_getReputation` | `(passportId: uint256, domain: string)` | `(ReputationScore)` | Retrieve per-domain reputation for an agent. |
-| `korai_submitKnowledge` | `(KnowledgeEntry)` | `(entryHash: bytes32)` | Post an HDC-encoded knowledge entry to the chain. |
-| `korai_queryKnowledge` | `(queryVector: bytes, topK: u32)` | `(Vec<KnowledgeResult>)` | HDC similarity search via the native precompile. |
-| `korai_postJob` | `(BountySpec)` | `(jobId: uint256)` | Post a job to the Spore market with escrowed budget. |
-| `korai_getJobStatus` | `(jobId: uint256)` | `(JobStatus)` | Query the lifecycle state of a job. |
-| `korai_submitBid` | `(SparrowBid)` | `(bidId: uint256)` | Submit a bid on an open job. |
-| `korai_agentHeartbeat` | `(passportId: uint256, status: bytes)` | `()` | Publish agent liveness heartbeat. |
-| `korai_getIsfrRate` | `(marketId: string)` | `(IsfrAggregate)` | Query the latest ISFR collective rate for a market. |
+| `nunchi_registerAgent` | `(AgentIdentity)` | `(agentId: uint256)` | Register a new agent on-chain via native ERC-8004. |
+| `nunchi_getAgent` | `(agentId: uint256)` | `(AgentIdentity)` | Retrieve an agent's full identity including capabilities, reputation, tier, and stake. |
+| `nunchi_queryAgentsByCapability` | `(capabilityBitmask: u64)` | `(Vec<agentId>)` | Find all agents with matching capabilities. |
+| `nunchi_getReputation` | `(agentId: uint256, domain: string)` | `(ReputationScore)` | Retrieve per-domain reputation for an agent. |
+| `nunchi_submitKnowledge` | `(KnowledgeEntry)` | `(entryHash: bytes32)` | Post an HDC-encoded knowledge entry to the chain. |
+| `nunchi_queryKnowledge` | `(queryVector: bytes, topK: u32)` | `(Vec<KnowledgeResult>)` | HDC similarity search via the native precompile. |
+| `nunchi_postJob` | `(BountySpec)` | `(jobId: uint256)` | Post a job to the ERC-8183 market with escrowed budget. |
+| `nunchi_getJobStatus` | `(jobId: uint256)` | `(JobStatus)` | Query the lifecycle state of a job. |
+| `nunchi_submitBid` | `(SparrowBid)` | `(bidId: uint256)` | Submit a bid on an open job. |
+| `nunchi_agentHeartbeat` | `(agentId: uint256, status: bytes)` | `()` | Publish agent liveness heartbeat. |
+| `nunchi_getIsfrRate` | `(marketId: string)` | `(IsfrAggregate)` | Query the latest ISFR collective rate for a market. |
 
 ### mirage-rs RPC Compatibility
 
-During development, mirage-rs implements all custom `korai_*` methods as local in-process operations. The existing `mirage_*` namespace methods continue to work for EVM-level operations (snapshots, time manipulation, account impersonation). When transitioning to the real Korai chain, agents switch their RPC endpoint — no code changes are needed because the API surface is identical.
+During development, mirage-rs implements all custom `nunchi_*` methods as local in-process operations. The existing `mirage_*` namespace methods continue to work for EVM-level operations (snapshots, time manipulation, account impersonation). When transitioning to the real Nunchi chain, agents switch their RPC endpoint — no code changes are needed because the API surface is identical.
 
 ---
 
@@ -84,7 +84,7 @@ During development, mirage-rs implements all custom `korai_*` methods as local i
 The chain intelligence architecture describes how agents perceive on-chain activity. Originally specified across five crates in the legacy architecture (now renamed: witness, triage, protocol-state, chain-scope, stream-api), this pipeline maps to the Roko Synapse Architecture as follows:
 
 ```
-[Korai Node / mirage-rs]
+[Nunchi Node / mirage-rs]
     | WS subscription (newHeads, logs)
     v
 [ChainWitness] — Substrate.query() equivalent for on-chain data
@@ -118,7 +118,7 @@ select! {
 }
 ```
 
-This eliminates latency on fast chains (Korai at 400ms blocks would batch 2-3 blocks per 5s Gamma tick otherwise). The Gamma oscillator remains as a heartbeat health check but does not gate chain perception.
+This eliminates latency on fast chains (Nunchi at 50ms blocks would batch 2-3 blocks per 5s Gamma tick otherwise). The Gamma oscillator remains as a heartbeat health check but does not gate chain perception.
 
 ---
 
@@ -138,7 +138,7 @@ Memory overhead per chain instance: MIDAS-R ~128KB, DDSketch ~2KB, Count-Min Ske
 
 ### Preferred Deployment: Arbitrum Orbit L3
 
-Rather than running as a sovereign L1, Korai's preferred deployment model is as an **Arbitrum Orbit L3 chain** settling to Arbitrum One (L2), which itself settles to Ethereum L1. This provides three layers of security inheritance:
+Rather than running as a sovereign L1, Nunchi's preferred deployment model is as an **Arbitrum Orbit L3 chain** settling to Arbitrum One (L2), which itself settles to Ethereum L1. This provides three layers of security inheritance:
 
 ```
 ┌─────────────────────────┐
@@ -148,24 +148,24 @@ Rather than running as a sovereign L1, Korai's preferred deployment model is as 
 │     Arbitrum One (L2)    │  Security: Nitro fraud proofs + BoLD
 │     (DA + Settlement)    │  Finality: 7 days (optimistic), minutes (ZK)
 ├─────────────────────────┤
-│     Korai Chain (L3)     │  Custom: HDC precompile, agent registries
-│     (Execution)          │  Block time: 400ms, KORAI gas token
+│     Nunchi Chain (L3)     │  Custom: HDC precompile, agent registries
+│     (Execution)          │  Block time: 50ms, NUNCHI gas token
 └─────────────────────────┘
 ```
 
-#### Orbit Configuration for Korai
+#### Orbit Configuration for Nunchi
 
 ```rust
-/// Orbit chain configuration for Korai
-pub struct KoraiOrbitConfig {
+/// Orbit chain configuration for Nunchi
+pub struct NunchiOrbitConfig {
     /// Chain name
-    pub chain_name: String,  // "Korai"
+    pub chain_name: String,  // "Nunchi"
 
-    /// Gas token: KORAI (not ETH)
-    pub gas_token: Address,  // KORAI ERC-20 address on parent chain
+    /// Gas token: NUNCHI (not ETH)
+    pub gas_token: Address,  // NUNCHI ERC-20 address on parent chain
 
     /// Block time target
-    pub block_time_ms: u64,  // 400
+    pub block_time_ms: u64,  // 50
 
     /// Data availability mode
     pub da_mode: DaMode,  // AnyTrust for lower cost, Rollup for max security
@@ -213,32 +213,32 @@ pub enum SequencerMode {
 | **Custom precompiles** | Via Stylus (Rust → WASM) | Requires op-geth fork |
 | **DA flexibility** | Rollup, AnyTrust, Celestia | Rollup, Celestia, EigenDA |
 
-The decisive factor is **Stylus**: Korai's HDC precompile requires high-performance bitwise operations that are 10-100x cheaper in WASM than in EVM bytecode. Stylus provides this natively on Orbit chains. The OP Stack would require forking op-geth to add custom precompiles — a higher maintenance burden.
+The decisive factor is **Stylus**: Nunchi's HDC precompile requires high-performance bitwise operations that are 10-100x cheaper in WASM than in EVM bytecode. Stylus provides this natively on Orbit chains. The OP Stack would require forking op-geth to add custom precompiles — a higher maintenance burden.
 
 ### Consensus Evolution Roadmap
 
-Korai's consensus evolves through three phases:
+Nunchi's consensus evolves through three phases:
 
 **Phase 1 — Centralized Sequencer (Launch)**:
-A single Korai-operated sequencer produces blocks. This is the standard model for new Orbit chains and all major L2s at launch. The sequencer cannot steal funds (fraud proofs protect users) but can censor transactions and extract MEV.
+A single Nunchi-operated sequencer produces blocks. This is the standard model for new Orbit chains and all major L2s at launch. The sequencer cannot steal funds (fraud proofs protect users) but can censor transactions and extract MEV.
 
 **Phase 2 — Shared Sequencer (12-18 months post-launch)**:
 Integrate with a shared sequencing layer (Espresso Sequencer or Astria). Shared sequencing provides:
-- Cross-chain atomic inclusion (agents on Korai and Base can have transactions included atomically)
+- Cross-chain atomic inclusion (agents on Nunchi and Base can have transactions included atomically)
 - Censorship resistance (no single party controls ordering)
-- MEV redistribution (MEV extracted from Korai flows back to validators/stakers)
+- MEV redistribution (MEV extracted from Nunchi flows back to validators/stakers)
 
 **Phase 3 — Decentralized Sequencer Set (24+ months)**:
-Korai-specific validator set using CometBFT-style consensus adapted for the Orbit framework. Validators are high-tier Korai Passport holders (Protocol and Sovereign) who stake KORAI as collateral. This provides full decentralization while maintaining 400ms block times.
+Nunchi-specific validator set using CometBFT-style consensus adapted for the Orbit framework. Validators are high-tier ERC-8004 identity holders (Protocol and Sovereign) who stake NUNCHI as collateral. This provides full decentralization while maintaining 50ms block times.
 
 ### EigenLayer AVS Integration
 
-Korai can optionally leverage EigenLayer's Actively Validated Services (AVS) framework for specific validation tasks that benefit from Ethereum's restaked security:
+Nunchi can optionally leverage EigenLayer's Actively Validated Services (AVS) framework for specific validation tasks that benefit from Ethereum's restaked security:
 
 ```rust
-/// EigenLayer AVS configuration for Korai validation tasks
-pub struct KoraiAvsConfig {
-    /// AVS tasks that Korai delegates to EigenLayer operators
+/// EigenLayer AVS configuration for Nunchi validation tasks
+pub struct NunchiAvsConfig {
+    /// AVS tasks that Nunchi delegates to EigenLayer operators
     pub tasks: Vec<AvsTask>,
 
     /// Minimum restaked ETH required per operator
@@ -271,11 +271,11 @@ pub enum AvsTask {
 }
 ```
 
-EigenLayer AVS is particularly relevant for Korai because it allows Korai to borrow Ethereum's >$7B restaked security for critical validation tasks without requiring Korai-native staking to reach the same security level. As of April 2025, EigenLayer supports 39 live AVSs and has rebranded AVS from "Actively Validated Services" to "Autonomous Verifiable Services" — explicitly embracing agentic systems.
+EigenLayer AVS is particularly relevant for Nunchi because it allows Nunchi to borrow Ethereum's >$7B restaked security for critical validation tasks without requiring Nunchi-native staking to reach the same security level. As of April 2025, EigenLayer supports 39 live AVSs and has rebranded AVS from "Actively Validated Services" to "Autonomous Verifiable Services" — explicitly embracing agentic systems.
 
 ### Alternative: Cosmos SDK Appchain with IBC
 
-If the Korai community decides that full sovereignty (own validator set, own consensus, no L1 dependency) outweighs Ethereum security inheritance, a Cosmos SDK appchain is the secondary option:
+If the Nunchi community decides that full sovereignty (own validator set, own consensus, no L1 dependency) outweighs Ethereum security inheritance, a Cosmos SDK appchain is the secondary option:
 
 **Advantages over Orbit**:
 - Full sovereignty: no dependency on Arbitrum or Ethereum
@@ -294,7 +294,7 @@ If the Korai community decides that full sovereignty (own validator set, own con
 /// Would be implemented as a native Cosmos SDK keeper
 pub struct HdcModuleConfig {
     /// Module name in the Cosmos SDK app
-    pub module_name: String,  // "korai_hdc"
+    pub module_name: String,  // "nunchi_hdc"
 
     /// Maximum vectors in on-chain index
     pub max_index_size: u64,  // 1_000_000
@@ -304,7 +304,7 @@ pub struct HdcModuleConfig {
 }
 ```
 
-The Orbit L3 approach is preferred for Korai's initial deployment due to Ethereum security inheritance and Stylus support. The Cosmos path remains viable for a future where agent coordination spans beyond the EVM ecosystem.
+The Orbit L3 approach is preferred for Nunchi's initial deployment due to Ethereum security inheritance and Stylus support. The Cosmos path remains viable for a future where agent coordination spans beyond the EVM ecosystem.
 
 ---
 
@@ -321,7 +321,7 @@ The Orbit L3 approach is preferred for Korai's initial deployment due to Ethereu
 | DDSketch distributions | ~50 KB | ~50 KB | ~50 KB |
 | **Total per chain** | **~3-9 MB/day** | **~20-62 MB** | **~90-270 MB** |
 
-Assumptions: ~100 protocols, ~1,000 watched addresses, ~7,500 blocks/day at Korai's 400ms block time, ~10% filter hit rate. If storage cap is reached, triage retention halves automatically.
+Assumptions: ~100 protocols, ~1,000 watched addresses, ~1,728,000 blocks/day at Nunchi's 50ms block time, ~10% filter hit rate. If storage cap is reached, triage retention halves automatically.
 
 ---
 
@@ -372,12 +372,12 @@ The Binary Fuse filter works across all chains because it operates on u64 hashes
 - `mirage-rs` with fork state, JSON-RPC, chain extensions, scenario engine (141 tests)
 
 **Not yet built (Tier 6, deferred):**
-- Korai genesis configuration
-- Daeji testnet deployment
+- Nunchi genesis configuration
+- Nunchi Testnet testnet deployment
 - HDC precompile implementation
-- Custom `korai_*` RPC methods on real chain (mirage-rs stubs exist)
+- Custom `nunchi_*` RPC methods on real chain (mirage-rs stubs exist)
 - Chain intelligence pipeline (ChainWitness, triage, protocol state, chain scope)
-- 5-phase block structure from Daeji specification
+- 5-phase block structure from Nunchi Testnet specification
 
 ---
 

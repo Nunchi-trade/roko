@@ -6,7 +6,7 @@
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
+**Prerequisites**: [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md)
 **Key sources**: `roko/crates/roko-chain/src/client.rs`, `roko/crates/roko-chain/src/wallet.rs`, `roko/crates/roko-chain/src/types.rs`
 
 ---
@@ -89,7 +89,7 @@ pub trait ChainWallet: Send + Sync {
     /// The wallet's address.
     fn address(&self) -> Address;
 
-    /// Current balance in native token (ETH, KORAI, etc.).
+    /// Current balance in native token (ETH, NUNCHI, etc.).
     async fn balance(&self) -> ChainResult<U256>;
 
     /// Current nonce.
@@ -139,7 +139,7 @@ pub struct ERC4337Wallet {
 }
 ```
 
-The `LocalKeyWallet` is used with mirage-rs during development. It stores the private key in memory — never suitable for production. The `ERC4337Wallet` uses account abstraction, where the "wallet" is a smart contract that the agent controls via session keys. Session keys can have limited permissions (e.g., "can only interact with these 5 contracts, spending at most 100 KORAI per day").
+The `LocalKeyWallet` is used with mirage-rs during development. It stores the private key in memory — never suitable for production. The `ERC4337Wallet` uses account abstraction, where the "wallet" is a smart contract that the agent controls via session keys. Session keys can have limited permissions (e.g., "can only interact with these 5 contracts, spending at most 100 NUNCHI per day").
 
 ---
 

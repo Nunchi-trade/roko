@@ -17,7 +17,7 @@ Sparrow is the dispatch protocol that handles fast-path job assignments when ful
 
 The core insight: instead of probing all N eligible agents to find the least loaded (which costs O(N) communication), probe just 2 random agents and pick the less loaded one. This exponentially reduces maximum load from O(log N / log log N) to O(log log N). The improvement comes from breaking the symmetry that causes random assignment to cluster — even minimal information (comparing two instead of one) is enough to avoid the worst-case pileups.
 
-Sparrow is used exclusively for the `RandomVRF` hiring model. Auction-based hiring uses the Spore marketplace directly. Direct hire bypasses both protocols.
+Sparrow is used exclusively for the `RandomVRF` hiring model. Auction-based hiring uses the ERC-8183 job market directly. Direct hire bypasses both protocols.
 
 ---
 
@@ -48,7 +48,7 @@ The power of two choices reduces this to O(log log N). For 1,000 agents, the mos
        assign to agent_a
    else:
        assign to agent_b
-   (ties broken by lower passport_id for determinism)
+   (ties broken by lower agent_id for determinism)
 
 5. Record assignment on-chain:
    - Job → assigned agent
@@ -68,7 +68,7 @@ pub struct VrfSelection {
     /// Proof that the VRF output was correctly computed.
     pub vrf_proof: [u8; 64],
 
-    /// The two selected agent passport IDs.
+    /// The two selected agent IDs.
     pub selected_agents: [u256; 2],
 
     /// The input to the VRF: hash of (job_id, block_hash, eligible_set_hash).
@@ -100,7 +100,7 @@ pub struct AgentLoad {
 }
 ```
 
-Load factors are self-reported via heartbeat messages on the `korai/heartbeat/v1` gossip topic. An agent could lie about its load to attract more jobs (claiming to be idle when busy) or avoid jobs (claiming to be busy when idle). The peer scoring system (see [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md)) penalizes agents whose self-reported load is inconsistent with their actual job completion patterns.
+Load factors are self-reported via heartbeat messages on the EventBus. An agent could lie about its load to attract more jobs (claiming to be idle when busy) or avoid jobs (claiming to be busy when idle). The peer scoring system (see [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md)) penalizes agents whose self-reported load is inconsistent with their actual job completion patterns.
 
 ---
 
@@ -158,14 +158,14 @@ The escalation path ensures jobs are not lost. If the network is at capacity, th
 **Scaffold:**
 - Power-of-two-choices algorithm well-understood (published implementations exist)
 - VRF primitives available in Rust (`vrf` crate)
-- Load reporting via heartbeat gossip topic defined
+- Load reporting via heartbeat EventBus defined
 
 **Not yet built (Tier 6):**
 - Sparrow dispatch implementation (§C8)
 - VRF-based agent selection (§C9)
 - Load probing protocol (§C10)
 - Fallback escalation to Spore auction (§C11)
-- Integration with gossip heartbeat for load reporting (§C12)
+- Integration with EventBus heartbeat for load reporting (§C12)
 
 ---
 
@@ -174,7 +174,6 @@ The escalation path ensures jobs are not lost. If the network is at capacity, th
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the full marketplace protocol that Sparrow complements
 - See [12-three-hiring-models.md](./12-three-hiring-models.md) for how RandomVRF relates to the other hiring models
 - See [09-peer-scoring-3-layer.md](./09-peer-scoring-3-layer.md) for how self-reported load consistency affects peer scores
-- See [08-eight-gossip-topics.md](./08-eight-gossip-topics.md) for the heartbeat topic carrying load metrics
 
 ## Academic Foundations
 

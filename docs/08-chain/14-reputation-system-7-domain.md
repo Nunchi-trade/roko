@@ -1,19 +1,19 @@
 # Reputation System: 7-Domain EMA Framework
 
-> Per-domain reputation with EMA smoothing, adaptive alpha, 30-day half-life decay, 4 discipline states (good standing → probation → suspension → banned), 7 base domains, and configurable slash rates by violation type. Reputation is the primary trust signal in the Korai marketplace.
+> Per-domain reputation with EMA smoothing, adaptive alpha, 30-day half-life decay, 4 discipline states (good standing → probation → suspension → banned), 7 base domains, and configurable slash rates by violation type. Reputation is the primary trust signal in the Nunchi marketplace.
 
 
 > **Implementation**: Deferred
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [06-erc-8004-registries.md](./06-erc-8004-registries.md), [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)
+**Prerequisites**: [06-erc-8004-registries.md](./06-erc-8004-registries.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §K, `refactoring-prd/04-knowledge-and-mesh.md`
 
 ---
 
 ## Abstract
 
-The Korai reputation system tracks agent performance across 7 base domains using Exponential Moving Average (EMA) smoothed scores. Each domain has an independent reputation score in the range [0.0, 1.0], a job count, and a last-update timestamp. Reputation serves as the primary trust signal in the marketplace: it determines auction competitiveness (see [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md)), tier progression eligibility (see [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)), and knowledge entry credibility.
+The Nunchi reputation system tracks agent performance across 7 base domains using Exponential Moving Average (EMA) smoothed scores. Each domain has an independent reputation score in the range [0.0, 1.0], a job count, and a last-update timestamp. Reputation serves as the primary trust signal in the marketplace: it determines auction competitiveness (see [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md)), tier progression eligibility (see [06-erc-8004-registries.md](./06-erc-8004-registries.md)), and knowledge entry credibility.
 
 The system is designed to be responsive but not volatile. A single bad job does not destroy an established reputation. A sustained pattern of poor performance does. The EMA smoothing, adaptive alpha, and 30-day decay half-life work together to achieve this balance.
 
@@ -33,7 +33,7 @@ The system is designed to be responsive but not volatile. A single bad job does 
 
 Agents can have reputation in any number of domains. A cross-domain agent might have reputation in `coding`, `chain`, and `security` simultaneously. Each domain score is independent — poor performance in `coding` does not affect `chain` reputation.
 
-Additional domains can be registered through governance. The 7 base domains cover the initial Korai use cases; new domains (medical, legal, scientific, etc.) can be added as the ecosystem grows.
+Additional domains can be registered through governance. The 7 base domains cover the initial Nunchi use cases; new domains (medical, legal, scientific, etc.) can be added as the ecosystem grows.
 
 ---
 
@@ -158,7 +158,7 @@ When a violation is detected, the agent's stake in the relevant domain is slashe
 
 ### Slash Distribution
 
-Slashed KORAI is distributed:
+Slashed NUNCHI is distributed:
 
 - 50% to the protocol treasury (funds development and governance)
 - 30% to the reporter (incentivizes detection of violations)
@@ -235,17 +235,17 @@ The network health metric connects to the C-Factor (collective intelligence fact
 
 ## Reputation Gaming Resistance
 
-The reputation system is a high-value target for manipulation. This section catalogs known attack vectors and the defenses built into the Korai design.
+The reputation system is a high-value target for manipulation. This section catalogs known attack vectors and the defenses built into the Nunchi design.
 
 ### Attack 1: Whitewashing (New Identity After Bad Reputation)
 
-**Attack**: Agent accumulates bad reputation, then creates a new passport to start fresh at the neutral 0.5 score.
+**Attack**: Agent accumulates bad reputation, then creates a new identity to start fresh at the neutral 0.5 score.
 
 **Defenses**:
-1. **Staking requirement**: New passports require KORAI stake. Whitewashing costs 5,000+ KORAI per new Worker identity.
+1. **Staking requirement**: New identities require NUNCHI stake. Whitewashing costs 5,000+ NUNCHI per new Worker identity.
 2. **Cold start penalty**: New agents start at 0.5 (neutral), not 1.0. They cannot access high-value jobs until they build a track record (10+ jobs, reputation > 0.5).
-3. **Soulbound passport**: Cannot transfer reputation from a good identity to a new one — the old identity's reputation dies with it.
-4. **IP colocation penalty**: Protocol-level peer scoring detects multiple passports from the same IP/subnet. Creating sybil identities to whitewash triggers IP colocation penalties on ALL identities.
+3. **Non-transferable identity**: Cannot transfer reputation from a good identity to a new one — the old identity's reputation dies with it.
+4. **IP colocation penalty**: Protocol-level peer scoring detects multiple identities from the same IP/subnet. Creating sybil identities to whitewash triggers IP colocation penalties on ALL identities.
 
 ### Attack 2: Collusion Rings (Mutual Positive Feedback)
 
@@ -276,7 +276,7 @@ pub struct CollusionConfig {
     pub clique_internal_ratio: f64,  // default: 0.8 (80% of jobs are internal)
 
     /// Time window for detection (blocks)
-    pub detection_window_blocks: u64,  // default: 216_000 (~24 hours at 400ms)
+    pub detection_window_blocks: u64,  // default: 1_728_000 (~24 hours at 50ms)
 }
 
 impl CollusionDetector {
@@ -334,7 +334,7 @@ fn estimate_difficulty(job: &SporeJobPosting) -> f64 {
 **Attack**: An attacker builds reputation by doing legitimate work, then leverages that reputation to validate malicious knowledge entries or fraudulent clearing certificates.
 
 **Defenses**:
-The Korai reputation system incorporates principles from the **EigenTrust** algorithm (Kamvar et al., 2003), which computes global trust values by iterating trust through a network of transitive recommendations:
+The Nunchi reputation system incorporates principles from the **EigenTrust** algorithm (Kamvar et al., 2003), which computes global trust values by iterating trust through a network of transitive recommendations:
 
 ```
 t_i = Σ_j (c_ij × t_j)
@@ -345,7 +345,7 @@ where:
   t_j = global trust of agent j
 ```
 
-Korai adapts EigenTrust in two ways:
+Nunchi adapts EigenTrust in two ways:
 1. **Domain-scoped transitive trust**: Trust does not transfer across domains. High trust in `coding` does not imply trust in `security`.
 2. **Recency-weighted trust**: Recent interactions carry more weight than historical ones (EMA smoothing achieves this).
 
@@ -414,13 +414,13 @@ Suspension recovery is more demanding — it requires:
 For systemic failures (e.g., a model provider outage affecting hundreds of agents simultaneously), governance can issue a **reputation amnesty** that:
 - Reverses specific slashing events across affected agents
 - Restores discipline states to their pre-event levels
-- Does NOT restore lost KORAI (stake slashing is permanent; the amnesty affects reputation scores only)
+- Does NOT restore lost NUNCHI (stake slashing is permanent; the amnesty affects reputation scores only)
 
 ```rust
 pub struct ReputationAmnesty {
     /// Governance proposal ID that authorized this amnesty
     pub proposal_id: [u8; 32],
-    /// Affected agents (passport IDs)
+    /// Affected agents (ERC-8004 agent IDs)
     pub affected_agents: Vec<u256>,
     /// Block range of the systemic event
     pub event_start_block: u64,
@@ -435,11 +435,11 @@ pub struct ReputationAmnesty {
 
 ### Academic Foundations (Reputation Extensions)
 
-- Kamvar, S.D., Schlosser, M.T., and Garcia-Molina, H. (2003). "The EigenTrust Algorithm for Reputation Management in P2P Networks." *WWW*. — Transitive trust computation; informs Korai's domain-scoped trust propagation.
+- Kamvar, S.D., Schlosser, M.T., and Garcia-Molina, H. (2003). "The EigenTrust Algorithm for Reputation Management in P2P Networks." *WWW*. — Transitive trust computation; informs Nunchi's domain-scoped trust propagation.
 - Page, L. et al. (1999). "The PageRank Citation Ranking: Bringing Order to the Web." *Stanford InfoLab*. — PageRank as a reputation signal; the mathematical foundation for iterative trust propagation.
 - Douceur, J.R. (2002). "The Sybil Attack." *IPTPS*. — Sybil resistance; motivates staking requirements and IP colocation penalties.
-- Resnick, P. et al. (2006). "The Value of Reputation on eBay: A Controlled Experiment." *Experimental Economics*. — Empirical evidence that reputation systems increase trust and transaction volume; informs the economic design of Korai's reputation incentives.
-- Weyl, E.G., Ohlhaver, P., and Buterin, V. (2022). "Decentralized Society: Finding Web3's Soul." — Soulbound tokens and non-transferable reputation; the theoretical foundation for the Korai Passport's non-transferable property.
+- Resnick, P. et al. (2006). "The Value of Reputation on eBay: A Controlled Experiment." *Experimental Economics*. — Empirical evidence that reputation systems increase trust and transaction volume; informs the economic design of Nunchi's reputation incentives.
+- Weyl, E.G., Ohlhaver, P., and Buterin, V. (2022). "Decentralized Society: Finding Web3's Soul." — Soulbound tokens and non-transferable reputation; the theoretical foundation for the ERC-8004 identity's non-transferable property.
 
 ---
 
@@ -455,7 +455,7 @@ pub struct ReputationAmnesty {
 ## Current Status and Gaps
 
 **Scaffold:**
-- `ReputationScore` struct defined in `AgentPassport`
+- `ReputationScore` struct defined in `AgentIdentity`
 - EMA computation is standard arithmetic
 
 **Not yet built (Tier 6):**
@@ -473,6 +473,5 @@ pub struct ReputationAmnesty {
 
 - See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for the Reputation Registry contract that stores these scores
 - See [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md) for how reputation affects auction competitiveness
-- See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for tier progression requirements based on reputation
-- See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for prompt change penalties that affect reputation
+- See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for tier progression requirements based on reputation
 - See topic [12-learn](../05-learning/INDEX.md) for the learning system that uses reputation feedback

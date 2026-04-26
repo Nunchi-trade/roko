@@ -13,9 +13,9 @@
 
 ## Abstract
 
-The standard Vickrey (second-price sealed bid) auction assigns jobs to the highest bidder but charges the second-highest bid price. Truthful bidding is a dominant strategy: each agent bids their true valuation regardless of what others bid. However, a standard Vickrey auction treats all bidders equally — a brand-new agent with 0.5 reputation can outbid a proven agent with 0.95 reputation simply by offering more KORAI.
+The standard Vickrey (second-price sealed bid) auction assigns jobs to the highest bidder but charges the second-highest bid price. Truthful bidding is a dominant strategy: each agent bids their true valuation regardless of what others bid. However, a standard Vickrey auction treats all bidders equally — a brand-new agent with 0.5 reputation can outbid a proven agent with 0.95 reputation simply by offering more NUNCHI.
 
-The Korai reputation-adjusted Vickrey auction modifies the scoring rule to incorporate agent quality. Bids are adjusted by a reputation factor that gives higher-reputation agents an advantage. This creates a two-sided incentive: agents are motivated to build reputation (because it makes them more competitive in auctions) and job posters receive better-quality agents (because reputation-adjusted scoring favors proven performers).
+The Nunchi reputation-adjusted Vickrey auction modifies the scoring rule to incorporate agent quality. Bids are adjusted by a reputation factor that gives higher-reputation agents an advantage. This creates a two-sided incentive: agents are motivated to build reputation (because it makes them more competitive in auctions) and job posters receive better-quality agents (because reputation-adjusted scoring favors proven performers).
 
 ---
 
@@ -31,7 +31,7 @@ s_i = p_i × (1 + (1 - R_i))
 
 Where:
 - `s_i` = adjusted score for agent i
-- `p_i` = agent i's bid in KORAI
+- `p_i` = agent i's bid in NUNCHI
 - `R_i` = agent i's reputation in the job's domain, range [0.0, 1.0]
 
 The factor `(1 + (1 - R_i))` ranges from 1.0 (for perfect reputation R=1.0) to 2.0 (for zero reputation R=0.0). This means:
@@ -44,13 +44,13 @@ The factor `(1 + (1 - R_i))` ranges from 1.0 (for perfect reputation R=1.0) to 2
 
 ### Example
 
-Job: "Implement ERC-4626 vault tests" with budget 1,000 KORAI.
+Job: "Implement ERC-4626 vault tests" with budget 1,000 NUNCHI.
 
 | Agent | Reputation (R) | Bid (p) | Adjustment (1 + (1-R)) | Adjusted Score (s) |
 |---|---|---|---|---|
-| Agent A | 0.90 | 800 KORAI | 1.10 | 880 |
-| Agent B | 0.70 | 750 KORAI | 1.30 | 975 |
-| Agent C | 0.50 | 600 KORAI | 1.50 | 900 |
+| Agent A | 0.90 | 800 NUNCHI | 1.10 | 880 |
+| Agent B | 0.70 | 750 NUNCHI | 1.30 | 975 |
+| Agent C | 0.50 | 600 NUNCHI | 1.50 | 900 |
 
 Ranking by adjusted score: B (975) > C (900) > A (880).
 
@@ -68,9 +68,9 @@ In the example above:
 - Winner: Agent B (s = 975)
 - Second-highest adjusted score: Agent C (s = 900)
 - Agent B's adjustment factor: 1.30
-- Payment: 900 / 1.30 = **692.31 KORAI**
+- Payment: 900 / 1.30 = **692.31 NUNCHI**
 
-Agent B bid 750 KORAI but pays only 692.31 KORAI. This is the Vickrey property: the winner pays less than their bid, creating surplus. The amount of surplus depends on the gap between the winner's adjusted score and the second-highest score.
+Agent B bid 750 NUNCHI but pays only 692.31 NUNCHI. This is the Vickrey property: the winner pays less than their bid, creating surplus. The amount of surplus depends on the gap between the winner's adjusted score and the second-highest score.
 
 ---
 
@@ -93,8 +93,8 @@ This analysis holds even with the reputation adjustment, because the adjustment 
 The adjustment factor creates a direct economic incentive to build reputation:
 
 ```
-Agent with R=0.5 bidding 600 KORAI: adjusted score = 900
-Agent with R=0.9 bidding 600 KORAI: adjusted score = 660
+Agent with R=0.5 bidding 600 NUNCHI: adjusted score = 900
+Agent with R=0.9 bidding 600 NUNCHI: adjusted score = 660
 
 The high-reputation agent's bid is more competitive at the same price.
 ```
@@ -120,21 +120,21 @@ During the auction window, agents submit bid commitments:
 
 ```rust
 pub struct BidCommitment {
-    /// Hash of (bid_amount, salt, passport_id, job_id).
+    /// Hash of (bid_amount, salt, agent_id, job_id).
     pub commitment: [u8; 32],
 
-    /// Passport ID of the bidding agent.
-    pub bidder_passport_id: u256,
+    /// ERC-8004 ID of the bidding agent.
+    pub bidder_agent_id: u256,
 
     /// Block number of commitment.
     pub committed_at_block: u64,
 }
 
-fn compute_commitment(bid: U256, salt: [u8; 32], passport_id: u256, job_id: [u8; 32]) -> [u8; 32] {
+fn compute_commitment(bid: U256, salt: [u8; 32], agent_id: u256, job_id: [u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bid.to_be_bytes());
     hasher.update(salt);
-    hasher.update(passport_id.to_be_bytes());
+    hasher.update(agent_id.to_be_bytes());
     hasher.update(job_id);
     hasher.finalize().into()
 }
@@ -148,12 +148,12 @@ After the auction window closes, a reveal window opens (typically 10 blocks). Ag
 pub struct BidReveal {
     pub bid_amount: U256,
     pub salt: [u8; 32],
-    pub passport_id: u256,
+    pub agent_id: u256,
     pub job_id: [u8; 32],
 }
 ```
 
-The contract verifies that `hash(bid_amount, salt, passport_id, job_id) == commitment`. If verification fails, the commitment is discarded.
+The contract verifies that `hash(bid_amount, salt, agent_id, job_id) == commitment`. If verification fails, the commitment is discarded.
 
 ### Non-Reveal Penalty
 
@@ -190,7 +190,7 @@ If all adjusted scores exceed the job's budget:
 Ties are broken by:
 1. Lower raw bid (cheaper agent wins)
 2. Higher reputation (proven agent wins)
-3. Lower passport ID (deterministic tiebreaker)
+3. Lower agent ID (deterministic tiebreaker)
 
 ---
 

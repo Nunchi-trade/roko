@@ -1,23 +1,23 @@
-# KORAI Token Economics
+# NUNCHI Token Economics
 
-> KORAI: a demurrage token where stale knowledge decays economically just as it decays in the NeuroStore. Earning rewards quality; spending prevents spam.
+> NUNCHI: a demurrage token where stale knowledge decays economically just as it decays in the NeuroStore. Earning rewards quality; spending prevents spam.
 
 
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [00-vision-and-framing.md](./00-vision-and-framing.md), [01-korai-chain-spec.md](./01-korai-chain-spec.md)
+**Prerequisites**: [00-vision-and-framing.md](./00-vision-and-framing.md), [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md)
 **Key sources**: `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain/06-tokenomics.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §L
 
 ---
 
 ## Abstract
 
-KORAI is the native token of the Korai mainnet (DAEJI on the Daeji testnet). Unlike conventional cryptocurrency tokens, KORAI implements **demurrage** — a 1% annual decay on token balances — mirroring the half-life decay of Engrams in the NeuroStore. This design principle ensures that knowledge and economic value are isomorphic: stale, unvalidated knowledge decays in both the knowledge system and the economic system.
+NUNCHI is the native token of the Nunchi mainnet (NUNCHI_TEST on the Nunchi Testnet testnet). Unlike conventional cryptocurrency tokens, NUNCHI implements **demurrage** — a 1% annual decay on token balances — mirroring the half-life decay of Engrams in the NeuroStore. This design principle ensures that knowledge and economic value are isomorphic: stale, unvalidated knowledge decays in both the knowledge system and the economic system.
 
-The token economics solve three fundamental problems in multi-agent knowledge-sharing systems: the free-rider problem (agents that consume without contributing), the spam problem (low-quality queries that exhaust compute), and the quality problem (noise that degrades the collective knowledge base). KORAI addresses all three through carefully designed earning and spending mechanisms that align individual agent incentives with collective knowledge quality.
+The token economics solve three fundamental problems in multi-agent knowledge-sharing systems: the free-rider problem (agents that consume without contributing), the spam problem (low-quality queries that exhaust compute), and the quality problem (noise that degrades the collective knowledge base). NUNCHI addresses all three through carefully designed earning and spending mechanisms that align individual agent incentives with collective knowledge quality.
 
-This document specifies the full KORAI token economics: demurrage mechanics, earning pathways, spending mechanisms, quality incentives, and the relationship between on-chain economics and the local NeuroStore's Ebbinghaus-based decay model.
+This document specifies the full NUNCHI token economics: demurrage mechanics, earning pathways, spending mechanisms, quality incentives, and the relationship between on-chain economics and the local NeuroStore's Ebbinghaus-based decay model.
 
 ---
 
@@ -27,7 +27,7 @@ This document specifies the full KORAI token economics: demurrage mechanics, ear
 
 In a conventional token economy, tokens accumulate indefinitely. Early adopters hoard tokens. The incentive is to buy and hold, not to use. Applied to a knowledge market, this means:
 
-- **Hoarding**: Agents accumulate KORAI but never post knowledge (why spend tokens when holding is profitable?)
+- **Hoarding**: Agents accumulate NUNCHI but never post knowledge (why spend tokens when holding is profitable?)
 - **Garbage accumulation**: Old, unvalidated knowledge entries persist forever on-chain because there is no cost to leaving them there
 - **Power concentration**: Early agents with large token balances dominate governance and market access regardless of their current knowledge quality
 
@@ -35,9 +35,9 @@ In a conventional token economy, tokens accumulate indefinitely. Early adopters 
 
 Demurrage creates a velocity-first economy where tokens circulate rather than accumulate. The 1% annual decay rate is designed to:
 
-1. **Mirror knowledge decay**: Engrams in the NeuroStore have Ebbinghaus-based half-lives. Knowledge that is not reinforced loses relevance over time. KORAI balances should reflect this same principle — tokens not actively used in knowledge production lose value.
+1. **Mirror knowledge decay**: Engrams in the NeuroStore have Ebbinghaus-based half-lives. Knowledge that is not reinforced loses relevance over time. NUNCHI balances should reflect this same principle — tokens not actively used in knowledge production lose value.
 
-2. **Incentivize contribution**: Holding KORAI loses value. Contributing validated knowledge earns KORAI. The rational strategy is continuous contribution, not passive holding.
+2. **Incentivize contribution**: Holding NUNCHI loses value. Contributing validated knowledge earns NUNCHI. The rational strategy is continuous contribution, not passive holding.
 
 3. **Prevent garbage accumulation**: Knowledge entries posted on-chain carry a maintenance cost via the poster's decaying stake. Entries not reinforced by confirmation eventually become economically unviable, creating natural pressure for quality curation.
 
@@ -45,14 +45,14 @@ Demurrage creates a velocity-first economy where tokens circulate rather than ac
 
 The theoretical basis for demurrage currencies comes from Silvio Gesell's *The Natural Economic Order* (1916) and more recently from community currency experiments in Wörgl, Austria (1932). The key insight: money should be a medium of exchange, not a store of value, when the goal is circulation and activity rather than accumulation.
 
-### Implementation at 400ms Block Time
+### Implementation at 50ms Block Time
 
-KORAI demurrage is implemented as a per-block decay applied during balance reads, not as active deductions on every block. The effective formula at Korai's 400ms block time:
+NUNCHI demurrage is implemented as a per-block decay applied during balance reads, not as active deductions on every block. The effective formula at Nunchi's 50ms block time:
 
 ```
 Annual decay rate: 1% = 0.01
-Blocks per year: 365.25 × 24 × 3600 / 0.4 = 78,894,000
-Per-block decay factor: (1 - 0.01)^(1/78,894,000) ≈ 1 - 1.267e-10
+Blocks per year: 365.25 × 24 × 3600 / 0.05 = 631,152,000
+Per-block decay factor: (1 - 0.01)^(1/631,152,000) ≈ 1 - 1.585e-11
 
 Effective balance at block B:
   balance_effective = balance_stored × (1 - 1.267e-10)^(B - balance_last_updated_block)
@@ -62,20 +62,20 @@ This is computed lazily on balance reads using fixed-point arithmetic (PU18 — 
 
 ---
 
-## Earning KORAI
+## Earning NUNCHI
 
-Agents earn KORAI through five mechanisms that reward quality knowledge production and collective participation:
+Agents earn NUNCHI through five mechanisms that reward quality knowledge production and collective participation:
 
 ### 1. Registration Mint
 
-When an agent registers a Korai Passport (see [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)), a small initial KORAI allocation is minted to bootstrap their economic participation. The amount depends on tier:
+When an agent registers an ERC-8004 identity (see [06-erc-8004-registries.md](./06-erc-8004-registries.md)), a small initial NUNCHI allocation is minted to bootstrap their economic participation. The amount depends on tier:
 
 | Tier | Initial Mint | Rationale |
 |---|---|---|
 | Protocol (Tier 0) | Governance-determined | Protocol-level agents have custom economics |
-| Sovereign (Tier 1) | 0 (must stake 25,000 KORAI) | Sovereigns bring their own capital |
-| Worker (Tier 2) | 100 KORAI | Enough for ~20 knowledge postings to establish reputation |
-| Edge (Tier 3) | 10 KORAI | Minimal bootstrap; must earn through quality work |
+| Sovereign (Tier 1) | 0 (must stake 25,000 NUNCHI) | Sovereigns bring their own capital |
+| Worker (Tier 2) | 100 NUNCHI | Enough for ~20 knowledge postings to establish reputation |
+| Edge (Tier 3) | 10 NUNCHI | Minimal bootstrap; must earn through quality work |
 
 ### 2. Validated Knowledge Posting
 
@@ -85,7 +85,7 @@ The primary earning mechanism. When an agent posts a knowledge entry (Insight, H
 Posting reward = base_reward × novelty_multiplier × domain_multiplier
 
 where:
-  base_reward = 1 KORAI (configurable per knowledge type)
+  base_reward = 1 NUNCHI (configurable per knowledge type)
   novelty_multiplier = 1.0 + (1.0 - max_similarity_to_existing) × 2.0
     — Range: [1.0, 3.0]. Truly novel entries earn 3x.
     — Duplicate entries (similarity > 0.95) earn 0 and pay a duplicate penalty.
@@ -95,14 +95,14 @@ where:
 Quality validation requires:
 - HDC vector encoding succeeds (entry is well-formed)
 - No near-duplicate exists (Hamming similarity < 0.95 against existing entries)
-- Poster has sufficient stake (anti-spam: must hold at least 10 KORAI)
+- Poster has sufficient stake (anti-spam: must hold at least 10 NUNCHI)
 
 ### 3. Confirmation by Other Agents
 
 When another agent uses a knowledge entry and confirms its value (by achieving a positive gate outcome while the entry was in context):
 
 ```
-Confirmation reward = 0.1 KORAI × confirmer_reputation_weight
+Confirmation reward = 0.1 NUNCHI × confirmer_reputation_weight
 
 where:
   confirmer_reputation_weight = reputation_multiplier(R_confirmer)
@@ -115,12 +115,12 @@ Cross-agent confirmation is the primary signal for knowledge quality. An entry c
 
 ### 4. Heartbeat Participation
 
-Agents that maintain active heartbeats (publishing liveness proofs on the gossip mesh at 30-60s intervals) earn a small continuous reward:
+Agents that maintain active heartbeats (publishing liveness proofs at 30-60s intervals) earn a small continuous reward:
 
 ```
-Heartbeat reward = 0.001 KORAI per heartbeat
-  — Capped at 1 KORAI/day to prevent gaming
-  — Requires active passport with valid TEE attestation (if applicable)
+Heartbeat reward = 0.001 NUNCHI per heartbeat
+  — Capped at 1 NUNCHI/day to prevent gaming
+  — Requires active ERC-8004 identity with valid TEE attestation (if applicable)
 ```
 
 This incentivizes agents to stay online and available for job market participation.
@@ -131,21 +131,21 @@ When an agent's knowledge entry is challenged by another agent (claiming it is i
 
 ```
 Defense reward = challenge_stake × 0.5
-  — Challenger must stake KORAI to challenge
+  — Challenger must stake NUNCHI to challenge
   — Successful defense earns half the challenger's stake
   — Failed defense loses the original posting reward
 ```
 
 ---
 
-## Spending KORAI
+## Spending NUNCHI
 
 ### 1. Knowledge Posting Fee (Anti-Spam)
 
 Every knowledge entry posted to the chain carries a posting fee:
 
 ```
-Posting fee = 0.1 KORAI per entry (configurable)
+Posting fee = 0.1 NUNCHI per entry (configurable)
 ```
 
 This prevents spam flooding. The fee is small enough that quality contributors earn net positive, but large enough that posting thousands of garbage entries is economically irrational.
@@ -155,17 +155,17 @@ This prevents spam flooding. The fee is small enough that quality contributors e
 Querying the collective knowledge base via the HDC precompile costs:
 
 ```
-Query fee = 0.01 KORAI per query (configurable)
+Query fee = 0.01 NUNCHI per query (configurable)
 ```
 
 This prevents indiscriminate querying. The fee is negligible for targeted, high-value queries but adds up for unfocused broad sweeps.
 
 ### 3. Challenge Stake
 
-Challenging an existing knowledge entry requires staking KORAI:
+Challenging an existing knowledge entry requires staking NUNCHI:
 
 ```
-Challenge stake = 1.0 KORAI (configurable)
+Challenge stake = 1.0 NUNCHI (configurable)
   — Returned if challenge succeeds
   — 50% to defender, 50% burned if challenge fails
 ```
@@ -180,16 +180,16 @@ Challenge stake = 1.0 KORAI (configurable)
 | Platform fee | 3% of job value | Included in total fees |
 | Direct hire premium | 1.5× standard fees | Requester (for naming specific agent) |
 
-### 5. Passport Staking
+### 5. Identity Staking
 
-Tier-based staking requirements (see [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md)):
+Tier-based staking requirements (see [06-erc-8004-registries.md](./06-erc-8004-registries.md)):
 
 | Tier | Required Stake |
 |---|---|
 | Protocol (Tier 0) | Governance-approved (custom) |
-| Sovereign (Tier 1) | 25,000 KORAI |
-| Worker (Tier 2) | 5,000 KORAI |
-| Edge (Tier 3) | None (rate-limited, ≤50 DAEJI jobs) |
+| Sovereign (Tier 1) | 25,000 NUNCHI |
+| Worker (Tier 2) | 5,000 NUNCHI |
+| Edge (Tier 3) | None (rate-limited, ≤50 NUNCHI_TEST jobs) |
 
 ---
 
@@ -221,7 +221,7 @@ An entry confirmed by 8 independent agents has approximately 1.6x the effective 
 
 ## Fee Distribution Per Epoch
 
-The Daeji chain specification describes per-epoch fee distribution:
+The Nunchi Testnet chain specification describes per-epoch fee distribution:
 
 | Recipient | Share | Rationale |
 |---|---|---|
@@ -234,9 +234,9 @@ The Daeji chain specification describes per-epoch fee distribution:
 
 ## Relationship to NeuroStore Decay
 
-KORAI demurrage mirrors the NeuroStore's Ebbinghaus-based half-life system at the economic level:
+NUNCHI demurrage mirrors the NeuroStore's Ebbinghaus-based half-life system at the economic level:
 
-| NeuroStore Concept | KORAI Economic Equivalent |
+| NeuroStore Concept | NUNCHI Economic Equivalent |
 |---|---|
 | Engram half-life decay | Token balance demurrage (1% annual) |
 | Tier promotion (Transient → Persistent) | Increased staking / higher confirmation count |
@@ -250,14 +250,14 @@ This isomorphism is intentional. The same principles that govern local knowledge
 
 ## Steady-State Analysis
 
-At equilibrium, the KORAI economy converges to a state where:
+At equilibrium, the NUNCHI economy converges to a state where:
 
 1. **Net flow is slightly inflationary** (earning > demurrage) to incentivize growth, with demurrage preventing runaway accumulation
 2. **Knowledge quality stabilizes** as low-quality entries lose economic viability and are pruned
 3. **Agent populations stratify** by contribution quality: high-quality agents accumulate stake faster than demurrage drains it; low-quality agents gradually exit
 4. **Query costs converge** to reflect the true value of collective knowledge access
 
-The specific equilibrium parameters depend on agent population size, posting frequency, and knowledge quality distribution — all of which need empirical validation on the Daeji testnet.
+The specific equilibrium parameters depend on agent population size, posting frequency, and knowledge quality distribution — all of which need empirical validation on the Nunchi Testnet testnet.
 
 ---
 
@@ -274,8 +274,8 @@ The specific equilibrium parameters depend on agent population size, posting fre
 ## Current Status and Gaps
 
 **Not yet built (Tier 6, deferred):**
-- KORAI token contract (demurrage implementation)
-- DAEJI testnet token
+- NUNCHI token contract (demurrage implementation)
+- NUNCHI_TEST testnet token
 - Fee distribution contracts
 - Quality incentive contracts (novelty bonus, curation bonds, confirmation multiplier)
 - Steady-state simulation for parameter tuning
@@ -286,9 +286,9 @@ See `roko/tmp/implementation-plans/12b-chain-layer.md` §L for the 5-item paymen
 
 ## Cross-References
 
-- See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for staking tiers
+- See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for staking tiers
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for novelty detection thresholds
 - See [10-spore-job-market.md](./10-spore-job-market.md) for job market fee structure
 - See [20-x402-micropayments.md](./20-x402-micropayments.md) for the self-funding agent economic cycle
-- See topic [06-neuro](../06-neuro/INDEX.md) for the NeuroStore decay model that KORAI mirrors
+- See topic [06-neuro](../06-neuro/INDEX.md) for the NeuroStore decay model that NUNCHI mirrors
 - See topic [14-identity-economy](../14-identity-economy/INDEX.md) for broader economic context

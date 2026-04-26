@@ -204,7 +204,7 @@ Where the prior is the agent's model before the observation and the posterior is
 |---|---|---|
 | 0.0 – 0.2 | **Ignore**: Event is noise. No further processing. | 0 |
 | 0.2 – 0.5 | **Silent monitor**: Log the event. Update statistical models. No LLM. | ~1ms |
-| 0.5 – 0.8 | **Alert**: Emit event on `korai/anomaly/v1` gossip topic. Queue for Theta-tick LLM analysis. | ~10ms |
+| 0.5 – 0.8 | **Alert**: Emit event on `nunchi/anomaly/v1` gossip topic. Queue for Theta-tick LLM analysis. | ~10ms |
 | 0.8 – 1.0 | **Escalate**: Immediate Theta-tick interrupt. LLM analysis with priority context. Possible action trigger. | ~100ms |
 
 The thresholds are adaptive — they adjust based on the current background curiosity level. During a period of high market activity, thresholds increase to avoid alert fatigue. During quiet periods, thresholds decrease to maintain sensitivity.
@@ -242,4 +242,4 @@ The thresholds are adaptive — they adjust based on the current background curi
 - See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for the upstream block ingestion that feeds this pipeline
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for the HDC encoding used in novelty scoring
 - See [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) for how triage feeds into the ANALYZE step of the 9-step heartbeat
-- See [08-eight-gossip-topics.md](./08-eight-gossip-topics.md) for the anomaly gossip topic that carries escalated events
+- See [15-chainwitness-event-watching.md](./15-chainwitness-event-watching.md) for the event watching pipeline that feeds escalated events
