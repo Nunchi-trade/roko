@@ -235,6 +235,19 @@ impl TraceSink for JsonlTraceSink {
     }
 }
 
+/// Convenience factory: create a [`JsonlTraceSink`] rooted at
+/// `roko_dir/traces/` — the conventional location for tool-trace
+/// persistence (§36.99).
+///
+/// The returned trait object is ready for injection into a
+/// [`TraceBuilder`](roko_core::tool::trace::TraceBuilder) or any
+/// consumer that accepts `Box<dyn TraceSink>`.
+#[must_use]
+pub fn default_trace_sink(roko_dir: &Path) -> Box<dyn TraceSink> {
+    let root = roko_dir.join("traces");
+    Box::new(JsonlTraceSink::new(root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +448,33 @@ mod tests {
         assert!(file.is_file());
         let contents = fs::read_to_string(&file).expect("read");
         assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[test]
+    fn default_trace_sink_creates_jsonl_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sink = super::default_trace_sink(tmp.path());
+        let id = trace_id(0xEE);
+
+        // Emit one event and finish.
+        sink.append(id, ToolTraceEvent::StreamCoerced { at_ms: 1 });
+        sink.finish(make_trace(id, 1));
+
+        // The traces/ subdirectory should have been created and contain a file.
+        let traces_dir = tmp.path().join("traces");
+        assert!(traces_dir.is_dir(), "traces/ dir must exist: {traces_dir:?}");
+
+        // Walk into the date directory and find the JSONL file.
+        let entries: Vec<_> = fs::read_dir(&traces_dir)
+            .expect("read traces dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(!entries.is_empty(), "should have at least one date directory");
+        let date_dir = &entries[0].path();
+        let jsonl_file = date_dir.join(format!("{}.jsonl", id.to_hex()));
+        assert!(jsonl_file.is_file(), "JSONL file must exist: {jsonl_file:?}");
+
+        let contents = fs::read_to_string(&jsonl_file).expect("read");
+        assert_eq!(contents.lines().count(), 2, "1 event + 1 trace summary");
     }
 }

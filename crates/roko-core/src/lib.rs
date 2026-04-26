@@ -243,7 +243,7 @@ pub use tool::{
     ToolError, ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome,
     ToolPermission, ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolSource,
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
-    compute_reward, galileo_tsq, profile_for_model,
+    classify_tool_error, compute_reward, galileo_tsq, profile_for_model,
 };
 pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Trigger, Verify};
 // Note: The `Score` protocol trait (formerly `Scorer`) is NOT re-exported at

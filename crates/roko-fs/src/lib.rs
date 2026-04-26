@@ -55,4 +55,4 @@ pub use observability::FsObservabilitySinks;
 pub use pointer::PointerStore;
 pub use tool_audit::ToolAuditLog;
 pub use tool_metrics_sink::{JsonlMetricsSink, ToolMetricsRecord};
-pub use trace_sink::JsonlTraceSink;
+pub use trace_sink::{JsonlTraceSink, default_trace_sink};
