@@ -221,6 +221,30 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 // ── Runner v2: direct RunState, streaming output ──────────
                 // Bypasses the old DashboardEvent indirection that lost fields
                 // (model, task titles, tokens). Uses mori's pattern instead.
+
+                // Ensure git repo exists — agents need git tools to work.
+                if !wd.join(".git").exists() {
+                    eprintln!("▸ No git repo found — initializing for agent tooling");
+                    let _ = std::process::Command::new("git")
+                        .args(["init"])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("git")
+                        .args(["add", "-A"])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("git")
+                        .args(["commit", "-m", "init (auto-created by roko)", "--allow-empty"])
+                        .current_dir(&wd)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+
                 let plans = roko_cli::runner::plan_loader::load_plans(&plans_dir)?;
                 let roko_config: roko_core::config::schema::RokoConfig =
                     std::fs::read_to_string(wd.join("roko.toml"))
@@ -255,7 +279,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 std::thread::Builder::new()
                     .name("roko-plan-approval-tui".to_string())
                     .spawn(move || {
-                        let mut app = App::new_connected_with_page(
+                        let app = App::new_connected_with_page(
                             &workdir_for_tui,
                             None,
                             &state_hub_for_tui,

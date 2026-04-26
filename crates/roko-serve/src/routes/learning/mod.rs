@@ -1,8 +1,8 @@
 //! Learning data endpoints — efficiency, cascade router, experiments, gate thresholds.
 
 pub(super) mod experiments;
-pub(super) mod helpers;
-pub(super) mod router_state;
+pub(crate) mod helpers;
+pub(crate) mod router_state;
 
 use std::collections::HashMap;
 use std::sync::Arc;

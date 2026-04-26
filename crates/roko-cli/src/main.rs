@@ -36,7 +36,7 @@ use roko_agent::process::{cleanup_orphaned_agents, reap_orphaned_children};
 use roko_agent::translate::BackendResponse;
 use roko_cli::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use roko_cli::serve_runtime::RokoCliRuntime;
-use roko_cli::tui::{App, ApprovalChannel};
+use roko_cli::tui::App;
 use roko_cli::{
     Config, DashboardScaffold, EditTarget, InjectKind, InjectRequest, OneshotMode, PageId,
     PipeMode, Plan, ReplMode, RepoRegistry, SessionStatus, Source, WizardInputs, config_cmd,
@@ -70,7 +70,6 @@ use std::env;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};

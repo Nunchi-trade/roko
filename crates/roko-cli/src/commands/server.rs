@@ -705,32 +705,3 @@ source = "roko_data"
 destination = "/data/.roko"
 "#;
 
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
-
-/// Resolve the working directory from CLI flags.
-///
-/// Detects when the user is running from inside a `.roko/` directory, which
-/// would cause a nested `.roko/.roko/` and silent data loss.
-pub(crate) fn resolve_workdir(cli: &Cli) -> PathBuf {
-    let dir = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
-
-    // Detect if we're running from inside a .roko/ directory and auto-correct
-    // to the project root to avoid nested .roko/.roko/ data dirs.
-    if let Ok(abs) = dir.canonicalize() {
-        for ancestor in abs.ancestors() {
-            if ancestor.file_name().and_then(|n| n.to_str()) == Some(".roko") {
-                let project_root = ancestor.parent().unwrap_or(ancestor).to_path_buf();
-                eprintln!(
-                    "\x1b[33m\u{26a0} Auto-correcting: running from inside .roko/, using project root: {}\x1b[0m",
-                    project_root.display()
-                );
-                return project_root;
-            }
-        }
-    }
-
-    dir
-}
-

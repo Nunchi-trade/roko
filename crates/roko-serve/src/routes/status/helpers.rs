@@ -1,13 +1,10 @@
 //! Shared helper functions for status submodules.
 
-use std::collections::HashMap;
-
 use serde_json::Value;
 
 use crate::error::ApiError;
 use roko_learn::cfactor::CFactor;
 use roko_learn::efficiency::AgentEfficiencyEvent;
-use roko_learn::prompt_experiment::ExperimentStore;
 
 pub const MAX_JSONL_RESULTS: usize = 10_000;
 
@@ -86,46 +83,6 @@ pub async fn read_efficiency_events(
         events.push(event);
     }
     Ok(events)
-}
-
-pub async fn read_experiment_store(path: &std::path::Path) -> Result<ExperimentStore, ApiError> {
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ExperimentStore::new()),
-        Err(e) => return Err(ApiError::internal(format!("read {}: {e}", path.display()))),
-    };
-
-    serde_json::from_str(&content)
-        .map_err(|e| ApiError::internal(format!("parse {}: {e}", path.display())))
-}
-
-/// Read the persisted cascade router snapshot if it exists.
-pub async fn read_cascade_snapshot(
-    path: &std::path::Path,
-) -> Result<Option<CascadeSnapshotData>, ApiError> {
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(ApiError::internal(format!("read {}: {e}", path.display()))),
-    };
-
-    let snapshot = serde_json::from_str::<CascadeSnapshotData>(&content)
-        .map_err(|e| ApiError::internal(format!("parse {}: {e}", path.display())))?;
-    Ok(Some(snapshot))
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct CascadeSnapshotData {
-    #[serde(default)]
-    pub model_slugs: Vec<String>,
-    #[serde(default)]
-    pub confidence_stats: HashMap<String, PersistedModelStatsData>,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct PersistedModelStatsData {
-    #[serde(default)]
-    pub trials: u64,
 }
 
 // ── signal extraction helpers ────────────────────────────────────────

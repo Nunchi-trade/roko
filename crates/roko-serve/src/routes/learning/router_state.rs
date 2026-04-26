@@ -62,7 +62,7 @@ pub struct CFactorTrendQuery {
     window: Option<String>,
 }
 
-pub(super) fn parse_cfactor_trend_window(raw: Option<&str>) -> (Duration, usize) {
+pub(crate) fn parse_cfactor_trend_window(raw: Option<&str>) -> (Duration, usize) {
     match raw {
         Some("7d") => (Duration::hours(1), 7 * 24),
         _ => (Duration::hours(1), 24),
@@ -70,7 +70,7 @@ pub(super) fn parse_cfactor_trend_window(raw: Option<&str>) -> (Duration, usize)
 }
 
 /// Read and parse a cascade snapshot, or return `None` if the file is missing.
-pub(super) async fn read_cascade_snapshot(
+pub(crate) async fn read_cascade_snapshot(
     path: &std::path::Path,
 ) -> Result<Option<CascadeSnapshotData>, ApiError> {
     let content = match tokio::fs::read_to_string(path).await {
@@ -338,7 +338,7 @@ fn build_cost_tier_response(snapshot: Option<CascadeSnapshotData>) -> CostTierRe
 
 /// Parsed cascade router snapshot matching the persisted JSON format.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-pub(super) struct CascadeSnapshotData {
+pub(crate) struct CascadeSnapshotData {
     #[serde(default)]
     pub model_slugs: Vec<String>,
     #[serde(default)]
@@ -347,7 +347,7 @@ pub(super) struct CascadeSnapshotData {
 
 /// Per-model confidence stats from the cascade router JSON.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-pub(super) struct PersistedModelStatsData {
+pub(crate) struct PersistedModelStatsData {
     #[serde(default)]
     pub trials: u64,
     #[serde(default)]
