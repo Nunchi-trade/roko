@@ -1,5 +1,15 @@
 //! Reusable widgets for the dashboard TUI.
 
+pub mod branch_tree;
+pub mod context_gauge;
+pub mod diff_panel;
+pub mod parallel_pool;
+pub mod phase_timeline;
+pub mod plan_list;
+pub mod status_badge;
+pub mod tab_bar;
+pub mod wave_bar;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
