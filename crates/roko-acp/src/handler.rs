@@ -1,9 +1,6 @@
 //! Main ACP dispatch loop.
 
-use std::{
-    collections::HashMap,
-    path::Path,
-};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use tracing::{debug, error, info, warn};
@@ -12,14 +9,14 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     config::AcpConfig,
-    session::AcpSession,
+    session::SessionManager,
     transport::{StdioTransport, TransportError},
     types::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
         ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcMessage,
         JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
         PromptCapabilities, SESSION_NOT_FOUND, SESSION_BUSY, SessionCancelParams,
-        SessionListResult, SessionLoadParams, SessionNewParams, SessionPromptParams,
+        SessionLoadParams, SessionNewParams, SessionPromptParams,
         SessionPromptResult, SessionSetModeParams, StopReason,
     },
 };
@@ -33,10 +30,10 @@ pub async fn run_acp_server(config: AcpConfig) -> Result<()> {
 }
 
 async fn run_acp_server_with_transport(
-    config: AcpConfig,
+    _config: AcpConfig,
     transport: &mut StdioTransport,
 ) -> Result<()> {
-    let mut sessions = HashMap::new();
+    let mut sessions = SessionManager::new();
 
     loop {
         let message = match transport.read_message().await {
@@ -54,7 +51,7 @@ async fn run_acp_server_with_transport(
 
         match message {
             JsonRpcMessage::Request(request) => {
-                handle_request(transport, &config, &mut sessions, request).await?;
+                handle_request(transport, &mut sessions, request).await?;
             }
             JsonRpcMessage::Response(response) => {
                 transport.handle_incoming_response(response);
@@ -68,8 +65,7 @@ async fn run_acp_server_with_transport(
 
 async fn handle_request(
     transport: &mut StdioTransport,
-    config: &AcpConfig,
-    sessions: &mut HashMap<String, AcpSession>,
+    sessions: &mut SessionManager,
     request: JsonRpcRequest,
 ) -> Result<()> {
     let JsonRpcRequest {
@@ -101,9 +97,9 @@ async fn handle_request(
                     }),
                 },
                 agent_info: AgentInfo {
-                    name: config.agent_name.clone(),
-                    title: config.agent_title.clone(),
-                    version: config.agent_version.clone(),
+                    name: "roko".to_owned(),
+                    title: "Roko ACP".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
                 auth_methods: Vec::new(),
             };
@@ -114,15 +110,11 @@ async fn handle_request(
                 Ok(params) => params,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            let session = AcpSession::new(params);
-            let result = session.new_result();
-            sessions.insert(session.session_id.clone(), session);
+            let result = sessions.create_session(params);
             send_success(transport, id, result).await
         }
         "session/list" => {
-            let result = SessionListResult {
-                sessions: sessions.values().map(AcpSession::info).collect(),
-            };
+            let result = sessions.list_sessions();
             send_success(transport, id, result).await
         }
         "session/load" => {
@@ -130,11 +122,18 @@ async fn handle_request(
                 Ok(params) => params,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            let session = match get_session(sessions, &params.session_id) {
-                Ok(session) => session,
-                Err(error) => return send_error_response(transport, id, error).await,
+            let result = match sessions.load_session(&params.session_id) {
+                Ok(result) => result,
+                Err(_) => {
+                    return send_error_response(
+                        transport,
+                        id,
+                        session_not_found_error(&params.session_id),
+                    )
+                    .await;
+                }
             };
-            send_success(transport, id, session.new_result()).await
+            send_success(transport, id, result).await
         }
         "session/prompt" => {
             let params: SessionPromptParams = match parse_params(params, &method) {
@@ -145,7 +144,7 @@ async fn handle_request(
                 Ok(session) => session,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            if session.busy {
+            if session.is_busy() {
                 return send_error_response(transport, id, session_busy_error(&params.session_id))
                     .await;
             }
@@ -174,7 +173,7 @@ async fn handle_request(
                 "received config update request before ACP15 wiring"
             );
             let result = ConfigUpdateResult {
-                config_options: session.config_options.clone(),
+                config_options: session.config_options(),
             };
             send_success(transport, id, result).await
         }
@@ -189,7 +188,7 @@ async fn handle_request(
             };
             session.set_mode(params.mode_id);
             let result = ConfigUpdateResult {
-                config_options: session.config_options.clone(),
+                config_options: session.config_options(),
             };
             send_success(transport, id, result).await
         }
@@ -204,7 +203,7 @@ async fn handle_request(
 }
 
 fn handle_notification(
-    sessions: &mut HashMap<String, AcpSession>,
+    sessions: &mut SessionManager,
     notification: JsonRpcNotification,
 ) {
     debug!(method = %notification.method, "handling ACP notification");
@@ -225,7 +224,7 @@ fn handle_notification(
                     }
                 };
 
-            match sessions.get_mut(&params.session_id) {
+            match sessions.get_session_mut(&params.session_id) {
                 Some(session) => session.cancel(),
                 None => warn!(session_id = %params.session_id, "received cancel for unknown ACP session"),
             }
@@ -234,21 +233,22 @@ fn handle_notification(
     }
 }
 
+#[cfg(test)]
 fn get_session<'a>(
-    sessions: &'a HashMap<String, AcpSession>,
+    sessions: &'a SessionManager,
     session_id: &str,
-) -> std::result::Result<&'a AcpSession, (i32, String)> {
+) -> std::result::Result<&'a crate::session::AcpSession, (i32, String)> {
     sessions
-        .get(session_id)
+        .get_session(session_id)
         .ok_or_else(|| session_not_found_error(session_id))
 }
 
 fn get_session_mut<'a>(
-    sessions: &'a mut HashMap<String, AcpSession>,
+    sessions: &'a mut SessionManager,
     session_id: &str,
-) -> std::result::Result<&'a mut AcpSession, (i32, String)> {
+) -> std::result::Result<&'a mut crate::session::AcpSession, (i32, String)> {
     sessions
-        .get_mut(session_id)
+        .get_session_mut(session_id)
         .ok_or_else(|| session_not_found_error(session_id))
 }
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn session_lookup_reports_missing_session() {
-        let sessions = HashMap::new();
+        let sessions = SessionManager::new();
 
         let error = get_session(&sessions, "sess_missing").expect_err("session should be absent");
 
@@ -370,7 +370,6 @@ mod tests {
 
     #[test]
     fn initialize_result_advertises_expected_protocol_version() {
-        let config = AcpConfig::default();
         let result = InitializeResult {
             protocol_version: ACP_PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
@@ -386,9 +385,9 @@ mod tests {
                 }),
             },
             agent_info: AgentInfo {
-                name: config.agent_name,
-                title: config.agent_title,
-                version: config.agent_version,
+                name: "roko".to_owned(),
+                title: "Roko ACP".to_owned(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             auth_methods: Vec::new(),
         };

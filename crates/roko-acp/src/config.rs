@@ -8,24 +8,29 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpConfig {
+    /// Working directory used to resolve ACP operations.
+    pub workdir: PathBuf,
+    /// Named configuration profile for ACP sessions.
+    pub profile: String,
+    /// Optional path to an explicit Roko configuration file.
+    pub config_path: Option<PathBuf>,
     /// Path to the file that receives ACP server logs.
     pub log_file: PathBuf,
-    /// Stable ACP agent name exposed during initialization.
-    pub agent_name: String,
-    /// Human-readable ACP agent title.
-    pub agent_title: String,
-    /// Agent version string reported to clients.
-    pub agent_version: String,
 }
 
 impl AcpConfig {
-    /// Creates a configuration using the provided log file path.
-    pub fn new(log_file: impl Into<PathBuf>) -> Self {
+    /// Creates a configuration using the provided ACP paths and profile.
+    pub fn new(
+        workdir: impl Into<PathBuf>,
+        profile: impl Into<String>,
+        config_path: Option<PathBuf>,
+        log_file: impl Into<PathBuf>,
+    ) -> Self {
         Self {
+            workdir: workdir.into(),
+            profile: profile.into(),
+            config_path,
             log_file: log_file.into(),
-            agent_name: "roko".to_owned(),
-            agent_title: "Roko ACP".to_owned(),
-            agent_version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }
 
@@ -37,6 +42,11 @@ impl AcpConfig {
 
 impl Default for AcpConfig {
     fn default() -> Self {
-        Self::new(".roko/roko-acp.log")
+        Self {
+            workdir: std::env::current_dir().unwrap_or_default(),
+            profile: "default".to_owned(),
+            config_path: None,
+            log_file: PathBuf::from(".roko/acp.log"),
+        }
     }
 }
