@@ -352,6 +352,7 @@ pub async fn start_rpc_server_with_chain(
             current_block: Arc::new(move || block_state.read().fork.local_block_number),
             projection_cache: crate::http_api::ProjectionCache::new(4096),
             started_at: std::time::Instant::now(),
+            ws_registry: Arc::new(crate::http_api::WsRegistry::new(1000)),
             #[cfg(feature = "roko")]
             subs: chain_subs.clone(),
         };
@@ -655,7 +656,6 @@ async fn finish_start_rpc_server(
     local_state: Arc<RwLock<MirageState>>,
     api_router: Option<Router>,
 ) -> Result<(SocketAddr, ServerHandle)> {
-    let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
     // Default jsonrpsee body limits are 10 MiB, which trips
     // `Error("Memory capacity exceeded")` when Ponder's realtime sync asks
     // for a full-tx block at the tip (a heavily-loaded block with many
@@ -663,6 +663,7 @@ async fn finish_start_rpc_server(
     // each direction is plenty of headroom for any Ethereum-shape payload
     // we'd actually emit.
     const MAX_BODY_BYTES: u32 = 128 * 1024 * 1024;
+    let (stop_handle, server_handle) = jsonrpsee::server::stop_channel();
     let server_config = jsonrpsee::server::ServerConfig::builder()
         .max_request_body_size(MAX_BODY_BYTES)
         .max_response_body_size(MAX_BODY_BYTES)
@@ -1078,6 +1079,7 @@ fn build_rpc_module(
     })?;
 
     module.register_async_method("eth_getLogs", |params, ctx, _| async move {
+        use std::collections::BTreeMap;
         // Accept a single `{ fromBlock?, toBlock?, address?, topics? }` filter
         // object. Range bounds accept block tags (`latest`, `earliest`,
         // `pending`) or hex numbers.
@@ -1130,7 +1132,6 @@ fn build_rpc_module(
         // because it reflects the canonical tx order; fall back to a stable
         // sort-by-hash derivation via txs_at_block_number when the block
         // index was lost.
-        use std::collections::BTreeMap;
         let mut by_block: BTreeMap<u64, Vec<(&alloy_primitives::B256, &crate::fork::LocalReceipt)>> = BTreeMap::new();
         for (tx_hash, receipt) in state.fork.receipts.iter() {
             if receipt.block_number < from || receipt.block_number > to {
@@ -1532,15 +1533,6 @@ fn build_rpc_module(
     )?;
 
     module.register_async_method("eth_getFilterChanges", |params, ctx, _| async move {
-        let (id_hex,): (String,) = params.parse().map_err(invalid_params)?;
-        let id = parse_hex_u256(&id_hex).map_err(rpc_error)?;
-        let mut state = ctx.state.write();
-        let tip = state.fork.local_block_number;
-        let Some(filter) = state.fork.filters.get_mut(&id) else {
-            return Err(invalid_params_message("filter not found"));
-        };
-        // Extract filter state and advance cursor under the mutable borrow,
-        // then drop the mutable ref so we can read blocks/receipts.
         enum PollKind {
             Block {
                 from: u64,
@@ -1552,6 +1544,15 @@ fn build_rpc_module(
                 addresses: Vec<Address>,
             },
         }
+        let (id_hex,): (String,) = params.parse().map_err(invalid_params)?;
+        let id = parse_hex_u256(&id_hex).map_err(rpc_error)?;
+        let mut state = ctx.state.write();
+        let tip = state.fork.local_block_number;
+        let Some(filter) = state.fork.filters.get_mut(&id) else {
+            return Err(invalid_params_message("filter not found"));
+        };
+        // Extract filter state and advance cursor under the mutable borrow,
+        // then drop the mutable ref so we can read blocks/receipts.
         let kind = match filter {
             EthFilter::Block { last_poll_block } => {
                 let from = *last_poll_block + 1;

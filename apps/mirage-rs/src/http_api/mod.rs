@@ -122,6 +122,67 @@ async fn request_id_middleware(mut request: axum::extract::Request, next: Next) 
 }
 
 // ---------------------------------------------------------------------------
+// WebSocket connection registry
+// ---------------------------------------------------------------------------
+
+/// Lock-free WebSocket connection registry using atomics.
+///
+/// Tracks connected, peak, and total connection counts without requiring locks
+/// on the hot path. Enforces a configurable maximum connection limit.
+pub struct WsRegistry {
+    /// Currently connected WebSocket clients.
+    connected: AtomicU64,
+    /// High-water mark of concurrent connections.
+    peak: AtomicU64,
+    /// Lifetime total connections accepted.
+    total: AtomicU64,
+    /// Hard cap on simultaneous connections.
+    max_connections: u64,
+}
+
+impl WsRegistry {
+    /// Creates a new registry with the given maximum connection limit.
+    pub fn new(max_connections: u64) -> Self {
+        Self {
+            connected: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+            max_connections,
+        }
+    }
+
+    /// Attempts to register a new connection.
+    ///
+    /// Returns `true` if the connection was accepted (under the limit),
+    /// `false` if the limit has been reached (caller should return 503).
+    pub fn try_connect(&self) -> bool {
+        let prev = self.connected.fetch_add(1, Ordering::Relaxed);
+        if prev >= self.max_connections {
+            // Over limit — roll back.
+            self.connected.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        self.total.fetch_add(1, Ordering::Relaxed);
+        self.peak.fetch_max(prev + 1, Ordering::Relaxed);
+        true
+    }
+
+    /// Records a connection drop.
+    pub fn disconnect(&self) {
+        self.connected.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Returns a snapshot of `(connected, peak, total)`.
+    pub fn stats(&self) -> (u64, u64, u64) {
+        (
+            self.connected.load(Ordering::Relaxed),
+            self.peak.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HDC projection cache
 // ---------------------------------------------------------------------------
 
@@ -187,6 +248,8 @@ pub struct ApiState {
     pub projection_cache: ProjectionCache,
     /// Server start time for uptime computation.
     pub started_at: Instant,
+    /// WebSocket connection registry for tracking and limiting connections.
+    pub ws_registry: Arc<WsRegistry>,
     /// Subscription manager for WebSocket streaming (roko feature only).
     #[cfg(feature = "roko")]
     pub subs: Option<crate::chain_rpc::SubscriptionManager>,
@@ -200,6 +263,7 @@ impl ApiState {
             current_block: Arc::new(|| 0),
             projection_cache: ProjectionCache::new(128),
             started_at: Instant::now(),
+            ws_registry: Arc::new(WsRegistry::new(1000)),
             #[cfg(feature = "roko")]
             subs: None,
         }
@@ -350,6 +414,8 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let prediction_session_count = chain.prediction_store.session_count();
     let prediction_claim_count = chain.prediction_store.claim_count();
 
+    let (ws_connected, ws_peak, ws_total) = state.ws_registry.stats();
+
     Json(serde_json::json!({
         "status": "ok",
         "uptime_secs": uptime,
@@ -367,6 +433,11 @@ async fn health(State(state): State<ApiState>) -> Json<serde_json::Value> {
                 "prediction_sessions": prediction_session_count,
                 "prediction_claims": prediction_claim_count,
             }
+        },
+        "websockets": {
+            "connected": ws_connected,
+            "peak": ws_peak,
+            "total": ws_total,
         }
     }))
 }
