@@ -78,6 +78,16 @@ pub enum ExecutorAction {
         /// The plan to resume.
         plan_id: String,
     },
+
+    /// Restart a plan from the current phase boundary (conductor-triggered).
+    RestartPlan {
+        /// The plan to restart.
+        plan_id: String,
+        /// Which watcher triggered the restart.
+        watcher: String,
+        /// Human-readable reason.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ExecutorAction {
@@ -98,6 +108,9 @@ impl std::fmt::Display for ExecutorAction {
             }
             Self::PausePlan { plan_id } => write!(f, "pause({plan_id})"),
             Self::ResumePlan { plan_id } => write!(f, "resume({plan_id})"),
+            Self::RestartPlan { plan_id, watcher, reason } => {
+                write!(f, "restart({plan_id}, {watcher}: {reason})")
+            }
         }
     }
 }
@@ -157,6 +170,11 @@ mod tests {
             },
             ExecutorAction::PausePlan { plan_id: "h".into() },
             ExecutorAction::ResumePlan { plan_id: "i".into() },
+            ExecutorAction::RestartPlan {
+                plan_id: "j".into(),
+                watcher: "ghost-turn".into(),
+                reason: "no progress".into(),
+            },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

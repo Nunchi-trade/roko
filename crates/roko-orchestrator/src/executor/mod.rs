@@ -24,7 +24,10 @@
 
 use std::collections::HashMap;
 
-use roko_core::PlanPhase;
+use roko_conductor::Conductor;
+use roko_core::{ConductorDecision, Context, PlanPhase, Signal};
+
+use crate::safety::audit_chain::AuditChain;
 
 pub mod action;
 pub mod plan_state;
@@ -78,6 +81,10 @@ pub struct ParallelExecutor {
     plans: HashMap<String, PlanState>,
     /// Execution queue: `plan_id`s in priority order.
     queue: Vec<String>,
+    /// Optional audit chain for recording `apply_event` transitions.
+    audit_chain: Option<AuditChain>,
+    /// Optional conductor for reactive intelligence on each tick.
+    conductor: Option<Conductor>,
 }
 
 impl ParallelExecutor {
@@ -88,6 +95,8 @@ impl ParallelExecutor {
             config,
             plans: HashMap::new(),
             queue: Vec::new(),
+            audit_chain: None,
+            conductor: None,
         }
     }
 
@@ -98,7 +107,31 @@ impl ParallelExecutor {
             config,
             plans: snapshot.plan_states,
             queue: snapshot.queue_order,
+            audit_chain: None,
+            conductor: None,
         }
+    }
+
+    /// Attach an audit chain. When present, every `apply_event()` call
+    /// records an entry on the chain.
+    #[must_use]
+    pub fn with_audit_chain(mut self, chain: AuditChain) -> Self {
+        self.audit_chain = Some(chain);
+        self
+    }
+
+    /// Attach a conductor. When present, `tick()` evaluates conductor
+    /// decisions before generating actions.
+    #[must_use]
+    pub fn with_conductor(mut self, conductor: Conductor) -> Self {
+        self.conductor = Some(conductor);
+        self
+    }
+
+    /// Access the audit chain, if attached.
+    #[must_use]
+    pub const fn audit_chain(&self) -> Option<&AuditChain> {
+        self.audit_chain.as_ref()
     }
 
     /// Add a plan to the executor queue.
@@ -121,8 +154,20 @@ impl ParallelExecutor {
     /// the actions the runtime should dispatch. The executor respects
     /// `max_concurrent_plans`: only the first N queued plans are
     /// considered active.
+    ///
+    /// When a conductor is attached, it evaluates each active plan's
+    /// signal stream and may override with `RestartPlan` or `FailPlan`.
     #[must_use]
     pub fn tick(&self) -> Vec<ExecutorAction> {
+        self.tick_with_signals(&[])
+    }
+
+    /// Tick with an explicit signal stream for conductor evaluation.
+    ///
+    /// Same as [`tick()`](Self::tick) but passes `signals` to the
+    /// conductor's `evaluate()` for each active plan.
+    #[must_use]
+    pub fn tick_with_signals(&self, signals: &[Signal]) -> Vec<ExecutorAction> {
         let mut actions = Vec::new();
         let mut active_count = 0;
 
@@ -147,6 +192,32 @@ impl ParallelExecutor {
                 break;
             }
 
+            // Consult the conductor when present.
+            if let Some(conductor) = &self.conductor {
+                let ctx = Context::now();
+                let decision = conductor.evaluate(signals, &ctx);
+                match decision {
+                    ConductorDecision::Restart { watcher, reason } => {
+                        actions.push(ExecutorAction::RestartPlan {
+                            plan_id: plan_id.clone(),
+                            watcher,
+                            reason,
+                        });
+                        continue;
+                    }
+                    ConductorDecision::Fail { watcher, reason } => {
+                        actions.push(ExecutorAction::FailPlan {
+                            plan_id: plan_id.clone(),
+                            reason: format!("{watcher}: {reason}"),
+                        });
+                        continue;
+                    }
+                    // Continue + future variants: proceed to normal
+                    // action generation below.
+                    _ => {}
+                }
+            }
+
             // Ask the state machine what action is needed.
             if let Some(action) = PlanStateMachine::next_action(state) {
                 actions.push(action);
@@ -157,6 +228,9 @@ impl ParallelExecutor {
     }
 
     /// Apply an event to a specific plan, transitioning its phase.
+    ///
+    /// When an audit chain is attached, records an entry for each
+    /// successful transition.
     ///
     /// # Errors
     ///
@@ -173,6 +247,7 @@ impl ParallelExecutor {
             reason: format!("plan '{plan_id}' not found"),
         })?;
 
+        let from_kind = state.current_phase.kind();
         let new_phase = PlanStateMachine::transition(state, event)?;
 
         // Apply the transition — the plan was just looked up so this
@@ -184,6 +259,15 @@ impl ParallelExecutor {
             if let PlanPhase::Failed { reason } = &new_phase {
                 state.last_error = Some(reason.to_string());
             }
+        }
+
+        // Record the transition on the audit chain when present.
+        if let Some(chain) = &self.audit_chain {
+            chain.record(
+                format!("phase.{:?}->{:?}", from_kind, new_phase.kind()),
+                "executor",
+                plan_id,
+            );
         }
 
         Ok(new_phase)

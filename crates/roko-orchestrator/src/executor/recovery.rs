@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use roko_core::{PhaseKind, PlanPhase};
 use serde::{Deserialize, Serialize};
 
-use crate::event_log::{EventEntry, EventKind};
+use crate::event_log::{EventEntry, EventKind, EventLog};
 use super::snapshot::ExecutorSnapshot;
 
 // ─── Error types ────────────────────────────────────────────────────────
@@ -238,6 +238,28 @@ impl RecoveryEngine {
             last_sequence,
             recovery_timestamp_ms: now_ms,
         })
+    }
+
+    /// Recover orchestrator state from an [`EventLog`], verifying its
+    /// hash-chain integrity before replaying.
+    ///
+    /// This is the recommended entry point for production recovery: it calls
+    /// [`EventLog::verify_integrity`] first and returns
+    /// [`RecoveryError::CorruptedSnapshot`] if the chain is broken.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError::CorruptedSnapshot`] if the event log's
+    /// hash chain is broken, or [`RecoveryError::InvalidEventSequence`] if
+    /// sequence numbers are not monotonically increasing.
+    pub fn recover_from_verified_event_log(
+        &self,
+        event_log: &EventLog,
+    ) -> Result<RecoveredState, RecoveryError> {
+        event_log.verify_integrity().map_err(|e| {
+            RecoveryError::CorruptedSnapshot(format!("event log integrity check failed: {e}"))
+        })?;
+        self.recover_from_event_log(&event_log.replay())
     }
 
     /// Merge state recovered from a snapshot and an event log.

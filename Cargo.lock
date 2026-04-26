@@ -4723,6 +4723,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "parking_lot",
+ "roko-conductor",
  "roko-core",
  "serde",
  "serde_json",
