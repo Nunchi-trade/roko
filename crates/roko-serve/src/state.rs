@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
-use roko_core::{Engram, Store};
+use roko_core::{Engram, Substrate};
 use roko_daimon::{DaimonState, StrategySpaceDefinition};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::latency::LatencyRegistry;
@@ -411,6 +411,7 @@ pub struct AppState {
     pub feeds: RwLock<roko_core::FeedRegistry>,
 
     // -- Gateway audit fixes (D1, B1, B3) --
+
     /// Cached [`CascadeRouter`] so model routing avoids per-request disk I/O.
     pub cascade_router: RwLock<Option<CascadeRouter>>,
     /// Per-model token + cost counters accumulated across inference requests.
@@ -743,7 +744,6 @@ impl AppState {
                     .label
                     .clone()
                     .unwrap_or_else(|| stored.agent_id.clone()),
-                model: String::new(),
             });
         stored
     }
