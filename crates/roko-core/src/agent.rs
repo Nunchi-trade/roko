@@ -1003,6 +1003,23 @@ mod tests {
     }
 
     #[test]
+    fn backend_from_perplexity_slug() {
+        assert_eq!(AgentBackend::from_model("sonar"), AgentBackend::Perplexity);
+        assert_eq!(
+            AgentBackend::from_model("sonar-pro"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            AgentBackend::from_model("perplexity/sonar"),
+            AgentBackend::Perplexity
+        );
+        assert_eq!(
+            ProviderKind::from(AgentBackend::Perplexity),
+            ProviderKind::PerplexityApi
+        );
+    }
+
+    #[test]
     fn kimi_not_cursor() {
         assert!(!is_cursor_slug("kimi-k2.5"));
         assert_eq!(AgentBackend::from_model("kimi-k2.5"), AgentBackend::Codex);
