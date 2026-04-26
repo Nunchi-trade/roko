@@ -20,6 +20,7 @@ use validator::Validate;
 
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_learn::bandits::UcbBandit;
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::model_router::RoutingContext;
 
@@ -78,6 +79,28 @@ struct CompletionRequest {
     /// Calling agent identifier. Used for attribution and event tagging.
     #[serde(default)]
     agent_id: Option<String>,
+
+    // -- Routing hint fields (B4) ------------------------------------------
+
+    /// Broad task category hint for model routing (e.g. `"implementation"`,
+    /// `"research"`, `"refactor"`). Parsed into [`TaskCategory`]; unknown
+    /// values fall back to `Implementation`.
+    #[serde(default)]
+    task_category: Option<String>,
+
+    /// Complexity band hint (`"fast"`, `"standard"`, `"complex"`). Parsed
+    /// into [`TaskComplexityBand`]; unknown values fall back to `Standard`.
+    #[serde(default)]
+    complexity: Option<String>,
+
+    /// Agent role hint (e.g. `"implementer"`, `"researcher"`, `"auditor"`).
+    /// Parsed into [`AgentRole`]; unknown values fall back to `Implementer`.
+    #[serde(default)]
+    role: Option<String>,
+
+    /// Current iteration number for the calling task (0-based).
+    #[serde(default)]
+    iteration: Option<u32>,
 }
 
 impl RequestPayload for CompletionRequest {
@@ -238,11 +261,18 @@ async fn inference_complete(
     // -----------------------------------------------------------------------
     // Model selection (D1: uses cached CascadeRouter)
     // -----------------------------------------------------------------------
+    let hints = RoutingHints {
+        task_category: body.task_category.clone(),
+        complexity: body.complexity.clone(),
+        role: body.role.clone(),
+        iteration: body.iteration,
+    };
+
     let model_slug = if let Some(ref requested) = body.model {
         let resolved = resolve_model(&config, requested);
         resolved.slug
     } else {
-        select_model_via_router(&state).await
+        select_model_via_router(&state, &hints).await
     };
 
     // -----------------------------------------------------------------------
@@ -491,7 +521,9 @@ async fn batch_submit(
                         let resolved = resolve_model(&config_ref, requested);
                         resolved.slug
                     } else {
-                        select_model_via_router(&state_ref).await
+                        // Batch items do not carry per-item routing hints; use
+                        // defaults (same as previous hardcoded behaviour).
+                        select_model_via_router(&state_ref, &RoutingHints::default()).await
                     };
 
                     let prompt = format_messages_as_prompt(&item.messages);
@@ -682,12 +714,81 @@ fn format_messages_as_prompt(messages: &[ChatMessage]) -> String {
     parts.join("\n\n")
 }
 
-/// Select the optimal model via the CascadeRouter (D1: cached in AppState).
+/// Routing hints extracted from an incoming [`CompletionRequest`].
+#[derive(Debug, Default)]
+struct RoutingHints {
+    task_category: Option<String>,
+    complexity: Option<String>,
+    role: Option<String>,
+    iteration: Option<u32>,
+}
+
+/// Parse a string into [`TaskCategory`], falling back to `Implementation`
+/// for unrecognised values.
+fn parse_task_category(s: &str) -> TaskCategory {
+    match s.to_ascii_lowercase().as_str() {
+        "scaffolding" => TaskCategory::Scaffolding,
+        "implementation" => TaskCategory::Implementation,
+        "integration" => TaskCategory::Integration,
+        "verification" => TaskCategory::Verification,
+        "research" => TaskCategory::Research,
+        "refactor" => TaskCategory::Refactor,
+        "infra" => TaskCategory::Infra,
+        "docs" => TaskCategory::Docs,
+        _ => TaskCategory::Implementation,
+    }
+}
+
+/// Parse a string into [`TaskComplexityBand`], falling back to `Standard`
+/// for unrecognised values.
+fn parse_complexity(s: &str) -> TaskComplexityBand {
+    match s.to_ascii_lowercase().as_str() {
+        "fast" => TaskComplexityBand::Fast,
+        "standard" => TaskComplexityBand::Standard,
+        "complex" => TaskComplexityBand::Complex,
+        _ => TaskComplexityBand::Standard,
+    }
+}
+
+/// Parse a string into [`AgentRole`], falling back to `Implementer` for
+/// unrecognised values.
+fn parse_agent_role(s: &str) -> AgentRole {
+    match s.to_ascii_lowercase().replace('-', "_").as_str() {
+        "conductor" => AgentRole::Conductor,
+        "strategist" => AgentRole::Strategist,
+        "implementer" => AgentRole::Implementer,
+        "architect" => AgentRole::Architect,
+        "researcher" => AgentRole::Researcher,
+        "auditor" => AgentRole::Auditor,
+        "quick_reviewer" => AgentRole::QuickReviewer,
+        "scribe" => AgentRole::Scribe,
+        "critic" => AgentRole::Critic,
+        "auto_fixer" => AgentRole::AutoFixer,
+        "refactorer" => AgentRole::Refactorer,
+        "pre_planner" => AgentRole::PrePlanner,
+        "doc_verifier" => AgentRole::DocVerifier,
+        "integration_tester" => AgentRole::IntegrationTester,
+        "merge_resolver" => AgentRole::MergeResolver,
+        _ => AgentRole::Implementer,
+    }
+}
+
+/// Select the optimal model via the [`CascadeRouter`] (D1: cached in AppState),
+/// optionally refined by a [`UcbBandit`] when one has been trained.
 ///
 /// On first call the router is loaded from disk and cached. Subsequent
 /// requests read the cached instance through an `RwLock`, avoiding
 /// per-request file I/O.
-async fn select_model_via_router(state: &AppState) -> String {
+///
+/// When the caller supplies routing hints (task category, complexity, role,
+/// iteration) they are parsed into the corresponding enum variants and used
+/// to populate the [`RoutingContext`]. Missing fields fall back to sensible
+/// defaults (matching previous hardcoded behaviour).
+///
+/// After the cascade router selects a model, we check for a persisted
+/// [`UcbBandit`] at `.roko/learn/model-bandit.json`. If the bandit has
+/// been trained (>0 total pulls) its selection overrides the cascade pick.
+async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> String {
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
     let mut model_slugs: Vec<String> = effective_models
@@ -701,39 +802,32 @@ async fn select_model_via_router(state: &AppState) -> String {
         return config.agent.default_model.clone();
     }
 
-    // Fast path: router already cached.
-    {
-        let guard = state.cascade_router.read().await;
-        if let Some(ref router) = *guard {
-            let routing_ctx = build_default_routing_ctx();
-            let explanation = router.explain_routing(&routing_ctx, &model_slugs);
-            return explanation.selected_model;
-        }
-    }
+    // -- B4: build RoutingContext from caller hints, with defaults ----------
+    let task_category = hints
+        .task_category
+        .as_deref()
+        .map(parse_task_category)
+        .unwrap_or(TaskCategory::Implementation);
 
-    // Slow path: load from disk once, cache for subsequent requests.
-    {
-        let mut guard = state.cascade_router.write().await;
-        // Double-check after acquiring write lock.
-        if guard.is_none() {
-            let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-            let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
-            *guard = Some(router);
-        }
-        let router = guard.as_ref().expect("just initialised");
-        let routing_ctx = build_default_routing_ctx();
-        let explanation = router.explain_routing(&routing_ctx, &model_slugs);
-        explanation.selected_model
-    }
-}
+    let complexity = hints
+        .complexity
+        .as_deref()
+        .map(parse_complexity)
+        .unwrap_or(TaskComplexityBand::Standard);
 
-/// Build the default `RoutingContext` used by the gateway for model selection.
-fn build_default_routing_ctx() -> RoutingContext {
-    RoutingContext {
-        task_category: TaskCategory::Implementation,
-        complexity: TaskComplexityBand::Standard,
-        iteration: 1,
-        role: AgentRole::Implementer,
+    let role = hints
+        .role
+        .as_deref()
+        .map(parse_agent_role)
+        .unwrap_or(AgentRole::Implementer);
+
+    let iteration = hints.iteration.unwrap_or(1);
+
+    let routing_ctx = RoutingContext {
+        task_category,
+        complexity,
+        iteration,
+        role,
         crate_familiarity: 0.5,
         has_prior_failure: false,
         conductor_load: 0.0,
@@ -746,7 +840,44 @@ fn build_default_routing_ctx() -> RoutingContext {
         previous_model: None,
         plan_context_tokens: None,
         tier_thresholds: None,
+    };
+
+    // D1: use cached CascadeRouter — fast path reads, slow path loads once.
+    let cascade_pick = {
+        let guard = state.cascade_router.read().await;
+        if let Some(ref router) = *guard {
+            router
+                .explain_routing(&routing_ctx, &model_slugs)
+                .selected_model
+        } else {
+            drop(guard);
+            let mut guard = state.cascade_router.write().await;
+            if guard.is_none() {
+                let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
+                let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+                *guard = Some(router);
+            }
+            let router = guard.as_ref().expect("just initialised");
+            router
+                .explain_routing(&routing_ctx, &model_slugs)
+                .selected_model
+        }
+    };
+
+    // -- A4: bandit refinement ---------------------------------------------
+    //
+    // Attempt to load a persisted UcbBandit. When it has been trained
+    // (total_pulls > 0) we use its selection to refine the cascade pick.
+    // On any failure we silently fall back to the cascade result.
+    let bandit_path = state.workdir.join(".roko/learn/model-bandit.json");
+    if let Ok(bandit) = UcbBandit::load(&bandit_path, model_slugs) {
+        if bandit.total_pulls() > 0 {
+            let bandit_pick = bandit.select();
+            return bandit_pick;
+        }
     }
+
+    cascade_pick
 }
 
 /// Rough token count estimate: ~4 characters per token for English text.
@@ -821,6 +952,10 @@ mod tests {
             temperature: None,
             tools: None,
             agent_id: None,
+            task_category: None,
+            complexity: None,
+            role: None,
+            iteration: None,
         };
         assert!(request.validate().is_err());
     }
@@ -837,6 +972,10 @@ mod tests {
             temperature: Some(0.7),
             tools: None,
             agent_id: Some("agent-1".into()),
+            task_category: None,
+            complexity: None,
+            role: None,
+            iteration: None,
         };
         assert!(request.validate().is_ok());
     }
