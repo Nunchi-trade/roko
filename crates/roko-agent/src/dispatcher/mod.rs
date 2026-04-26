@@ -51,6 +51,58 @@ use self::timeout::with_timeout;
 use self::truncate::truncate_result;
 use self::validate::validate;
 
+use crate::safety::{
+    bash::BashPolicy,
+    git::GitPolicy,
+    network::NetworkPolicy,
+    rate_limit::{RateLimitKey, RateLimiter},
+};
+
+// ─── SafetyPolicy ────────────────────────────────────────────────────────
+
+/// Aggregate safety policy wired into the dispatcher pipeline.
+///
+/// Each optional field gates one safety family (§36.e). When `None`, the
+/// corresponding check is skipped — backward-compatible with callers that
+/// have not opted into safety enforcement yet.
+#[derive(Debug)]
+pub struct SafetyPolicy {
+    /// Bash command denylist / allowlist (§36.47).
+    pub bash: Option<BashPolicy>,
+    /// Outbound URL policy (§36.48).
+    pub network: Option<NetworkPolicy>,
+    /// Git branch-protection policy (§36.49).
+    pub git: Option<GitPolicy>,
+    /// Per-(role, tool) sliding-window rate limiter (§36.51).
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+}
+
+impl SafetyPolicy {
+    /// Construct a policy with every family disabled (pass-through).
+    #[must_use]
+    pub const fn none() -> Self {
+        Self { bash: None, network: None, git: None, rate_limiter: None }
+    }
+
+    /// Construct a policy with all families set to their defaults.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            bash: Some(BashPolicy::default()),
+            network: Some(NetworkPolicy::default()),
+            git: Some(GitPolicy::default()),
+            rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+        }
+    }
+}
+
+impl Default for SafetyPolicy {
+    /// Default is pass-through — no policies — for backward compatibility.
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
 /// Default cap on per-tool-result content bytes (§36.43).
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 16_384;
 
@@ -74,19 +126,37 @@ where
     }
 }
 
-/// Dispatches [`ToolCall`]s through validation → authorization → handler.
+/// Dispatches [`ToolCall`]s through validation → authorization → safety
+/// → handler.
 pub struct ToolDispatcher {
     registry: Arc<dyn ToolRegistry>,
     resolver: Arc<dyn HandlerResolver>,
     max_result_bytes: usize,
+    safety_policy: SafetyPolicy,
 }
 
 impl ToolDispatcher {
     /// Construct a dispatcher backed by the given tool registry and
-    /// handler resolver.
+    /// handler resolver. Safety policies default to pass-through (none).
     #[must_use]
     pub fn new(registry: Arc<dyn ToolRegistry>, resolver: Arc<dyn HandlerResolver>) -> Self {
-        Self { registry, resolver, max_result_bytes: DEFAULT_MAX_RESULT_BYTES }
+        Self {
+            registry,
+            resolver,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            safety_policy: SafetyPolicy::default(),
+        }
+    }
+
+    /// Attach a [`SafetyPolicy`] to the dispatcher.
+    ///
+    /// When set, safety checks run after authorization but before the
+    /// handler executes. Any policy violation short-circuits dispatch and
+    /// returns the corresponding [`ToolError`] immediately.
+    #[must_use]
+    pub fn with_safety_policy(mut self, policy: SafetyPolicy) -> Self {
+        self.safety_policy = policy;
+        self
     }
 
     /// Override the default result-byte cap.
@@ -135,6 +205,10 @@ impl ToolDispatcher {
                 call.name, def.permission, role_perms
             )));
         }
+        // 3.5. Safety checks — run after authorization, before handler.
+        if let Err(e) = self.check_safety(&call) {
+            return ToolResult::err(e);
+        }
         // 4. Resolve handler.
         let Some(handler) = self.resolver.resolve(&call.name) else {
             return ToolResult::err(ToolError::Other(format!("no handler: {}", call.name)));
@@ -150,6 +224,55 @@ impl ToolDispatcher {
         };
         // 6. Truncate oversized output.
         truncate_result(result, self.max_result_bytes)
+    }
+
+    /// Run all configured safety checks against `call`.
+    ///
+    /// Returns the first policy violation as a [`ToolError`], or `Ok(())`
+    /// if every enabled check passes.
+    fn check_safety(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let sp = &self.safety_policy;
+
+        // ── Rate limiter (applies to all tools) ──────────────────────
+        if let Some(ref limiter) = sp.rate_limiter {
+            let key = RateLimitKey {
+                role: String::new(), // role-agnostic when called here
+                tool: call.name.clone(),
+            };
+            limiter.check_and_record(&key)?;
+        }
+
+        // ── Bash-specific policies ───────────────────────────────────
+        if call.name == "bash" {
+            let command = call
+                .arguments
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+
+            if let Some(ref bash_policy) = sp.bash {
+                crate::safety::bash::check_command_with_policy(command, bash_policy)?;
+            }
+
+            // Git policy also applies to bash commands that start with `git `.
+            if let Some(ref git_policy) = sp.git {
+                crate::safety::git::check_git_command_with_policy(command, git_policy)?;
+            }
+        }
+
+        // ── Network-specific policies ────────────────────────────────
+        if call.name == "web_fetch" || call.name == "web_search" {
+            if let Some(ref net_policy) = sp.network {
+                let url = call
+                    .arguments
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                crate::safety::network::check_url_with_policy(url, net_policy)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Dispatch a batch of tool calls, grouping by concurrency policy.
@@ -190,6 +313,7 @@ impl std::fmt::Debug for ToolDispatcher {
             .field("max_result_bytes", &self.max_result_bytes)
             .field("registry", &"Arc<dyn ToolRegistry>")
             .field("resolver", &"Arc<dyn HandlerResolver>")
+            .field("safety_policy", &self.safety_policy)
             .finish()
     }
 }
