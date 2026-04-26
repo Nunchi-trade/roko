@@ -38,6 +38,7 @@ use roko_fs::FileSubstrate;
 use roko_fs::layout::RokoLayout;
 
 use crate::events::ServerEvent;
+use crate::relay::RelayHealth;
 use crate::templates::TemplateRegistry;
 
 fn affect_state_path(layout_root: &Path) -> PathBuf {
@@ -324,6 +325,10 @@ pub struct AppState {
     pub aggregator_cache: RwLock<HashMap<String, CachedJsonValue>>,
     /// Ring buffer of recent heartbeat payloads.
     pub heartbeats: RwLock<VecDeque<roko_core::HeartbeatPayload>>,
+    /// Relay connection health (shared with the heartbeat loop).
+    pub relay_health: Arc<parking_lot::RwLock<RelayHealth>>,
+    /// Atomic counter of active agents (used by relay workspace heartbeat).
+    pub agent_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl AppState {
@@ -391,6 +396,8 @@ impl AppState {
             discovered_agents: RwLock::new(HashMap::new()),
             aggregator_cache: RwLock::new(HashMap::new()),
             heartbeats: RwLock::new(VecDeque::new()),
+            relay_health: Arc::new(parking_lot::RwLock::new(RelayHealth::default())),
+            agent_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 

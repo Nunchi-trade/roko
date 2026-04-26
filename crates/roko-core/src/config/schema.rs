@@ -178,6 +178,10 @@ pub struct RokoConfig {
     #[serde(default)]
     pub chain: ChainConfig,
 
+    /// Relay connection settings for dashboard auto-discovery.
+    #[serde(default)]
+    pub relay: RelayConfig,
+
     /// Agent definitions for multi-agent startup (`roko up`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentDefinition>,
@@ -226,6 +230,7 @@ impl Default for RokoConfig {
             tools: ToolsConfig::default(),
             oneirography: OneirographyConfig::default(),
             chain: ChainConfig::default(),
+            relay: RelayConfig::default(),
             agents: Vec::new(),
         }
     }
@@ -1414,6 +1419,41 @@ pub struct ChainConfig {
     /// Deployer / funder address.
     #[serde(default)]
     pub deployer: Option<String>,
+}
+
+// ---- relay ----------------------------------------------------------------
+
+/// Relay connection settings for dashboard auto-discovery.
+///
+/// ```toml
+/// [relay]
+/// url = "wss://relay.nunchi.dev"
+/// workspace_name = "will-dev"
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RelayConfig {
+    /// WebSocket URL of the relay (e.g. `wss://relay.nunchi.dev`).
+    /// When `None`, relay registration is disabled.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Human-readable workspace name. Falls back to hostname.
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+
+    /// Override the public URL that the relay advertises to dashboards.
+    /// Auto-detected from RAILWAY_PUBLIC_DOMAIN / FLY_APP_NAME otherwise.
+    #[serde(default)]
+    pub public_url: Option<String>,
+
+    /// Heartbeat interval in seconds (default: 15).
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+}
+
+const fn default_heartbeat_interval_secs() -> u64 {
+    15
 }
 
 /// A single named tool profile with extra/excluded tool lists.
