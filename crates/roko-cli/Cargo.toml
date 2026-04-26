@@ -18,6 +18,7 @@ path = "src/main.rs"
 roko-core = { path = "../roko-core" }
 roko-std = { path = "../roko-std" }
 roko-fs = { path = "../roko-fs" }
+roko-learn = { path = "../roko-learn" }
 roko-compose = { path = "../roko-compose" }
 roko-agent = { path = "../roko-agent" }
 roko-agent-server = { path = "../roko-agent-server" }
