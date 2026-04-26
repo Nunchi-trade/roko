@@ -512,6 +512,8 @@ impl PlanMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::Mutex;
 
     #[derive(Debug, Default)]
@@ -569,6 +571,90 @@ mod tests {
             .with_merge_backend(merge)
             .with_regression_gate(gate);
         PlanMerger::new(MergeQueue::new(), cfg)
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "main"]);
+        git(repo.path(), &["config", "user.name", "roko"]);
+        git(repo.path(), &["config", "user.email", "roko@nunchi.dev"]);
+        repo
+    }
+
+    fn commit_all(repo: &Path, message: &str) {
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-m", message]);
+    }
+
+    #[tokio::test]
+    async fn git_backend_merges_existing_branch() {
+        let repo = init_repo();
+        let file = repo.path().join("state.txt");
+        std::fs::write(&file, "base\n").unwrap();
+        commit_all(repo.path(), "base");
+
+        git(repo.path(), &["checkout", "-b", "roko/plan-a"]);
+        std::fs::write(&file, "base\nplan-a\n").unwrap();
+        commit_all(repo.path(), "plan-a");
+
+        git(repo.path(), &["checkout", "main"]);
+        let request = MergeRequest::new("plan-a", "roko/plan-a", vec!["state.txt".into()], 0);
+        let config = PlanMergerConfig::new(repo.path().to_path_buf(), Duration::from_secs(5));
+
+        let outcome = GitMergeBackend.merge(&request, &config).await;
+
+        assert!(outcome.passed, "{}", outcome.summary);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("plan-a"));
+    }
+
+    #[tokio::test]
+    async fn git_backend_reports_conflict_and_aborts() {
+        let repo = init_repo();
+        let file = repo.path().join("state.txt");
+        std::fs::write(&file, "base\n").unwrap();
+        commit_all(repo.path(), "base");
+
+        git(repo.path(), &["checkout", "-b", "roko/plan-a"]);
+        std::fs::write(&file, "branch change\n").unwrap();
+        commit_all(repo.path(), "branch");
+
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(&file, "main change\n").unwrap();
+        commit_all(repo.path(), "main");
+
+        let request = MergeRequest::new("plan-a", "roko/plan-a", vec!["state.txt".into()], 0);
+        let config = PlanMergerConfig::new(repo.path().to_path_buf(), Duration::from_secs(5));
+
+        let outcome = GitMergeBackend.merge(&request, &config).await;
+        let status = git_output(repo.path(), &["status", "--porcelain"])
+            .await
+            .unwrap();
+
+        assert!(!outcome.passed);
+        assert_eq!(outcome.failure_kind, Some(RunnerFailureKind::Structural));
+        assert!(outcome.summary.contains("git merge"));
+        assert!(
+            status.trim().is_empty(),
+            "merge conflict should have been aborted, status:\n{status}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "main change\n");
     }
 
     #[tokio::test]
