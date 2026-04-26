@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, error, info, warn};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -15,7 +16,8 @@ use crate::{
     types::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
         ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcMessage,
-        JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
+        JsonRpcId, JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
+        PARSE_ERROR,
         PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams,
         SessionLoadParams, SessionNewParams, SessionPromptParams, SessionSetModeParams,
     },
@@ -29,10 +31,18 @@ pub async fn run_acp_server(config: AcpConfig) -> Result<()> {
     run_acp_server_with_transport(config, &mut transport).await
 }
 
-async fn run_acp_server_with_transport(
+/// Runs the ACP server against an injected transport.
+///
+/// This is primarily used by integration tests to exercise the full JSON-RPC
+/// lifecycle over in-memory streams.
+pub async fn run_acp_server_with_transport<R, W>(
     _config: AcpConfig,
-    transport: &mut StdioTransport,
-) -> Result<()> {
+    transport: &mut StdioTransport<R, W>,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut sessions = SessionManager::new();
 
     loop {
@@ -44,6 +54,14 @@ async fn run_acp_server_with_transport(
             }
             Err(TransportError::Json(error)) => {
                 error!(error = %error, "failed to decode inbound JSON-RPC message");
+                transport
+                    .send_error(
+                        JsonRpcId::Null,
+                        PARSE_ERROR,
+                        format!("failed to parse JSON-RPC message: {error}"),
+                    )
+                    .await
+                    .context("failed to send JSON-RPC parse error response")?;
                 continue;
             }
             Err(error) => return Err(error).context("failed to read ACP message"),
@@ -64,7 +82,7 @@ async fn run_acp_server_with_transport(
 }
 
 async fn handle_request(
-    transport: &mut StdioTransport,
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
     sessions: &mut SessionManager,
     request: JsonRpcRequest,
 ) -> Result<()> {
@@ -276,7 +294,7 @@ fn session_not_found_error(session_id: &str) -> (i32, String) {
 }
 
 async fn send_success<T>(
-    transport: &mut StdioTransport,
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
     id: crate::types::JsonRpcId,
     result: T,
 ) -> Result<()>
@@ -291,7 +309,7 @@ where
 }
 
 async fn send_error_response(
-    transport: &mut StdioTransport,
+    transport: &mut StdioTransport<impl AsyncRead + Unpin, impl AsyncWrite + Unpin>,
     id: crate::types::JsonRpcId,
     error: (i32, String),
 ) -> Result<()> {
@@ -349,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn session_lookup_reports_missing_session() {
+    fn test_session_lookup_reports_missing_session() {
         let sessions = SessionManager::new();
 
         let error = get_session(&sessions, "sess_missing").expect_err("session should be absent");
@@ -359,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_result_advertises_expected_protocol_version() {
+    fn test_initialize_result_advertises_expected_protocol_version() {
         let result = InitializeResult {
             protocol_version: ACP_PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {

@@ -66,6 +66,8 @@ pub enum JsonRpcId {
     Number(u64),
     /// String request identifier.
     String(String),
+    /// Null identifier used for parse-level failures before an id is known.
+    Null,
 }
 
 /// A JSON-RPC 2.0 response.

@@ -1,5 +1,7 @@
 //! Cognitive event to session/update streaming.
 
+use std::time::Duration;
+
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -9,10 +11,11 @@ use tracing::{debug, warn};
 
 use crate::{
     session::{AcpSession, CancelToken},
-    transport::{StdioTransport, TransportError},
+    transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, PlanEntry, PlanStatus, Priority, SESSION_BUSY, SessionPromptParams,
-        SessionPromptResult, SessionUpdate, StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
+        ContentBlock, JsonRpcMessage, PlanEntry, PlanStatus, Priority, SESSION_BUSY,
+        SessionCancelParams, SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason,
+        ToolCallKind, ToolCallStatus, UsageInfo,
     },
 };
 
@@ -132,8 +135,21 @@ where
     W: AsyncWrite + Unpin,
 {
     loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
+        enum StreamAction {
+            Cancelled,
+            Event(Option<CognitiveEvent>),
+            Inbound(TransportResult<Option<JsonRpcMessage>>),
+        }
+
+        let action = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => StreamAction::Cancelled,
+            maybe_event = events.recv() => StreamAction::Event(maybe_event),
+            inbound = transport.read_message() => StreamAction::Inbound(inbound),
+        };
+
+        match action {
+            StreamAction::Cancelled => {
                 debug!(session_id, "ACP prompt cancelled while streaming events");
                 return Ok(SessionPromptResult {
                     session_id: session_id.to_owned(),
@@ -141,7 +157,7 @@ where
                     usage: None,
                 });
             }
-            maybe_event = events.recv() => {
+            StreamAction::Event(maybe_event) => {
                 let Some(event) = maybe_event else {
                     warn!(session_id, "ACP event stream closed without an explicit completion event");
                     let stop_reason = if cancel_token.is_cancelled() {
@@ -177,6 +193,52 @@ where
                     }
                 }
             }
+            StreamAction::Inbound(inbound) => match inbound? {
+                Some(JsonRpcMessage::Notification(notification))
+                    if notification.method == "session/cancel" =>
+                {
+                    match serde_json::from_value::<SessionCancelParams>(
+                        notification.params.unwrap_or(serde_json::Value::Null),
+                    ) {
+                        Ok(params) if params.session_id == session_id => {
+                            cancel_token.cancel();
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(
+                                session_id,
+                                error = %error,
+                                "received malformed session/cancel while prompt was active"
+                            );
+                        }
+                    }
+                }
+                Some(JsonRpcMessage::Notification(notification)) => {
+                    warn!(
+                        session_id,
+                        method = %notification.method,
+                        "ignoring unsupported notification while prompt was active"
+                    );
+                }
+                Some(JsonRpcMessage::Response(response)) => {
+                    transport.handle_incoming_response(response);
+                }
+                Some(JsonRpcMessage::Request(request)) => {
+                    warn!(
+                        session_id,
+                        method = %request.method,
+                        "ignoring inbound request while prompt was active"
+                    );
+                }
+                None => {
+                    warn!(session_id, "ACP client disconnected while prompt was active");
+                    return Ok(SessionPromptResult {
+                        session_id: session_id.to_owned(),
+                        stop_reason: StopReason::Cancelled,
+                        usage: None,
+                    });
+                }
+            },
         }
     }
 }
@@ -269,10 +331,26 @@ async fn run_placeholder_cognitive_task(
         return Ok(());
     }
 
+    tokio::select! {
+        _ = cancel_token.cancelled() => return Ok(()),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+
+    if cancel_token.is_cancelled() {
+        return Ok(());
+    }
+
     let _ = event_sender
         .send(CognitiveEvent::Complete {
             stop_reason: StopReason::EndTurn,
-            usage: None,
+            usage: Some(UsageInfo {
+                total_tokens: 16,
+                input_tokens: 6,
+                output_tokens: 10,
+                thought_tokens: None,
+                cached_read_tokens: None,
+                cached_write_tokens: None,
+            }),
         })
         .await;
 
