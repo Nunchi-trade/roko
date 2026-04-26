@@ -64,6 +64,11 @@ via `cargo run -p roko-cli -- <subcommand>`, it's probably wrong.
 ### 3. Verify before marking done
 Run the actual code path. "Code exists" != "feature works". Test via CLI, not just unit tests.
 
+### 4. Log gaps when finishing work
+After completing any implementation task, append unfinished items to `.roko/GAPS.md`.
+Include: what's missing, why it wasn't done, and what subsystem it affects.
+This file is the canonical gap tracker — check it before starting new work.
+
 ## Architecture
 
 1 noun (Signal) + 6 verb traits (Substrate, Scorer, Gate, Router, Composer, Policy).

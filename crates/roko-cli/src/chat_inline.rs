@@ -188,6 +188,8 @@ struct ChatSession {
     agent_id: String,
     tick: u64,
     started_at: Instant,
+    /// Channel for receiving async responses from background HTTP calls.
+    response_rx: Option<tokio::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +238,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         agent_id: agent_id.to_string(),
         tick: 0,
         started_at: Instant::now(),
+        response_rx: None,
     };
 
     // Main event loop
@@ -274,6 +277,44 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         }
                     }
                     Phase::Done => break,
+                }
+            }
+        }
+
+        // Check for async response from background HTTP call
+        if let Some(ref mut rx) = session.response_rx {
+            match rx.try_recv() {
+                Ok(Ok(reply)) => {
+                    push_agent_response(&mut term, &theme, &reply, &session.agent_id)?;
+                    let approx_tokens = (reply.len() as u64) / 4;
+                    session.cost.record_run(0.0, approx_tokens, approx_tokens, "unknown", 0.0);
+                    session.phase = Phase::Input;
+                    session.response_rx = None;
+                    term.push_blank()?;
+                }
+                Ok(Err(err)) => {
+                    term.push_lines(&[styled::continuation(
+                        &theme,
+                        "error",
+                        &err,
+                        None,
+                    )])?;
+                    session.phase = Phase::Input;
+                    session.response_rx = None;
+                    term.push_blank()?;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // Still waiting — spinner continues
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    term.push_lines(&[styled::continuation(
+                        &theme,
+                        "error",
+                        "response channel closed",
+                        None,
+                    )])?;
+                    session.phase = Phase::Input;
+                    session.response_rx = None;
                 }
             }
         }
@@ -353,28 +394,24 @@ async fn handle_input_key(
             session.phase = Phase::Thinking;
             session.streaming = StreamingState::new("resolving...");
 
-            // Send message and get response (blocking for now)
-            let response = send_and_receive(client, serve_url, &session.agent_id, &text).await;
-
-            match response {
-                Ok(reply) => {
-                    push_agent_response(term, theme, &reply, &session.agent_id)?;
-                    // Record in cost meter (approximate — real cost tracking comes later)
-                    let approx_tokens = (reply.len() as u64) / 4;
-                    session.cost.record_run(0.0, approx_tokens, approx_tokens, "unknown", 0.0);
-                }
-                Err(err) => {
-                    term.push_lines(&[styled::continuation(
-                        theme,
-                        "error",
-                        &format!("{err}"),
-                        None,
-                    )])?;
-                }
-            }
-
-            session.phase = Phase::Input;
-            term.push_blank()?;
+            // Spawn async HTTP call — non-blocking so the spinner animates
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            session.response_rx = Some(rx);
+            let client_clone = client.clone();
+            let serve_url_owned = serve_url.to_string();
+            let agent_id_owned = session.agent_id.clone();
+            tokio::spawn(async move {
+                let result = send_and_receive(
+                    &client_clone,
+                    &serve_url_owned,
+                    &agent_id_owned,
+                    &text,
+                )
+                .await;
+                let _ = tx
+                    .send(result.map_err(|e| e.to_string()))
+                    .await;
+            });
         }
 
         // Exit
