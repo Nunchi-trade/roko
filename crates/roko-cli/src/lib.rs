@@ -48,6 +48,7 @@ pub mod doctor;
 pub mod episode;
 pub mod event_sources;
 pub mod explain;
+pub(crate) mod gate_runner;
 mod heartbeat;
 pub mod index;
 pub mod inject;
@@ -71,6 +72,7 @@ pub mod subscriptions;
 pub mod surface_inventory;
 pub mod task_parser;
 pub mod tui;
+pub mod vision_loop;
 pub mod worker;
 pub mod workspace_paths;
 

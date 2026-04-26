@@ -58,13 +58,13 @@ use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::{
     GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
 };
+use roko_core::extension::ExtensionChain;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
 use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
-use roko_core::extension::ExtensionChain;
 use roko_core::{
     AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
     OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
@@ -86,7 +86,7 @@ use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
     AcceptanceDecision, AcceptanceEvidence, AcceptanceOutcome, ArtifactStore as GateArtifactStore,
     ClippyGate, CompileGate, FailureClass, GateEvidence, GateFailureAction, GateRatchet,
-    NoStubEvidence, ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict,
+    ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict,
     RecoveryEvidence, ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle,
     ShellGate, StructuredOutputEvidence, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
@@ -194,6 +194,14 @@ use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
 use crate::workspace_paths::find_prd_path;
 
+// Gate-related free functions and types extracted to gate_runner.rs.
+use crate::gate_runner::{
+    FsGeneratedArtifactStore, RecordedGateVerdict, RecordingGate, acceptance_task_dir,
+    apply_neuro_gate_hints, domain_uses_compiled_gates, format_acceptance_decision,
+    gate_artifact_store_path, gate_ratchet_path, gate_result_matches_requirement,
+    primary_gate_phase_to_rung, scan_no_stub_evidence,
+};
+
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
@@ -205,14 +213,6 @@ const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
 const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
 const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
-
-/// Whether this domain uses compiled (compile/test/clippy) gates.
-fn domain_uses_compiled_gates(domain: &TaskDomain) -> bool {
-    matches!(
-        domain,
-        TaskDomain::Code | TaskDomain::Chain | TaskDomain::Custom(_)
-    )
-}
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
 fn domain_uses_git(domain: &TaskDomain) -> bool {
@@ -235,17 +235,6 @@ fn model_experiments_path(workdir: &Path) -> PathBuf {
         .join(".roko")
         .join("learn")
         .join("model-experiments.json")
-}
-
-fn gate_artifact_store_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("artifacts")
-}
-
-fn gate_ratchet_path(workdir: &Path) -> PathBuf {
-    workdir
-        .join(".roko")
-        .join("learn")
-        .join("gate-ratchet.json")
 }
 
 fn failure_pattern_store_path(workdir: &Path) -> PathBuf {
@@ -2759,6 +2748,94 @@ fn knowledge_routing_boost(
     boost.clamp(-0.3, 0.3)
 }
 
+/// Build structured knowledge routing advice for all candidate models.
+///
+/// This aggregates per-model knowledge signals into a
+/// [`KnowledgeRoutingAdvice`] that can be applied to a
+/// [`CascadeRouteExplanation`] via
+/// [`CascadeRouter::apply_knowledge_advice`].
+fn build_knowledge_routing_advice(
+    knowledge_store: &KnowledgeStore,
+    candidate_slugs: &[String],
+    role: AgentRole,
+    task_category: &str,
+) -> roko_learn::cascade_router::KnowledgeRoutingAdvice {
+    use roko_learn::cascade_router::{KnowledgeHint, KnowledgeRoutingAdvice};
+
+    let query = format!("{} {} routing model", role.label(), task_category);
+    let entries = match knowledge_store.query(&query, 10) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "failed to query knowledge store for routing advice"
+            );
+            return KnowledgeRoutingAdvice::default();
+        }
+    };
+
+    if entries.is_empty() {
+        return KnowledgeRoutingAdvice::default();
+    }
+
+    let mut hints: Vec<KnowledgeHint> = Vec::new();
+
+    for slug in candidate_slugs {
+        let slug_lower = slug.to_lowercase();
+        let mut score = 0.0_f64;
+        let mut supporting = 0_u32;
+        let mut positive_count = 0_u32;
+        let mut negative_count = 0_u32;
+
+        for entry in &entries {
+            let content_matches = entry.content.to_lowercase().contains(&slug_lower)
+                || entry
+                    .source_model
+                    .as_deref()
+                    .is_some_and(|sm| sm.eq_ignore_ascii_case(slug))
+                || entry
+                    .tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(slug));
+            if !content_matches {
+                continue;
+            }
+
+            supporting += 1;
+            let weight = entry.confidence.clamp(0.0, 1.0);
+            if entry.kind == KnowledgeKind::AntiKnowledge {
+                score -= weight * 0.15;
+                negative_count += 1;
+            } else {
+                score += weight * 0.10;
+                positive_count += 1;
+            }
+        }
+
+        if supporting > 0 {
+            let reason = if negative_count > 0 && positive_count > 0 {
+                format!(
+                    "{positive_count} positive + {negative_count} negative entries for {slug}"
+                )
+            } else if negative_count > 0 {
+                format!("{negative_count} anti-knowledge entries for {slug}")
+            } else {
+                format!("{positive_count} positive entries for {slug}")
+            };
+
+            hints.push(KnowledgeHint {
+                model_slug: slug.clone(),
+                score: score.clamp(-0.3, 0.3),
+                supporting_entries: supporting,
+                reason,
+            });
+        }
+    }
+
+    let has_signal = !hints.is_empty();
+    KnowledgeRoutingAdvice { hints, has_signal }
+}
+
 /// INT-20: Record significant lifecycle transitions as knowledge entries in the
 /// neuro store.
 ///
@@ -2816,18 +2893,13 @@ fn record_lifecycle_knowledge(
 
     // Route through admission store when available.
     if let Some(admission) = admission {
-        let candidate = KnowledgeCandidateRecord::new(
-            &entry_id,
-            kind,
-            "lifecycle-monitor",
-            &content,
-            1.0,
-        )
-        .with_tags(vec![
-            "lifecycle".to_string(),
-            format!("agent:{}", transition.agent_id),
-            format!("state:{:?}", transition.to),
-        ]);
+        let candidate =
+            KnowledgeCandidateRecord::new(&entry_id, kind, "lifecycle-monitor", &content, 1.0)
+                .with_tags(vec![
+                    "lifecycle".to_string(),
+                    format!("agent:{}", transition.agent_id),
+                    format!("state:{:?}", transition.to),
+                ]);
 
         match admission.submit_candidate(candidate) {
             Ok(decision) => {
@@ -2865,67 +2937,6 @@ fn record_lifecycle_knowledge(
 
     if let Err(err) = knowledge_store.add(entry) {
         tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
-    }
-}
-
-/// INT-15: Query neuro knowledge for gate-related failure and stability
-/// patterns and apply them as hints to the adaptive gate thresholds.
-///
-/// This bridges neuro (durable knowledge) with the gate verification pipeline,
-/// so that known problematic or reliably stable rungs are tuned accordingly
-/// before the plan run begins.
-fn apply_neuro_gate_hints(knowledge_store: &KnowledgeStore, thresholds: &mut AdaptiveThresholds) {
-    let failure_rungs = match knowledge_store.query("gate failure compile lint test", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint")
-                    || content_lower.contains("clippy")
-                    || content_lower.contains("rung 1")
-                {
-                    Some(1)
-                } else if content_lower.contains("test fail") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            tracing::debug!(error = %err, "INT-15: skipping neuro gate hints (query failed)");
-            return;
-        }
-    };
-
-    let stable_rungs = match knowledge_store.query("gate stable passing consistently", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint") || content_lower.contains("rung 1") {
-                    Some(1)
-                } else if content_lower.contains("test") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
-
-    if !failure_rungs.is_empty() || !stable_rungs.is_empty() {
-        tracing::info!(
-            failure_rungs = ?failure_rungs,
-            stable_rungs = ?stable_rungs,
-            "INT-15: applying neuro knowledge hints to adaptive gate thresholds"
-        );
-        thresholds.apply_neuro_hints(&failure_rungs, &stable_rungs);
     }
 }
 
@@ -3721,108 +3732,6 @@ fn fallback_plan_complexity(tasks: &[crate::task_parser::TaskDef]) -> PlanComple
         .map(|task| task_tier_to_plan_complexity(&task.tier))
         .max()
         .unwrap_or(PlanComplexity::Simple)
-}
-
-fn primary_gate_phase_to_rung(phase: &str) -> Option<Rung> {
-    match phase {
-        gate if gate.starts_with("compile") => Some(Rung::Compile),
-        gate if gate.starts_with("clippy") => Some(Rung::Lint),
-        gate if gate.starts_with("test") => Some(Rung::Test),
-        "symbol" => Some(Rung::Symbol),
-        gate if gate.starts_with("generated_test") || gate == "verify_chain" => {
-            Some(Rung::GeneratedTest)
-        }
-        gate if gate.starts_with("property_test") || gate == "fact_check" => {
-            Some(Rung::PropertyTest)
-        }
-        gate if gate == "llm_judge" || gate.starts_with("integration") => Some(Rung::Integration),
-        _ => None,
-    }
-}
-
-#[derive(Clone)]
-struct RecordedGateVerdict {
-    rung: Rung,
-    verdict: Verdict,
-}
-
-struct RecordingGate {
-    rung: Rung,
-    inner: Box<dyn Gate>,
-    sink: Arc<Mutex<Vec<RecordedGateVerdict>>>,
-}
-
-impl RecordingGate {
-    fn new(rung: Rung, inner: Box<dyn Gate>, sink: Arc<Mutex<Vec<RecordedGateVerdict>>>) -> Self {
-        Self { rung, inner, sink }
-    }
-}
-
-#[async_trait::async_trait]
-impl Gate for RecordingGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
-        let verdict = self.inner.verify(signal, ctx).await;
-        self.sink
-            .lock()
-            .expect("recorded gate sink poisoned")
-            .push(RecordedGateVerdict {
-                rung: self.rung,
-                verdict: verdict.clone(),
-            });
-        verdict
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FsGeneratedArtifactStore {
-    root: PathBuf,
-}
-
-impl FsGeneratedArtifactStore {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn artifact_dir(&self) -> PathBuf {
-        self.root.join("generated-tests")
-    }
-
-    fn matching_entries(&self, prefix: &str) -> Vec<String> {
-        let dir = self.artifact_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-
-        let mut names: Vec<String> = entries
-            .filter_map(std::result::Result::ok)
-            .filter_map(|entry| {
-                entry.file_type().ok().filter(|kind| kind.is_file())?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let logical = format!("generated-tests/{name}");
-                logical.starts_with(prefix).then_some(logical)
-            })
-            .collect();
-        names.sort();
-        names
-    }
-}
-
-impl GeneratedArtifactStore for FsGeneratedArtifactStore {
-    fn list(&self, _plan: &str, prefix: &str) -> Vec<String> {
-        self.matching_entries(prefix)
-    }
-
-    fn read(&self, _plan: &str, name: &str) -> Option<Vec<u8>> {
-        let relative = name.strip_prefix("generated-tests/")?;
-        if relative.contains("..") || relative.contains('/') {
-            return None;
-        }
-        std::fs::read(self.artifact_dir().join(relative)).ok()
-    }
 }
 
 // ─── Gate Oracle Adapters ────────────────────────────────────────────────
@@ -4823,8 +4732,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
-        let knowledge_admission =
-            Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -5035,8 +4943,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
-        let knowledge_admission =
-            Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -5243,8 +5150,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
-        let knowledge_admission =
-            Some(KnowledgeAdmissionStore::for_workdir(workdir));
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -5849,7 +5755,11 @@ impl PlanRunner {
             // degradation) as knowledge entries so that future sessions can
             // learn from operational history.
             RokoEvent::AgentLifecycleTransition(ref transition) => {
-                record_lifecycle_knowledge(&self.knowledge_store, self.knowledge_admission.as_ref(), transition);
+                record_lifecycle_knowledge(
+                    &self.knowledge_store,
+                    self.knowledge_admission.as_ref(),
+                    transition,
+                );
                 false
             }
             RokoEvent::HeartbeatTick(_)
@@ -11179,7 +11089,8 @@ impl PlanRunner {
         }
 
         // UX34: when a force_backend override was used, feed the outcome into
-        // the cascade router so it learns which backend works for this role.
+        // the cascade router with a dampened reward so it learns which backend
+        // works for this task category without letting user bias dominate.
         {
             let routing_reason = self
                 .task_trackers
@@ -11187,15 +11098,22 @@ impl PlanRunner {
                 .and_then(|t| t.last_routing_reason.clone());
             if routing_reason.as_deref() == Some("role_force_backend") {
                 let model = self.effective_model();
+                let ctx = cascade_routing_context(
+                    self,
+                    plan_id,
+                    task_id,
+                    AgentRole::Implementer,
+                    task_def.as_ref(),
+                );
                 self.learning
                     .cascade_router()
-                    .record_outcome(&model, result.success);
+                    .record_override_outcome(&model, &ctx, result.success);
                 tracing::debug!(
                     plan_id = %plan_id,
                     task_id = %task_id,
                     model = %model,
                     success = result.success,
-                    "UX34: persisted force_backend outcome to cascade router"
+                    "UX34: persisted force_backend override outcome to cascade router (dampened)"
                 );
             }
         }
@@ -13304,7 +13222,8 @@ impl PlanRunner {
         if let Some(model) = selected_model {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
-        // UX34: record force_backend failure outcome so the router learns.
+        // UX34: record force_backend failure with dampened reward so the
+        // router learns from override failures without over-penalizing.
         {
             let routing_reason = self
                 .task_trackers
@@ -13312,12 +13231,21 @@ impl PlanRunner {
                 .and_then(|t| t.last_routing_reason.clone());
             if routing_reason.as_deref() == Some("role_force_backend") {
                 if let Some(model) = selected_model {
-                    self.learning.cascade_router().record_outcome(model, false);
+                    let ctx = cascade_routing_context(
+                        self,
+                        plan_id,
+                        task_id,
+                        AgentRole::Implementer,
+                        task_def.as_ref(),
+                    );
+                    self.learning
+                        .cascade_router()
+                        .record_override_outcome(model, &ctx, false);
                     tracing::debug!(
                         plan_id = %plan_id,
                         task_id = %task_id,
                         model = %model,
-                        "UX34: persisted force_backend failure to cascade router"
+                        "UX34: persisted force_backend failure to cascade router (dampened)"
                     );
                 }
             }
@@ -14920,6 +14848,26 @@ impl PlanRunner {
             } else {
                 routing_explanation =
                     Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
+
+                // Apply knowledge-informed routing advice to the explanation.
+                // This adjusts candidate scores based on past model/task
+                // performance stored in the neuro knowledge store.
+                if let Some(ref mut explanation) = routing_explanation {
+                    let knowledge_advice = build_knowledge_routing_advice(
+                        &self.knowledge_store,
+                        &healthy_models,
+                        role,
+                        routing_ctx.task_category.label(),
+                    );
+                    if knowledge_advice.has_signal {
+                        tracing::info!(
+                            hints = knowledge_advice.hints.len(),
+                            "[orchestrate] applying knowledge routing advice to cascade explanation"
+                        );
+                    }
+                    cascade_router.apply_knowledge_advice(explanation, knowledge_advice);
+                }
+
                 if let Some(explanation) = routing_explanation.as_ref() {
                     routing_stage = explanation.stage.label().to_string();
                     routing_reason = if cost_spike {
@@ -15739,7 +15687,10 @@ impl PlanRunner {
                 "model": &selected_model,
                 "prompt_len": task_text.len(),
             });
-            if let Err(err) = self.extension_chain.run_pre_inference(&mut pre_inference_value) {
+            if let Err(err) = self
+                .extension_chain
+                .run_pre_inference(&mut pre_inference_value)
+            {
                 tracing::warn!(error = %err, "extension pre_inference hook failed");
             }
         }
@@ -16137,7 +16088,10 @@ impl PlanRunner {
                 "cost_usd": result.usage.cost_usd,
                 "wall_ms": result.usage.wall_ms,
             });
-            if let Err(err) = self.extension_chain.run_post_inference(&mut post_inference_value) {
+            if let Err(err) = self
+                .extension_chain
+                .run_post_inference(&mut post_inference_value)
+            {
                 tracing::warn!(error = %err, "extension post_inference hook failed");
             }
         }
@@ -16917,7 +16871,10 @@ impl PlanRunner {
                 "verdict_names": verdict_names,
             });
             let gate_label = format!("pipeline:rung-{rung}");
-            if let Err(err) = self.extension_chain.run_on_gate(&gate_label, all_passed, &mut gate_details) {
+            if let Err(err) =
+                self.extension_chain
+                    .run_on_gate(&gate_label, all_passed, &mut gate_details)
+            {
                 tracing::warn!(error = %err, "extension on_gate hook failed");
             }
         }
@@ -20394,85 +20351,6 @@ where
             "unsupported agent output outcome '{other}'"
         ))),
     }
-}
-
-fn gate_result_matches_requirement(
-    result: &GateResult,
-    requirement: &roko_gate::GateRequirement,
-) -> bool {
-    let gate_name = result.gate_name.to_ascii_lowercase();
-    let requirement_id = requirement.id.to_ascii_lowercase();
-    if gate_name == requirement_id || gate_name.contains(&requirement_id) {
-        return true;
-    }
-    matches!(
-        (requirement.kind, gate_name.as_str()),
-        (
-            roko_gate::GateRequirementKind::Compile,
-            "compile" | "cargo_check"
-        ) | (roko_gate::GateRequirementKind::Test, "test" | "cargo_test")
-            | (roko_gate::GateRequirementKind::Lint, "lint" | "clippy")
-            | (
-                roko_gate::GateRequirementKind::Review,
-                "review" | "llm_judge"
-            )
-    )
-}
-
-fn scan_no_stub_evidence(workdir: &Path, production_paths: &[String]) -> NoStubEvidence {
-    let mut scanned_paths = Vec::new();
-    let mut findings = Vec::new();
-    for path in production_paths {
-        let full_path = workdir.join(path);
-        if !full_path.exists() {
-            findings.push(format!("{path}: path missing"));
-            continue;
-        }
-        scanned_paths.push(path.clone());
-        if full_path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&full_path)
-        {
-            let lower = content.to_ascii_lowercase();
-            for marker in ["todo!", "unimplemented!", "noop", "stub"] {
-                if lower.contains(marker) {
-                    findings.push(format!("{path}: contains marker `{marker}`"));
-                }
-            }
-        }
-    }
-    NoStubEvidence {
-        outcome: if findings.is_empty() {
-            AcceptanceOutcome::Passed
-        } else {
-            AcceptanceOutcome::Failed
-        },
-        scanned_paths,
-        findings,
-    }
-}
-
-fn acceptance_task_dir(workdir: &Path, plan_id: &str, task_id: &str) -> PathBuf {
-    workdir
-        .join(".roko")
-        .join("acceptance")
-        .join(plan_id)
-        .join(task_id)
-}
-
-fn format_acceptance_decision(task_id: &str, decision: &AcceptanceDecision) -> String {
-    let mut out = format!(
-        "task {task_id} acceptance outcome {:?} did not pass",
-        decision.outcome
-    );
-    for issue in &decision.issues {
-        out.push_str(&format!(
-            "\n- {}: {}{}",
-            issue.code,
-            issue.message,
-            if issue.blocking { " (blocking)" } else { "" }
-        ));
-    }
-    out
 }
 
 /// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
