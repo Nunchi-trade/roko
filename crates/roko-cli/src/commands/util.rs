@@ -231,6 +231,7 @@ pub(crate) async fn cmd_run(
 
     // Use inline rendering when stdout is a TTY and we're not in --json or --quiet mode.
     if !cli.json && !cli.quiet && roko_cli::inline::should_use_inline() {
+        let start = std::time::Instant::now();
         let report =
             roko_cli::run_inline::run_once_inline(&workdir, &config, &prompt, external_hub).await?;
 
