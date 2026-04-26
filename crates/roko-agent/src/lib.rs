@@ -72,6 +72,7 @@ pub mod process;
 pub mod provider;
 pub mod rate_limit;
 pub mod retry;
+pub mod runtime_events;
 pub mod safety;
 pub mod session;
 pub mod streaming;
@@ -121,6 +122,7 @@ pub use provider::{
     with_scoped_safety_layer,
 };
 pub use rate_limit::ProviderRateLimiter;
+pub use runtime_events::{AgentEventStream, AgentRuntimeEvent};
 pub use roko_core::{
     BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
     MANIFEST_BACKED_BUILTIN_ROLE_IDS, PromptPolicy, RolePolicyManifest,

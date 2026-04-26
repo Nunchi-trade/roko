@@ -1,3 +1,10 @@
+pub mod stream;
+
+pub use stream::{
+    ClaudeAssistantEvent, ClaudeContentBlock, ClaudeMessage, ClaudeResultEvent, ClaudeStreamEvent,
+    ClaudeSystemEvent, ClaudeToolEvent, ClaudeUsage, parse_stream_line,
+};
+
 use crate::Agent;
 use crate::claude_cli_agent::{ClaudeCliAgent, build_settings_json};
 use crate::provider::{AgentCreationError, AgentOptions, ProviderAdapter, ProviderError};

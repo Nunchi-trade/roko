@@ -169,6 +169,202 @@ pub struct GateVerdictSummary {
     pub failure_kind: Option<RunnerFailureKind>,
 }
 
+// ─── Stderr Classification ──────────────────────────────────────────────
+
+/// Severity classification for agent stderr lines, applied before persistence
+/// so that downstream consumers (TUI, HTTP, query index) can distinguish
+/// provider warnings, real errors, and informational/infra noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StderrSeverity {
+    /// Provider/CLI warning that does not abort the task.
+    Warning,
+    /// Hard error (panic, failure, abort).
+    Error,
+    /// Informational / infra-level chatter (banners, INFO lines).
+    Infra,
+}
+
+impl StderrSeverity {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Infra => "infra",
+        }
+    }
+
+    /// Rule-based classification of a stderr line.
+    ///
+    /// Order matters: explicit "info"/"INFO" markers take precedence over
+    /// substrings that happen to live inside an info banner; explicit warning
+    /// markers beat error words inside an info banner; otherwise default to
+    /// `Error` so we never silently downgrade a hard failure.
+    pub fn from_message(message: &str) -> Self {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return Self::Infra;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+
+        // Explicit info markers — provider banners, "INFO ..." log lines.
+        if message.contains("INFO")
+            || lower.starts_with("info ")
+            || lower.starts_with("info:")
+            || lower.starts_with("[info]")
+            || lower.contains(" info ")
+            || lower.contains("debug")
+            || lower.contains("trace")
+        {
+            // Promote to Error/Warning if the line *also* clearly indicates one.
+            if lower.contains("error") || lower.contains("panic") || lower.contains("failed") {
+                return Self::Error;
+            }
+            if lower.contains("warn") {
+                return Self::Warning;
+            }
+            return Self::Infra;
+        }
+
+        if lower.contains("warn") {
+            return Self::Warning;
+        }
+        if lower.contains("error") || lower.contains("failed") || lower.contains("panic") {
+            return Self::Error;
+        }
+
+        // Default: an unannotated stderr line is treated as an error so we
+        // never silently downgrade a real failure.
+        Self::Error
+    }
+}
+
+// ─── Normalized Event Category ──────────────────────────────────────────
+
+/// Provider-agnostic event category emitted by the projection layer.
+///
+/// Every runtime event flowing through [`projection::Projection`](super::projection::Projection)
+/// is mapped to exactly one `EventCategory` so that TUI / HTTP-SSE / non-TUI
+/// CLI subscribers can filter, route, and index events without parsing the
+/// nested provider-specific payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventCategory {
+    /// Run-level lifecycle (`run.started`, `run.completed`, `resume.marker`).
+    Run,
+    /// Plan-level lifecycle (`plan.started`, `plan.completed`).
+    Plan,
+    /// Task attempt lifecycle (`task.attempt.started`, `task.attempt.completed`).
+    Task,
+    /// Resume markers and recovery hints.
+    Resume,
+    /// Agent process lifecycle (`agent.started`, `agent.dispatch.completed`,
+    /// `agent.completed`, `agent.exited`, `agent.error`, `agent.system_init`).
+    AgentLifecycle,
+    /// Agent textual output (assistant deltas, structured messages).
+    AgentMessage,
+    /// Agent tool call start/finish.
+    AgentTool,
+    /// Per-turn token usage.
+    Token,
+    /// Authoritative cost updates.
+    Cost,
+    /// Gate dispatch and verdict events.
+    Gate,
+    /// Retry policy decisions.
+    Retry,
+    /// Dream / consolidation events.
+    Dream,
+    /// Fallback for unknown / coerced events.
+    Other,
+}
+
+impl EventCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Plan => "plan",
+            Self::Task => "task",
+            Self::Resume => "resume",
+            Self::AgentLifecycle => "agent_lifecycle",
+            Self::AgentMessage => "agent_message",
+            Self::AgentTool => "agent_tool",
+            Self::Token => "token",
+            Self::Cost => "cost",
+            Self::Gate => "gate",
+            Self::Retry => "retry",
+            Self::Dream => "dream",
+            Self::Other => "other",
+        }
+    }
+
+    /// Map a `RunnerEvent` to its category. Stable mapping used by the
+    /// projection facade and the on-disk event index.
+    pub fn from_runner_event(event: &RunnerEvent) -> Self {
+        match event {
+            RunnerEvent::ResumeMarker { .. } => Self::Resume,
+            RunnerEvent::RunStarted { .. } | RunnerEvent::RunCompleted { .. } => Self::Run,
+            RunnerEvent::PlanStarted { .. } | RunnerEvent::PlanCompleted { .. } => Self::Plan,
+            RunnerEvent::TaskAttemptStarted { .. } | RunnerEvent::TaskAttemptCompleted { .. } => {
+                Self::Task
+            }
+            RunnerEvent::AgentDispatchStarted { .. }
+            | RunnerEvent::AgentDispatchCompleted { .. }
+            | RunnerEvent::AgentCompleted { .. } => Self::AgentLifecycle,
+            RunnerEvent::GateDispatchStarted { .. } | RunnerEvent::GateCompleted { .. } => {
+                Self::Gate
+            }
+            RunnerEvent::RetryDecision { .. } => Self::Retry,
+        }
+    }
+
+    /// Map an `AgentEvent` to its category.
+    pub fn from_agent_event(event: &AgentEvent) -> Self {
+        match event {
+            AgentEvent::Started { .. }
+            | AgentEvent::SystemInit { .. }
+            | AgentEvent::Error { .. }
+            | AgentEvent::Exited { .. } => Self::AgentLifecycle,
+            AgentEvent::MessageDelta { .. } => Self::AgentMessage,
+            AgentEvent::ToolCall { .. } | AgentEvent::ToolOutput { .. } => Self::AgentTool,
+            AgentEvent::TokenUsage { .. } => Self::Token,
+            AgentEvent::TurnCompleted { .. } => Self::Cost,
+        }
+    }
+
+    /// Map a free-form event-type string to its category. Returns
+    /// `(category, coerced)` where `coerced = true` indicates the input did
+    /// not match any known prefix and was bucketed into `Other`.
+    pub fn from_event_type(event_type: &str) -> (Self, bool) {
+        let cat = if let Some(rest) = event_type.strip_prefix("agent.") {
+            match rest {
+                "message_delta" => Self::AgentMessage,
+                "tool_call" | "tool_output" => Self::AgentTool,
+                "token_usage" => Self::Token,
+                "turn_completed" => Self::Cost,
+                _ => Self::AgentLifecycle,
+            }
+        } else if event_type.starts_with("plan.") {
+            Self::Plan
+        } else if event_type.starts_with("task.") {
+            Self::Task
+        } else if event_type.starts_with("gate.") {
+            Self::Gate
+        } else if event_type.starts_with("retry.") {
+            Self::Retry
+        } else if event_type.starts_with("run.") {
+            Self::Run
+        } else if event_type.starts_with("resume.") {
+            Self::Resume
+        } else if event_type.starts_with("dream.") {
+            Self::Dream
+        } else {
+            return (Self::Other, true);
+        };
+        (cat, false)
+    }
+}
+
 // ─── Runtime Lifecycle Events ───────────────────────────────────────────
 
 /// Stable reference to one task attempt within a run.
@@ -940,7 +1136,7 @@ fn new_run_id() -> String {
 // ─── Run Config ─────────────────────────────────────────────────────────
 
 /// Configuration for a runner v2 execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunConfig {
     /// Working directory for the plan execution.
     pub workdir: PathBuf,
@@ -974,6 +1170,16 @@ pub struct RunConfig {
     pub skip_tests: bool,
     /// Effective project config used for provider/model dispatch resolution.
     pub roko_config: Option<Arc<RokoConfig>>,
+    /// Extension chain for lifecycle hooks (init, pre/post inference, gate, error, shutdown).
+    pub extension_chain: Option<Arc<tokio::sync::Mutex<roko_core::extension::ExtensionChain>>>,
+    /// Learned model selection router (persists across runs).
+    pub cascade_router: Option<Arc<roko_learn::cascade_router::CascadeRouter>>,
+    /// MCP connector tracking registry.
+    pub connector_registry: Option<Arc<std::sync::Mutex<roko_core::ConnectorRegistry>>>,
+    /// Agent feed tracking registry.
+    pub feed_registry: Option<Arc<std::sync::Mutex<roko_core::FeedRegistry>>>,
+    /// Contextual bandit policy for recording model-selection feedback.
+    pub bandit_policy: Option<Arc<std::sync::Mutex<roko_learn::contextual_bandit::ContextualBanditPolicy>>>,
 }
 
 impl Default for RunConfig {
@@ -995,7 +1201,32 @@ impl Default for RunConfig {
             clippy_enabled: true,
             skip_tests: false,
             roko_config: None,
+            extension_chain: None,
+            cascade_router: None,
+            connector_registry: None,
+            feed_registry: None,
+            bandit_policy: None,
         }
+    }
+}
+
+impl std::fmt::Debug for RunConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunConfig")
+            .field("workdir", &self.workdir)
+            .field("plan_dir", &self.plan_dir)
+            .field("model", &self.model)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_retries", &self.max_retries)
+            .field("max_gate_rung", &self.max_gate_rung)
+            .field("max_plan_usd", &self.max_plan_usd)
+            .field("max_turn_usd", &self.max_turn_usd)
+            .field("extension_chain", &self.extension_chain.as_ref().map(|_| ".."))
+            .field("cascade_router", &self.cascade_router.as_ref().map(|_| ".."))
+            .field("connector_registry", &self.connector_registry.as_ref().map(|_| ".."))
+            .field("feed_registry", &self.feed_registry.as_ref().map(|_| ".."))
+            .field("bandit_policy", &self.bandit_policy.as_ref().map(|_| ".."))
+            .finish()
     }
 }
 
@@ -1117,6 +1348,101 @@ mod tests {
         };
 
         assert_eq!(event.event_type(), "agent.started");
+    }
+
+    #[test]
+    fn stderr_severity_classifies_warning() {
+        assert_eq!(
+            StderrSeverity::from_message("warning: deprecated flag --foo"),
+            StderrSeverity::Warning
+        );
+    }
+
+    #[test]
+    fn stderr_severity_classifies_error() {
+        assert_eq!(
+            StderrSeverity::from_message("thread 'main' panicked at 'bad'"),
+            StderrSeverity::Error
+        );
+        assert_eq!(
+            StderrSeverity::from_message("error: bad happened"),
+            StderrSeverity::Error
+        );
+        assert_eq!(
+            StderrSeverity::from_message("plain stderr line"),
+            StderrSeverity::Error,
+            "unannotated stderr should default to Error"
+        );
+    }
+
+    #[test]
+    fn stderr_severity_classifies_infra() {
+        assert_eq!(
+            StderrSeverity::from_message("INFO ready to dispatch"),
+            StderrSeverity::Infra
+        );
+        assert_eq!(
+            StderrSeverity::from_message(""),
+            StderrSeverity::Infra,
+            "empty stderr is infra"
+        );
+        // Info banner that *also* contains an error word is promoted to Error.
+        assert_eq!(
+            StderrSeverity::from_message("INFO error during retry"),
+            StderrSeverity::Error
+        );
+    }
+
+    #[test]
+    fn event_category_runner_mapping() {
+        let event = RunnerEvent::plan_started("run-1", "plan-a");
+        assert_eq!(EventCategory::from_runner_event(&event), EventCategory::Plan);
+
+        let event = RunnerEvent::resume_marker(
+            "run-1",
+            ResumeMarker {
+                outcome: ResumeOutcome::Fresh,
+                snapshot_path: String::new(),
+                snapshot_plan_ids: Vec::new(),
+                current_plan_ids: Vec::new(),
+                message: None,
+            },
+        );
+        assert_eq!(
+            EventCategory::from_runner_event(&event),
+            EventCategory::Resume
+        );
+    }
+
+    #[test]
+    fn event_category_agent_mapping() {
+        let token = AgentEvent::TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(EventCategory::from_agent_event(&token), EventCategory::Token);
+
+        let tool = AgentEvent::ToolCall {
+            id: "1".into(),
+            name: "Read".into(),
+        };
+        assert_eq!(
+            EventCategory::from_agent_event(&tool),
+            EventCategory::AgentTool
+        );
+    }
+
+    #[test]
+    fn event_category_string_coercion() {
+        let (cat, coerced) = EventCategory::from_event_type("agent.message_delta");
+        assert_eq!(cat, EventCategory::AgentMessage);
+        assert!(!coerced);
+
+        let (cat, coerced) = EventCategory::from_event_type("custom.weird.thing");
+        assert_eq!(cat, EventCategory::Other);
+        assert!(coerced);
     }
 
     #[test]
