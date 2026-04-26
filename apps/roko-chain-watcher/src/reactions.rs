@@ -389,7 +389,7 @@ pub fn decide(
             for i in insights {
                 *counts.entry(classify_topic(&i.content)).or_default() += 1;
             }
-            counts.into_iter().max_by_key(|(_, v)| *v).map(|(k, _)| k).unwrap_or("general")
+            counts.into_iter().max_by_key(|(_, v)| *v).map_or("general", |(k, _)| k)
         };
         let content = format!(
             "[{watcher_id}] wisdom: {} pheromones ({} threats, {} opps), {} insights ({} confirmed), dominant topic: {}",
@@ -560,7 +560,13 @@ mod tests {
 
     #[test]
     fn summary_pheromone_deposited_when_observations_exist() {
-        let phs = vec![pheromone(1, "wisdom", 0.2)];
+        // Rule 5 requires pheromones.len() + insights.len() >= 3 to emit a
+        // wisdom summary, so we pass 3 pheromones.
+        let phs = vec![
+            pheromone(1, "wisdom", 0.2),
+            pheromone(2, "wisdom", 0.3),
+            pheromone(3, "wisdom", 0.1),
+        ];
         let reactions = decide(&phs, &[], "watcher-a");
         assert!(reactions.iter().any(|r| {
             r.kind == ReactionKind::DepositPheromone

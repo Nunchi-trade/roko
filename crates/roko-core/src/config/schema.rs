@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 /// Current schema version. Bump on incompatible changes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
+/// A non-fatal configuration warning produced by [`RokoConfig::validate`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigWarning {
+    /// Human-readable description of the issue.
+    pub message: String,
+}
+
 // ---- top-level -----------------------------------------------------------
 
 /// Root configuration for the Roko runtime.
@@ -170,6 +177,48 @@ impl RokoConfig {
     /// Convenience: apply overrides from the real process environment.
     pub fn apply_process_env(&mut self) {
         self.apply_env(&|key| std::env::var(key).ok());
+    }
+
+    /// Validate the configuration and return any warnings.
+    ///
+    /// This is a non-fatal check: warnings indicate values that are likely
+    /// misconfigured but don't prevent the runtime from starting.
+    #[must_use]
+    pub fn validate(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+
+        if self.budget.max_plan_usd <= 0.0 {
+            warnings.push(ConfigWarning {
+                message: "budget.max_plan_usd must be > 0".into(),
+            });
+        }
+        if self.budget.max_turn_usd <= 0.0 {
+            warnings.push(ConfigWarning {
+                message: "budget.max_turn_usd must be > 0".into(),
+            });
+        }
+        if self.conductor.max_agents < 1 {
+            warnings.push(ConfigWarning {
+                message: "conductor.max_agents must be >= 1".into(),
+            });
+        }
+        if self.conductor.max_parallel_plans < 1 {
+            warnings.push(ConfigWarning {
+                message: "conductor.max_parallel_plans must be >= 1".into(),
+            });
+        }
+        if self.gates.max_iterations < 1 {
+            warnings.push(ConfigWarning {
+                message: "gates.max_iterations must be >= 1".into(),
+            });
+        }
+        if self.agent.context_limit_k < 50 {
+            warnings.push(ConfigWarning {
+                message: "agent.context_limit_k must be >= 50".into(),
+            });
+        }
+
+        warnings
     }
 
     /// Generate an example config string showing every field with doc comments.
@@ -1052,5 +1101,36 @@ model = "opus"
         assert!(!parse_bool_env("no"));
         assert!(!parse_bool_env("off"));
         assert!(!parse_bool_env(""));
+    }
+
+    #[test]
+    fn validate_warns_on_zero_budget() {
+        let mut cfg = RokoConfig::default();
+        cfg.budget.max_plan_usd = 0.0;
+        let warnings = cfg.validate();
+        assert!(
+            warnings.iter().any(|w| w.message.contains("max_plan_usd")),
+            "expected warning about max_plan_usd, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_default_config_has_no_warnings() {
+        let cfg = RokoConfig::default();
+        let warnings = cfg.validate();
+        assert!(warnings.is_empty(), "default config should be valid: {warnings:?}");
+    }
+
+    #[test]
+    fn validate_catches_all_bad_values() {
+        let mut cfg = RokoConfig::default();
+        cfg.budget.max_plan_usd = 0.0;
+        cfg.budget.max_turn_usd = -1.0;
+        cfg.conductor.max_agents = 0;
+        cfg.conductor.max_parallel_plans = 0;
+        cfg.gates.max_iterations = 0;
+        cfg.agent.context_limit_k = 10;
+        let warnings = cfg.validate();
+        assert_eq!(warnings.len(), 6, "expected 6 warnings, got: {warnings:?}");
     }
 }

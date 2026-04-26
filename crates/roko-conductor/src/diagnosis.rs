@@ -226,13 +226,14 @@ fn match_pattern(pattern: &ErrorPattern, error_output: &str) -> Option<Diagnosis
 
 /// Compute confidence score for a match.
 ///
-/// Confidence is based on two factors:
+/// Confidence is based on three factors:
 /// 1. How much of the output the needle covers (ratio).
 /// 2. How specific the needle is (longer needles = more specific).
+/// 3. Whether the pattern is an exact-match (contains an error code) vs fuzzy.
 ///
 /// Returns a value in `[0.5, 1.0]`.
 #[allow(clippy::cast_precision_loss)]
-fn compute_confidence(_pattern: &ErrorPattern, error_output: &str, needle: &str) -> f64 {
+fn compute_confidence(pattern: &ErrorPattern, error_output: &str, needle: &str) -> f64 {
     if error_output.is_empty() {
         return 0.5;
     }
@@ -257,7 +258,18 @@ fn compute_confidence(_pattern: &ErrorPattern, error_output: &str, needle: &str)
     #[allow(clippy::cast_precision_loss)]
     let specificity_bonus = (needle.len() as f64 * 0.005).min(0.15);
 
-    (base + specificity_bonus).min(1.0)
+    // Exact-match patterns (those whose name contains a specific error code or
+    // well-known marker) get an additional confidence bump. This lets e.g.
+    // "rust-type-mismatch" beat the generic "rust-compile-error" when both match.
+    let exact_match_bonus = if !pattern.case_insensitive && pattern.name.contains('-') {
+        // Patterns with hyphens and case-sensitive matching tend to be more
+        // specific (e.g. "rust-type-mismatch" vs "assertion-failed").
+        0.02
+    } else {
+        0.0
+    };
+
+    (base + specificity_bonus + exact_match_bonus).min(1.0)
 }
 
 /// Truncate a string with ellipsis.
