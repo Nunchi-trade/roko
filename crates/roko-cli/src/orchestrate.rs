@@ -127,8 +127,9 @@ use roko_learn::skill_library::{
 };
 use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
-    ContextAssembler, EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore,
-    KnowledgeTier, NeuroStore,
+    AdmissionDecision, ContextAssembler, EmotionalProvenance, KnowledgeAdmissionController,
+    KnowledgeCandidateRecord, KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier,
+    NeuroStore,
 };
 use roko_orchestrator::coordination::{Pheromone, PheromoneKind, PheromoneScope};
 use roko_orchestrator::executor::recovery::{RecoveryEngine, WarningSeverity};
@@ -2690,7 +2691,11 @@ fn knowledge_routing_boost(
 /// -- they capture when and why agents changed state.  Recording them as
 /// knowledge enables future sessions to learn from operational history (e.g.
 /// "agent X was degraded due to budget constraints 5 times last week").
-fn record_lifecycle_knowledge(knowledge_store: &KnowledgeStore, transition: &LifecycleTransition) {
+fn record_lifecycle_knowledge(
+    knowledge_store: &KnowledgeStore,
+    admission: Option<&KnowledgeAdmissionController>,
+    transition: &LifecycleTransition,
+) {
     // Only record significant transitions -- skip routine Active/Waiting/Initiated.
     let is_significant = matches!(
         &transition.to,
@@ -2750,7 +2755,30 @@ fn record_lifecycle_knowledge(knowledge_store: &KnowledgeStore, transition: &Lif
     };
     entry.source = Some("lifecycle-monitor".to_string());
 
-    if let Err(err) = knowledge_store.add(entry) {
+    // Route through admission controller if available, else direct write.
+    let result = if let Some(ctrl) = admission {
+        let id = entry.id.clone();
+        let candidate = KnowledgeCandidateRecord::from_entry(entry);
+        match ctrl.submit_candidate(candidate) {
+            Ok(AdmissionDecision::Admitted) => {
+                tracing::debug!(entry_id = %id, "lifecycle knowledge admitted");
+                Ok(())
+            }
+            Ok(AdmissionDecision::Deferred { reason }) => {
+                tracing::info!(entry_id = %id, reason = %reason, "lifecycle knowledge deferred");
+                Ok(())
+            }
+            Ok(AdmissionDecision::Rejected { reason }) => {
+                tracing::info!(entry_id = %id, reason = %reason, "lifecycle knowledge rejected");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        knowledge_store.add(entry)
+    };
+
+    if let Err(err) = result {
         tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
     }
 }
@@ -3086,6 +3114,10 @@ pub struct PlanRunner {
     playbook: PlaybookStore,
     /// Durable knowledge store queried per task for task-scoped context.
     knowledge_store: KnowledgeStore,
+    /// Optional admission controller that gates knowledge writes.
+    /// When `Some`, all knowledge writes are routed through the controller's
+    /// policy evaluation. When `None`, writes go directly to the store.
+    knowledge_admission: Option<KnowledgeAdmissionController>,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: Arc<ProcessSupervisor>,
     /// Root cancellation token for coordinated shutdown.
@@ -4662,6 +4694,22 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = match KnowledgeStore::init(
+            &workdir.join(".roko").join("neuro").join("knowledge.jsonl"),
+        ) {
+            Ok(admission_store) => {
+                let ctrl = KnowledgeAdmissionController::new(admission_store);
+                tracing::info!("knowledge admission controller initialized");
+                Some(ctrl)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to init admission controller; falling back to direct writes"
+                );
+                None
+            }
+        };
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -4796,6 +4844,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -4870,6 +4919,22 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = match KnowledgeStore::init(
+            &workdir.join(".roko").join("neuro").join("knowledge.jsonl"),
+        ) {
+            Ok(admission_store) => {
+                let ctrl = KnowledgeAdmissionController::new(admission_store);
+                tracing::info!("knowledge admission controller initialized (snapshot)");
+                Some(ctrl)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to init admission controller; falling back to direct writes"
+                );
+                None
+            }
+        };
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -4998,6 +5063,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -5074,6 +5140,22 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = match KnowledgeStore::init(
+            &workdir.join(".roko").join("neuro").join("knowledge.jsonl"),
+        ) {
+            Ok(admission_store) => {
+                let ctrl = KnowledgeAdmissionController::new(admission_store);
+                tracing::info!("knowledge admission controller initialized (snapshots)");
+                Some(ctrl)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to init admission controller; falling back to direct writes"
+                );
+                None
+            }
+        };
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -5202,6 +5284,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -5513,7 +5596,11 @@ impl PlanRunner {
             // degradation) as knowledge entries so that future sessions can
             // learn from operational history.
             RokoEvent::AgentLifecycleTransition(ref transition) => {
-                record_lifecycle_knowledge(&self.knowledge_store, transition);
+                record_lifecycle_knowledge(
+                    &self.knowledge_store,
+                    self.knowledge_admission.as_ref(),
+                    transition,
+                );
                 false
             }
             RokoEvent::HeartbeatTick(_)
@@ -8362,7 +8449,7 @@ impl PlanRunner {
                                 frozen: false,
                                 catalytic_score: 0,
                             };
-                            if let Err(e) = self.knowledge_store.add(anti_entry) {
+                            if let Err(e) = self.admit_knowledge_entry(anti_entry) {
                                 tracing::warn!(
                                     plan_id = %plan_id,
                                     phase = %phase,
@@ -10813,7 +10900,7 @@ impl PlanRunner {
             &model,
             &success_episode_id,
         );
-        if let Err(err) = self.knowledge_store.ingest(vec![success_entry]) {
+        if let Err(err) = self.admit_knowledge_batch(vec![success_entry]) {
             tracing::warn!(
                 plan_id = %plan_id,
                 task_id = %task_id,
@@ -17120,6 +17207,63 @@ impl PlanRunner {
         }
 
         Ok(())
+    }
+
+    /// Route a single knowledge entry through the admission controller if
+    /// available, falling back to a direct `knowledge_store.add()` otherwise.
+    ///
+    /// Returns `Ok(())` regardless of admission outcome -- deferred/rejected
+    /// entries are logged but do not block execution.
+    fn admit_knowledge_entry(&self, entry: KnowledgeEntry) -> anyhow::Result<()> {
+        if let Some(ref ctrl) = self.knowledge_admission {
+            let id = entry.id.clone();
+            let candidate = KnowledgeCandidateRecord::from_entry(entry);
+            match ctrl.submit_candidate(candidate)? {
+                AdmissionDecision::Admitted => {
+                    tracing::debug!(entry_id = %id, "knowledge entry admitted");
+                }
+                AdmissionDecision::Deferred { reason } => {
+                    tracing::info!(entry_id = %id, reason = %reason, "knowledge entry deferred");
+                }
+                AdmissionDecision::Rejected { reason } => {
+                    tracing::info!(entry_id = %id, reason = %reason, "knowledge entry rejected");
+                }
+            }
+            Ok(())
+        } else {
+            self.knowledge_store.add(entry)
+        }
+    }
+
+    /// Route a batch of knowledge entries through the admission controller if
+    /// available, falling back to a direct `knowledge_store.ingest()` otherwise.
+    fn admit_knowledge_batch(&self, entries: Vec<KnowledgeEntry>) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        if let Some(ref ctrl) = self.knowledge_admission {
+            let candidates: Vec<KnowledgeCandidateRecord> = entries
+                .into_iter()
+                .map(KnowledgeCandidateRecord::from_entry)
+                .collect();
+            let results = ctrl.submit_batch(candidates)?;
+            for (id, decision) in &results {
+                match decision {
+                    AdmissionDecision::Admitted => {
+                        tracing::debug!(entry_id = %id, "knowledge entry admitted (batch)");
+                    }
+                    AdmissionDecision::Deferred { reason } => {
+                        tracing::info!(entry_id = %id, reason = %reason, "knowledge entry deferred (batch)");
+                    }
+                    AdmissionDecision::Rejected { reason } => {
+                        tracing::info!(entry_id = %id, reason = %reason, "knowledge entry rejected (batch)");
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            self.knowledge_store.ingest(entries)
+        }
     }
 }
 

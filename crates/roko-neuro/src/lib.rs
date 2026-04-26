@@ -1322,6 +1322,8 @@ pub trait NeuroStore: Sized {
     fn gc(&mut self, min_confidence: f64) -> Result<usize>;
 }
 
+/// Knowledge admission controller with policy-based quality gates.
+pub mod admission;
 pub mod context;
 /// Episode distillation into durable knowledge candidates.
 pub mod distiller;
@@ -1335,6 +1337,9 @@ pub mod temporal;
 /// Tier progression from raw episodes to playbooks.
 pub mod tier_progression;
 
+pub use admission::{
+    AdmissionDecision, AdmissionPolicy, KnowledgeAdmissionController, KnowledgeCandidateRecord,
+};
 pub use context::{
     ContextAssembler, ContextChunk, ContextSource, EpisodeStore, PadState, ReadFileSpec, TaskInput,
     VerifySpec,
