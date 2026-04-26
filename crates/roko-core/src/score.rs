@@ -44,7 +44,7 @@ fn finite_non_negative(value: f32) -> f32 {
 
 /// A multi-dimensional quality score for a signal.
 ///
-/// Scores are typically computed at query time by a [`Scorer`](crate::Scorer)
+/// Scores are typically computed at query time by a [`Score`](crate::traits::Score) impl
 /// rather than stored on the signal itself, so different contexts can rank
 /// the same signal differently.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

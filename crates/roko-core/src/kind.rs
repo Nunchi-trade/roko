@@ -12,8 +12,8 @@ use std::fmt;
 
 /// The category of a signal. Determines how its body should be interpreted.
 ///
-/// Kinds are the switchyard for dispatch: a [`Gate`](crate::Gate) might only
-/// verify signals of kind `GateVerdict`, a [`Composer`](crate::Composer) might
+/// Kinds are the switchyard for dispatch: a [`Verify`](crate::Verify) might only
+/// verify signals of kind `GateVerdict`, a [`Compose`](crate::Compose) might
 /// only combine `PromptSection` signals, etc.
 ///
 /// # Extensibility

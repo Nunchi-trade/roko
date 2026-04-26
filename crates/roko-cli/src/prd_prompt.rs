@@ -47,13 +47,13 @@ graph TD
     classDef data fill:#16213e,stroke:#0f3460,color:#eee,stroke-width:1px
     classDef action fill:#0f3460,stroke:#533483,color:#eee,stroke-width:1px
 
-    A[Engram Input] --> B[Scorer]
-    B --> C{Router}
+    A[Engram Input] --> B[Score]
+    B --> C{Route}
     C -->|high confidence| D[Direct Execute]
     C -->|low confidence| E[LLM Deliberation]
-    D --> F[Gate Pipeline]
+    D --> F[Verify Pipeline]
     E --> F
-    F --> G[Substrate Write]
+    F --> G[Store Write]
 
     class A,B core
     class C,D,E action
@@ -85,7 +85,7 @@ sequenceDiagram
     participant C as CLI
     participant O as Orchestrator
     participant A as Agent
-    participant G as Gate
+    participant G as Verify
 
     U->>C: roko plan run
     C->>O: discover plans

@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// Summary of a verdict suitable for Pulse body serialization.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerdictSummary {
-    /// Gate that produced the verdict.
+    /// Verify that produced the verdict.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,

@@ -33,7 +33,7 @@ pub enum ErrorCategory {
     Other,
 }
 
-/// Gate failure classes used by retries, replanning, and pre-agent remediation.
+/// Verify failure classes used by retries, replanning, and pre-agent remediation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureClass {
@@ -51,7 +51,7 @@ pub enum FailureClass {
     TestExpectationFailure,
     /// Toolchain, network, permissions, timeout, or environment failure.
     ExternalEnvironment,
-    /// Gate evidence suggests a stub, fake pass, or unsafe no-op production path.
+    /// Verify evidence suggests a stub, fake pass, or unsafe no-op production path.
     UnsafeStubOrPassBehavior,
     /// The agent likely lacked enough task/context information to continue safely.
     PromptContextInsufficiency,
@@ -100,7 +100,7 @@ pub struct CompileError {
 /// Structured failure classification for compile/test/lint gate output.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GateFailureClassification {
-    /// Gate that produced the failure, such as `compile:cargo`.
+    /// Verify that produced the failure, such as `compile:cargo`.
     pub gate: String,
     /// Primary class for retry and remediation decisions.
     pub primary: FailureClass,

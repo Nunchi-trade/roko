@@ -1,4 +1,4 @@
-//! In-memory [`Substrate`] — fast, ephemeral, test-friendly.
+//! In-memory [`Store`] — fast, ephemeral, test-friendly.
 //!
 //! `MemorySubstrate` holds signals in a `parking_lot::RwLock<HashMap>`.
 //! It's the default substrate for tests and for ephemeral in-process state
@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use roko_core::{ContentHash, Context, Engram, Query, Substrate, error::Result};
+use roko_core::{ContentHash, Context, Engram, Query, Store, error::Result};
 use std::collections::HashMap;
 
 /// An in-memory, concurrent signal substrate.
@@ -59,8 +59,14 @@ impl MemorySubstrate {
     }
 }
 
+impl roko_core::Cell for MemorySubstrate {
+    fn cell_id(&self) -> &str { "memory-substrate" }
+    fn cell_name(&self) -> &str { "MemorySubstrate" }
+    fn protocols(&self) -> &[&str] { &["Store"] }
+}
+
 #[async_trait]
-impl Substrate for MemorySubstrate {
+impl Store for MemorySubstrate {
     async fn put(&self, signal: Engram) -> Result<ContentHash> {
         let id = signal.id;
         self.store.write().insert(id, signal);

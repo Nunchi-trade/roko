@@ -2,12 +2,12 @@
 //!
 //! # Why a dedicated trait?
 //!
-//! The six core Roko traits (Substrate, Scorer, Gate, Router, Composer, Policy)
+//! The six core Roko traits (Store, Score, Verify, Route, Compose, React)
 //! capture composition, verification, and decision-making. An **Agent** is
 //! different: it's an async executor with potentially long-running side
 //! effects (subprocess management, file edits, LLM API calls).
 //!
-//! Rather than contort an agent into a Gate or Composer, Roko adds the
+//! Rather than contort an agent into a Verify or Compose, Roko adds the
 //! [`Agent`] trait as a capability extension. The core stays clean; agent
 //! impls live in this crate.
 //!

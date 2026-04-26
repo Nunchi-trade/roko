@@ -1,4 +1,4 @@
-//! Conductor: composite `Policy` that runs all watchers and applies
+//! Conductor: composite `React` that runs all watchers and applies
 //! the intervention policy to produce a single decision.
 //!
 //! The conductor is the reactive intelligence layer of the Roko
@@ -19,7 +19,7 @@ use crate::watchers::{
 };
 use parking_lot::Mutex;
 use roko_core::{
-    Body, CognitiveSignal, ConductorDecision, ConductorEvaluation, Context, Engram, Kind, Policy,
+    Body, CognitiveSignal, ConductorDecision, ConductorEvaluation, Context, Engram, Kind, React,
 };
 use roko_learn::provider_health::ProviderHealthTracker;
 use serde::{Deserialize, Serialize};
@@ -43,13 +43,13 @@ pub struct RoutingBias {
 /// The conductor: runs all watchers, applies escalation policy, tracks
 /// circuit breaker state.
 ///
-/// Implements [`Policy`] so it can be composed into larger policy chains.
+/// Implements [`React`] so it can be composed into larger policy chains.
 ///
 /// # Usage
 ///
 /// ```rust,no_run
 /// use roko_conductor::Conductor;
-/// use roko_core::{Context, Policy};
+/// use roko_core::{Context, React};
 ///
 /// let conductor = Conductor::default();
 /// let signals = vec![]; // your signal stream
@@ -57,8 +57,8 @@ pub struct RoutingBias {
 /// let interventions = conductor.decide(&signals, &ctx);
 /// ```
 pub struct Conductor {
-    /// The individual watchers, stored as boxed `Policy` impls.
-    watchers: Vec<Box<dyn Policy>>,
+    /// The individual watchers, stored as boxed `React` impls.
+    watchers: Vec<Box<dyn React>>,
     /// Intervention escalation policy.
     policy: Box<dyn InterventionPolicy>,
     /// Per-plan circuit breaker.
@@ -95,7 +95,7 @@ impl Conductor {
     /// Create a conductor with all default watchers and the worst-severity policy.
     #[must_use]
     pub fn new() -> Self {
-        let watchers: Vec<Box<dyn Policy>> = vec![
+        let watchers: Vec<Box<dyn React>> = vec![
             Box::new(GhostTurnWatcher::default()),
             Box::new(ReviewLoopWatcher::default()),
             Box::new(IterationLoopWatcher::default()),
@@ -131,7 +131,7 @@ impl Conductor {
 
     /// Create a conductor with custom watchers.
     #[must_use]
-    pub fn with_watchers(watchers: Vec<Box<dyn Policy>>) -> Self {
+    pub fn with_watchers(watchers: Vec<Box<dyn React>>) -> Self {
         Self {
             watchers,
             policy: Box::new(WorstSeverityPolicy),
@@ -460,7 +460,7 @@ fn derive_cognitive_signals(outputs: &[WatcherOutput]) -> Vec<CognitiveSignal> {
 
 /// Run all watchers and collect their outputs as `WatcherOutput` values.
 fn collect_watcher_outputs(
-    watchers: &[Box<dyn Policy>],
+    watchers: &[Box<dyn React>],
     stream: &[Engram],
     ctx: &Context,
 ) -> Vec<WatcherOutput> {
@@ -484,7 +484,7 @@ fn collect_watcher_outputs(
     outputs
 }
 
-impl Policy for Conductor {
+impl React for Conductor {
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         // Run all watchers and collect outputs.
         let watcher_outputs = collect_watcher_outputs(&self.watchers, stream, ctx);

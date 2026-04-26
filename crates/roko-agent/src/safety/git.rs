@@ -6,7 +6,7 @@
 //! through unconditionally; git commands are inspected against the caller's
 //! [`GitPolicy`].
 //!
-//! # Policy dimensions
+//! # React dimensions
 //!
 //! - **Force push** — `git push --force`, `--force-with-lease`, or `-f` to a
 //!   protected branch is rejected when [`GitPolicy::block_force_push`] is
@@ -50,7 +50,7 @@
 
 use roko_core::tool::ToolError;
 
-// ─── Policy ────────────────────────────────────────────────────────────────
+// ─── React ────────────────────────────────────────────────────────────────
 
 /// Rules governing which git operations are permitted on which branches.
 ///

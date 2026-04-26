@@ -385,7 +385,7 @@ pub enum BanditStrategy {
     ConservativeEpsilonGreedy,
 }
 
-/// Policy operating mode.
+/// React operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BanditPolicyMode {
@@ -402,7 +402,7 @@ pub enum BanditPolicyMode {
 pub struct BanditPolicyConfig {
     /// Stable policy id.
     pub policy_id: String,
-    /// Policy manifest version.
+    /// React manifest version.
     pub policy_version: String,
     /// Operating mode.
     pub mode: BanditPolicyMode,
@@ -552,9 +552,9 @@ pub struct PolicyUpdateCandidate {
     pub schema_version: u32,
     /// Stable update id.
     pub update_id: String,
-    /// Policy id the update targets.
+    /// React id the update targets.
     pub policy_id: String,
-    /// Policy version the update was generated against.
+    /// React version the update was generated against.
     pub policy_version: String,
     /// Decision surface.
     pub decision_kind: BanditDecisionKind,
@@ -601,9 +601,9 @@ pub struct BanditDecision {
     pub schema_version: u32,
     /// Deterministic decision id.
     pub decision_id: String,
-    /// Policy id used for selection.
+    /// React id used for selection.
     pub policy_id: String,
-    /// Policy version used for selection.
+    /// React version used for selection.
     pub policy_version: String,
     /// Operating mode used for selection.
     pub mode: BanditPolicyMode,
@@ -624,7 +624,7 @@ pub struct BanditDecision {
 /// Conservative contextual bandit policy state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextualBanditPolicy {
-    /// Policy configuration.
+    /// React configuration.
     pub config: BanditPolicyConfig,
     /// Per-context, per-action statistics.
     pub stats: HashMap<String, HashMap<String, BanditActionStats>>,

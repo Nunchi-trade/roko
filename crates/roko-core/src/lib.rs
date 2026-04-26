@@ -7,12 +7,12 @@
 //!
 //! | Trait | Purpose |
 //! |---|---|
-//! | [`Substrate`] | Store and query engrams |
-//! | [`Scorer`] | Rate engrams along multi-dimensional axes |
-//! | [`Gate`] | Verify engrams against ground truth |
-//! | [`Router`] | Select one engram from many candidates |
-//! | [`Composer`] | Combine engrams into a new engram under a budget |
-//! | [`Policy`] | Watch engram streams and emit new engrams (interventions) |
+//! | [`Store`] | Store and query engrams |
+//! | [`Score`](traits::Score) | Rate engrams along multi-dimensional axes |
+//! | [`Verify`] | Verify engrams against ground truth |
+//! | [`Route`] | Select one engram from many candidates |
+//! | [`Compose`] | Combine engrams into a new engram under a budget |
+//! | [`React`] | Watch engram streams and emit new engrams (interventions) |
 //!
 //! Every capability — coding-agent spawning, verification gates, context assembly,
 //! model routing, memory retrieval, chain participation, bounty markets, HDC search
@@ -48,6 +48,8 @@
 
 pub mod affect;
 pub mod agent;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
 /// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
 pub mod arbitration;
 pub mod attestation;
@@ -128,6 +130,7 @@ pub use bus_backends::{
     BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
 };
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cell::*;
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
@@ -239,5 +242,8 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Trigger, Verify};
+// Note: The `Score` protocol trait (formerly `Scorer`) is NOT re-exported at
+// the crate root to avoid colliding with the `Score` value struct. Access it
+// via `roko_core::traits::Score` or import with an alias.
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

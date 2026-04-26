@@ -3,7 +3,7 @@
 //! Monitors task completion signals emitted by the orchestrator and compares
 //! the elapsed runtime against the task's declared `timeout_secs`.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 use serde::Deserialize;
 
 /// Tag key marking signals from this watcher.
@@ -56,7 +56,7 @@ fn exceeds_threshold(duration_ms: u64, timeout_secs: u64) -> bool {
     duration_ms.saturating_mul(5) > timeout_ms.saturating_mul(4)
 }
 
-impl Policy for TimeOverrunWatcher {
+impl React for TimeOverrunWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(signal) = stream
             .iter()

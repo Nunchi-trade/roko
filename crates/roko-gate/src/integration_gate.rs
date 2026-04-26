@@ -43,7 +43,7 @@
 
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Engram, Verify, TestCount, Verdict};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -246,8 +246,14 @@ impl IntegrationGate {
     }
 }
 
+impl roko_core::Cell for IntegrationGate {
+    fn cell_id(&self) -> &str { "integration-gate" }
+    fn cell_name(&self) -> &str { "IntegrationGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for IntegrationGate {
+impl Verify for IntegrationGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
@@ -661,7 +667,7 @@ test foo::c ... ok";
         assert!(!d.contains("foo::c"));
     }
 
-    // --- Gate::verify behaviour (custom scenarios) ---
+    // --- Verify::verify behaviour (custom scenarios) ---
 
     #[tokio::test]
     async fn custom_pass_scenario_passes_through() {
@@ -740,7 +746,7 @@ test foo::c ... ok";
         );
     }
 
-    // --- Gate::verify behaviour (script scenarios) ---
+    // --- Verify::verify behaviour (script scenarios) ---
 
     #[tokio::test]
     async fn script_passes_when_exit_zero() {
@@ -789,7 +795,7 @@ test foo::c ... ok";
         );
     }
 
-    // --- Gate::verify behaviour (build-test scenarios) ---
+    // --- Verify::verify behaviour (build-test scenarios) ---
 
     #[tokio::test]
     async fn build_test_spawn_failure_yields_verdict() {

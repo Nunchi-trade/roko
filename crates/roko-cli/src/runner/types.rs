@@ -54,7 +54,7 @@ pub enum AgentEvent {
     },
 }
 
-// ─── Gate Completion ────────────────────────────────────────────────────
+// ─── Verify Completion ────────────────────────────────────────────────────
 
 /// Result of a gate run, sent back through the gate channel.
 #[derive(Debug, Clone)]

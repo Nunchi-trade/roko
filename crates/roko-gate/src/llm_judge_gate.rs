@@ -28,7 +28,7 @@
 //! - oracle errors under `non_blocking` → pass with `detail` explaining why
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -190,8 +190,14 @@ impl LlmJudgeGate {
     }
 }
 
+impl roko_core::Cell for LlmJudgeGate {
+    fn cell_id(&self) -> &str { "llm-judge-gate" }
+    fn cell_name(&self) -> &str { "LlmJudgeGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for LlmJudgeGate {
+impl Verify for LlmJudgeGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);

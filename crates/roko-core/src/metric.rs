@@ -166,7 +166,7 @@ pub struct TaskMetric {
     pub model: String,
     /// Complexity band (`"trivial"` | `"simple"` | `"standard"` | `"complex"`).
     pub complexity_band: String,
-    /// Gate that produced this verdict (e.g. `"compile"`, `"test"`).
+    /// Verify that produced this verdict (e.g. `"compile"`, `"test"`).
     pub gate: String,
 
     // ── Outcome ──────────────────────────────────────────────────

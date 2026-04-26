@@ -199,7 +199,7 @@ pub(crate) async fn cmd_archive(
     let hot = roko_fs::FileSubstrate::open(&roko_dir).await?;
 
     // Query for old engrams.
-    use roko_core::{Context, Query, Substrate};
+    use roko_core::{Context, Query, Store};
     let ctx = Context::now();
     let query = Query::all().until(cutoff_ms).limit(batch_size);
     let candidates = hot.query(&query, &ctx).await?;
@@ -237,7 +237,7 @@ pub(crate) async fn cmd_archive(
     let cold_dir = roko_dir.join("cold");
     let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
 
-    use roko_core::ColdSubstrate;
+    use roko_core::ColdStore;
     let archived = cold.archive_batch(candidates.clone()).await?;
 
     // Prune archived engrams from hot storage.

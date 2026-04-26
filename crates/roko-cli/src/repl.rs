@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0], ReplCommand::SlashExplain("gates".to_string()));
         let out_str = String::from_utf8(output).unwrap();
-        assert!(out_str.contains("Gate Pipeline"));
+        assert!(out_str.contains("Verify Pipeline"));
     }
 
     #[test]

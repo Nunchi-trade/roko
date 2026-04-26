@@ -534,7 +534,7 @@ pub struct InsightEnvironmentSnapshot {
     pub task_type_distribution: HashMap<String, f64>,
     /// Active tools available when the insight was generated.
     pub active_tools: Vec<String>,
-    /// Gate thresholds in force at generation time.
+    /// Verify thresholds in force at generation time.
     pub gate_thresholds: HashMap<String, f64>,
     /// Snapshot timestamp.
     pub snapshot_at: DateTime<Utc>,

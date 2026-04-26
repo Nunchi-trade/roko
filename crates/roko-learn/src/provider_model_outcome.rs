@@ -50,7 +50,7 @@ impl ProviderModelOutcomeStatus {
 /// One gate result joined to a model/provider choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderModelGateOutcome {
-    /// Gate identifier, such as `compile`, `test`, or `lint`.
+    /// Verify identifier, such as `compile`, `test`, or `lint`.
     pub gate_name: String,
     /// Whether the gate passed.
     pub passed: bool,
@@ -122,7 +122,7 @@ pub struct ProviderModelOutcomeRecord {
     pub role_id: Option<String>,
     /// Overall outcome status.
     pub status: ProviderModelOutcomeStatus,
-    /// Gate outcomes joined to this model/provider choice.
+    /// Verify outcomes joined to this model/provider choice.
     #[serde(default)]
     pub gate_outcomes: Vec<ProviderModelGateOutcome>,
     /// Number of retries before this terminal result.

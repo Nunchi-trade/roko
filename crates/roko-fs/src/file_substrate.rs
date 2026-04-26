@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use roko_core::{
-    ContentHash, Context, Engram, Query, Substrate,
+    ContentHash, Context, Engram, Query, Store,
     error::{Result, RokoError},
 };
 use std::collections::HashMap;
@@ -79,7 +79,7 @@ impl FileSubstrate {
     }
 
     /// Compact the log file: rewrite it containing only currently-live signals.
-    /// This is the durable form of [`Substrate::prune`] — it shrinks the log
+    /// This is the durable form of [`Store::prune`] — it shrinks the log
     /// file on disk after pruning decayed signals from the in-memory index.
     ///
     /// # Errors
@@ -194,8 +194,14 @@ fn matches_query(signal: &Engram, q: &Query, ctx: &Context) -> bool {
     true
 }
 
+impl roko_core::Cell for FileSubstrate {
+    fn cell_id(&self) -> &str { "file-substrate" }
+    fn cell_name(&self) -> &str { "FileSubstrate" }
+    fn protocols(&self) -> &[&str] { &["Store"] }
+}
+
 #[async_trait]
-impl Substrate for FileSubstrate {
+impl Store for FileSubstrate {
     async fn put(&self, signal: Engram) -> Result<ContentHash> {
         // Dedupe: skip write if already present.
         if self.index.read().contains_key(&signal.id) {

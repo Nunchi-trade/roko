@@ -25,9 +25,9 @@ const MAX_CANDIDATES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReflectionGateOutcome {
-    /// Gate or task passed.
+    /// Verify or task passed.
     Passed,
-    /// Gate or task failed.
+    /// Verify or task failed.
     Failed,
 }
 
@@ -61,7 +61,7 @@ pub struct PostGateReflectionRecord {
     /// Optional source episode id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub episode_id: Option<String>,
-    /// Gate that triggered the reflection.
+    /// Verify that triggered the reflection.
     pub trigger_gate: String,
     /// Whether the triggering gate passed or failed.
     pub outcome: ReflectionGateOutcome,
@@ -92,7 +92,7 @@ pub struct ReflectionInput {
     pub task_id: Option<String>,
     /// Optional source episode id.
     pub episode_id: Option<String>,
-    /// Gate that triggered the reflection.
+    /// Verify that triggered the reflection.
     pub trigger_gate: String,
     /// Whether the triggering gate passed or failed.
     pub outcome: ReflectionGateOutcome,

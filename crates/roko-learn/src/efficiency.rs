@@ -37,7 +37,7 @@ pub struct PromptSectionMeta {
     pub name: String,
     /// Number of tokens this section consumed in the final prompt.
     pub tokens: u64,
-    /// Composer-assigned priority (0 = highest, 255 = lowest).
+    /// Compose-assigned priority (0 = highest, 255 = lowest).
     pub priority: u8,
     /// Whether this section was truncated due to budget pressure.
     pub was_truncated: bool,
@@ -146,7 +146,7 @@ pub struct AgentEfficiencyEvent {
     /// Outcome label for the observation.
     #[serde(default)]
     pub outcome: String,
-    /// Gate error summaries recorded for failed tasks.
+    /// Verify error summaries recorded for failed tasks.
     #[serde(default)]
     pub gate_errors: Vec<String>,
     /// Model used for the task attempt.

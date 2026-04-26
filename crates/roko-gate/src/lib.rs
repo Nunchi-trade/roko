@@ -7,7 +7,7 @@
 //! [`Verdict`](roko_core::Verdict)s that flow back into the substrate as
 //! signals.
 //!
-//! # Gate architecture: two-tier system
+//! # Verify architecture: two-tier system
 //!
 //! ## Rung-dispatched gates (7 rungs)
 //!

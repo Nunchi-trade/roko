@@ -2,7 +2,7 @@
 //! and policy hooks.
 
 use crate::{
-    Budget, ContentHash, Context, Engram, Kind, Policy, Provenance, Score, Scorer, error::Result,
+    Budget, ContentHash, Context, Engram, Kind, React, Provenance, Score, error::Result,
 };
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -1364,7 +1364,7 @@ impl PredictiveScorer {
     }
 }
 
-impl Scorer for PredictiveScorer {
+impl crate::traits::Score for PredictiveScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         let model = signal
             .tag("model_slug")
@@ -1404,7 +1404,7 @@ impl Scorer for PredictiveScorer {
     }
 }
 
-/// Policy that emits calibration warnings / regime-shift insights.
+/// React that emits calibration warnings / regime-shift insights.
 pub struct PredictionPolicy {
     calibration: Arc<dyn PredictionCalibrationSource>,
     min_samples: usize,
@@ -1446,7 +1446,7 @@ impl PredictionPolicy {
     }
 }
 
-impl Policy for PredictionPolicy {
+impl React for PredictionPolicy {
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         let mut seen = BTreeSet::new();
         let mut outputs = Vec::new();
@@ -1569,6 +1569,7 @@ fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::Score as ScoreTrait;
     use std::collections::HashMap;
 
     #[derive(Default)]

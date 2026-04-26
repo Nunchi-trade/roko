@@ -3,7 +3,7 @@
 //! When the same plan repeatedly cycles through gate failures without
 //! advancing to a later phase, this watcher fires a critical signal to abort.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Maximum implementer attempts before firing.
 pub const MAX_IMPLEMENTER_ATTEMPTS: usize = 3;
@@ -76,7 +76,7 @@ fn plan_event(signal: &Engram) -> Option<String> {
         })
 }
 
-impl Policy for IterationLoopWatcher {
+impl React for IterationLoopWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(plan_id) = latest_plan_id(stream) else {
             return Vec::new();

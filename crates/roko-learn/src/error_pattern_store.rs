@@ -30,7 +30,7 @@ pub struct ErrorPattern {
     /// Normalized error signature (first line of error, stripped of file
     /// paths and line numbers).
     pub digest: String,
-    /// Gate that emitted the pattern, if known.
+    /// Verify that emitted the pattern, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<String>,
     /// Error category (e.g. `"unresolved_import"`, `"type_mismatch"`,
@@ -67,7 +67,7 @@ pub struct GateFailureObservation {
     /// Task that observed the failure, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// Gate or parser source that observed the failure.
+    /// Verify or parser source that observed the failure.
     pub gate: String,
     /// Coarse failure class.
     pub classification: String,
@@ -143,7 +143,7 @@ pub struct FailurePatternQuery<'a> {
     pub plan_id: Option<&'a str>,
     /// Task to prefer.
     pub task_id: Option<&'a str>,
-    /// Gate to prefer.
+    /// Verify to prefer.
     pub gate: Option<&'a str>,
     /// Failure class to prefer.
     pub classification: Option<&'a str>,
@@ -166,7 +166,7 @@ impl FailurePatternSummary {
             return String::new();
         }
 
-        let mut out = String::from("## Prior Gate Failure Patterns\n");
+        let mut out = String::from("## Prior Verify Failure Patterns\n");
         out.push_str(
             "Use these concise prior failures as constraints; do not treat them as full logs.\n",
         );
@@ -186,7 +186,7 @@ impl FailurePatternSummary {
                 if pattern.occurrences == 1 { "" } else { "s" },
             );
             if let Some(gate) = &pattern.gate {
-                let _ = writeln!(out, "   Gate: {gate}");
+                let _ = writeln!(out, "   Verify: {gate}");
             }
             if let Some(resolution) = &pattern.resolution {
                 let _ = writeln!(out, "   Fix: {resolution}");
@@ -204,7 +204,7 @@ impl FailurePatternSummary {
 pub struct FailurePatternSummaryItem {
     /// Stable key for the pattern.
     pub key: String,
-    /// Gate that emitted the pattern, if known.
+    /// Verify that emitted the pattern, if known.
     pub gate: Option<String>,
     /// Coarse failure class.
     pub classification: String,
@@ -971,7 +971,7 @@ mod tests {
                 .all(|p| p.digest.chars().count() <= 200)
         );
         let prompt = summary.format_for_prompt();
-        assert!(prompt.contains("Prior Gate Failure Patterns"));
+        assert!(prompt.contains("Prior Verify Failure Patterns"));
         assert!(!prompt.contains(&"x".repeat(500)));
     }
 

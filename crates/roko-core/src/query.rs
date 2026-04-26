@@ -1,8 +1,8 @@
 //! Queries and budgets — the specs that drive substrate lookups and composer
 //! constraints.
 //!
-//! A [`Query`] describes which signals a [`Substrate`](crate::Substrate) should
-//! return. A [`Budget`] describes the resource limits a [`Composer`](crate::Composer)
+//! A [`Query`] describes which signals a [`Store`](crate::Store) should
+//! return. A [`Budget`] describes the resource limits a [`Compose`](crate::Compose)
 //! must respect.
 
 use crate::Kind;

@@ -24,7 +24,8 @@ use crate::templates::reviewer::{Reviewer, ReviewerTemplate};
 use crate::templates::scribe::{ScribeTemplate, ScribeVariant};
 use crate::templates::strategist::StrategistTemplate;
 use roko_core::error::{Result, RokoError};
-use roko_core::{AgentRole, Budget, Composer, Context, ManifestError, Scorer};
+use roko_core::{AgentRole, Budget, Compose, Context, ManifestError};
+use roko_core::traits::Score as ScoreFn;
 use roko_core::{PolicyProvenance, PromptPolicy, PromptSectionSource, RolePolicyManifest};
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
@@ -447,7 +448,7 @@ impl RoleSystemPromptSpec {
     pub fn compose_with_budget_and_scorer(
         &self,
         token_budget: usize,
-        scorer: &dyn Scorer,
+        scorer: &dyn ScoreFn,
         ctx: &Context,
     ) -> Result<String> {
         let sections = self.build_sections();
@@ -535,7 +536,7 @@ impl RoleSystemPromptSpec {
         &self,
         sections: Vec<PromptSection>,
         token_budget: usize,
-        scorer: &dyn Scorer,
+        scorer: &dyn ScoreFn,
         ctx: &Context,
     ) -> Result<String> {
         let signals = sections
@@ -555,7 +556,7 @@ impl RoleSystemPromptSpec {
         ctx
     }
 
-    fn composition_scorer(&self) -> Box<dyn Scorer> {
+    fn composition_scorer(&self) -> Box<dyn ScoreFn> {
         if let Some(goal) = self.task_context.goal_text() {
             Box::new(GoalDirectedHeuristicScorer::new(goal))
         } else {

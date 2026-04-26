@@ -1,4 +1,4 @@
-//! [`WalletGate`] — §33.4.10: a [`Gate`] that checks balance / nonce
+//! [`WalletGate`] — §33.4.10: a [`Verify`] that checks balance / nonce
 //! preconditions before an agent signs a tx.
 //!
 //! The gate reads a [`TxRequest`] encoded as JSON in the signal body,
@@ -14,7 +14,7 @@
 //! enforced.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, traits::Gate, verdict::Verdict};
+use roko_core::{Body, Context, Engram, traits::Verify, verdict::Verdict};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -55,7 +55,7 @@ impl Default for WalletGateConfig {
     }
 }
 
-/// A [`Gate`] that verifies a wallet is ready to sign the tx encoded in the
+/// A [`Verify`] that verifies a wallet is ready to sign the tx encoded in the
 /// input signal.
 ///
 /// Holds `Arc<dyn ChainWallet>` + `Arc<dyn ChainClient>` so multiple gates
@@ -72,7 +72,7 @@ pub struct WalletGate {
 /// Classification of a single wallet readiness check.
 ///
 /// Balance-oriented outcomes are produced by [`WalletGate::check`]; the
-/// [`Gate::verify`] entry point turns these into [`Verdict`]s and can also
+/// [`Verify::verify`] entry point turns these into [`Verdict`]s and can also
 /// emit [`WalletCheck::NonceGap`] when strict nonce checking is enabled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalletCheck {
@@ -141,7 +141,7 @@ impl WalletGate {
     /// Inspect the underlying wallet balance and classify against the
     /// requested `needed_wei`.
     ///
-    /// This helper covers balance readiness only. [`Gate::verify`] layers
+    /// This helper covers balance readiness only. [`Verify::verify`] layers
     /// strict-nonce checking on top when the tx pins a nonce.
     pub async fn check(&self, needed_wei: u128) -> WalletCheck {
         if self.config.require_allowance_for.is_some() {
@@ -251,7 +251,7 @@ pub(crate) fn parse_tx_from_signal(signal: &Engram) -> Result<TxRequest, String>
 }
 
 #[async_trait]
-impl Gate for WalletGate {
+impl Verify for WalletGate {
     async fn verify(&self, input: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 

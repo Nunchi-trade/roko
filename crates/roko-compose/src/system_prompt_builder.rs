@@ -40,7 +40,8 @@ use crate::templates::common::PromptBudget;
 use crate::token_counter::TokenCounter;
 use crate::{ContextChunk, PadState};
 use roko_core::tool::ToolDef;
-use roko_core::{Budget, Composer, Context, Engram, Result, Scorer};
+use roko_core::{Budget, Compose, Context, Engram, Result};
+use roko_core::traits::Score as ScoreFn;
 use roko_learn::playbook::Playbook;
 use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
 use roko_learn::skill_library::Skill;
@@ -759,12 +760,12 @@ impl SystemPromptBuilder {
     }
 }
 
-impl Composer for SystemPromptBuilder {
+impl Compose for SystemPromptBuilder {
     fn compose(
         &self,
         signals: &[Engram],
         budget: &Budget,
-        scorer: &dyn Scorer,
+        scorer: &dyn ScoreFn,
         ctx: &Context,
     ) -> Result<Engram> {
         let mut built_sections = self
@@ -1209,14 +1210,14 @@ const fn cache_marker(layer: CacheLayer) -> Option<&'static str> {
 mod tests {
     use super::*;
     use roko_core::tool::{ToolCategory, ToolPermission};
-    use roko_core::{Budget, Context, Kind, Score, Scorer};
+    use roko_core::{Budget, Context, Kind, Score};
     use roko_learn::playbook::{Playbook, PlaybookStep};
     use roko_learn::section_effect::SectionEffectivenessRegistry;
     use roko_learn::skill_library::Skill;
 
     struct ConstScorer;
 
-    impl Scorer for ConstScorer {
+    impl ScoreFn for ConstScorer {
         fn score(&self, _signal: &Engram, _ctx: &Context) -> Score {
             Score::NEUTRAL
         }

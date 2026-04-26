@@ -5,7 +5,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -24,8 +24,14 @@ impl SecurityScanGate {
     }
 }
 
+impl roko_core::Cell for SecurityScanGate {
+    fn cell_id(&self) -> &str { "security-scan-gate" }
+    fn cell_name(&self) -> &str { "SecurityScanGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for SecurityScanGate {
+impl Verify for SecurityScanGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: Option<GatePayload> = signal.body.as_json().ok();

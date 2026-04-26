@@ -1,4 +1,4 @@
-//! Archive-backed [`ColdSubstrate`] implementation.
+//! Archive-backed [`ColdStore`] implementation.
 //!
 //! Stores aged-out engrams in compressed JSONL archive files organized by month.
 //! This is the filesystem-backed cold storage tier, complementing the hot
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::{Datelike, Utc};
 use parking_lot::RwLock;
 use roko_core::{
-    ColdSubstrate, ContentHash, Engram,
+    ColdStore, ContentHash, Engram,
     error::{Result, RokoError},
 };
 use tokio::fs::{self, OpenOptions};
@@ -192,7 +192,7 @@ impl ArchiveColdSubstrate {
 }
 
 #[async_trait]
-impl ColdSubstrate for ArchiveColdSubstrate {
+impl ColdStore for ArchiveColdSubstrate {
     async fn archive(&self, engram: Engram) -> Result<ContentHash> {
         let _guard = self.write_lock.lock().await;
 

@@ -165,13 +165,13 @@ pub fn scaffold_pages() -> Vec<PageScaffold> {
         ),
         PageScaffold::new(
             PageId::GateResults,
-            "Gate Results",
-            "Gate pass rates, adaptive thresholds, and recent failures.",
+            "Verify Results",
+            "Verify pass rates, adaptive thresholds, and recent failures.",
             vec![
                 WidgetScaffold::new(
                     "gate_summary",
-                    "Gate Summary",
-                    "Gate name, runs, pass rate, average duration, and last run.",
+                    "Verify Summary",
+                    "Verify name, runs, pass rate, average duration, and last run.",
                 ),
                 WidgetScaffold::new(
                     "adaptive_thresholds",

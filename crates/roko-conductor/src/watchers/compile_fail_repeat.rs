@@ -3,7 +3,7 @@
 //! When the same compile diagnostic appears [`MAX_IDENTICAL_COMPILE_FAILURES`]
 //! consecutive times, the agent is stuck on the same error and needs a restart.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Maximum consecutive identical compile failures before firing.
 pub const MAX_IDENTICAL_COMPILE_FAILURES: usize = 3;
@@ -62,7 +62,7 @@ fn diagnostic_key(signal: &Engram) -> Option<String> {
     }
 }
 
-impl Policy for CompileFailRepeatWatcher {
+impl React for CompileFailRepeatWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Collect compile diagnostic signals in order.
         let diagnostics: Vec<&Engram> = stream

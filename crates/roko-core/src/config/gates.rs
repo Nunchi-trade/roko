@@ -1,4 +1,4 @@
-//! Gate (verification) and pipeline configuration sections.
+//! Verify (verification) and pipeline configuration sections.
 
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ use super::agent::default_true;
 
 // ---- [gates] -------------------------------------------------------------
 
-/// Gate (verification) settings.
+/// Verify (verification) settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatesConfig {
     /// Enable clippy / lint gate.

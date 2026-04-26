@@ -59,7 +59,7 @@ impl PlanComplexity {
 
 /// Canonical rung identifiers for the 7-rung gate pipeline.
 ///
-/// Each rung maps to one or more concrete [`Gate`](roko_core::Gate) impls via
+/// Each rung maps to one or more concrete [`Verify`](roko_core::Verify) impls via
 /// [`run_canonical_rung`](crate::rung_dispatch::run_canonical_rung). The numeric
 /// repr matches [`CANONICAL_ORDER`] position, so derived `Ord` gives the correct
 /// execution sequence.

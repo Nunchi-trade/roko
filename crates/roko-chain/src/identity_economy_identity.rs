@@ -1598,7 +1598,7 @@ pub enum GateType {
 /// Deferred gate verdict referenced by futures delivery records.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GateVerdict {
-    /// Gate that produced the verdict.
+    /// Verify that produced the verdict.
     pub gate: GateType,
     /// Whether the gate passed.
     pub passed: bool,

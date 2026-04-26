@@ -96,6 +96,12 @@ pub struct CascadeRouter {
     free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
 }
 
+impl roko_core::Cell for CascadeRouter {
+    fn cell_id(&self) -> &str { "cascade-router" }
+    fn cell_name(&self) -> &str { "CascadeRouter" }
+    fn protocols(&self) -> &[&str] { &["Route"] }
+}
+
 impl CascadeRouter {
     /// Create a cascade router with the given model slugs.
     ///

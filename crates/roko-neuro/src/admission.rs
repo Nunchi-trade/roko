@@ -71,21 +71,21 @@ pub enum EvidencePolarity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionGateOutcome {
-    /// Gate passed.
+    /// Verify passed.
     Passed,
-    /// Gate failed.
+    /// Verify failed.
     Failed,
-    /// Gate was blocked before a trustworthy verdict.
+    /// Verify was blocked before a trustworthy verdict.
     Blocked,
-    /// Gate timed out.
+    /// Verify timed out.
     TimedOut,
-    /// Gate was cancelled.
+    /// Verify was cancelled.
     Cancelled,
-    /// Gate requested replanning.
+    /// Verify requested replanning.
     NeedsReplan,
-    /// Gate requested retry.
+    /// Verify requested retry.
     NeedsRetry,
-    /// Gate requires human judgment.
+    /// Verify requires human judgment.
     NeedsHuman,
 }
 
@@ -119,7 +119,7 @@ pub struct KnowledgeEvidence {
     pub polarity: EvidencePolarity,
     /// Confidence of this evidence item in `0.0..=1.0`.
     pub confidence: f64,
-    /// Gate name when this evidence came from a gate.
+    /// Verify name when this evidence came from a gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_name: Option<String>,
     /// Structured gate outcome when available.
@@ -204,7 +204,7 @@ impl KnowledgeEvidence {
 /// Applicability scope for a knowledge candidate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeScope {
-    /// Policy or prompt/context action identifier this candidate applies to.
+    /// React or prompt/context action identifier this candidate applies to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<String>,
     /// Role/profile identifier this candidate applies to.
@@ -1344,7 +1344,7 @@ mod tests {
             "policy-check",
             KnowledgeKind::Insight,
             "test",
-            "Policy validation test",
+            "React validation test",
             1.0,
         )
         .with_evidence(vec![

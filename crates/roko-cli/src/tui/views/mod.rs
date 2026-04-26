@@ -15,14 +15,14 @@
 //! |-------------|--------|-----------|
 //! | F1 Dashboard | Overview | Health, Mesh Status, Cost |
 //! | F2 Plans | Plan Detail | DAG View, Task Detail, Wave Progress |
-//! | F3 Agents | Agent Detail | Output Stream, Gate Results, Token Burn |
+//! | F3 Agents | Agent Detail | Output Stream, Verify Results, Token Burn |
 //! | F4 Git | Git Detail | Branch Tree, Commit Graph, Worktrees |
 //! | F5 Logs | Logs | Filtered Log, Signal Stream |
 //! | F6 Config | System | Config View, Provider Health, Model Comparison |
 //! | F7 Inspect | Knowledge | Engram DAG, Episode Replay, Knowledge Browse |
 //! | F8 Marketplace | Jobs | Job List, Job Detail, Create Job |
 //! | F9 Atelier | Workshop | PRD Workshop, Plan Explorer |
-//! | F10 Learning | Learning | Router, History, Efficiency |
+//! | F10 Learning | Learning | Route, History, Efficiency |
 
 pub mod agents_view;
 pub mod atelier_view;
@@ -68,7 +68,7 @@ pub enum SubView {
     // ── Region 3: Agents (F3) ──
     /// Live output stream from selected agent.
     AgentOutputStream,
-    /// Gate results for the selected agent.
+    /// Verify results for the selected agent.
     AgentGateResults,
     /// Token burn / cost metrics per agent.
     AgentTokenBurn,
@@ -205,7 +205,7 @@ impl SubView {
             Self::CreateJob => "New Job",
             Self::PrdWorkshop => "PRDs",
             Self::PlanExplorer => "Plans",
-            Self::LearningRouter => "Router",
+            Self::LearningRouter => "Route",
             Self::LearningHistory => "History",
             Self::LearningEfficiency => "Efficiency",
         }

@@ -39,7 +39,7 @@ pub enum ExecutionEvent {
     GateResult {
         /// Task identifier.
         task_id: String,
-        /// Gate name.
+        /// Verify name.
         gate: String,
         /// Whether the gate passed.
         passed: bool,
@@ -135,7 +135,7 @@ pub enum ServerEvent {
     GateResult {
         plan_id: String,
         task_id: String,
-        /// Gate name (also exposed as `rung` for dashboard compat).
+        /// Verify name (also exposed as `rung` for dashboard compat).
         gate: String,
         /// Numeric rung index for dashboard display.
         #[serde(default)]

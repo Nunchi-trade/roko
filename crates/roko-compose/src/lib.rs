@@ -1,4 +1,4 @@
-//! [`Composer`](roko_core::Composer) implementations — assemble signals into
+//! [`Compose`](roko_core::Compose) implementations — assemble signals into
 //! structured outputs under resource budgets.
 //!
 //! This crate provides:

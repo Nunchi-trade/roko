@@ -11,7 +11,7 @@
 use crate::compile_errors::{classify_gate_failure, render_failure_classification};
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Engram, Verify, TestCount, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -88,8 +88,14 @@ impl TestGate {
     }
 }
 
+impl roko_core::Cell for TestGate {
+    fn cell_id(&self) -> &str { "test-gate" }
+    fn cell_name(&self) -> &str { "TestGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for TestGate {
+impl Verify for TestGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {

@@ -727,7 +727,7 @@ impl ReinforcementSignal {
 pub enum SourceChannel {
     /// Direct user input -- fully trusted.
     UserInput,
-    /// Gate verdicts from the validation pipeline.
+    /// Verify verdicts from the validation pipeline.
     GateVerdict,
     /// Output produced by an LLM agent.
     AgentOutput,

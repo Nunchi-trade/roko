@@ -1,8 +1,8 @@
-//! `GatePipeline` — sequentially composes inner [`Gate`]s behind a single
-//! [`Gate`] impl.
+//! `GatePipeline` — sequentially composes inner [`Verify`]s behind a single
+//! [`Verify`] impl.
 //!
 //! This module implements parity §10.15: the orchestrator's "ask every gate
-//! in order" verb. The pipeline is itself a `Gate`, so it can be stacked, fed
+//! in order" verb. The pipeline is itself a `Verify`, so it can be stacked, fed
 //! to a registry, or wrapped by higher-level composition just like any leaf
 //! gate. Inner gates are invoked strictly in push-order and the pipeline
 //! short-circuits on the first failure by default. With
@@ -24,7 +24,7 @@
 //! *independent* pipelines is a concern one level up.
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Engram, Verify, TestCount, Verdict};
 use std::fmt;
 use std::time::Instant;
 
@@ -39,7 +39,7 @@ pub enum GatePipelineSeed {
     /// Start with an empty pipeline named `String`.
     Name(String),
     /// Start with a prebuilt list of gates and the default pipeline name.
-    Gates(Vec<Box<dyn Gate>>),
+    Gates(Vec<Box<dyn Verify>>),
 }
 
 impl From<String> for GatePipelineSeed {
@@ -54,19 +54,19 @@ impl From<&str> for GatePipelineSeed {
     }
 }
 
-impl From<Vec<Box<dyn Gate>>> for GatePipelineSeed {
-    fn from(value: Vec<Box<dyn Gate>>) -> Self {
+impl From<Vec<Box<dyn Verify>>> for GatePipelineSeed {
+    fn from(value: Vec<Box<dyn Verify>>) -> Self {
         Self::Gates(value)
     }
 }
 
-/// A [`Gate`] that runs a fixed sequence of inner gates.
+/// A [`Verify`] that runs a fixed sequence of inner gates.
 ///
 /// Construct with [`GatePipeline::new`] and append inner gates via
 /// [`GatePipeline::push`] (or the chaining [`GatePipeline::with_gate`]).
 /// The pipeline is empty by default; an empty pipeline passes trivially.
 pub struct GatePipeline {
-    gates: Vec<Box<dyn Gate>>,
+    gates: Vec<Box<dyn Verify>>,
     short_circuit: bool,
     name: String,
 }
@@ -93,13 +93,13 @@ impl GatePipeline {
     }
 
     /// Append an inner gate to the pipeline.
-    pub fn push(&mut self, gate: Box<dyn Gate>) {
+    pub fn push(&mut self, gate: Box<dyn Verify>) {
         self.gates.push(gate);
     }
 
     /// Chainable [`Self::push`].
     #[must_use]
-    pub fn with_gate(mut self, gate: Box<dyn Gate>) -> Self {
+    pub fn with_gate(mut self, gate: Box<dyn Verify>) -> Self {
         self.push(gate);
         self
     }
@@ -192,8 +192,14 @@ fn render_step_line(index: usize, inner: &Verdict) -> String {
     )
 }
 
+impl roko_core::Cell for GatePipeline {
+    fn cell_id(&self) -> &str { "gate-pipeline" }
+    fn cell_name(&self) -> &str { "GatePipeline" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for GatePipeline {
+impl Verify for GatePipeline {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
@@ -314,7 +320,7 @@ impl Default for GateComposition {
 /// [`GateComposition`] strategy. Backward compatible: `Sequential` mode
 /// behaves identically to the existing [`GatePipeline`].
 pub struct ComposedGatePipeline {
-    gates: Vec<Box<dyn Gate>>,
+    gates: Vec<Box<dyn Verify>>,
     composition: GateComposition,
     name: String,
 }
@@ -341,13 +347,13 @@ impl ComposedGatePipeline {
     }
 
     /// Append an inner gate.
-    pub fn push(&mut self, gate: Box<dyn Gate>) {
+    pub fn push(&mut self, gate: Box<dyn Verify>) {
         self.gates.push(gate);
     }
 
     /// Chainable gate append.
     #[must_use]
-    pub fn with_gate(mut self, gate: Box<dyn Gate>) -> Self {
+    pub fn with_gate(mut self, gate: Box<dyn Verify>) -> Self {
         self.push(gate);
         self
     }
@@ -382,7 +388,7 @@ impl ComposedGatePipeline {
 }
 
 #[async_trait]
-impl Gate for ComposedGatePipeline {
+impl Verify for ComposedGatePipeline {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
 
@@ -629,7 +635,7 @@ fn build_aggregate_verdict(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Gate, Kind, TestCount, Verdict};
+    use roko_core::{Body, Context, Engram, Verify, Kind, TestCount, Verdict};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -682,7 +688,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Gate for MockGate {
+    impl Verify for MockGate {
         async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let mut v = if self.pass {
@@ -823,7 +829,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Gate for OrderedGate {
+    impl Verify for OrderedGate {
         async fn verify(&self, _s: &Engram, _c: &Context) -> Verdict {
             let position = self.counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
@@ -938,7 +944,7 @@ mod tests {
     #[tokio::test]
     async fn docs_style_constructor_from_gate_vec_is_supported() {
         let pipeline = GatePipeline::new(vec![
-            Box::new(MockGate::new("a", true)) as Box<dyn Gate>,
+            Box::new(MockGate::new("a", true)) as Box<dyn Verify>,
             Box::new(MockGate::new("b", true)),
         ])
         .with_name("docs")

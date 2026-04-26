@@ -114,7 +114,7 @@ pub fn full_lineage(input: &Engram) -> impl Iterator<Item = ContentHash> + '_ {
 /// 4. Are **non-deterministic** (LLMs are stochastic)
 ///
 /// Rather than distort another trait, `Agent` is its own capability. Most
-/// orchestrator work doesn't call `Agent` directly; a Policy decides when
+/// orchestrator work doesn't call `Agent` directly; a React decides when
 /// to run an agent and the runtime dispatches it.
 ///
 /// # Example

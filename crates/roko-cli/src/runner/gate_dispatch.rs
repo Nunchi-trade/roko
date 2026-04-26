@@ -1,4 +1,4 @@
-//! Gate dispatch — runs gate rungs as background tokio tasks and sends
+//! Verify dispatch — runs gate rungs as background tokio tasks and sends
 //! results through a channel.
 
 use std::path::PathBuf;

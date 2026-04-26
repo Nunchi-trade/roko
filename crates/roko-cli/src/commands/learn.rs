@@ -10,7 +10,7 @@ pub(crate) async fn dispatch_learn(cli: &Cli, cmd: LearnCmd) -> Result<i32> {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             cmd_learn(&wd, "all").await
         }
-        LearnCmd::Router { workdir } => {
+        LearnCmd::Route { workdir } => {
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
             cmd_learn(&wd, "router").await
         }
@@ -46,7 +46,7 @@ pub(crate) async fn cmd_tune(workdir: &std::path::Path, subsystem: &str, dry_run
             if path.exists() {
                 let content = std::fs::read_to_string(&path)?;
                 let thresholds: serde_json::Value = serde_json::from_str(&content)?;
-                println!("Gate adaptive thresholds ({}):", path.display());
+                println!("Verify adaptive thresholds ({}):", path.display());
                 println!("{}", serde_json::to_string_pretty(&thresholds)?);
             } else {
                 println!("No gate thresholds found at {}.", path.display());

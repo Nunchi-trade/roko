@@ -11,7 +11,7 @@
 use crate::compile_errors::{classify_gate_failure, render_failure_classification};
 use crate::payload::{BuildSystem, GatePayload};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -57,9 +57,15 @@ impl CompileGate {
     }
 }
 
+impl roko_core::Cell for CompileGate {
+    fn cell_id(&self) -> &str { "compile-gate" }
+    fn cell_name(&self) -> &str { "CompileGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
 #[allow(clippy::cast_possible_truncation)]
-impl Gate for CompileGate {
+impl Verify for CompileGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {

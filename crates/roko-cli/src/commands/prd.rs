@@ -362,7 +362,7 @@ pub(crate) fn detect_project_domain(target: &Path) -> &'static str {
 }
 
 
-/// Gate configuration hint based on domain profile.
+/// Verify configuration hint based on domain profile.
 pub(crate) fn domain_gate_hint(domain: &str) -> &'static str {
     match domain {
         "rust" => "compile (cargo check), test (cargo test), clippy (cargo clippy)",

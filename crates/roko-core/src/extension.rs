@@ -63,20 +63,20 @@ pub struct InferenceResponse {
     pub extra: serde_json::Value,
 }
 
-/// Gate evaluation result passed to `on_gate`.
+/// Verify evaluation result passed to `on_gate`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GateEvent {
     /// Plan the gate belongs to.
     pub plan_id: String,
-    /// Gate that ran (e.g. "compile", "test", "clippy").
+    /// Verify that ran (e.g. "compile", "test", "clippy").
     pub gate_name: String,
     /// Whether the gate passed.
     pub passed: bool,
-    /// Gate rung (e.g. "rung-1", "rung-3").
+    /// Verify rung (e.g. "rung-1", "rung-3").
     pub rung: String,
     /// How long the gate took in milliseconds.
     pub duration_ms: u64,
-    /// Gate-specific details (diagnostics, counts, etc.).
+    /// Verify-specific details (diagnostics, counts, etc.).
     pub details: serde_json::Value,
 }
 

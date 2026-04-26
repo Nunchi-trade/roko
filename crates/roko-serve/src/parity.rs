@@ -256,12 +256,12 @@ pub fn build_parity_matrix() -> ParityMatrix {
             backend_source: "Agent sidecar proxy + episode logger".into(),
             status: ParityStatus::Partial,
         },
-        // -- Gate results --
+        // -- Verify results --
         ParityEntry {
-            feature: "Gate results".into(),
+            feature: "Verify results".into(),
             dashboard_route: Some("GET /api/gates/summary, GET /api/gates/history".into()),
             tui_tab: Some("F2 Plans".into()),
-            tui_subview: Some("Gate result badges".into()),
+            tui_subview: Some("Verify result badges".into()),
             cli_fallback: Some("roko plan run <dir> (gate output in log)".into()),
             backend_source: ".roko/episodes.jsonl (gate events) + adaptive thresholds".into(),
             status: ParityStatus::Full,

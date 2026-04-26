@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
-use roko_core::{Engram, Substrate};
+use roko_core::{Engram, Store};
 use roko_daimon::{DaimonState, StrategySpaceDefinition};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::latency::LatencyRegistry;

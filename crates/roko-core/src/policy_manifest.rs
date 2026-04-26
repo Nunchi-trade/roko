@@ -352,13 +352,13 @@ impl RoleProfile {
 pub struct PromptPolicy {
     /// Stable policy identifier referenced by role profiles.
     pub policy_id: String,
-    /// Policy version.
+    /// React version.
     #[serde(default = "default_profile_version")]
     pub version: String,
     /// Ordered prompt sections.
     #[serde(default)]
     pub sections: Vec<PromptPolicySection>,
-    /// Policy-level prompt budget.
+    /// React-level prompt budget.
     #[serde(default)]
     pub budget: PromptBudgetPolicy,
     /// Provenance for this policy.
@@ -647,10 +647,10 @@ pub enum OutputFormat {
     Markdown,
 }
 
-/// Gate expected after a role invocation.
+/// Verify expected after a role invocation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateExpectation {
-    /// Gate identifier.
+    /// Verify identifier.
     pub gate_id: String,
     /// Whether failure blocks task completion.
     #[serde(default = "default_true")]

@@ -1161,7 +1161,7 @@ async fn run_cold_archival_tick(
     max_age_ms: i64,
     batch_size: usize,
 ) -> anyhow::Result<usize> {
-    use roko_core::{ColdSubstrate, Context, Query, Substrate};
+    use roko_core::{ColdStore, Context, Query, Store};
 
     let hot = roko_fs::FileSubstrate::open(roko_dir).await?;
     let ctx = Context::now();

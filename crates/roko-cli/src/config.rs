@@ -973,7 +973,7 @@ pub struct ConfigLayer {
     /// Prompt settings overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<PromptLayer>,
-    /// Gate list (replaces rather than merges if present).
+    /// Verify list (replaces rather than merges if present).
     #[serde(default, rename = "gate", skip_serializing_if = "Option::is_none")]
     pub gates: Option<Vec<GateConfig>>,
     /// Executor settings overrides.

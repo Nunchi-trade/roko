@@ -16,7 +16,7 @@ pub enum LlmBackend {
     Claude,
     /// `OpenAI` Codex models.
     Codex,
-    /// Cursor Composer models.
+    /// Cursor Compose models.
     Cursor,
     /// Local models via Ollama (Gemma, Llama, Qwen, etc.).
     Ollama,

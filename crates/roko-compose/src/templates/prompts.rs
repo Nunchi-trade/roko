@@ -443,7 +443,7 @@ total = N
 # BLOCKING GATES
 [[task]]
 id = "R1"
-title = "Compilation Gate"
+title = "Compilation Verify"
 type = "gate"
 severity = "blocking"
 check = ["specific thing to verify"]

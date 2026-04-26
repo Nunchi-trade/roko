@@ -144,9 +144,9 @@ fn utf8_char_len(first_byte: u8) -> usize {
     }
 }
 
-// ─── Data LLM Router ──────────────────────────────────────────────────
+// ─── Data LLM Route ──────────────────────────────────────────────────
 
-/// Router that decides whether content should pass through the Data LLM.
+/// Route that decides whether content should pass through the Data LLM.
 ///
 /// The router inspects the taint label on incoming content and routes
 /// tainted content through the Data LLM dispatch path. Clean content

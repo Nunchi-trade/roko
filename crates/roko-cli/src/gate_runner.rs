@@ -1,4 +1,4 @@
-//! Gate-related free functions and types extracted from `orchestrate.rs`.
+//! Verify-related free functions and types extracted from `orchestrate.rs`.
 //!
 //! This module contains gate helpers that do not require `&self` access to
 //! `PlanRunner`. The heavy gate methods (`run_gate_pipeline`, `run_gate_rung`,
@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use roko_core::{Context, Engram, Gate, TaskDomain, Verdict};
+use roko_core::{Context, Engram, Verify, TaskDomain, Verdict};
 use roko_gate::generated_test_gate::ArtifactStore as GeneratedArtifactStore;
 use roko_gate::rung_selector::Rung;
 use roko_gate::{AcceptanceDecision, AcceptanceOutcome, NoStubEvidence};
@@ -69,7 +69,7 @@ pub(crate) fn primary_gate_phase_to_rung(phase: &str) -> Option<Rung> {
     }
 }
 
-// ─── Gate result matching ────────────────────────────────────────────────
+// ─── Verify result matching ────────────────────────────────────────────────
 
 /// Check whether a [`GateResult`] satisfies a gate requirement by name or
 /// kind.
@@ -164,17 +164,17 @@ pub(crate) struct RecordedGateVerdict {
     pub(crate) verdict: Verdict,
 }
 
-/// Decorator around a [`Gate`] that records every verdict into a shared sink.
+/// Decorator around a [`Verify`] that records every verdict into a shared sink.
 pub(crate) struct RecordingGate {
     rung: Rung,
-    inner: Box<dyn Gate>,
+    inner: Box<dyn Verify>,
     sink: Arc<Mutex<Vec<RecordedGateVerdict>>>,
 }
 
 impl RecordingGate {
     pub(crate) fn new(
         rung: Rung,
-        inner: Box<dyn Gate>,
+        inner: Box<dyn Verify>,
         sink: Arc<Mutex<Vec<RecordedGateVerdict>>>,
     ) -> Self {
         Self { rung, inner, sink }
@@ -182,7 +182,7 @@ impl RecordingGate {
 }
 
 #[async_trait::async_trait]
-impl Gate for RecordingGate {
+impl Verify for RecordingGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let verdict = self.inner.verify(signal, ctx).await;
         self.sink

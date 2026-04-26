@@ -1,7 +1,7 @@
 //! `EpisodePolicy` — emits an Episode signal that ties a prompt, an agent
 //! output, and a set of gate verdicts together into one replayable record.
 
-use roko_core::{Body, Context, Decay, Engram, Kind, Policy, Provenance};
+use roko_core::{Body, Context, Decay, Engram, Kind, React, Provenance};
 
 /// A policy that wraps a full run (prompt → agent → gates) in one Episode signal.
 ///
@@ -75,9 +75,9 @@ impl EpisodePolicy {
     }
 }
 
-impl Policy for EpisodePolicy {
+impl React for EpisodePolicy {
     fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
-        // The CLI drives `record_run` directly; the streaming Policy API is
+        // The CLI drives `record_run` directly; the streaming React API is
         // unused here but implemented so `EpisodePolicy` still satisfies the
         // trait contract for composition with future runtimes.
         Vec::new()

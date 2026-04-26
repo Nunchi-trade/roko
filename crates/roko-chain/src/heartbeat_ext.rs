@@ -122,7 +122,7 @@ pub struct SimulateResult {
 pub struct ValidateResult {
     /// Whether validation passed (no error-severity violations).
     pub passed: bool,
-    /// Policy violations detected (may include warnings even on pass).
+    /// React violations detected (may include warnings even on pass).
     pub violations: Vec<PolicyViolation>,
     /// Human-readable summary.
     pub summary: String,

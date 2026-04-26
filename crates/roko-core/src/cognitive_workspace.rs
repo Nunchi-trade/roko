@@ -48,7 +48,7 @@ pub struct CognitiveWorkspace {
     /// Structured output parse result, attached once output is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_parse_result: Option<OutputParseResult>,
-    /// Gate outcomes associated with this invocation.
+    /// Verify outcomes associated with this invocation.
     #[serde(default)]
     pub gate_outcomes: Vec<InvocationGateOutcome>,
     /// Structured review verdicts associated with this invocation.
@@ -465,10 +465,10 @@ pub enum OutputParseResult {
     },
 }
 
-/// Gate outcome attached to an invocation.
+/// Verify outcome attached to an invocation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvocationGateOutcome {
-    /// Gate identifier.
+    /// Verify identifier.
     pub gate_id: String,
     /// Outcome state such as `passed`, `failed`, `blocked`, or `needs_replan`.
     pub outcome: String,

@@ -63,7 +63,7 @@ impl SectionOutcomeStatus {
 /// One gate result joined to a section observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SectionGateOutcome {
-    /// Gate identifier.
+    /// Verify identifier.
     pub gate_id: String,
     /// Outcome status string emitted by the gate.
     pub outcome: String,
@@ -164,7 +164,7 @@ pub struct SectionOutcomeRecord {
     pub experiment_id: Option<String>,
     /// Overall invocation outcome.
     pub status: SectionOutcomeStatus,
-    /// Gate outcomes joined to this section.
+    /// Verify outcomes joined to this section.
     #[serde(default)]
     pub gate_outcomes: Vec<SectionGateOutcome>,
     /// Review verdicts joined to this section.

@@ -1,4 +1,4 @@
-//! Gate summary and history endpoints.
+//! Verify summary and history endpoints.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

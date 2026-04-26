@@ -328,7 +328,7 @@ pub struct DashboardData {
     pub active_tasks: Vec<TaskSummary>,
     /// Agents tracked by the process supervisor.
     pub agents: Vec<AgentSummary>,
-    /// Gate verdicts collected from signals.
+    /// Verify verdicts collected from signals.
     pub gate_results: Vec<GateResultSummary>,
     /// Efficiency aggregate from `.roko/learn/efficiency.jsonl`.
     pub efficiency: EfficiencySummary,
@@ -350,7 +350,7 @@ pub struct DashboardData {
     pub experiment_winners: Vec<ExperimentWinnerSummary>,
     /// Last observed experiments file metadata.
     experiments_stamp: FileStamp,
-    /// Gate-results page data derived from signals and adaptive thresholds.
+    /// Verify-results page data derived from signals and adaptive thresholds.
     pub gate_results_page: GateResultsPageData,
     /// Cached adaptive thresholds from `.roko/learn/gate-thresholds.json`.
     adaptive_thresholds: Option<AdaptiveThresholds>,
@@ -1042,7 +1042,7 @@ pub struct GateResultSummary {
     pub summary: String,
 }
 
-/// Gate signal summary used to derive the gate-results page.
+/// Verify signal summary used to derive the gate-results page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateSignalSummary {
     pub id: String,
@@ -3324,7 +3324,7 @@ pub struct DashboardSnapshot {
     experiments: Option<ExperimentStore>,
     /// Adaptive gate thresholds from `.roko/learn/gate-thresholds.json`.
     adaptive_thresholds: Option<AdaptiveThresholds>,
-    /// Gate-results page data derived from signals and thresholds.
+    /// Verify-results page data derived from signals and thresholds.
     gate_results_page: GateResultsPageData,
     /// Most recent signals from `.roko/engrams.jsonl`.
     recent_signals: Vec<SignalSummary>,
@@ -5651,7 +5651,7 @@ mod tests {
         let rendered = dashboard
             .render_page_text(PageId::GateResults)
             .expect("gate results page should render");
-        assert!(rendered.contains("Gate Results"));
+        assert!(rendered.contains("Verify Results"));
         assert!(rendered.contains("gate summary:"));
         assert!(rendered.contains("adaptive thresholds:"));
         assert!(rendered.contains("recent gate failures:"));

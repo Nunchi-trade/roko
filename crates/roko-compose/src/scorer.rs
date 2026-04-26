@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::prompt::{PromptSection, SectionPriority};
-use roko_core::{Context, Engram, Score, Scorer};
+use roko_core::{Context, Engram, Score};
+use roko_core::traits::Score as ScoreFn;
 
 /// Ranks `Engram<PromptSection>` inputs by importance.
 ///
@@ -42,7 +43,7 @@ impl SectionScorer {
     }
 }
 
-impl Scorer for SectionScorer {
+impl ScoreFn for SectionScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
@@ -121,7 +122,7 @@ impl Scorer for SectionScorer {
 ///
 /// If higher-fidelity epistemic scoring is needed in the future, the
 /// `epistemic_value()` method can be replaced with a proper KL-divergence
-/// computation without changing the [`Scorer`] interface.
+/// computation without changing the [`ScoreFn`] interface.
 #[derive(Clone, Debug)]
 pub struct GoalDirectedHeuristicScorer {
     goal_text: String,
@@ -227,7 +228,7 @@ impl GoalDirectedHeuristicScorer {
     }
 }
 
-impl Scorer for GoalDirectedHeuristicScorer {
+impl ScoreFn for GoalDirectedHeuristicScorer {
     fn score(&self, signal: &Engram, _ctx: &Context) -> Score {
         let Ok(section) = PromptSection::from_signal(signal) else {
             return Score::ZERO;
@@ -290,7 +291,7 @@ impl Scorer for GoalDirectedHeuristicScorer {
 /// See [`GoalDirectedHeuristicScorer`] struct documentation for the full
 /// three-point justification (correlation, cost, adequacy). If higher-fidelity
 /// epistemic scoring is needed, the `epistemic_value()` method can be replaced
-/// with KL-divergence computation without changing the [`Scorer`] interface.
+/// with KL-divergence computation without changing the [`ScoreFn`] interface.
 pub type ActiveInferenceScorer = GoalDirectedHeuristicScorer;
 
 fn embed_text(text: &str, dimensions: usize) -> Vec<f32> {

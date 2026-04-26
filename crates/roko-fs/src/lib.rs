@@ -1,4 +1,4 @@
-//! Filesystem-backed [`Substrate`](roko_core::Substrate).
+//! Filesystem-backed [`Store`](roko_core::Store).
 //!
 //! `FileSubstrate` persists signals to an append-only JSONL log under a
 //! directory (typically `.roko/signals/`). It keeps an in-memory index of
@@ -15,7 +15,7 @@
 //!   Memory cost is low: tens of MB per million signals.
 //!
 //! When workload grows beyond in-memory capacity, we can swap in a different
-//! backend (`SQLite`, `sled`) behind the same `Substrate` trait — the callers
+//! backend (`SQLite`, `sled`) behind the same `Store` trait — the callers
 //! won't change.
 
 #![allow(
@@ -31,7 +31,7 @@ pub mod archive;
 /// Shared atomic-write helpers (write-tmp-rename pattern).
 pub mod atomic;
 pub mod bandit;
-/// Archive-backed [`ColdSubstrate`](roko_core::ColdSubstrate) for aged-out engrams.
+/// Archive-backed [`ColdStore`](roko_core::ColdStore) for aged-out engrams.
 pub mod cold_substrate;
 pub mod file_substrate;
 pub mod gc;

@@ -181,7 +181,7 @@ pub enum RokoEvent {
         /// UTC timestamp of the broadcast.
         broadcast_at: chrono::DateTime<chrono::Utc>,
     },
-    /// BEAT-05 REACT step: emitted when the Policy.decide() react hook fires.
+    /// BEAT-05 REACT step: emitted when the React.decide() react hook fires.
     ReactDecision {
         /// Tick that triggered the react.
         tick_id: u64,

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use roko_core::{
-    Body, Budget, Composer, Context, Engram, Kind, PromptSectionAudit, Provenance, Scorer,
+    Body, Budget, Compose, Context, Engram, Kind, PromptSectionAudit, Provenance,
     error::{Result, RokoError},
 };
 use serde::{Deserialize, Serialize};
@@ -457,7 +457,7 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
-// ─── Composer ──────────────────────────────────────────────────────────────
+// ─── Compose ──────────────────────────────────────────────────────────────
 
 /// Assembles `Engram<PromptSection>` inputs into a final `Engram<Prompt>`
 /// under a token budget.
@@ -594,12 +594,12 @@ impl PromptComposer {
     }
 }
 
-impl Composer for PromptComposer {
+impl Compose for PromptComposer {
     fn compose(
         &self,
         signals: &[Engram],
         budget: &Budget,
-        scorer: &dyn Scorer,
+        scorer: &dyn roko_core::traits::Score,
         ctx: &Context,
     ) -> Result<Engram> {
         // Decode sections; skip anything that doesn't parse. Enforce any
@@ -1108,7 +1108,7 @@ fn keyword_weight(text: &str, keywords: &[&str]) -> f32 {
 fn candidate_bid_density(
     section: &PromptSection,
     signal: &Engram,
-    scorer: &dyn Scorer,
+    scorer: &dyn roko_core::traits::Score,
     ctx: &Context,
 ) -> f32 {
     let score = scorer.score(signal, ctx);

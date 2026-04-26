@@ -88,7 +88,7 @@ pub enum LoggerError {
 /// Verdict produced by a single gate run on behalf of an agent turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GateVerdict {
-    /// Gate identifier ("compile", "test", "lint", …).
+    /// Verify identifier ("compile", "test", "lint", …).
     #[serde(default)]
     pub gate: String,
     /// Whether the gate passed.

@@ -21,7 +21,7 @@ use crate::rung_selector::Rung;
 use crate::symbol_gate::SymbolGate;
 use crate::test_gate::TestGate;
 use crate::verify_chain_gate::{VERIFY_SCRIPT_TAG, VerifyChainGate};
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub struct RungExecutionConfig {
     /// Artifact store for `GeneratedTestGate`.
     pub generated_test_artifacts: Option<Arc<dyn GeneratedArtifactStore>>,
     /// Optional fallback gate for `VerifyChainGate`.
-    pub verify_chain_fallback: Option<Arc<dyn Gate>>,
+    pub verify_chain_fallback: Option<Arc<dyn Verify>>,
     /// Search oracle for `FactCheckGate`.
     pub fact_check_oracle: Option<Arc<dyn SearchOracle>>,
     /// Fact-check confidence threshold. Defaults to the gate's builtin value.

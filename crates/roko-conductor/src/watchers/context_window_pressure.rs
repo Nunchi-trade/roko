@@ -3,7 +3,7 @@
 //! Monitors `TokenUsage` signals derived from agent efficiency events and
 //! fires when usage exceeds [`MAX_CONTEXT_USAGE_RATIO`].
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 use roko_learn::efficiency::AgentEfficiencyEvent;
 
 /// Maximum context window utilization ratio (0.0 to 1.0) before firing.
@@ -49,7 +49,7 @@ impl ContextWindowPressureWatcher {
     }
 }
 
-impl Policy for ContextWindowPressureWatcher {
+impl React for ContextWindowPressureWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Find the most recent TokenUsage signal.
         let latest = stream.iter().rev().find(|s| s.kind == Kind::TokenUsage);

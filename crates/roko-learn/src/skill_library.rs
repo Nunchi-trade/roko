@@ -404,7 +404,7 @@ pub struct SkillQuery {
 /// One gate result passed into skill extraction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillGateResult {
-    /// Gate name.
+    /// Verify name.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,
@@ -436,7 +436,7 @@ pub struct SkillExtractionRequest {
     pub model: String,
     /// Hash of the rendered system prompt.
     pub prompt_hash: String,
-    /// Gate results that passed the task.
+    /// Verify results that passed the task.
     pub gate_results: Vec<SkillGateResult>,
 }
 
@@ -501,7 +501,7 @@ pub struct SkillCandidate {
     /// Short summary of the successful output.
     #[serde(default)]
     pub output_summary: String,
-    /// Gate outcomes attached to the source episode.
+    /// Verify outcomes attached to the source episode.
     #[serde(default)]
     pub gate_results: Vec<SkillGateResult>,
 }
@@ -1820,7 +1820,7 @@ pub enum SkillUpdate {
         skill_name: String,
         /// Description of the anti-pattern.
         anti_pattern: String,
-        /// Gate that failed.
+        /// Verify that failed.
         failed_gate: String,
     },
     /// A skill's confidence should be updated based on new evidence.

@@ -25,8 +25,8 @@ use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Composer, Context, Engram, Gate, Kind, Provenance, StateHub,
-    Substrate, Verdict,
+    AgentRole, Body, Budget, Compose, Context, Engram, Verify, Kind, Provenance, StateHub,
+    Store, Verdict,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};

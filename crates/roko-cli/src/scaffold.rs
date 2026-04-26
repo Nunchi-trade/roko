@@ -1,12 +1,12 @@
 //! `roko new` scaffolders — generate compilable boilerplate for Synapse traits.
 //!
 //! Nine scaffold types are supported:
-//! - `gate` — Gate trait impl with one passing test
-//! - `scorer` — Scorer trait impl
-//! - `router` — Router trait impl
-//! - `policy` — Policy trait impl
-//! - `substrate` — Substrate trait impl
-//! - `composer` — Composer trait impl
+//! - `gate` — Verify trait impl with one passing test
+//! - `scorer` — Score trait impl
+//! - `router` — Route trait impl
+//! - `policy` — React trait impl
+//! - `substrate` — Store trait impl
+//! - `composer` — Compose trait impl
 //! - `domain` — Full domain profile with config, gates, templates
 //! - `template` — Prompt template module
 //! - `event-source` — EventSource trait impl
@@ -80,7 +80,7 @@ fn write_scaffold_file(path: &Path, content: &str) -> Result<()> {
 }
 
 fn scaffold_gate(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    let struct_name = format!("{}Gate", to_pascal_case(name));
+    let struct_name = format!("{}Verify", to_pascal_case(name));
     let mod_name = to_snake_case(name);
     let file_path = output_dir.join(format!("{mod_name}_gate.rs"));
 
@@ -89,7 +89,7 @@ fn scaffold_gate(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
 
 use async_trait::async_trait;
 use roko_core::{{Body, Context, Engram, Kind, Result}};
-use roko_core::traits::Gate;
+use roko_core::traits::Verify;
 
 /// {struct_name} validates engrams against custom criteria.
 pub struct {struct_name} {{
@@ -105,7 +105,7 @@ impl {struct_name} {{
 }}
 
 #[async_trait]
-impl Gate for {struct_name} {{
+impl Verify for {struct_name} {{
     async fn check(&self, engram: &Engram, ctx: &Context) -> Result<bool> {{
         // TODO: implement your gate logic here.
         // Return true if the engram passes, false if it should be rejected.
@@ -170,13 +170,13 @@ fn scaffold_scorer(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
 
 use async_trait::async_trait;
 use roko_core::{{Context, Engram, Result}};
-use roko_core::traits::Scorer;
+use roko_core::traits::Score as ScoreFn;
 
 /// {struct_name} assigns relevance scores to engrams.
 pub struct {struct_name};
 
 #[async_trait]
-impl Scorer for {struct_name} {{
+impl ScoreFn for {struct_name} {{
     async fn score(&self, engram: &Engram, ctx: &Context) -> Result<f32> {{
         // TODO: implement your scoring logic here.
         // Return a value in [0.0, 1.0] indicating relevance.
@@ -222,7 +222,7 @@ mod tests {{
 }
 
 fn scaffold_router(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    let struct_name = format!("{}Router", to_pascal_case(name));
+    let struct_name = format!("{}Route", to_pascal_case(name));
     let mod_name = to_snake_case(name);
     let file_path = output_dir.join(format!("{mod_name}_router.rs"));
 
@@ -231,7 +231,7 @@ fn scaffold_router(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
 
 use async_trait::async_trait;
 use roko_core::{{Context, Engram, Result}};
-use roko_core::traits::Router;
+use roko_core::traits::Route;
 
 /// {struct_name} routes engrams to appropriate handlers.
 pub struct {struct_name} {{
@@ -247,7 +247,7 @@ impl {struct_name} {{
 }}
 
 #[async_trait]
-impl Router for {struct_name} {{
+impl Route for {struct_name} {{
     async fn route(&self, engram: &Engram, ctx: &Context) -> Result<String> {{
         // TODO: implement your routing logic here.
         // Return a route label string identifying the target handler.
@@ -292,7 +292,7 @@ mod tests {{
 }
 
 fn scaffold_policy(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    let struct_name = format!("{}Policy", to_pascal_case(name));
+    let struct_name = format!("{}React", to_pascal_case(name));
     let mod_name = to_snake_case(name);
     let file_path = output_dir.join(format!("{mod_name}_policy.rs"));
 
@@ -301,13 +301,13 @@ fn scaffold_policy(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
 
 use async_trait::async_trait;
 use roko_core::{{Context, Engram, Result}};
-use roko_core::traits::Policy;
+use roko_core::traits::React;
 
 /// {struct_name} decides whether an action should proceed.
 pub struct {struct_name};
 
 #[async_trait]
-impl Policy for {struct_name} {{
+impl React for {struct_name} {{
     async fn evaluate(&self, engram: &Engram, ctx: &Context) -> Result<bool> {{
         // TODO: implement your policy logic here.
         // Return true to permit the action, false to deny.
@@ -351,7 +351,7 @@ mod tests {{
 }
 
 fn scaffold_substrate(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    let struct_name = format!("{}Substrate", to_pascal_case(name));
+    let struct_name = format!("{}Store", to_pascal_case(name));
     let mod_name = to_snake_case(name);
     let file_path = output_dir.join(format!("{mod_name}_substrate.rs"));
 
@@ -363,7 +363,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use roko_core::{{Body, ContentHash, Context, Engram, Kind, Query, Result}};
-use roko_core::traits::Substrate;
+use roko_core::traits::Store;
 
 /// {struct_name} stores engrams in memory.
 pub struct {struct_name} {{
@@ -386,7 +386,7 @@ impl Default for {struct_name} {{
 }}
 
 #[async_trait]
-impl Substrate for {struct_name} {{
+impl Store for {struct_name} {{
     async fn put(&self, engram: Engram) -> Result<ContentHash> {{
         let hash = engram.hash.clone();
         self.store.lock().unwrap().insert(hash.clone(), engram);
@@ -458,7 +458,7 @@ mod tests {{
 }
 
 fn scaffold_composer(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    let struct_name = format!("{}Composer", to_pascal_case(name));
+    let struct_name = format!("{}Compose", to_pascal_case(name));
     let mod_name = to_snake_case(name);
     let file_path = output_dir.join(format!("{mod_name}_composer.rs"));
 
@@ -467,13 +467,13 @@ fn scaffold_composer(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
 
 use async_trait::async_trait;
 use roko_core::{{Context, Engram, Result}};
-use roko_core::traits::Composer;
+use roko_core::traits::Compose;
 
 /// {struct_name} assembles context from engram history.
 pub struct {struct_name};
 
 #[async_trait]
-impl Composer for {struct_name} {{
+impl Compose for {struct_name} {{
     async fn compose(&self, engrams: &[Engram], ctx: &Context) -> Result<String> {{
         // TODO: implement your composition logic here.
         // Combine the engrams into a prompt string for the model.
@@ -546,7 +546,7 @@ fn scaffold_domain(name: &str, output_dir: &Path) -> Result<Vec<PathBuf>> {
         r#"//! {pascal} domain profile.
 //!
 //! This module defines a complete domain profile including:
-//! - Gate implementation
+//! - Verify implementation
 //! - Prompt template
 //! - Domain configuration
 
@@ -567,13 +567,13 @@ pub const DOMAIN_NAME: &str = "{snake}";
 
 use async_trait::async_trait;
 use roko_core::{{Context, Engram, Result}};
-use roko_core::traits::Gate;
+use roko_core::traits::Verify;
 
-/// Gate for the {pascal} domain.
-pub struct {pascal}Gate;
+/// Verify for the {pascal} domain.
+pub struct {pascal}Verify;
 
 #[async_trait]
-impl Gate for {pascal}Gate {{
+impl Verify for {pascal}Verify {{
     async fn check(&self, engram: &Engram, _ctx: &Context) -> Result<bool> {{
         Ok(engram.score > 0.0)
     }}
@@ -590,7 +590,7 @@ mod tests {{
 
     #[tokio::test]
     async fn gate_passes_positive_score() {{
-        let gate = {pascal}Gate;
+        let gate = {pascal}Verify;
         let engram = Engram {{
             hash: ContentHash::from_bytes(b"test"),
             kind: Kind::Signal,
@@ -801,8 +801,8 @@ mod tests {
         let files = scaffold_gate("my-custom", dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
-        assert!(content.contains("MyCustomGate"));
-        assert!(content.contains("impl Gate for"));
+        assert!(content.contains("MyCustomVerify"));
+        assert!(content.contains("impl Verify for"));
         assert!(content.contains("#[cfg(test)]"));
         assert!(content.contains("passes_above_threshold"));
     }
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
         assert!(content.contains("RelevanceScorer"));
-        assert!(content.contains("impl Scorer for"));
+        assert!(content.contains("impl ScoreFn for"));
     }
 
     #[test]
@@ -823,8 +823,8 @@ mod tests {
         let files = scaffold_router("priority", dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
-        assert!(content.contains("PriorityRouter"));
-        assert!(content.contains("impl Router for"));
+        assert!(content.contains("PriorityRoute"));
+        assert!(content.contains("impl Route for"));
     }
 
     #[test]
@@ -833,8 +833,8 @@ mod tests {
         let files = scaffold_policy("budget", dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
-        assert!(content.contains("BudgetPolicy"));
-        assert!(content.contains("impl Policy for"));
+        assert!(content.contains("BudgetReact"));
+        assert!(content.contains("impl React for"));
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
         assert!(content.contains("RedisSubstrate"));
-        assert!(content.contains("impl Substrate for"));
+        assert!(content.contains("impl Store for"));
     }
 
     #[test]
@@ -853,8 +853,8 @@ mod tests {
         let files = scaffold_composer("summary", dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         let content = std::fs::read_to_string(&files[0]).unwrap();
-        assert!(content.contains("SummaryComposer"));
-        assert!(content.contains("impl Composer for"));
+        assert!(content.contains("SummaryCompose"));
+        assert!(content.contains("impl Compose for"));
     }
 
     #[test]

@@ -317,7 +317,7 @@ pub(crate) async fn cmd_status(
         }
         let episode_count = counts.get("episode").copied().unwrap_or(0);
 
-        // Gate verdicts from substrate.
+        // Verify verdicts from substrate.
         let verdicts_json = substrate
             .query(&Query::of_kind(Kind::GateVerdict), &ctx)
             .await

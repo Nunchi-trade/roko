@@ -1,4 +1,4 @@
-//! Gate failure pattern extraction and normalized keys.
+//! Verify failure pattern extraction and normalized keys.
 //!
 //! This module keeps gate failure identity separate from raw logs. Compile
 //! diagnostics are keyed by error code plus file path, while fallback text
@@ -17,7 +17,7 @@ const MAX_DIGEST_CHARS: usize = 200;
 pub struct FailurePatternRecord {
     /// Stable key used for de-duplication.
     pub key: String,
-    /// Gate that emitted the failure.
+    /// Verify that emitted the failure.
     pub gate: String,
     /// Coarse failure class or category.
     pub classification: String,

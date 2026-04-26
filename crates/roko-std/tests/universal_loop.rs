@@ -6,15 +6,15 @@
 
 use async_trait::async_trait;
 use roko_core::{
-    Body, Budget, Composer, Context, Decay, Engram, Gate, Kind, Policy, Provenance, Query, Result,
-    Score, Scorer, Substrate, Verdict, loop_tick,
+    Body, Budget, Compose, Context, Decay, Engram, Verify, Kind, React, Provenance, Query, Result,
+    Score, Store, Verdict, loop_tick,
 };
 use roko_std::{FirstRouter, MemorySubstrate, NoOpPolicy};
 use std::sync::Arc;
 
 /// A custom scorer: favors signals tagged `priority=high`.
 struct PriorityScorer;
-impl Scorer for PriorityScorer {
+impl roko_core::traits::Score for PriorityScorer {
     fn score(&self, s: &Engram, _ctx: &Context) -> Score {
         let confidence = if s.tag("priority") == Some("high") {
             0.9
@@ -31,7 +31,7 @@ impl Scorer for PriorityScorer {
 /// A custom gate: passes if the signal body is not empty.
 struct NonEmptyGate;
 #[async_trait]
-impl Gate for NonEmptyGate {
+impl Verify for NonEmptyGate {
     async fn verify(&self, s: &Engram, _ctx: &Context) -> Verdict {
         if s.body.byte_size() > 0 {
             Verdict::pass(self.name())
@@ -46,12 +46,12 @@ impl Gate for NonEmptyGate {
 
 /// A composer that wraps the input in a "processed" kind with lineage.
 struct WrapComposer;
-impl Composer for WrapComposer {
+impl Compose for WrapComposer {
     fn compose(
         &self,
         signals: &[Engram],
         _budget: &Budget,
-        _scorer: &dyn Scorer,
+        _scorer: &dyn roko_core::traits::Score,
         _ctx: &Context,
     ) -> Result<Engram> {
         let input = signals.first().expect("at least one input");
@@ -70,7 +70,7 @@ impl Composer for WrapComposer {
 
 /// A policy that emits a logging episode every time a signal passes through.
 struct EpisodeLoggerPolicy;
-impl Policy for EpisodeLoggerPolicy {
+impl React for EpisodeLoggerPolicy {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         stream
             .iter()
@@ -93,7 +93,7 @@ impl Policy for EpisodeLoggerPolicy {
 
 #[tokio::test]
 async fn universal_loop_processes_a_signal_end_to_end() {
-    let substrate: Arc<dyn Substrate> = Arc::new(MemorySubstrate::named("test"));
+    let substrate: Arc<dyn Store> = Arc::new(MemorySubstrate::named("test"));
     let scorer = PriorityScorer;
     let router = FirstRouter;
     let composer = WrapComposer;
@@ -154,13 +154,13 @@ async fn universal_loop_processes_a_signal_end_to_end() {
     // Written = composed + episode = 2 new signals.
     assert_eq!(outcome.written.len(), 2);
 
-    // Substrate now contains original tasks + composed + episode = 4 signals.
+    // Store now contains original tasks + composed + episode = 4 signals.
     assert_eq!(substrate.len().await.unwrap(), 4);
 }
 
 #[tokio::test]
 async fn loop_tick_does_nothing_when_query_matches_nothing() {
-    let substrate: Arc<dyn Substrate> = Arc::new(MemorySubstrate::new());
+    let substrate: Arc<dyn Store> = Arc::new(MemorySubstrate::new());
     let scorer = PriorityScorer;
     let router = FirstRouter;
     let composer = WrapComposer;
@@ -195,17 +195,17 @@ async fn loop_tick_does_nothing_when_query_matches_nothing() {
 
 #[tokio::test]
 async fn failing_gate_prevents_writeback() {
-    let substrate: Arc<dyn Substrate> = Arc::new(MemorySubstrate::new());
+    let substrate: Arc<dyn Store> = Arc::new(MemorySubstrate::new());
     let scorer = PriorityScorer;
     let router = FirstRouter;
-    // Composer that produces an empty-body signal — will fail NonEmptyGate.
+    // Compose that produces an empty-body signal — will fail NonEmptyGate.
     struct EmptyComposer;
-    impl Composer for EmptyComposer {
+    impl Compose for EmptyComposer {
         fn compose(
             &self,
             _s: &[Engram],
             _b: &Budget,
-            _sc: &dyn Scorer,
+            _sc: &dyn roko_core::traits::Score,
             _c: &Context,
         ) -> Result<Engram> {
             Ok(Engram::builder(Kind::Custom("empty".into()))
@@ -248,7 +248,7 @@ async fn failing_gate_prevents_writeback() {
     assert!(!outcome.passed(), "NonEmptyGate should fail on empty body");
     assert!(outcome.written.is_empty(), "failed gate prevents writeback");
     assert!(outcome.emitted.is_empty(), "policy didn't fire");
-    // Substrate still has just the original task.
+    // Store still has just the original task.
     assert_eq!(substrate.len().await.unwrap(), 1);
 }
 

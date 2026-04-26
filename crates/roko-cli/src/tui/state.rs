@@ -901,13 +901,13 @@ pub struct TaskRow {
 /// A single gate result for the command_output widget.
 #[derive(Debug, Clone, Default)]
 pub struct GateResultEntry {
-    /// Gate name (e.g. "compile", "clippy", "test").
+    /// Verify name (e.g. "compile", "clippy", "test").
     pub gate: String,
     /// Plan ID this gate ran against.
     pub plan_id: String,
     /// Whether the gate passed.
     pub passed: bool,
-    /// Gate output text (stdout + stderr).
+    /// Verify output text (stdout + stderr).
     pub output: String,
 }
 
@@ -1022,7 +1022,7 @@ pub struct TuiState {
     pub current_task_checklist: Vec<TaskRow>,
 
     // -- gate results --
-    /// Gate pipeline results for the command_output widget.
+    /// Verify pipeline results for the command_output widget.
     pub gate_results: Vec<GateResultEntry>,
     /// Recent conductor diagnoses from the live dashboard snapshot.
     pub diagnoses: Vec<roko_core::dashboard_snapshot::DiagnosisSummary>,
@@ -1223,7 +1223,7 @@ pub struct TuiState {
     pub conductor_alerts: Vec<AlertSummary>,
     /// C-factor snapshot for the inspect tab.
     pub cfactor: Option<roko_learn::cfactor::CFactor>,
-    /// Gate results page data (gate_rows, failure_rows, threshold_rows).
+    /// Verify results page data (gate_rows, failure_rows, threshold_rows).
     pub gate_results_page: GateResultsPageData,
     /// Experiment summaries for the config tab.
     pub experiments: Vec<ExperimentSummary>,
@@ -1237,7 +1237,7 @@ pub struct TuiState {
     pub agent_summaries: Vec<AgentSummary>,
     /// Active task summaries (legacy format from DashboardData).
     pub active_task_summaries: Vec<TaskSummary>,
-    /// Gate result summaries (legacy format from DashboardData).
+    /// Verify result summaries (legacy format from DashboardData).
     pub gate_result_summaries: Vec<GateResultSummary>,
     /// Cached episodes for the logs tab.
     pub episodes_cache: Vec<roko_learn::episode_logger::Episode>,

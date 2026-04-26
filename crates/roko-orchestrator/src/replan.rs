@@ -38,7 +38,7 @@ impl std::fmt::Display for FailureDisposition {
 /// One piece of structured evidence supporting a plan revision request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanRevisionEvidence {
-    /// Gate, review, or dispatcher source that produced the evidence.
+    /// Verify, review, or dispatcher source that produced the evidence.
     pub source: String,
     /// Optional failure classification, such as `type_error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,7 +109,7 @@ pub struct PlanRevisionRequest {
     pub disposition: FailureDisposition,
     /// Reason label, for example `gate_failure_limit`.
     pub reason: String,
-    /// Gate/task attempt count at the time the request was issued.
+    /// Verify/task attempt count at the time the request was issued.
     pub attempts: u32,
     /// Evidence items used to choose replan over retry.
     pub evidence: Vec<PlanRevisionEvidence>,

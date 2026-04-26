@@ -4,12 +4,12 @@
 //! agent action. Seven-step reconstruction:
 //!
 //! 1. **Action** -- identify the action Engram by `ContentHash`
-//! 2. **Substrate state** -- reconstruct file/signal state at action time
-//! 3. **Scorer outputs** -- reconstruct scores for each relevant Engram
-//! 4. **Router selection** -- reconstruct routing decision including alternatives
-//! 5. **Composer output** -- reconstruct prompt composition under budget
-//! 6. **Gate verdict** -- reconstruct gate pass/fail decision
-//! 7. **Policy decisions** -- reconstruct safety/authorization decisions
+//! 2. **Store state** -- reconstruct file/signal state at action time
+//! 3. **Score outputs** -- reconstruct scores for each relevant Engram
+//! 4. **Route selection** -- reconstruct routing decision including alternatives
+//! 5. **Compose output** -- reconstruct prompt composition under budget
+//! 6. **Verify verdict** -- reconstruct gate pass/fail decision
+//! 7. **React decisions** -- reconstruct safety/authorization decisions
 //!
 //! The replay itself is persisted as a `kind: Replay` record with lineage
 //! pointing to all reconstructed records, and is cryptographically verifiable
@@ -33,15 +33,15 @@ use crate::ContentHash;
 pub enum ReconstructionStep {
     /// Step 1: The action being replayed.
     Action,
-    /// Step 2: Substrate state at action time.
+    /// Step 2: Store state at action time.
     SubstrateState,
-    /// Step 3: Scorer outputs for relevant Engrams.
+    /// Step 3: Score outputs for relevant Engrams.
     ScorerOutputs,
-    /// Step 4: Router selection and rejected alternatives.
+    /// Step 4: Route selection and rejected alternatives.
     RouterSelection,
-    /// Step 5: Composer output under budget constraints.
+    /// Step 5: Compose output under budget constraints.
     ComposerOutput,
-    /// Step 6: Gate verdict (pass/fail with evidence).
+    /// Step 6: Verify verdict (pass/fail with evidence).
     GateVerdict,
     /// Step 7: Safety and authorization policy decisions.
     PolicyDecisions,
@@ -61,12 +61,12 @@ impl fmt::Display for ReconstructionStep {
     }
 }
 
-/// A scored Engram reference from the Scorer step.
+/// A scored Engram reference from the Score step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredReference {
     /// Content hash of the scored Engram.
     pub hash: ContentHash,
-    /// Score assigned by the Scorer.
+    /// Score assigned by the Score.
     pub score: f64,
     /// Name of the scorer that produced this score.
     pub scorer: String,
@@ -109,13 +109,13 @@ pub struct PolicyDecisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyOutcome {
-    /// Policy allowed the action.
+    /// React allowed the action.
     Allow,
-    /// Policy allowed with a confirmation requirement.
+    /// React allowed with a confirmation requirement.
     AllowWithConfirm,
-    /// Policy denied the action.
+    /// React denied the action.
     Deny,
-    /// Policy escalated to a higher authority.
+    /// React escalated to a higher authority.
     Escalate,
 }
 
@@ -148,17 +148,17 @@ pub struct ForensicReplay {
     /// Agent that performed the action.
     pub agent_id: String,
 
-    /// Step 2: Content hashes of the Substrate state at action time.
+    /// Step 2: Content hashes of the Store state at action time.
     pub substrate_state: Vec<ContentHash>,
-    /// Step 3: Scorer outputs for each relevant Engram.
+    /// Step 3: Score outputs for each relevant Engram.
     pub scorer_outputs: Vec<ScoredReference>,
-    /// Step 4: Router selection including rejected alternatives.
+    /// Step 4: Route selection including rejected alternatives.
     pub router_selection: Option<RouterDecisionRecord>,
-    /// Step 5: Composer output (the prompt that was assembled).
+    /// Step 5: Compose output (the prompt that was assembled).
     pub composer_output: Option<String>,
-    /// Step 6: Gate verdicts that determined pass/fail.
+    /// Step 6: Verify verdicts that determined pass/fail.
     pub gate_verdicts: Vec<GateVerdictRecord>,
-    /// Step 7: Policy decisions made during the action.
+    /// Step 7: React decisions made during the action.
     pub policy_decisions: Vec<PolicyDecisionRecord>,
 
     /// Content hash of this replay record (for chain integrity).

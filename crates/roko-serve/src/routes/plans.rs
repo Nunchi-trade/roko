@@ -411,7 +411,7 @@ async fn resume_plan(
     ))
 }
 
-// ── Gate results query ──────────────────────────────────────────────
+// ── Verify results query ──────────────────────────────────────────────
 
 /// `GET /api/plans/:id/gates` — query gate results for a specific plan.
 ///

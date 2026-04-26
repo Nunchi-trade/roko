@@ -1561,7 +1561,7 @@ impl ContextProvider {
             );
         }
 
-        // ── Policy and budget enforcement ──────────────────────────
+        // ── React and budget enforcement ──────────────────────────
         self.select_candidates(&request, candidates, ContextInjectionPolicy::default())
     }
 

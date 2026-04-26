@@ -2,7 +2,7 @@
 //! gate types.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Gate, Kind, Verdict};
+use roko_core::{Body, Context, Engram, Verify, Kind, Verdict};
 use roko_gate::generated_test_gate::{ArtifactStore, GeneratedTestGate, InMemoryArtifactStore};
 use roko_gate::integration_gate::IntegrationGate;
 use roko_gate::llm_judge_gate::{JudgeOracle, JudgePayload, LlmJudgeGate};
@@ -117,7 +117,7 @@ fn diff_signal(payload: &DiffPayload) -> Engram {
     json_signal(payload)
 }
 
-async fn verify<G: Gate + Sync>(gate: &G, signal: &Engram) -> Verdict {
+async fn verify<G: Verify + Sync>(gate: &G, signal: &Engram) -> Verdict {
     let ctx = Context::now();
     gate.verify(signal, &ctx).await
 }

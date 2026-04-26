@@ -12,11 +12,12 @@
 //! ]);
 //! ```
 
-use roko_core::{Context, Engram, Score, Scorer};
+use roko_core::{Context, Engram, Score};
+use roko_core::traits::Score as ScoreFn;
 
 /// Sum several scorers element-wise (aggregates evidence).
 pub struct SumScorer {
-    scorers: Vec<Box<dyn Scorer>>,
+    scorers: Vec<Box<dyn ScoreFn>>,
     #[allow(dead_code)]
     name: String,
 }
@@ -24,7 +25,7 @@ pub struct SumScorer {
 impl SumScorer {
     /// Construct a sum scorer from a list of component scorers.
     #[must_use]
-    pub fn new(scorers: Vec<Box<dyn Scorer>>) -> Self {
+    pub fn new(scorers: Vec<Box<dyn ScoreFn>>) -> Self {
         Self {
             scorers,
             name: "sum_scorer".to_string(),
@@ -33,7 +34,7 @@ impl SumScorer {
 
     /// Construct with a custom name (useful for logs).
     #[must_use]
-    pub fn named(name: impl Into<String>, scorers: Vec<Box<dyn Scorer>>) -> Self {
+    pub fn named(name: impl Into<String>, scorers: Vec<Box<dyn ScoreFn>>) -> Self {
         Self {
             scorers,
             name: name.into(),
@@ -41,7 +42,7 @@ impl SumScorer {
     }
 }
 
-impl Scorer for SumScorer {
+impl ScoreFn for SumScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         self.scorers
             .iter()
@@ -55,7 +56,7 @@ impl Scorer for SumScorer {
 
 /// Multiply several scorers element-wise (scales each axis).
 pub struct MulScorer {
-    scorers: Vec<Box<dyn Scorer>>,
+    scorers: Vec<Box<dyn ScoreFn>>,
     #[allow(dead_code)]
     name: String,
 }
@@ -63,7 +64,7 @@ pub struct MulScorer {
 impl MulScorer {
     /// Construct a multiplicative scorer from a list of component scorers.
     #[must_use]
-    pub fn new(scorers: Vec<Box<dyn Scorer>>) -> Self {
+    pub fn new(scorers: Vec<Box<dyn ScoreFn>>) -> Self {
         Self {
             scorers,
             name: "mul_scorer".to_string(),
@@ -72,7 +73,7 @@ impl MulScorer {
 
     /// Construct with a custom name (useful for logs).
     #[must_use]
-    pub fn named(name: impl Into<String>, scorers: Vec<Box<dyn Scorer>>) -> Self {
+    pub fn named(name: impl Into<String>, scorers: Vec<Box<dyn ScoreFn>>) -> Self {
         Self {
             scorers,
             name: name.into(),
@@ -80,7 +81,7 @@ impl MulScorer {
     }
 }
 
-impl Scorer for MulScorer {
+impl ScoreFn for MulScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         // Start with all-1 score so multiplication is identity.
         let one = Score::new(1.0, 1.0, 1.0, 1.0);
@@ -107,7 +108,7 @@ impl ConstScorer {
     }
 }
 
-impl Scorer for ConstScorer {
+impl ScoreFn for ConstScorer {
     fn score(&self, _s: &Engram, _ctx: &Context) -> Score {
         self.value
     }
@@ -134,8 +135,8 @@ mod tests {
 
     #[test]
     fn sum_scorer_aggregates() {
-        let a = Box::new(ConstScorer::new(Score::new(0.3, 0.0, 0.0, 0.0))) as Box<dyn Scorer>;
-        let b = Box::new(ConstScorer::new(Score::new(0.4, 0.0, 0.0, 0.0))) as Box<dyn Scorer>;
+        let a = Box::new(ConstScorer::new(Score::new(0.3, 0.0, 0.0, 0.0))) as Box<dyn ScoreFn>;
+        let b = Box::new(ConstScorer::new(Score::new(0.4, 0.0, 0.0, 0.0))) as Box<dyn ScoreFn>;
         let sum = SumScorer::new(vec![a, b]);
         let out = sum.score(&signal(), &Context::at(0));
         assert!((out.confidence - 0.7).abs() < 1e-6);
@@ -144,8 +145,8 @@ mod tests {
     #[test]
     fn mul_scorer_scales() {
         // 0.9 × 0.5 = 0.45 on confidence axis
-        let a = Box::new(ConstScorer::new(Score::new(0.9, 1.0, 1.0, 1.0))) as Box<dyn Scorer>;
-        let b = Box::new(ConstScorer::new(Score::new(0.5, 1.0, 1.0, 1.0))) as Box<dyn Scorer>;
+        let a = Box::new(ConstScorer::new(Score::new(0.9, 1.0, 1.0, 1.0))) as Box<dyn ScoreFn>;
+        let b = Box::new(ConstScorer::new(Score::new(0.5, 1.0, 1.0, 1.0))) as Box<dyn ScoreFn>;
         let mul = MulScorer::new(vec![a, b]);
         let out = mul.score(&signal(), &Context::at(0));
         assert!((out.confidence - 0.45).abs() < 1e-6);
@@ -161,7 +162,7 @@ mod tests {
     #[test]
     fn named_preserves_name() {
         let s = MulScorer::named("my_scorer", vec![]);
-        // The Scorer trait returns a static name; the stored name is for logging.
+        // The ScoreFn trait returns a static name; the stored name is for logging.
         assert_eq!(s.name(), "mul_scorer");
     }
 }

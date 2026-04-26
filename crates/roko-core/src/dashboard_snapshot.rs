@@ -221,7 +221,7 @@ pub struct GateVerdict {
     pub plan_id: String,
     /// Task identifier.
     pub task_id: String,
-    /// Gate name.
+    /// Verify name.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,
@@ -648,7 +648,7 @@ pub struct FailureEntry {
     /// Task identifier when known.
     #[serde(default)]
     pub task_id: String,
-    /// Gate name.
+    /// Verify name.
     #[serde(default)]
     pub gate: String,
     /// Short failure summary or reason when available.

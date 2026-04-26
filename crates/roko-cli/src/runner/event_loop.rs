@@ -193,7 +193,7 @@ pub async fn run(
                 }
             }
 
-            // ─── Branch 2: Gate completions ─────────────────────────
+            // ─── Branch 2: Verify completions ─────────────────────────
             Some(completion) = gate_rx.recv() => {
                 let event = if completion.passed {
                     ExecutorEvent::GatePassed
@@ -423,7 +423,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
             // Prepend gate feedback if this is a retry.
             let final_prompt = if !ctx.state.gate_output.is_empty() {
                 format!(
-                    "## Previous Gate Failure\n\n{}\n\n---\n\n{prompt}",
+                    "## Previous Verify Failure\n\n{}\n\n---\n\n{prompt}",
                     ctx.state.gate_output
                 )
             } else {

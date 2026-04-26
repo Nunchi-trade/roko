@@ -49,7 +49,7 @@ use roko_conductor::health::{HealthMonitor, HealthStatus, SystemSnapshot};
 use roko_conductor::stuck_detection::{ActivityEntry, MetaCognitionHook, StuckDetector, StuckKind};
 use roko_conductor::{CircuitBreakerState, Conductor, ConductorDecision, FailureRecord};
 use roko_core::DaimonPolicy;
-use roko_core::Policy;
+use roko_core::React;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::{
@@ -63,8 +63,8 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
-    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate,
+    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, Verify, Kind,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Store,
     TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict,
     score_model_for_task,
 };
@@ -207,7 +207,7 @@ use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
 use crate::workspace_paths::find_prd_path;
 
-// Gate-related free functions and types extracted to gate_runner.rs.
+// Verify-related free functions and types extracted to gate_runner.rs.
 use crate::gate_runner::{
     FsGeneratedArtifactStore, RecordedGateVerdict, RecordingGate, acceptance_task_dir,
     domain_uses_compiled_gates, format_acceptance_decision, gate_artifact_store_path,
@@ -1911,7 +1911,7 @@ pub struct PlanRunReport {
     pub succeeded: bool,
     /// Number of agent invocations for this plan.
     pub agent_calls: usize,
-    /// Gate results collected during execution.
+    /// Verify results collected during execution.
     pub gate_results: Vec<(String, bool)>,
 }
 
@@ -2892,7 +2892,7 @@ fn fallback_plan_complexity(tasks: &[crate::task_parser::TaskDef]) -> PlanComple
         .unwrap_or(PlanComplexity::Simple)
 }
 
-// ─── Gate Oracle Adapters ────────────────────────────────────────────────
+// ─── Verify Oracle Adapters ────────────────────────────────────────────────
 
 /// Adapts [`PerplexitySearchClient`] to the [`SearchOracle`] trait expected
 /// by `FactCheckGate`. Each `search` call issues a single-query batch and
@@ -3405,7 +3405,7 @@ fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) 
 ///
 /// Errors are propagated to the caller, which logs and continues (non-fatal).
 async fn post_plan_cold_archival(workdir: &Path) -> Result<()> {
-    use roko_core::{ColdSubstrate, Context, Query, Substrate};
+    use roko_core::{ColdStore, Context, Query, Store};
 
     let roko_dir = workdir.join(".roko");
     if !roko_dir.exists() {
@@ -7767,7 +7767,7 @@ impl PlanRunner {
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        // Gate runs are local process work, so the episode records zero USD cost
+                        // Verify runs are local process work, so the episode records zero USD cost
                         // while still carrying the latency field alongside it.
                         let gate_cost_usd = 0.0;
                         let mut ep =
@@ -7899,7 +7899,7 @@ impl PlanRunner {
                                 .unwrap_or_else(|| format!("rung-{effective_rung}"));
                             let anti_content = if failure_context.is_empty() {
                                 format!(
-                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
+                                    "Verify '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
                                     failed_gates
                                         .iter()
                                         .map(|g| format!("{}: {}", g.gate_name, g.summary))
@@ -7913,7 +7913,7 @@ impl PlanRunner {
                                     &failure_context
                                 };
                                 format!(
-                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
+                                    "Verify '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
                                 )
                             };
                             let gate_failure_tag = self.daimon.emotional_tag("gate_failure");
@@ -11021,7 +11021,7 @@ impl PlanRunner {
         prompt.push_str(&original_task.build_prompt(plan_id, &self.workdir));
 
         if !gate_report.trim().is_empty() {
-            prompt.push_str("\n\n## Gate failure outputs\n");
+            prompt.push_str("\n\n## Verify failure outputs\n");
             prompt.push_str(gate_report);
         }
 
@@ -13093,7 +13093,7 @@ impl PlanRunner {
             let feedback =
                 feedback_for_agent(&gate_output, u8::try_from(gate_rung).unwrap_or(u8::MAX));
             if !feedback.is_empty() {
-                let mut structured = String::from("\n\n## Structured Gate Feedback\n");
+                let mut structured = String::from("\n\n## Structured Verify Feedback\n");
                 if !feedback.errors.is_empty() {
                     structured.push_str("Errors:\n");
                     for error in &feedback.errors {
@@ -14933,7 +14933,7 @@ impl PlanRunner {
             registry: section_effectiveness.clone(),
             role: role_key.clone(),
         });
-        let mut scorers: Vec<Box<dyn roko_core::Scorer>> = vec![
+        let mut scorers: Vec<Box<dyn roko_core::traits::Score>> = vec![
             Box::new(SectionScorer::new()),
             Box::new(CatalystScorer::new(catalyst_source)),
         ];
@@ -14946,7 +14946,7 @@ impl PlanRunner {
                 }),
             ));
         }
-        let section_scorer: Box<dyn roko_core::Scorer> = Box::new(SumScorer::new(scorers));
+        let section_scorer: Box<dyn roko_core::traits::Score> = Box::new(SumScorer::new(scorers));
         let prompt_ctx = ctx
             .clone()
             .with_attr("roko.model_slug", &selected_model)
@@ -16511,7 +16511,7 @@ impl PlanRunner {
         task.effective_domain(config_default.as_ref())
     }
 
-    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Gate>)> {
+    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Verify>)> {
         let domain = self.current_task_domain(plan_id);
 
         // For non-code domains, use verify steps or domain-specific gate config
@@ -16543,7 +16543,7 @@ impl PlanRunner {
             !self.should_skip_selected_rung(*rung)
         });
 
-        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+        let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
         for rung in selected {
             match rung {
                 Rung::Compile => {
@@ -16573,8 +16573,8 @@ impl PlanRunner {
 
     /// Build gate steps for a non-code domain. Uses task verify steps, config
     /// domain_gates, or a pass-through ShellGate as fallback.
-    fn domain_gate_steps(&self, plan_id: &str, domain: &TaskDomain) -> Vec<(Rung, Box<dyn Gate>)> {
-        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+    fn domain_gate_steps(&self, plan_id: &str, domain: &TaskDomain) -> Vec<(Rung, Box<dyn Verify>)> {
+        let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
 
         // 1. Check for per-task verify steps.
         if let Some(tracker) = self.task_trackers.get(plan_id) {
@@ -16819,7 +16819,7 @@ impl PlanRunner {
             let task_id = t.last_impl_task_id.as_deref()?;
             t.tasks_file.tasks.iter().find(|task| task.id == task_id)
         });
-        // Gate runs are less frequent than dispatches; pass None to avoid
+        // Verify runs are less frequent than dispatches; pass None to avoid
         // requiring &mut self here.  The dispatch path uses the cached index.
         let code_intel_hints = task_def
             .and_then(|td| td.description.as_deref())
@@ -18284,7 +18284,7 @@ fn execution_event_summary(
         } => (
             "gate_result".to_string(),
             task_id.clone(),
-            format!("Gate {gate}: {}", if *passed { "passed" } else { "failed" }),
+            format!("Verify {gate}: {}", if *passed { "passed" } else { "failed" }),
         ),
         _ => ("execution".to_string(), String::new(), String::new()),
     }

@@ -2859,7 +2859,7 @@ mod tests {
         input.playbook_rule_id = Some("rule-001".to_string());
         runtime.record_completed_run(input).await.unwrap();
 
-        // Router subsystem should have observed the model decision.
+        // Route subsystem should have observed the model decision.
         assert_eq!(
             runtime.local_reward_score("router", "claude-opus-4-6"),
             1.0,

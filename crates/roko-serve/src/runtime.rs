@@ -46,7 +46,7 @@ pub struct PlanGenerationResult {
 /// Structured gate result collected while executing a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeGateResult {
-    /// Gate name.
+    /// Verify name.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,

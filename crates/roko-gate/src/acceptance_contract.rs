@@ -351,7 +351,7 @@ pub struct GateRequirement {
     pub required: bool,
 }
 
-/// Gate categories understood by the done-gate contract.
+/// Verify categories understood by the done-gate contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateRequirementKind {
@@ -453,7 +453,7 @@ pub struct ParityLedgerRequirementRow {
 pub struct AcceptanceEvidence {
     /// Overall task outcome reported by the executor.
     pub outcome: AcceptanceOutcome,
-    /// Gate results keyed by [`GateRequirement::id`].
+    /// Verify results keyed by [`GateRequirement::id`].
     #[serde(default)]
     pub gates: Vec<GateEvidence>,
     /// No-stub scan evidence.
@@ -478,7 +478,7 @@ pub struct AcceptanceEvidence {
 pub struct GateEvidence {
     /// Requirement id this result satisfies.
     pub gate_id: String,
-    /// Gate outcome.
+    /// Verify outcome.
     pub outcome: AcceptanceOutcome,
     /// Evidence path, command log, or content-addressed artifact id.
     pub evidence_ref: String,

@@ -11,7 +11,7 @@
 //! | `[tools]` | Yes | Tool profile allow/deny lists |
 //! | `[learning]` | Yes | Learning subsystem toggles |
 //! | `[demurrage]` | Yes | Knowledge decay rates |
-//! | `[gates]` | Yes | Gate thresholds |
+//! | `[gates]` | Yes | Verify thresholds |
 //! | `[conductor]` | Yes | Conductor settings |
 //! | `[agent]` | **No** | Requires restart (model, provider) |
 //! | `[providers]` | **No** | Requires restart |

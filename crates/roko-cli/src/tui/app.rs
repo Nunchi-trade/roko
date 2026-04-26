@@ -89,7 +89,7 @@ pub struct App {
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page (legacy).
     pub signal_selection: usize,
-    /// Selected gate-failure row on the Gate Results page (legacy).
+    /// Selected gate-failure row on the Verify Results page (legacy).
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
