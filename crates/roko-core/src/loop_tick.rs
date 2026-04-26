@@ -21,8 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Budget, Composer, Context, Engram, Gate, Policy, Query, Router, Scorer, Substrate, Verdict,
-    error::Result,
+    Budget, Compose, Context, Engram, Query, React, Route, Store, Verdict, Verify, error::Result,
 };
 
 /// Configuration for a single tick of the universal loop (IF-04).
@@ -137,16 +136,16 @@ fn ensure_lineage(mut signal: Engram, parent: crate::ContentHash) -> Engram {
 ///
 /// # Errors
 ///
-/// Propagates errors from the substrate and composer. Gate failures are
+/// Propagates errors from the substrate and composer. Verify failures are
 /// *not* errors — they return a failing [`Verdict`] in the outcome.
 #[allow(clippy::similar_names, clippy::too_many_arguments)]
 pub async fn loop_tick(
-    substrate: &dyn Substrate,
-    scorer: &dyn Scorer,
-    router: &dyn Router,
-    composer: &dyn Composer,
-    gate: &dyn Gate,
-    policy: &dyn Policy,
+    substrate: &dyn Store,
+    scorer: &dyn crate::traits::Score,
+    router: &dyn Route,
+    composer: &dyn Compose,
+    gate: &dyn Verify,
+    policy: &dyn React,
     query: &Query,
     budget: &Budget,
     ctx: &Context,
@@ -178,12 +177,12 @@ pub async fn loop_tick(
 /// Propagates errors from the substrate and composer.
 #[allow(clippy::similar_names, clippy::too_many_arguments)]
 pub async fn loop_tick_with_config(
-    substrate: &dyn Substrate,
-    scorer: &dyn Scorer,
-    router: &dyn Router,
-    composer: &dyn Composer,
-    gate: &dyn Gate,
-    policy: &dyn Policy,
+    substrate: &dyn Store,
+    scorer: &dyn crate::traits::Score,
+    router: &dyn Route,
+    composer: &dyn Compose,
+    gate: &dyn Verify,
+    policy: &dyn React,
     query: &Query,
     budget: &Budget,
     ctx: &Context,
@@ -203,7 +202,7 @@ pub async fn loop_tick_with_config(
         });
     }
 
-    // 2. Router selects one candidate (or bails).
+    // 2. Route selects one candidate (or bails).
     let Some(selection) = router.select(&candidates, ctx) else {
         return Ok(TickOutcome {
             candidates_examined,
@@ -233,7 +232,7 @@ pub async fn loop_tick_with_config(
         chosen.id,
     );
 
-    // 4. Gate verifies the composition.
+    // 4. Verify verifies the composition.
     let verdict = gate.verify(&composed, ctx).await;
 
     // 5. If passed, persist and run policy reaction.
@@ -243,7 +242,7 @@ pub async fn loop_tick_with_config(
         let id = substrate.put(composed.clone()).await?;
         written.push(id);
 
-        // Policy sees the new signal and may produce reactions.
+        // React sees the new signal and may produce reactions.
         let reactions = policy.decide(std::slice::from_ref(&composed), ctx);
         for r in reactions {
             let id = substrate.put(r.clone()).await?;
@@ -278,7 +277,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Substrate for TestSubstrate {
+    impl Store for TestSubstrate {
         async fn put(&self, signal: Engram) -> Result<ContentHash> {
             self.written.lock().push(signal.clone());
             Ok(signal.id)
@@ -301,7 +300,7 @@ mod tests {
         choice: Selection,
     }
 
-    impl Router for TestRouter {
+    impl Route for TestRouter {
         fn select(&self, _candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
             Some(self.choice.clone())
         }
@@ -315,12 +314,12 @@ mod tests {
 
     struct PassthroughComposer;
 
-    impl Composer for PassthroughComposer {
+    impl Compose for PassthroughComposer {
         fn compose(
             &self,
             signals: &[Engram],
             _budget: &Budget,
-            _scorer: &dyn Scorer,
+            _scorer: &dyn crate::traits::Score,
             _ctx: &Context,
         ) -> Result<Engram> {
             Ok(Engram::builder(Kind::Prompt)
@@ -344,7 +343,7 @@ mod tests {
     struct PassGate;
 
     #[async_trait]
-    impl Gate for PassGate {
+    impl Verify for PassGate {
         async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
             Verdict::pass("pass_gate")
         }
@@ -356,7 +355,7 @@ mod tests {
 
     struct NoopPolicy;
 
-    impl Policy for NoopPolicy {
+    impl React for NoopPolicy {
         fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
             Vec::new()
         }
@@ -368,7 +367,7 @@ mod tests {
 
     struct ZeroScorer;
 
-    impl Scorer for ZeroScorer {
+    impl crate::traits::Score for ZeroScorer {
         fn score(&self, _signal: &Engram, _ctx: &Context) -> crate::Score {
             crate::Score::NEUTRAL
         }

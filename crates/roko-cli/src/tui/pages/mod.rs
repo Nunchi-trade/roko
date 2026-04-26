@@ -17,7 +17,7 @@ pub enum PageId {
     Trends,
     /// Efficiency correlations.
     Correlations,
-    /// Gate results and adaptive thresholds.
+    /// Verify results and adaptive thresholds.
     GateResults,
     /// Learning and routing feedback.
     Learning,
@@ -53,7 +53,7 @@ impl PageId {
             Self::Health => "Health",
             Self::Trends => "Trends",
             Self::Correlations => "Correlations",
-            Self::GateResults => "Gate Results",
+            Self::GateResults => "Verify Results",
             Self::Learning => "Learning",
             Self::Parameters => "Parameters",
             Self::Experiments => "Experiments",

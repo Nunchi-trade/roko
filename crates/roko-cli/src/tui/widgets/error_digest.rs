@@ -54,7 +54,7 @@ pub fn render_error_digest(
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(inner);
 
-    // --- Gate summary ---
+    // --- Verify summary ---
     render_gate_summary(frame, sections[0], gates, stats, theme);
 
     // --- Error list ---

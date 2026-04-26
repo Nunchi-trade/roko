@@ -1697,7 +1697,7 @@ pub enum AffectEvent {
         task_id: String,
         /// Whether the gate passed.
         passed: bool,
-        /// Gate rung for the task.
+        /// Verify rung for the task.
         rung: u32,
     },
     /// Final task outcome.
@@ -1785,7 +1785,7 @@ pub struct AppraisalResult {
 /// Per spec: 10 categories, each mapping to different appraisal weights.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppraisalTrigger {
-    /// Gate or test result (performance feedback).
+    /// Verify or test result (performance feedback).
     Performance,
     /// Task completion or failure.
     TaskOutcome,

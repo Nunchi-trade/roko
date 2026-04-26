@@ -7,7 +7,7 @@
 //! [`Verdict`](roko_core::Verdict)s that flow back into the substrate as
 //! signals.
 //!
-//! # Gate architecture: two-tier system
+//! # Verify architecture: two-tier system
 //!
 //! ## Rung-dispatched gates (7 rungs)
 //!
@@ -75,11 +75,13 @@
     clippy::struct_field_names,
     clippy::suboptimal_flops,
     clippy::too_many_lines,
+    clippy::unnecessary_literal_bound,
     clippy::unreadable_literal
 )]
 
 pub mod adaptive_threshold;
 
+pub mod acceptance_contract;
 pub mod artifact_store;
 pub mod clippy_gate;
 pub mod code_exec;
@@ -90,6 +92,7 @@ pub mod compile_errors;
 pub mod composition;
 pub mod diff_gate;
 pub mod env_builder;
+pub mod error_patterns;
 pub mod eval_generator;
 pub mod fact_check;
 pub mod feedback;
@@ -119,6 +122,14 @@ pub mod test_gate;
 pub mod verdict_publisher;
 pub mod verify_chain_gate;
 
+pub use acceptance_contract::{
+    AcceptanceContract, AcceptanceDecision, AcceptanceEvidence, AcceptanceIssue, AcceptanceOutcome,
+    GateEvidence, GateRequirement, GateRequirementKind, NoStubEvidence, NoStubRequirement,
+    ParityLedgerEvidenceRow, ParityLedgerRequirement, ParityLedgerRequirementRow,
+    ParityLedgerStatus, RecoveryEvidence, RecoveryRequirement, RequiredNextAction,
+    ReviewVerdictEvidence, ReviewVerdictRequirement, StructuredAgentOutputRequirement,
+    StructuredOutputEvidence,
+};
 pub use adaptive_threshold::{AdaptiveThresholds, RungStats};
 pub use artifact_store::ArtifactStore;
 pub use clippy_gate::ClippyGate;
@@ -126,9 +137,19 @@ pub use code_exec::{
     CodeExecutionBackend, CodeExecutionGate, CodeExecutionOutcome, CodeExecutionPayload,
 };
 pub use compile::CompileGate;
+pub use compile_errors::{
+    CompileError, CompileErrorSummary, ErrorCategory, FailureClass, GateFailureAction,
+    GateFailureClassification, GateFailureKind, GateRetryPolicy, classify_error_code,
+    classify_gate_failure, parse_cargo_json, parse_plain_stderr, render_failure_classification,
+    structured_gate_failure,
+};
 pub use composition::{FallbackGate, ParallelGate, VotingGate};
 pub use diff_gate::{DiffAnalysis, DiffGate, DiffPayload, analyze_diff};
 pub use env_builder::{GateEnv, GateEnvBuilder, build_for_rung};
+pub use error_patterns::{
+    FailurePatternRecord, error_key, extract_error_digest, records_from_classification,
+    records_from_parsed_review_verdict,
+};
 pub use eval_generator::{EvalGenerator, EvalStrategy, EvalTemplate, Evaluation};
 pub use fact_check::{FactCheckGate, SearchHit, SearchOracle};
 pub use feedback::{FeedbackItem, GateFeedback, Severity, feedback_for_agent};
@@ -143,6 +164,10 @@ pub use process_reward::{
     AggregateMethod, ProcessRewardModel, ReasoningStep, StepVerdict, TurnSnapshot,
 };
 pub use ratchet::GateRatchet;
+pub use review_verdict::{
+    ParsedReviewVerdict, ReviewParseSource, ReviewVerdict, ReviewVerdictContext,
+    parse_structured_review_verdict,
+};
 pub use rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_canonical_rung, run_rung};
 pub use rung_selector::{PlanComplexity, Rung, RungCaps, is_selected, select_rungs};
 pub use shell::ShellGate;

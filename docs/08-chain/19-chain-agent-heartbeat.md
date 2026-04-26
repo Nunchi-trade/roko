@@ -49,7 +49,7 @@ The agent perceives on-chain state through the ChainWitness pipeline and `ChainB
 - **Output**: Filtered, normalized `chain.*` Pulses published on `ChainBus` and durable state queried from `ChainSubstrate`
 - **Synapse mapping**: `ChainBus.subscribe()` + `ChainSubstrate.query()` — live chain transport plus durable reads
 
-This step runs continuously in its own Tokio task, outside the heartbeat clock. The heartbeat gates the agent's *cognitive response* to what it sees, not the seeing itself. Block ingestion at 12-second intervals (Ethereum) or 400ms intervals (Korai) is too fast for deliberative processing at every block, so the gamma consumer drains buffered `chain.*` Pulses when `heartbeat.gamma.tick` fires.
+This step runs continuously in its own Tokio task, outside the heartbeat clock. The heartbeat gates the agent's *cognitive response* to what it sees, not the seeing itself. Block ingestion at 12-second intervals (Ethereum) or 50ms intervals (Nunchi) is too fast for deliberative processing at every block, so the gamma consumer drains buffered `chain.*` Pulses when `heartbeat.gamma.tick` fires.
 
 ### Step 2: RETRIEVE
 
@@ -155,7 +155,7 @@ The agent reflects on the full cycle and updates its models:
   - Update Daimon affect markers (positive outcome → positive marker for this pattern)
   - Update NeuroStore knowledge (new insights from the episode)
   - Update Oracle predictions (calibrate estimates against actuals)
-  - If the episode revealed useful knowledge, post to Korai chain
+  - If the episode revealed useful knowledge, post to Nunchi chain
 - **Output**: Updated agent state, potential knowledge entry for the chain
 - **Synapse mapping**: `Policy.decide()` — adaptation from experience
 
@@ -186,7 +186,7 @@ temperament = "balanced"  # conservative for high-risk operations
 
 [substrate]
 type = "chain"
-chains = ["ethereum", "korai"]
+chains = ["ethereum", "nunchi"]
 
 [gates]
 pipeline = ["tx_sim", "wallet", "verify_chain"]
@@ -194,7 +194,7 @@ pipeline = ["tx_sim", "wallet", "verify_chain"]
 [chain]
 custody_mode = "local_key"  # "delegation" | "embedded" | "local_key"
 position_limit_usd = 10000
-approved_assets = ["ETH", "USDC", "KORAI"]
+approved_assets = ["ETH", "USDC", "NUNCHI"]
 max_gas_per_tx = 500000
 slippage_tolerance = 0.005  # 0.5%
 ```

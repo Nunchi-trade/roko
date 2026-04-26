@@ -7,12 +7,12 @@
 //!
 //! | Trait | Purpose |
 //! |---|---|
-//! | [`Substrate`] | Store and query engrams |
-//! | [`Scorer`] | Rate engrams along multi-dimensional axes |
-//! | [`Gate`] | Verify engrams against ground truth |
-//! | [`Router`] | Select one engram from many candidates |
-//! | [`Composer`] | Combine engrams into a new engram under a budget |
-//! | [`Policy`] | Watch engram streams and emit new engrams (interventions) |
+//! | [`Store`] | Store and query engrams |
+//! | [`Score`](traits::Score) | Rate engrams along multi-dimensional axes |
+//! | [`Verify`] | Verify engrams against ground truth |
+//! | [`Route`] | Select one engram from many candidates |
+//! | [`Compose`] | Combine engrams into a new engram under a budget |
+//! | [`React`] | Watch engram streams and emit new engrams (interventions) |
 //!
 //! Every capability — coding-agent spawning, verification gates, context assembly,
 //! model routing, memory retrieval, chain participation, bounty markets, HDC search
@@ -56,9 +56,12 @@ pub mod build;
 /// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
 pub mod bus_backends;
 pub mod catalyst;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
 pub mod cfactor;
 /// Canonical provider-agnostic chat message types.
 pub mod chat_types;
+pub mod cognitive_workspace;
 pub mod conductor;
 pub mod config;
 /// Connector trait for external system I/O (MCP, API, Database, Blockchain, Feed, Custom).
@@ -92,6 +95,7 @@ pub mod namespace;
 pub mod obs;
 pub mod operating_frequency;
 pub mod phase;
+pub mod policy_manifest;
 pub mod polyglot;
 pub mod prediction;
 pub mod project;
@@ -126,11 +130,18 @@ pub use bus_backends::{
     BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
 };
 pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cell::*;
 pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
 pub use chat_types::{
     ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
     RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
     ToolCallMessage, ToolChoice, Usage,
+};
+pub use cognitive_workspace::{
+    COGNITIVE_WORKSPACE_SCHEMA_VERSION, CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef,
+    ContextRejectionAudit, ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit,
+    InvocationGateOutcome, InvocationReviewVerdictOutcome, ModelChoice, OutputParseResult,
+    PolicyVersionRef, PromptSectionAudit, RewardObservation, TaskInvocationContract,
 };
 pub use conductor::{CognitiveSignal, ConductorDecision, ConductorEvaluation};
 pub use connector::{
@@ -167,6 +178,14 @@ pub use operating_frequency::{
     OperatingFrequencyScheduler,
 };
 pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
+pub use policy_manifest::{
+    BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
+    CURRENT_POLICY_MANIFEST_SCHEMA_VERSION, ContextPolicyRef, FallbackBehavior, GateExpectation,
+    InclusionMode, InclusionRule, MANIFEST_BACKED_BUILTIN_ROLE_IDS, ManifestError,
+    ManifestLookupError, ManifestValidationError, OutputFormat, OutputSchemaExpectation,
+    PolicyProvenance, PromptBudgetPolicy, PromptPolicy, PromptPolicySection, PromptSectionSource,
+    RolePolicyManifest, RoleProfile, RoleSafetyPolicy, SectionBudget, ToolCapabilityPolicy,
+};
 pub use polyglot::{PolyglotProject, detect_polyglot};
 pub use prediction::{
     AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
@@ -223,5 +242,8 @@ pub use tool::{
     ToolTrace, ToolTraceEvent, TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
     compute_reward, galileo_tsq, profile_for_model,
 };
-pub use traits::{Bus, ColdSubstrate, Composer, Gate, Policy, Router, Scorer, Substrate};
+pub use traits::{Bus, ColdStore, Compose, Connect, Observe, React, Route, Store, Trigger, Verify};
+// Note: The `Score` protocol trait (formerly `Scorer`) is NOT re-exported at
+// the crate root to avoid colliding with the `Score` value struct. Access it
+// via `roko_core::traits::Score` or import with an alias.
 pub use verdict::{Outcome, Selection, TestCount, Verdict};

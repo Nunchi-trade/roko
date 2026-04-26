@@ -6,7 +6,7 @@
 //! [`check_url_with_policy`] first. Violations surface as
 //! [`ToolError::NetworkBlocked`] and short-circuit dispatch.
 //!
-//! # Policy dimensions
+//! # React dimensions
 //!
 //! - **Scheme** — only URL schemes in [`NetworkPolicy::allow_schemes`]
 //!   pass. Default: HTTPS-only.

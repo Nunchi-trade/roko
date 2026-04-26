@@ -772,7 +772,7 @@ impl WisdomGate {
 // COORD-05: Scope promotion gates
 // ---------------------------------------------------------------------------
 
-/// Gate controlling pheromone scope promotion (e.g., Pattern -> Wisdom).
+/// Verify controlling pheromone scope promotion (e.g., Pattern -> Wisdom).
 ///
 /// Prevents gaming by requiring confirmations from a minimum number of
 /// distinct agents and optionally requiring that a gate pass accompanies

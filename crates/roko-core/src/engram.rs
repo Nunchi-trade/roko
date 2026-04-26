@@ -7,7 +7,7 @@
 //! - **Decaying** — every engram has a decay function; weight fades over time
 //! - **Scored** — multi-dimensional confidence/novelty/utility/reputation
 //! - **Traced** — lineage tracks which engrams this derived from
-//! - **Composable** — engrams combine into new engrams via [`Composer`]s
+//! - **Composable** — engrams combine into new engrams via [`Compose`]s
 
 use crate::{Attestation, Body, ContentHash, Decay, EmotionalTag, Kind, Provenance, Pulse, Score};
 use roko_primitives::HdcVector;
@@ -383,7 +383,7 @@ impl EngramBuilder {
 
     /// Stage fingerprint metadata for this engram.
     ///
-    /// Most callers leave this unset and allow `Substrate::put()` to populate
+    /// Most callers leave this unset and allow `Store::put()` to populate
     /// it using the active encoder registry.
     #[must_use]
     pub fn fingerprint(mut self, fingerprint: HdcFingerprint) -> Self {

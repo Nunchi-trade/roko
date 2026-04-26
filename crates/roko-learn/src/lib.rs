@@ -64,9 +64,11 @@
     clippy::similar_names,
     clippy::struct_field_names,
     clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::uninlined_format_args,
+    clippy::unnecessary_literal_bound,
     clippy::unnecessary_map_or,
     clippy::unused_self,
     clippy::unwrap_used,
@@ -77,7 +79,7 @@
 pub mod active_inference;
 /// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
 pub mod adas;
-/// HDC-based adversarial signal detection with attack prototype library (TA-10).
+/// HDC-based adversarial signal detection and attack prototypes.
 pub mod adversarial;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
@@ -92,9 +94,10 @@ pub mod bayesian_confidence;
 pub mod budget;
 /// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
 pub mod calibration_policy;
+/// Extracted submodules for cascade router types, helpers, and persistence.
+pub mod cascade;
 pub mod cascade_router;
-/// Causal microstructure discovery: Granger causality, PC algorithm,
-/// and formal causal DAG construction from time series data (TA-08).
+/// Causal discovery helpers for time-series and DAG extraction.
 pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
@@ -123,8 +126,6 @@ pub mod hdc_clustering;
 pub mod hdc_fingerprint;
 /// Heuristic, worldview, and research-provenance shells for learning parity.
 pub mod heuristics;
-/// Kalman filter for online signal smoothing in oracle predictions (P2-10).
-pub mod kalman;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
@@ -136,29 +137,27 @@ pub mod pareto;
 pub mod pattern_discovery;
 pub mod playbook;
 pub mod playbook_rules;
+/// Structured post-gate reflections and reflection-derived playbook candidates.
+pub mod post_gate_reflection;
 pub mod prediction;
 pub mod prompt_experiment;
 pub mod provider_health;
+/// Provider/model pass-rate outcome telemetry for future routing bandits.
+pub mod provider_model_outcome;
 pub mod quality_judge;
 pub mod regression;
 /// Typed reinforcement signal categories for the learning pipeline (AS-11).
 pub mod reinforce_kind;
 /// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
 pub mod research_pipeline;
-/// Evolutionary resonant pattern organisms with Lotka-Volterra dynamics,
-/// Price equation tracking, and HDC genomes (TA-09).
-pub mod resonant_patterns;
 /// Lookahead and calibration shells around the shipped cascade router.
 pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.
 pub mod routing_log;
 pub mod runtime_feedback;
 pub mod section_effect;
-/// Shapley-value attribution for fair credit distribution among agents (P1-08).
-pub mod shapley;
-/// Evolutionary signal population dynamics: replicator dynamics, Hebbian
-/// learning, and Fisher variance monitoring (TA-07).
-pub mod signal_metabolism;
+/// Prompt/context section outcome telemetry for future adaptive policy.
+pub mod section_outcome;
 pub mod skill_library;
 pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).

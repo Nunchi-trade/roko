@@ -17,8 +17,8 @@
 use roko_agent::{Agent, ExecAgent, MockAgent};
 use roko_compose::{CacheLayer, Placement, PromptComposer, PromptSection, SectionPriority};
 use roko_core::{
-    Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind, Policy, Provenance,
-    Query, Substrate, Verdict,
+    Body, Budget, Compose, ContentHash, Context, Decay, Engram, Kind, Provenance, Query, React,
+    Store, Verdict, Verify,
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, CompileGate, GatePayload};
@@ -31,7 +31,7 @@ use tokio::fs;
 /// whose body records {task_id, verdict, timestamp}.
 struct EpisodePolicy;
 
-impl Policy for EpisodePolicy {
+impl React for EpisodePolicy {
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram> {
         stream
             .iter()
@@ -90,7 +90,7 @@ async fn coding_agent_full_loop() {
     scaffold_cargo_project(&project).await;
 
     // 1. FileSubstrate: durable storage for all signals.
-    let substrate: Arc<dyn Substrate> =
+    let substrate: Arc<dyn Store> =
         Arc::new(FileSubstrate::open(tmp.path().join(".roko")).await.unwrap());
 
     // 2. Seed prompt sections. Each section is its own signal.
@@ -231,7 +231,7 @@ async fn coding_agent_full_loop() {
 
 /// Walk the lineage DAG breadth-first from a starting signal, collecting
 /// every ancestor.
-async fn trace_lineage(substrate: &dyn Substrate, start: ContentHash) -> Vec<Engram> {
+async fn trace_lineage(substrate: &dyn Store, start: ContentHash) -> Vec<Engram> {
     let mut visited = std::collections::HashSet::new();
     let mut queue = vec![start];
     let mut out = Vec::new();
@@ -362,7 +362,7 @@ mod parking_lot_fork {
     }
 }
 
-impl roko_core::Router for FeedbackCounter {
+impl roko_core::Route for FeedbackCounter {
     fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<roko_core::Selection> {
         candidates
             .first()
@@ -387,12 +387,12 @@ async fn router_receives_feedback() {
         Engram::builder(Kind::Task).body(Body::text("a")).build(),
         Engram::builder(Kind::Task).body(Body::text("b")).build(),
     ];
-    let sel = roko_core::Router::select(&router, &candidates, &Context::at(0)).unwrap();
+    let sel = roko_core::Route::select(&router, &candidates, &Context::at(0)).unwrap();
 
     // Simulate an outcome.
     let outcome = roko_core::Outcome::success(sel.clone()).with_reward(0.9);
-    roko_core::Router::feedback(&router, &outcome);
-    roko_core::Router::feedback(&router, &outcome);
+    roko_core::Route::feedback(&router, &outcome);
+    roko_core::Route::feedback(&router, &outcome);
 
     assert_eq!(*router.count.lock(), 2);
 }

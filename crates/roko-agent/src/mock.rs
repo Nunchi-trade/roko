@@ -462,7 +462,7 @@ mod tests {
         );
         assert_eq!(
             fourth.output.body.as_text().unwrap(),
-            "Implemented the single smoke-test task."
+            "{\"outcome\":\"passed\",\"task_id\":\"T1\",\"summary\":\"Implemented the single smoke-test task and left the sample Rust project ready for cargo check.\",\"evidence_refs\":[\"Cargo.toml\",\"src/main.rs\"]}"
         );
         assert!(
             fifth
@@ -470,7 +470,7 @@ mod tests {
                 .body
                 .as_text()
                 .unwrap()
-                .contains("verdict = \"approve\"")
+                .contains("\"status\":\"passed\"")
         );
         assert_eq!(agent.name(), "self-host-fixture");
     }

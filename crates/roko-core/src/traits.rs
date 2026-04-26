@@ -7,21 +7,22 @@
 //!
 //! See [crate docs](crate) for the universal loop that composes them.
 
+use crate::score::Score as ScoreValue;
 use crate::{
-    Budget, ContentHash, Context, Datum, Engram, Outcome, PolicyOutputs, Pulse, Query, Score,
-    Selection, TopicFilter, Verdict, error::Result,
+    Budget, ContentHash, Context, Datum, Engram, Outcome, PolicyOutputs, Pulse, Query, Selection,
+    TopicFilter, Verdict, error::Result,
 };
 use async_trait::async_trait;
 use roko_primitives::HdcVector;
 
-// ─── Substrate ─────────────────────────────────────────────────────────────
+// ─── Store ────────────────────────────────────────────────────────────────
 
 /// Stores and queries [`Engram`]s.
 ///
 /// All storage backends implement this trait: `MemorySubstrate` (testing),
 /// `FileSubstrate` (.roko/ persistence), `HdcSubstrate` (semantic search),
 /// `ChainSubstrate` (shared on-chain state). They are API-identical from a
-/// caller's perspective — pick the substrate that matches your durability,
+/// caller's perspective — pick the store that matches your durability,
 /// visibility, and latency needs.
 ///
 /// # Idempotence
@@ -31,9 +32,9 @@ use roko_primitives::HdcVector;
 ///
 /// # Concurrency
 ///
-/// Substrates are `Send + Sync`. Impls must handle concurrent access internally.
+/// Stores are `Send + Sync`. Impls must handle concurrent access internally.
 #[async_trait]
-pub trait Substrate: Send + Sync {
+pub trait Store: Send + Sync {
     /// Store an engram. Returns its content hash. Idempotent on content.
     async fn put(&self, engram: Engram) -> Result<ContentHash>;
 
@@ -74,31 +75,31 @@ pub trait Substrate: Send + Sync {
 
     /// Human-readable name for logging/debugging.
     fn name(&self) -> &'static str {
-        "unnamed_substrate"
+        "unnamed_store"
     }
 }
 
-// ─── ColdSubstrate ───────────────────────────────────────────────────────
+// ─── ColdStore ───────────────────────────────────────────────────────────
 
-/// Archival substrate for aged-out engrams that no longer need hot-path access.
+/// Archival store for aged-out engrams that no longer need hot-path access.
 ///
-/// While a [`Substrate`] keeps engrams in-memory or on fast storage for
-/// real-time queries, a `ColdSubstrate` stores them in compressed, append-only
+/// While a [`Store`] keeps engrams in-memory or on fast storage for
+/// real-time queries, a `ColdStore` stores them in compressed, append-only
 /// archives for durability and audit trails. Engrams are migrated from hot to
 /// cold when they age out (e.g., low decay weight, old epoch, pruned).
 ///
 /// # Migration flow
 ///
 /// ```text
-/// Substrate (hot) ──age_out()──► ColdSubstrate (cold/archive)
-///                   ◄──thaw()──
+/// Store (hot) ──age_out()──► ColdStore (cold/archive)
+///               ◄──thaw()──
 /// ```
 ///
 /// # Implementations
 ///
 /// - `ArchiveColdSubstrate` (roko-fs) — compressed JSONL archive files
 #[async_trait]
-pub trait ColdSubstrate: Send + Sync {
+pub trait ColdStore: Send + Sync {
     /// Archive an engram into cold storage. Returns its content hash.
     ///
     /// The engram is removed from the hot substrate by the caller after
@@ -145,44 +146,45 @@ pub trait ColdSubstrate: Send + Sync {
 
     /// Human-readable name for logging/debugging.
     fn name(&self) -> &'static str {
-        "unnamed_cold_substrate"
+        "unnamed_cold_store"
     }
 }
 
-// ─── Scorer ───────��────────────────────────────────────��───────────────────
+// ─── Score ───────────────────────────────────────────────────────────────
 
 /// Rates an engram along multi-dimensional axes.
 ///
-/// Scorers are pure functions of `(engram, context)`. They compose freely:
-/// use `CompositeScorer` to combine several scorers via +/× operations.
+/// Score implementations are pure functions of `(engram, context)`. They
+/// compose freely: use `CompositeScorer` to combine several scorers via +/×
+/// operations.
 ///
-/// # Examples of Scorers
+/// # Examples of Score implementations
 ///
 /// - `RelevanceScorer`: how well does this engram match the current goal?
 /// - `RecencyScorer`: how recent is this engram?
 /// - `ReputationScorer`: how trustworthy is its author?
 /// - `CatalyticScorer`: how many downstream engrams does this enable?
-pub trait Scorer: Send + Sync {
+pub trait Score: Send + Sync {
     /// Score an engram in the given context.
     ///
     /// This is the implementor hook — override this in your scorer impl.
-    fn score(&self, engram: &Engram, ctx: &Context) -> Score;
+    fn score(&self, engram: &Engram, ctx: &Context) -> ScoreValue;
 
     /// Alias for [`score`](Self::score) — score a persisted engram.
     ///
     /// Provided so callers can be explicit about the input type.
-    fn score_engram(&self, engram: &Engram, ctx: &Context) -> Score {
+    fn score_engram(&self, engram: &Engram, ctx: &Context) -> ScoreValue {
         self.score(engram, ctx)
     }
 
     /// Score an ephemeral pulse by promoting it to a synthetic engram.
-    fn score_pulse(&self, p: &Pulse, ctx: &Context) -> Score {
+    fn score_pulse(&self, p: &Pulse, ctx: &Context) -> ScoreValue {
         let synthetic = Engram::from_pulse_synthetic(p);
         self.score(&synthetic, ctx)
     }
 
     /// Score either an engram or a pulse via [`Datum`] dispatch.
-    fn score_datum(&self, datum: Datum<'_>, ctx: &Context) -> Score {
+    fn score_datum(&self, datum: Datum<'_>, ctx: &Context) -> ScoreValue {
         match datum {
             Datum::Engram(e) => self.score(e, ctx),
             Datum::Pulse(p) => self.score_pulse(p, ctx),
@@ -195,7 +197,7 @@ pub trait Scorer: Send + Sync {
     }
 }
 
-// ─── Gate ──────────────────────────────────────────────────────────────────
+// ─── Verify ──────────────────────────────────────────────────────────────────
 
 /// Verifies an engram against ground truth, producing a [`Verdict`].
 ///
@@ -209,7 +211,7 @@ pub trait Scorer: Send + Sync {
 /// trait is async. For pure/synchronous verification, implementors can return
 /// a ready future.
 #[async_trait]
-pub trait Gate: Send + Sync {
+pub trait Verify: Send + Sync {
     /// Verify the engram and return a verdict.
     async fn verify(&self, engram: &Engram, ctx: &Context) -> Verdict;
 
@@ -223,13 +225,13 @@ pub trait Gate: Send + Sync {
     fn name(&self) -> &str;
 }
 
-// ─── Router ────────────────────────────────────────────────────────────────
+// ─── Route ────────────────────────────────────────────────────────────────
 
 /// Selects one engram from many candidates.
 ///
 /// Routers are the decision-making layer: which model to call, which backend
 /// to use, which gate to run next, which bounty to claim. They learn via
-/// [`Router::feedback`] so they improve with experience.
+/// [`Route::feedback`] so they improve with experience.
 ///
 /// # Implementations
 ///
@@ -237,7 +239,7 @@ pub trait Gate: Send + Sync {
 /// - `LinUCBRouter` — contextual bandit
 /// - `CascadeRouter` — multi-stage confidence → UCB
 /// - `WeightedRouter` — softmax over scorers
-pub trait Router: Send + Sync {
+pub trait Route: Send + Sync {
     /// Select one engram from the candidates. None = no selection made.
     ///
     /// This is the implementor hook — override this in your router impl.
@@ -264,7 +266,7 @@ pub trait Router: Send + Sync {
     fn name(&self) -> &str;
 }
 
-// ─── Composer ──────────────────────────────────────────────────────────────
+// ─── Compose ──────────────────────────────────────────────────────────────
 
 /// Combines multiple engrams into one new engram under a [`Budget`].
 ///
@@ -280,14 +282,14 @@ pub trait Router: Send + Sync {
 /// compose call.  The default implementation filters for engrams and
 /// delegates to [`compose`](Self::compose), so existing implementations
 /// get the new entry point for free.
-pub trait Composer: Send + Sync {
+pub trait Compose: Send + Sync {
     /// Combine input engrams into a new composed engram.
     /// The composer may use the scorer to rank/select inputs under budget.
     fn compose(
         &self,
         engrams: &[Engram],
         budget: &Budget,
-        scorer: &dyn Scorer,
+        scorer: &dyn Score,
         ctx: &Context,
     ) -> Result<Engram>;
 
@@ -300,7 +302,7 @@ pub trait Composer: Send + Sync {
         &self,
         datums: &[Datum<'_>],
         budget: &Budget,
-        scorer: &dyn Scorer,
+        scorer: &dyn Score,
         ctx: &Context,
     ) -> Result<Engram> {
         let engrams: Vec<Engram> = datums
@@ -317,7 +319,7 @@ pub trait Composer: Send + Sync {
     fn name(&self) -> &str;
 }
 
-// ─── Policy ────────────────────────────────────────────────────────────────
+// ─── React ────────────────────────────────────────────────────────────────
 
 /// Watches a stream of engrams and emits new engrams in response.
 ///
@@ -334,7 +336,7 @@ pub trait Composer: Send + Sync {
 /// (to publish on the Bus).  The default implementation ignores pulses and
 /// wraps the existing [`decide`](Self::decide) output in `PolicyOutputs`,
 /// so existing implementations get the new entry point for free.
-pub trait Policy: Send + Sync {
+pub trait React: Send + Sync {
     /// Examine the recent engram stream and produce new engrams (interventions).
     fn decide(&self, stream: &[Engram], ctx: &Context) -> Vec<Engram>;
 
@@ -367,9 +369,9 @@ pub trait Policy: Send + Sync {
 /// Publish/subscribe transport for ephemeral [`Pulse`]s.
 ///
 /// The Bus is the real-time transport layer that complements the durable
-/// [`Substrate`]. Pulses flow through the Bus for immediate downstream
+/// [`Store`]. Pulses flow through the Bus for immediate downstream
 /// reactions; only those worth persisting get promoted to [`Engram`]s and
-/// stored in a Substrate.
+/// stored in a Store.
 ///
 /// # Sequence numbers
 ///
@@ -390,4 +392,34 @@ pub trait Bus: Send + Sync {
 
     /// Subscribe to pulses matching the given topic filter.
     fn subscribe(&self, filter: TopicFilter) -> Result<Self::Receiver>;
+}
+
+// ─── Observe ─────────────────────────────────────────────────────────────
+
+/// Observation protocol — passive data collection from external sources.
+pub trait Observe: crate::cell::Cell {
+    /// Collect observations from the environment.
+    fn observe(&self) -> Vec<Engram>;
+}
+
+// ─── Connect ─────────────────────────────────────────────────────────────
+
+/// Connectivity protocol — manage connections to external systems.
+pub trait Connect: crate::cell::Cell {
+    /// Establish the connection.
+    fn connect(&self) -> Result<()>;
+    /// Check if the connection is healthy.
+    fn health(&self) -> bool;
+    /// Tear down the connection.
+    fn disconnect(&self) -> Result<()>;
+}
+
+// ─── Trigger ─────────────────────────────────────────────────────────────
+
+/// Trigger protocol — armed conditions that fire when criteria are met.
+pub trait Trigger: crate::cell::Cell {
+    /// Arm the trigger to begin watching.
+    fn arm(&self) -> Result<()>;
+    /// Disarm the trigger, stopping all watches.
+    fn disarm(&self) -> Result<()>;
 }

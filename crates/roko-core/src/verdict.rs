@@ -1,9 +1,9 @@
-//! Gate verdicts, router selections, and router feedback outcomes.
+//! Verify verdicts, router selections, and router feedback outcomes.
 //!
 //! These are the three "output" types of the verification and routing verbs:
 //!
-//! - [`Verdict`] — a [`Gate`](crate::Gate) passed or failed a signal
-//! - [`Selection`] — a [`Router`](crate::Router) chose one candidate
+//! - [`Verdict`] — a [`Verify`](crate::Verify) passed or failed a signal
+//! - [`Selection`] — a [`Route`](crate::Route) chose one candidate
 //! - [`Outcome`] — feedback about what happened after a selection was acted on
 
 use crate::ContentHash;
@@ -42,7 +42,7 @@ impl TestCount {
     }
 }
 
-/// The result of a [`Gate`](crate::Gate) verifying a signal.
+/// The result of a [`Verify`](crate::Verify) verifying a signal.
 ///
 /// Verdicts include evidence — why did the gate pass or fail? — so downstream
 /// policies can make intelligent decisions (retry with different input,
@@ -153,12 +153,12 @@ impl Verdict {
     }
 }
 
-/// The result of a [`Router`](crate::Router) picking one signal from candidates.
+/// The result of a [`Route`](crate::Route) picking one signal from candidates.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Selection {
     /// The content hash of the chosen signal.
     pub chosen: ContentHash,
-    /// Router's confidence in this choice, `[0..1]`.
+    /// Route's confidence in this choice, `[0..1]`.
     pub confidence: f32,
     /// Identifier of the router that made this selection.
     pub router: String,

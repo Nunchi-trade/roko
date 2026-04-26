@@ -4,7 +4,7 @@
 //! burning tokens without progress. After [`MAX_GHOST_TURNS`] consecutive
 //! ghost turns, this watcher fires a restart signal.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 use serde::Deserialize;
 
 /// Maximum consecutive wasted turns before firing.
@@ -80,7 +80,7 @@ fn extract_ghost_turn_event(signal: &Engram) -> Option<GhostTurnEvent> {
         })
 }
 
-impl Policy for GhostTurnWatcher {
+impl React for GhostTurnWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Count consecutive wasted turns from the end of the stream.
         let mut consecutive = 0usize;

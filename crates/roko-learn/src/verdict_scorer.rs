@@ -1,6 +1,6 @@
 //! VerdictAwareScorer — weights gate verdict signals by recency and severity (GATE-05).
 //!
-//! This scorer implements the `Scorer` trait from `roko-core` and specifically
+//! This scorer implements the `ScoreFn` trait from `roko-core` and specifically
 //! targets engrams of `Kind::GateVerdict`. It assigns higher scores to:
 //!
 //! 1. **Recent** verdicts (exponential time decay)
@@ -10,7 +10,8 @@
 //! Non-verdict engrams receive a neutral score so the scorer composes cleanly
 //! with other scorers in a `SumScorer` or `MulScorer` chain.
 
-use roko_core::{Context, Engram, Kind, Score, Scorer};
+use roko_core::traits::Score as ScoreFn;
+use roko_core::{Context, Engram, Kind, Score};
 
 /// Weights for verdict scoring dimensions.
 #[derive(Debug, Clone)]
@@ -36,7 +37,7 @@ impl Default for VerdictScorerConfig {
     }
 }
 
-/// Scorer that weights `Kind::GateVerdict` engrams by recency, severity, and relevance.
+/// ScoreFn that weights `Kind::GateVerdict` engrams by recency, severity, and relevance.
 ///
 /// Designed to be composed with other scorers. Non-verdict engrams receive
 /// `Score::ZERO` so they don't interfere in aggregate pipelines.
@@ -140,7 +141,7 @@ impl Default for VerdictAwareScorer {
     }
 }
 
-impl Scorer for VerdictAwareScorer {
+impl ScoreFn for VerdictAwareScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         // Only score GateVerdict engrams.
         if signal.kind != Kind::GateVerdict {

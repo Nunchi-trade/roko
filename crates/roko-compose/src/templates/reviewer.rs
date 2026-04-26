@@ -1,9 +1,8 @@
 //! Reviewer prompt template.
 //!
-//! Ports Mori's `architect_prompt` + `auditor_prompt` + `combined_reviewer_prompt`
-//! into a single template with enum dispatch. All three share a common context
-//! prefix (plan, workspace map, prd2, brief) and differ only in role identity
-//! and instructions.
+//! Roko-owned architect, auditor, and combined-reviewer prompts in a single
+//! template with enum dispatch. All three share a common context prefix (plan,
+//! workspace map, prd2, brief) and differ only in role identity and instructions.
 
 use super::common::budget_for;
 use super::{PlanSlice, RolePromptTemplate, truncate};

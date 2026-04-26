@@ -1,6 +1,7 @@
 //! Catalyst scoring for downstream-impact-aware ranking.
 
-use crate::{Context, Engram, Score, Scorer};
+use crate::traits::Score as ScoreTrait;
+use crate::{Context, Engram, Score};
 use std::sync::Arc;
 
 /// Observed downstream impact for one signal.
@@ -55,7 +56,7 @@ impl CatalystScorer {
     }
 }
 
-impl Scorer for CatalystScorer {
+impl ScoreTrait for CatalystScorer {
     fn score(&self, signal: &Engram, ctx: &Context) -> Score {
         let summary = self.source.impact(signal, ctx);
         let lineage_signal = (signal.lineage.len() as f32 / 8.0).min(1.0);

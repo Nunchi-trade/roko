@@ -236,7 +236,7 @@ cargo run -p roko-cli -- status
 | **Safety layer** | `/Users/will/dev/nunchi/roko/roko/crates/roko-agent/src/safety/` |
 | **System prompt builder** | `/Users/will/dev/nunchi/roko/roko/crates/roko-compose/src/system_prompt_builder.rs` |
 | **Role templates** | `/Users/will/dev/nunchi/roko/roko/crates/roko-compose/src/templates/` |
-| **Implementation plans** | `/Users/will/dev/nunchi/roko/roko/tmp/implementation-plans/00-INDEX.md` |
+| **Master task list** | `/Users/will/dev/nunchi/roko/roko/tmp/MASTER-TASKS.md` |
 | **Roko data dir** | `/Users/will/dev/nunchi/roko/roko/.roko/` |
 | **Executor snapshots** | `/Users/will/dev/nunchi/roko/roko/.roko/state/` |
 | **PRD storage** | `/Users/will/dev/nunchi/roko/roko/.roko/prd/` |

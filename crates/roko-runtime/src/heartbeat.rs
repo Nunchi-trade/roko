@@ -846,7 +846,7 @@ impl HeartbeatPolicy {
         });
     }
 
-    /// BEAT-05 REACT step: emit the result of a Policy.decide() call onto
+    /// BEAT-05 REACT step: emit the result of a React.decide() call onto
     /// the runtime bus. Called at the end of each gamma tick after PERSIST
     /// and BROADCAST, implementing the seven-step loop's REACT phase.
     pub fn emit_react_decision(

@@ -3,10 +3,10 @@
 //! Run against a real plans directory:
 //!
 //! ```bash
-//! cargo run -p roko-orchestrator --example discover -- /Users/will/dev/uniswap/bardo/.mori/plans
+//! cargo run -p roko-orchestrator --example discover -- .roko/plans
 //! ```
 //!
-//! Falls back to `./.mori/plans` (or `./plans`) relative to the current
+//! Falls back to `./.roko/plans` (or `./plans`) relative to the current
 //! working directory when no argument is supplied.
 
 use std::env;
@@ -19,12 +19,12 @@ fn main() -> ExitCode {
     let arg = env::args().nth(1);
     let path = arg.map_or_else(
         || {
-            let candidates = [".mori/plans", "plans", ".roko/plans"];
+            let candidates = [".roko/plans", "plans"];
             candidates
                 .into_iter()
                 .map(PathBuf::from)
                 .find(|p| p.exists())
-                .unwrap_or_else(|| PathBuf::from(".mori/plans"))
+                .unwrap_or_else(|| PathBuf::from(".roko/plans"))
         },
         PathBuf::from,
     );

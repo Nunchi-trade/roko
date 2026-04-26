@@ -9,22 +9,30 @@
 //! The store is a single JSON file. Writes use atomic tmp-rename to avoid
 //! corruption on crash.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 /// A single normalized error pattern with occurrence tracking.
 ///
-/// Patterns are keyed by [`ErrorPattern::digest`] — a normalized first-line
-/// error signature stripped of file paths, line numbers, and ANSI codes.
+/// Patterns are keyed by [`ErrorPattern::key`]. Older digest-only rows are
+/// repaired on load by using the digest as the key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorPattern {
+    /// Stable key used for de-duplication. New gate failure observations use
+    /// normalized gate/parser keys such as `E0425::src/lib.rs`.
+    #[serde(default)]
+    pub key: String,
     /// Normalized error signature (first line of error, stripped of file
     /// paths and line numbers).
     pub digest: String,
+    /// Verify that emitted the pattern, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
     /// Error category (e.g. `"unresolved_import"`, `"type_mismatch"`,
     /// `"lifetime"`).
     pub category: String,
@@ -35,21 +43,195 @@ pub struct ErrorPattern {
     /// ISO 8601 timestamp of the most recent occurrence.
     pub last_seen_at: String,
     /// Plan IDs that have hit this error.
-    pub plan_ids: Vec<String>,
+    pub plan_ids: BTreeSet<String>,
+    /// Task IDs that have hit this error.
+    #[serde(default)]
+    pub task_ids: BTreeSet<String>,
+    /// Whether this pattern has been resolved.
+    #[serde(default)]
+    pub resolved: bool,
     /// What fixed the error (filled in from reflection or manual annotation).
     pub resolution: Option<String>,
     /// Auto-fix hint extracted from rustc output.
     pub suggestion: Option<String>,
 }
 
+/// A structured gate failure observation emitted by gates, review parsing, or
+/// retry classification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateFailureObservation {
+    /// Stable key used to merge repeated observations.
+    pub key: String,
+    /// Plan that observed the failure.
+    pub plan_id: String,
+    /// Task that observed the failure, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Verify or parser source that observed the failure.
+    pub gate: String,
+    /// Coarse failure class.
+    pub classification: String,
+    /// Compact, bounded signature. Raw logs should not be stored here.
+    pub digest: String,
+    /// Optional suggested fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+    /// Source subsystem that produced the observation.
+    pub source: GateFailureSource,
+    /// ISO 8601 timestamp for the observation.
+    pub observed_at: String,
+}
+
+impl GateFailureObservation {
+    /// Build an observation and stamp it with the current time.
+    #[must_use]
+    pub fn new(
+        key: impl Into<String>,
+        plan_id: impl Into<String>,
+        task_id: Option<String>,
+        gate: impl Into<String>,
+        classification: impl Into<String>,
+        digest: impl Into<String>,
+        source: GateFailureSource,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            plan_id: plan_id.into(),
+            task_id,
+            gate: gate.into(),
+            classification: classification.into(),
+            digest: truncate_chars(&digest.into(), 200),
+            suggestion: None,
+            source,
+            observed_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Attach an optional suggestion to this observation.
+    #[must_use]
+    pub fn with_suggestion(mut self, suggestion: Option<String>) -> Self {
+        self.suggestion = suggestion;
+        self
+    }
+}
+
+/// Subsystem that produced a gate failure observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateFailureSource {
+    /// Compile/test/lint gate classification.
+    GateClassification,
+    /// Structured review verdict parsing.
+    ReviewVerdict,
+    /// Agent dispatch/retry error classification.
+    RetryClassifier,
+}
+
+/// Result of upserting a failure observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailurePatternUpdate {
+    /// Whether this observation created a new pattern.
+    pub inserted: bool,
+    /// Occurrence count after the update.
+    pub occurrences: u32,
+}
+
+/// Query used to select relevant failure patterns for retry context.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FailurePatternQuery<'a> {
+    /// Plan to prefer.
+    pub plan_id: Option<&'a str>,
+    /// Task to prefer.
+    pub task_id: Option<&'a str>,
+    /// Verify to prefer.
+    pub gate: Option<&'a str>,
+    /// Failure class to prefer.
+    pub classification: Option<&'a str>,
+}
+
+/// A bounded prompt/context summary for failure memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailurePatternSummary {
+    /// Selected patterns in display order.
+    pub patterns: Vec<FailurePatternSummaryItem>,
+    /// Number of candidate patterns considered before bounding.
+    pub total_candidates: usize,
+}
+
+impl FailurePatternSummary {
+    /// Render the summary as retry-context text.
+    #[must_use]
+    pub fn format_for_prompt(&self) -> String {
+        if self.patterns.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::from("## Prior Verify Failure Patterns\n");
+        out.push_str(
+            "Use these concise prior failures as constraints; do not treat them as full logs.\n",
+        );
+        for (index, pattern) in self.patterns.iter().enumerate() {
+            let repeated = if pattern.repeated {
+                "repeated"
+            } else {
+                "one-off"
+            };
+            let _ = writeln!(
+                out,
+                "{}. [{}] {} (seen {} time{}, {repeated})",
+                index + 1,
+                pattern.classification,
+                pattern.digest,
+                pattern.occurrences,
+                if pattern.occurrences == 1 { "" } else { "s" },
+            );
+            if let Some(gate) = &pattern.gate {
+                let _ = writeln!(out, "   Verify: {gate}");
+            }
+            if let Some(resolution) = &pattern.resolution {
+                let _ = writeln!(out, "   Fix: {resolution}");
+            }
+            if let Some(suggestion) = &pattern.suggestion {
+                let _ = writeln!(out, "   Hint: {suggestion}");
+            }
+        }
+        out
+    }
+}
+
+/// One selected failure pattern for prompt/context use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailurePatternSummaryItem {
+    /// Stable key for the pattern.
+    pub key: String,
+    /// Verify that emitted the pattern, if known.
+    pub gate: Option<String>,
+    /// Coarse failure class.
+    pub classification: String,
+    /// Compact signature.
+    pub digest: String,
+    /// Occurrence count.
+    pub occurrences: u32,
+    /// Whether this is a repeated pattern rather than a one-off failure.
+    pub repeated: bool,
+    /// Known resolution from reflection or manual annotation.
+    pub resolution: Option<String>,
+    /// Optional suggested fix.
+    pub suggestion: Option<String>,
+}
+
 /// Persistent store of [`ErrorPattern`] records backed by a JSON file.
 ///
-/// The store de-duplicates patterns by digest: calling [`append`](Self::append)
-/// with the same digest increments the occurrence counter and merges
-/// metadata rather than creating a new entry.
+/// The store de-duplicates patterns by key: structured observations use
+/// normalized keys, while the legacy [`append`](Self::append) path uses the
+/// digest as the key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPatternStore {
     patterns: Vec<ErrorPattern>,
+    /// Derived index mapping pattern keys to their position in `patterns`.
+    /// Rebuilt on load; not serialized.
+    #[serde(skip)]
+    key_index: HashMap<String, usize>,
 }
 
 impl ErrorPatternStore {
@@ -62,7 +244,13 @@ impl ErrorPatternStore {
             Ok(b) => b,
             Err(_) => return Self::empty(),
         };
-        serde_json::from_slice::<Self>(&bytes).unwrap_or_else(|_| Self::empty())
+        serde_json::from_slice::<Self>(&bytes)
+            .map(|mut store| {
+                store.repair_loaded_patterns();
+                store.rebuild_key_index();
+                store
+            })
+            .unwrap_or_else(|_| Self::empty())
     }
 
     /// Persist the store to `path` as pretty-printed JSON.
@@ -74,16 +262,9 @@ impl ErrorPatternStore {
     ///
     /// Returns the underlying [`std::io::Error`] if the parent directory
     /// cannot be created, serialization fails, or the filesystem write fails.
-    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = unique_tmp_path(path);
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+    pub fn save(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.gc(Duration::from_secs(90 * 24 * 3600), 10_000);
+        roko_fs::atomic_write_json(path, self)
     }
 
     /// Upsert an error pattern by digest.
@@ -98,32 +279,79 @@ impl ErrorPatternStore {
         plan_id: &str,
         suggestion: Option<&str>,
     ) {
-        let now = Utc::now().to_rfc3339();
+        let observation = GateFailureObservation::new(
+            digest,
+            plan_id,
+            None,
+            "unknown",
+            category,
+            digest,
+            GateFailureSource::RetryClassifier,
+        )
+        .with_suggestion(suggestion.map(str::to_string));
+        let _ = self.observe_gate_failure(observation);
+    }
 
-        if let Some(existing) = self.patterns.iter_mut().find(|p| p.digest == digest) {
-            existing.occurrences = existing.occurrences.saturating_add(1);
-            existing.last_seen_at = now;
-            if !existing.plan_ids.contains(&plan_id.to_string()) {
-                existing.plan_ids.push(plan_id.to_string());
-            }
-            if existing.suggestion.is_none() {
-                if let Some(s) = suggestion {
-                    existing.suggestion = Some(s.to_string());
-                }
-            }
-            return;
+    /// Upsert a structured gate failure observation.
+    ///
+    /// Repeated observations with the same key increment evidence on the
+    /// existing pattern instead of producing duplicate prompt noise.
+    pub fn observe_gate_failure(
+        &mut self,
+        observation: GateFailureObservation,
+    ) -> FailurePatternUpdate {
+        let now = Utc::now().to_rfc3339();
+        let key = observation.key.trim().to_string();
+        if key.is_empty() {
+            return FailurePatternUpdate {
+                inserted: false,
+                occurrences: 0,
+            };
         }
 
+        if let Some(&idx) = self.key_index.get(&key) {
+            let existing = &mut self.patterns[idx];
+            existing.occurrences = existing.occurrences.saturating_add(1);
+            existing.last_seen_at = now;
+            existing.plan_ids.insert(observation.plan_id);
+            if let Some(task_id) = observation.task_id {
+                existing.task_ids.insert(task_id);
+            }
+            if existing.gate.is_none() && !observation.gate.trim().is_empty() {
+                existing.gate = Some(observation.gate);
+            }
+            if !observation.digest.trim().is_empty() {
+                existing.digest = truncate_chars(&observation.digest, 200);
+            }
+            if existing.suggestion.is_none() {
+                existing.suggestion = observation.suggestion;
+            }
+            return FailurePatternUpdate {
+                inserted: false,
+                occurrences: existing.occurrences,
+            };
+        }
+
+        let idx = self.patterns.len();
+        self.key_index.insert(key.clone(), idx);
         self.patterns.push(ErrorPattern {
-            digest: digest.to_string(),
-            category: category.to_string(),
+            key,
+            digest: truncate_chars(&observation.digest, 200),
+            gate: (!observation.gate.trim().is_empty()).then_some(observation.gate),
+            category: observation.classification,
             occurrences: 1,
             first_seen_at: now.clone(),
             last_seen_at: now,
-            plan_ids: vec![plan_id.to_string()],
+            plan_ids: std::iter::once(observation.plan_id).collect(),
+            task_ids: observation.task_id.into_iter().collect(),
+            resolved: false,
             resolution: None,
-            suggestion: suggestion.map(|s| s.to_string()),
+            suggestion: observation.suggestion,
         });
+        FailurePatternUpdate {
+            inserted: true,
+            occurrences: 1,
+        }
     }
 
     /// Return the most frequent patterns, sorted by descending occurrence
@@ -143,36 +371,68 @@ impl ErrorPatternStore {
             .collect()
     }
 
+    /// Return a bounded, relevance-ranked summary for retry prompt context.
+    #[must_use]
+    pub fn bounded_summary(
+        &self,
+        query: FailurePatternQuery<'_>,
+        limit: usize,
+        max_chars: usize,
+    ) -> FailurePatternSummary {
+        let mut candidates: Vec<(usize, &ErrorPattern)> = self
+            .patterns
+            .iter()
+            .filter(|pattern| !pattern.resolved)
+            .map(|pattern| (pattern.relevance_score(query), pattern))
+            .filter(|(score, _)| *score > 0 || query.is_empty())
+            .collect();
+        candidates.sort_by(|(score_a, a), (score_b, b)| {
+            score_b
+                .cmp(score_a)
+                .then_with(|| b.occurrences.cmp(&a.occurrences))
+                .then_with(|| b.last_seen_at.cmp(&a.last_seen_at))
+        });
+
+        let total_candidates = candidates.len();
+        let mut used_chars = 0usize;
+        let mut patterns = Vec::new();
+        for (_, pattern) in candidates.into_iter().take(limit) {
+            let item = FailurePatternSummaryItem {
+                key: pattern.key.clone(),
+                gate: pattern.gate.clone(),
+                classification: pattern.category.clone(),
+                digest: truncate_chars(&pattern.digest, 200),
+                occurrences: pattern.occurrences,
+                repeated: pattern.occurrences > 1,
+                resolution: pattern.resolution.clone(),
+                suggestion: pattern.suggestion.clone(),
+            };
+            let projected = item.digest.chars().count()
+                + item.resolution.as_ref().map_or(0, |s| s.chars().count())
+                + item.suggestion.as_ref().map_or(0, |s| s.chars().count())
+                + item.gate.as_ref().map_or(0, |s| s.chars().count())
+                + 80;
+            if !patterns.is_empty() && used_chars.saturating_add(projected) > max_chars {
+                break;
+            }
+            used_chars = used_chars.saturating_add(projected);
+            patterns.push(item);
+        }
+
+        FailurePatternSummary {
+            patterns,
+            total_candidates,
+        }
+    }
+
     /// Format the top patterns as a markdown-ish block suitable for
     /// injection into an agent system prompt.
     ///
     /// Each entry shows the digest, category, occurrence count, and any
     /// known resolution or suggestion. Output is capped at `limit` entries.
     pub fn format_for_prompt(&self, limit: usize) -> String {
-        let top = self.top_patterns(limit);
-        if top.is_empty() {
-            return String::new();
-        }
-
-        let mut out = String::from("Known error patterns (learn from prior failures):\n");
-        for (i, pattern) in top.iter().enumerate() {
-            let _ = writeln!(
-                out,
-                "{}. [{}] {} (seen {} time{})",
-                i + 1,
-                pattern.category,
-                pattern.digest,
-                pattern.occurrences,
-                if pattern.occurrences == 1 { "" } else { "s" },
-            );
-            if let Some(resolution) = &pattern.resolution {
-                let _ = writeln!(out, "   Fix: {resolution}");
-            }
-            if let Some(suggestion) = &pattern.suggestion {
-                let _ = writeln!(out, "   Hint: {suggestion}");
-            }
-        }
-        out
+        self.bounded_summary(FailurePatternQuery::default(), limit, 2_000)
+            .format_for_prompt()
     }
 
     /// Return the number of distinct patterns in the store.
@@ -188,7 +448,107 @@ impl ErrorPatternStore {
     fn empty() -> Self {
         Self {
             patterns: Vec::new(),
+            key_index: HashMap::new(),
         }
+    }
+
+    fn repair_loaded_patterns(&mut self) {
+        for pattern in &mut self.patterns {
+            if pattern.key.is_empty() {
+                pattern.key = pattern.digest.clone();
+            }
+            pattern.digest = truncate_chars(&pattern.digest, 200);
+        }
+    }
+
+    /// Rebuild the `key_index` from the current `patterns` vec.
+    fn rebuild_key_index(&mut self) {
+        self.key_index.clear();
+        self.key_index.reserve(self.patterns.len());
+        for (idx, pattern) in self.patterns.iter().enumerate() {
+            self.key_index.insert(pattern.key.clone(), idx);
+        }
+    }
+
+    /// Evict stale or excess patterns to bound store growth.
+    ///
+    /// 1. Removes patterns whose `last_seen_at` is older than `max_age`.
+    /// 2. If the store still exceeds `max_patterns`, removes the oldest
+    ///    *resolved* patterns first (by `last_seen_at`), then the oldest
+    ///    unresolved patterns until the limit is satisfied.
+    /// 3. Rebuilds the `key_index` after any removals.
+    pub fn gc(&mut self, max_age: Duration, max_patterns: usize) {
+        let cutoff =
+            Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(90));
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let before = self.patterns.len();
+        self.patterns.retain(|p| p.last_seen_at >= cutoff_str);
+
+        if self.patterns.len() > max_patterns {
+            // Sort indices by eviction priority: resolved first, then oldest last_seen_at.
+            let mut indices: Vec<usize> = (0..self.patterns.len()).collect();
+            indices.sort_by(|&a, &b| {
+                let pa = &self.patterns[a];
+                let pb = &self.patterns[b];
+                // Resolved patterns are evicted before unresolved ones.
+                pb.resolved
+                    .cmp(&pa.resolved)
+                    .then_with(|| pa.last_seen_at.cmp(&pb.last_seen_at))
+            });
+            // Mark the first (len - max_patterns) indices for removal.
+            let to_remove = self.patterns.len() - max_patterns;
+            let mut remove_set: Vec<bool> = vec![false; self.patterns.len()];
+            for &idx in indices.iter().take(to_remove) {
+                remove_set[idx] = true;
+            }
+            let mut i = 0;
+            self.patterns.retain(|_| {
+                let keep = !remove_set[i];
+                i += 1;
+                keep
+            });
+        }
+
+        if self.patterns.len() != before {
+            self.rebuild_key_index();
+        }
+    }
+}
+
+impl ErrorPattern {
+    fn relevance_score(&self, query: FailurePatternQuery<'_>) -> usize {
+        let mut score = 0usize;
+        if let Some(task_id) = query.task_id
+            && self.task_ids.contains(task_id)
+        {
+            score += 8;
+        }
+        if let Some(plan_id) = query.plan_id
+            && self.plan_ids.contains(plan_id)
+        {
+            score += 4;
+        }
+        if let Some(gate) = query.gate
+            && self.gate.as_deref() == Some(gate)
+        {
+            score += 2;
+        }
+        if let Some(classification) = query.classification
+            && self.category == classification
+        {
+            score += 1;
+        }
+        score
+    }
+}
+
+impl FailurePatternQuery<'_> {
+    fn is_empty(self) -> bool {
+        self.plan_id.is_none()
+            && self.task_id.is_none()
+            && self.gate.is_none()
+            && self.classification.is_none()
     }
 }
 
@@ -297,21 +657,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// Generate a unique temporary file path next to `path` for atomic writes.
-fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("error-patterns.json");
-    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
-}
+// NOTE: The `unique_tmp_path` helper that lived here has been replaced by
+// `roko_fs::atomic_write_json`.
+// TODO: migrate remaining atomic write sites to roko_fs::atomic_write_json
 
 #[cfg(test)]
 mod tests {
@@ -343,7 +691,10 @@ mod tests {
         assert_eq!(store.len(), 1);
         let pattern = &store.patterns[0];
         assert_eq!(pattern.occurrences, 3);
-        assert_eq!(pattern.plan_ids, vec!["plan-1", "plan-2"]);
+        assert_eq!(
+            pattern.plan_ids,
+            BTreeSet::from(["plan-1".to_string(), "plan-2".to_string()])
+        );
         assert_eq!(
             pattern.suggestion.as_deref(),
             Some("did you mean `std::io`?")
@@ -535,5 +886,121 @@ mod tests {
             Some("original hint"),
             "first suggestion wins"
         );
+    }
+
+    #[test]
+    fn structured_observations_dedupe_by_key() {
+        let mut store = ErrorPatternStore::empty();
+        let first = GateFailureObservation::new(
+            "E0425::src/lib.rs",
+            "plan-a",
+            Some("task-a".to_string()),
+            "compile:cargo",
+            "unresolved_import",
+            "E0425: cannot find value `foo` [src/lib.rs]",
+            GateFailureSource::GateClassification,
+        );
+        let second = GateFailureObservation::new(
+            "E0425::src/lib.rs",
+            "plan-b",
+            Some("task-b".to_string()),
+            "compile:cargo",
+            "unresolved_import",
+            "E0425: cannot find value `bar` [src/lib.rs]",
+            GateFailureSource::GateClassification,
+        );
+        let different_file = GateFailureObservation::new(
+            "E0425::src/other.rs",
+            "plan-a",
+            Some("task-a".to_string()),
+            "compile:cargo",
+            "unresolved_import",
+            "E0425: cannot find value `foo` [src/other.rs]",
+            GateFailureSource::GateClassification,
+        );
+
+        assert!(store.observe_gate_failure(first).inserted);
+        let update = store.observe_gate_failure(second);
+        assert!(!update.inserted);
+        assert_eq!(update.occurrences, 2);
+        assert!(store.observe_gate_failure(different_file).inserted);
+
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            store.patterns[0].plan_ids,
+            BTreeSet::from(["plan-a".to_string(), "plan-b".to_string()])
+        );
+        assert_eq!(
+            store.patterns[0].task_ids,
+            BTreeSet::from(["task-a".to_string(), "task-b".to_string()])
+        );
+    }
+
+    #[test]
+    fn bounded_summary_limits_patterns_and_size() {
+        let mut store = ErrorPatternStore::empty();
+        for i in 0..8 {
+            let observation = GateFailureObservation::new(
+                format!("E04{i:02}::src/lib.rs"),
+                "plan-a",
+                Some("task-a".to_string()),
+                "compile:cargo",
+                "type_error",
+                format!("E04{i:02}: {}", "x".repeat(500)),
+                GateFailureSource::GateClassification,
+            );
+            store.observe_gate_failure(observation);
+        }
+
+        let summary = store.bounded_summary(
+            FailurePatternQuery {
+                plan_id: Some("plan-a"),
+                task_id: Some("task-a"),
+                gate: Some("compile:cargo"),
+                classification: Some("type_error"),
+            },
+            5,
+            500,
+        );
+
+        assert!(summary.patterns.len() <= 5);
+        assert!(
+            summary
+                .patterns
+                .iter()
+                .all(|p| p.digest.chars().count() <= 200)
+        );
+        let prompt = summary.format_for_prompt();
+        assert!(prompt.contains("Prior Verify Failure Patterns"));
+        assert!(!prompt.contains(&"x".repeat(500)));
+    }
+
+    #[test]
+    fn summary_distinguishes_repeated_from_one_off() {
+        let mut store = ErrorPatternStore::empty();
+        let observation = GateFailureObservation::new(
+            "test::panic::snapshot",
+            "plan-a",
+            Some("task-a".to_string()),
+            "test:cargo",
+            "test_expectation_failure",
+            "snapshot mismatch",
+            GateFailureSource::GateClassification,
+        );
+        store.observe_gate_failure(observation.clone());
+        store.observe_gate_failure(observation);
+
+        let summary = store.bounded_summary(
+            FailurePatternQuery {
+                gate: Some("test:cargo"),
+                ..FailurePatternQuery::default()
+            },
+            3,
+            1_000,
+        );
+
+        assert_eq!(summary.patterns.len(), 1);
+        assert!(summary.patterns[0].repeated);
+        assert!(summary.format_for_prompt().contains("repeated"));
     }
 }

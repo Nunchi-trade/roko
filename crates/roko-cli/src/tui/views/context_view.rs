@@ -507,14 +507,14 @@ fn render_cascade_router(
         theme.accent()
     };
     let block = Block::bordered()
-        .title(Span::styled(" Cascade Router ", title_style))
+        .title(Span::styled(" Cascade Route ", title_style))
         .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(inner);
 
-    // Router model stats
+    // Route model stats
     if tui_state.cascade_router.model_slugs.is_empty() && ctx_data.token_burns.is_empty() {
         let empty = Paragraph::new("no routing decisions -- run agents to populate")
             .style(theme.muted())
@@ -677,7 +677,7 @@ fn render_alerts_and_health(
         frame.render_widget(List::new(items), sections[0]);
     }
 
-    // Gate threshold summary
+    // Verify threshold summary
     if tui_state.gate_results_page.threshold_rows.is_empty()
         && tui_state.gate_results_page.gate_rows.is_empty()
     {

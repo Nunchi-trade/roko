@@ -103,7 +103,7 @@ pub struct Custody {
     pub why_claims: Vec<String>,
     /// Optional simulation or dry-run identifier.
     pub simulation: Option<String>,
-    /// Gate or review stages that passed before execution.
+    /// Verify or review stages that passed before execution.
     pub gates_passed: Vec<String>,
     /// Taint state active for the action.
     pub taint: Option<Taint>,

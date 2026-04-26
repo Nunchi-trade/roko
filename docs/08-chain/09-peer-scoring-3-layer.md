@@ -6,16 +6,16 @@
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md), [08-eight-gossip-topics.md](./08-eight-gossip-topics.md)
+**Prerequisites**: [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md), [06-erc-8004-registries.md](./06-erc-8004-registries.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §B, `refactoring-prd/04-knowledge-and-mesh.md`
 
 ---
 
 ## Abstract
 
-The Korai gossip network faces a fundamental challenge: agents are economically motivated participants that may behave adversarially. An agent might flood the network with messages to crowd out competitors, selectively withhold messages to disadvantage peers, or broadcast false anomaly alerts to trigger unnecessary responses. Without peer scoring, the gossip network is vulnerable to these attacks.
+The Nunchi gossip network faces a fundamental challenge: agents are economically motivated participants that may behave adversarially. An agent might flood the network with messages to crowd out competitors, selectively withhold messages to disadvantage peers, or broadcast false anomaly alerts to trigger unnecessary responses. Without peer scoring, the gossip network is vulnerable to these attacks.
 
-Korai uses a 3-layer peer scoring model that evaluates agent behavior at three levels: protocol, application, and economic. Each layer captures different aspects of trustworthiness, and the combined score determines an agent's standing in the gossip mesh.
+Nunchi uses a 3-layer peer scoring model that evaluates agent behavior at three levels: protocol, application, and economic. Each layer captures different aspects of trustworthiness, and the combined score determines an agent's standing in the gossip mesh.
 
 ---
 
@@ -37,7 +37,7 @@ pub struct ProtocolScoreParams {
     pub ip_colocation_factor_threshold: usize, // default: 10
 
     /// Decay interval for score components.
-    pub decay_interval_secs: u64,  // default: slot_duration (400ms * 32 = 12.8s)
+    pub decay_interval_secs: u64,  // default: slot_duration (50ms * 32 = 1.6s)
 
     /// Below this score, peer is graylisted (messages deprioritized).
     pub graylist_threshold: f64,   // default: -16000.0
@@ -69,7 +69,7 @@ Protocol scores decay toward zero over time. This serves two purposes:
 1. **Forgiveness**: A peer that misbehaved briefly (e.g., during a network partition) recovers naturally as the negative score decays.
 2. **Continuous evaluation**: A peer cannot rest on past good behavior. It must continue participating honestly to maintain a positive score.
 
-Decay rate: configurable per topic, typically one decay interval per slot (12.8 seconds on Korai).
+Decay rate: configurable per topic, typically one decay interval per slot (12.8 seconds on Nunchi).
 
 ---
 
@@ -110,7 +110,7 @@ pub struct ApplicationScore {
 
 ### Knowledge Quality Scoring
 
-When an agent posts a knowledge entry on the `korai/knowledge/v1` topic:
+When an agent posts a knowledge entry on the `nunchi/knowledge/v1` topic:
 
 ```
 Initial score contribution: 0 (neutral)
@@ -129,7 +129,7 @@ Over time, agents that consistently post useful knowledge entries accumulate pos
 
 ### Anomaly Detection Accuracy
 
-When an agent broadcasts on the `korai/anomaly/v1` topic:
+When an agent broadcasts on the `nunchi/anomaly/v1` topic:
 
 ```
 If the anomaly is confirmed by 3+ independent agents:
@@ -166,25 +166,25 @@ Job completed but failed gates:
 
 ## Layer 3: Economic Scoring
 
-The economic layer weights peers by their on-chain stake. An agent with 25,000 KORAI staked (Sovereign tier) has more to lose from misbehavior than an agent with no stake (Edge tier). This asymmetry is reflected in peer scoring.
+The economic layer weights peers by their on-chain stake. An agent with 25,000 NUNCHI staked (Sovereign tier) has more to lose from misbehavior than an agent with no stake (Edge tier). This asymmetry is reflected in peer scoring.
 
 ### Stake-Weighted Trust
 
 ```rust
-pub fn economic_score(passport: &AgentPassport) -> f64 {
-    let total_stake: f64 = passport.domain_stakes.values()
+pub fn economic_score(agent: &AgentIdentity) -> f64 {
+    let total_stake: f64 = agent.domain_stakes.values()
         .map(|s| s.as_f64())
         .sum();
 
-    let tier_multiplier = match passport.tier {
-        PassportTier::Protocol  => 4.0,
-        PassportTier::Sovereign => 3.0,
-        PassportTier::Worker    => 2.0,
-        PassportTier::Edge      => 1.0,
+    let tier_multiplier = match agent.tier {
+        AgentTier::Protocol  => 4.0,
+        AgentTier::Sovereign => 3.0,
+        AgentTier::Worker    => 2.0,
+        AgentTier::Edge      => 1.0,
     };
 
-    let stake_score = (total_stake / 10_000.0).min(5.0); // cap at 50K KORAI
-    let slash_penalty = passport.slash_history.len() as f64 * -0.5;
+    let stake_score = (total_stake / 10_000.0).min(5.0); // cap at 50K NUNCHI
+    let slash_penalty = agent.slash_history.len() as f64 * -0.5;
 
     (stake_score * tier_multiplier + slash_penalty).max(-10.0)
 }
@@ -195,7 +195,7 @@ pub fn economic_score(passport: &AgentPassport) -> f64 {
 - **Stake provides collateral**: High-stake agents have more to lose from slashing, so their messages are more trustworthy a priori.
 - **Tier amplifies stake**: A Sovereign agent's stake counts 3× in the trust calculation. This reflects the additional verification requirements for higher tiers.
 - **Slash history penalizes**: Each past slashing event permanently reduces economic score. An agent that has been slashed twice is less trusted than a clean-record agent, even with the same stake.
-- **Capped at 5.0**: Stake beyond 50,000 KORAI provides no additional trust benefit, preventing plutocratic capture where wealthy agents dominate the mesh.
+- **Capped at 5.0**: Stake beyond 50,000 NUNCHI provides no additional trust benefit, preventing plutocratic capture where wealthy agents dominate the mesh.
 
 ---
 
@@ -249,7 +249,7 @@ Peer scoring is a key sybil resistance mechanism. The three layers work together
 
 - **Protocol layer**: IP co-location penalty detects sybil clusters running on the same machine or subnet
 - **Application layer**: Sybil agents that confirm each other's entries are detected by cross-referencing confirmation patterns (a confirmation ring where the same N agents always confirm each other's entries is flagged)
-- **Economic layer**: Each sybil identity requires stake. Creating 100 sybil agents at Worker tier (5,000 KORAI each) costs 500,000 KORAI — a significant economic barrier
+- **Economic layer**: Each sybil identity requires stake. Creating 100 sybil agents at Worker tier (5,000 NUNCHI each) costs 500,000 NUNCHI — a significant economic barrier
 
 The combination makes sybil attacks expensive (economic), detectable (application), and penalizable (protocol).
 
@@ -271,7 +271,7 @@ The combination makes sybil attacks expensive (economic), detectable (applicatio
 
 **Not yet built (Tier 6):**
 - Application scoring implementation (§B6)
-- Economic scoring integration with on-chain passport data (§B7)
+- Economic scoring integration with on-chain ERC-8004 identity data (§B7)
 - Combined score computation and threshold enforcement (§B8)
 - Confirmation ring detection for sybil resistance (§B9)
 - Score decay and recovery mechanics (§B10)
@@ -280,7 +280,5 @@ The combination makes sybil attacks expensive (economic), detectable (applicatio
 
 ## Cross-References
 
-- See [07-4-tier-gossip-architecture.md](./07-4-tier-gossip-architecture.md) for the gossip infrastructure where peer scoring operates
-- See [08-eight-gossip-topics.md](./08-eight-gossip-topics.md) for per-topic scoring parameters
-- See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for stake and tier data used in economic scoring
+- See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for stake and tier data used in economic scoring
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for the relationship between peer scoring and on-chain reputation

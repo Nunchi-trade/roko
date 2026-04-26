@@ -78,7 +78,7 @@ pub enum FaultGateType {
 pub struct FaultGate {
     /// Stable gate identifier.
     pub id: String,
-    /// Gate operator.
+    /// Verify operator.
     pub gate_type: FaultGateType,
     /// Input event identifiers.
     pub inputs: Vec<String>,

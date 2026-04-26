@@ -8,9 +8,10 @@
 //! Mori reference: `apps/mori/src/orchestrator/gates.rs::test_gate` +
 //! `parse_test_counts`.
 
+use crate::compile_errors::{render_failure_classification, structured_gate_failure};
 use crate::payload::{BuildSystem, GatePayload, TestSelector};
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, TestCount, Verdict};
+use roko_core::{Context, Engram, TestCount, Verdict, Verify};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -87,8 +88,20 @@ impl TestGate {
     }
 }
 
+impl roko_core::Cell for TestGate {
+    fn cell_id(&self) -> &str {
+        "test-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "TestGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for TestGate {
+impl Verify for TestGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: GatePayload = match signal.body.as_json() {
@@ -123,16 +136,21 @@ impl Gate for TestGate {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(&self.name, format!("spawn failed: {e}"))
+                let reason = format!("spawn failed: {e}");
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
                     .with_duration(elapsed);
             }
             Err(_) => {
                 let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                return Verdict::fail(
-                    &self.name,
-                    format!("timed out after {} ms", self.timeout_ms),
-                )
-                .with_duration(elapsed);
+                let reason = format!("timed out after {} ms", self.timeout_ms);
+                let classification =
+                    structured_gate_failure(&self.name, &reason, reason.clone(), elapsed);
+                return Verdict::fail(&self.name, reason)
+                    .with_error_digest(render_failure_classification(&classification))
+                    .with_duration(elapsed);
             }
         };
 
@@ -148,8 +166,11 @@ impl Gate for TestGate {
                 .with_duration(elapsed)
         } else {
             let reason = summarize_test_failures(&combined, 3);
+            let classification =
+                structured_gate_failure(&self.name, &combined, reason.clone(), elapsed);
             Verdict::fail(&self.name, reason)
                 .with_detail(combined)
+                .with_error_digest(render_failure_classification(&classification))
                 .with_duration(elapsed)
         };
         if let Some(tc) = counts {

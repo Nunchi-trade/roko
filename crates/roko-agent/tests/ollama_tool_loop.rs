@@ -1,6 +1,6 @@
 //! Integration test: Ollama tool loop via OpenAI-compatible endpoint.
 //!
-//! Gate: only runs when `ROKO_TEST_OLLAMA=1` is set. Requires a local
+//! Verify: only runs when `ROKO_TEST_OLLAMA=1` is set. Requires a local
 //! Ollama instance at `http://localhost:11434` with `llama3.2` pulled.
 //!
 //! Tests the full tool-loop cycle:

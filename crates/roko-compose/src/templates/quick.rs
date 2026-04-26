@@ -9,8 +9,7 @@
 //! - [`QuickFixTemplate`] — minimal fix-only prompt. Does not re-read the plan
 //!   or workspace map; only includes the compressed feedback and fix directives.
 //!
-//! Ports Mori's `quick_reviewer_prompt` and `quick_fix_prompt` from
-//! `prompts.rs:3468` and `prompts.rs:3622`.
+//! Roko-owned quick review/fix prompts for focused retry loops.
 
 use super::common::{budget_for, format_prior_review, format_verdict_instructions};
 use super::{PlanSlice, RolePromptTemplate, truncate};
@@ -189,7 +188,7 @@ impl RolePromptTemplate for QuickFixTemplate {
         // 2. selfcheck_instructions — System / High / End
         let selfcheck = format!(
             "## Output\n\n\
-             Write results to `.mori/plans/completion/{plan_num}-selfcheck.toml` \
+             Write results to `.roko/plans/completion/{plan_num}-selfcheck.toml` \
              (fallback: `plans/context/completion/{plan_num}-selfcheck.toml`).\n",
             plan_num = input.plan_num,
         );

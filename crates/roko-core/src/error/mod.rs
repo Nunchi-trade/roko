@@ -39,7 +39,7 @@ pub type Result<T, E = RokoError> = std::result::Result<T, E>;
 pub enum RokoError {
     /// A substrate failed to store or retrieve a signal.
     #[error("substrate error: {0}")]
-    Substrate(String),
+    Store(String),
 
     /// Engram not found in the queried substrate.
     #[error("signal not found: {0}")]
@@ -94,10 +94,10 @@ pub enum RokoError {
         message: String,
     },
 
-    /// Gate rejected with structured verdict detail (superset of existing `Rejected`).
+    /// Verify rejected with structured verdict detail (superset of existing `Rejected`).
     #[error("gate error ({gate}): {message}")]
-    Gate {
-        /// Gate identifier (e.g. "compile", "clippy", "test").
+    Verify {
+        /// Verify identifier (e.g. "compile", "clippy", "test").
         gate: String,
         /// Verdict detail from the gate.
         message: String,
@@ -166,7 +166,7 @@ impl RokoError {
     /// Construct a substrate error from any displayable cause.
     #[must_use]
     pub fn substrate(err: impl std::fmt::Display) -> Self {
-        Self::Substrate(err.to_string())
+        Self::Store(err.to_string())
     }
 
     /// Construct an invalid-input error.
@@ -189,7 +189,7 @@ impl RokoError {
     /// Construct a gate error with a structured verdict message.
     #[must_use]
     pub fn gate(gate: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Gate {
+        Self::Verify {
             gate: gate.into(),
             message: message.into(),
         }
@@ -265,7 +265,7 @@ impl RokoError {
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         match self {
-            Self::Substrate(_) => ErrorKind::Substrate,
+            Self::Store(_) => ErrorKind::Store,
             Self::NotFound(_) => ErrorKind::NotFound,
             Self::BodyEncode(_) => ErrorKind::BodyEncode,
             Self::BodyDecode(_) => ErrorKind::BodyDecode,
@@ -276,7 +276,7 @@ impl RokoError {
             Self::Invalid(_) => ErrorKind::Invalid,
             Self::Planning(_) => ErrorKind::Planning,
             Self::Agent { .. } => ErrorKind::Agent,
-            Self::Gate { .. } => ErrorKind::Gate,
+            Self::Verify { .. } => ErrorKind::Verify,
             Self::Tool { .. } => ErrorKind::Tool,
             Self::Chain(_) => ErrorKind::Chain,
             Self::Config(_) => ErrorKind::Config,
@@ -292,10 +292,10 @@ impl RokoError {
     /// Indicates whether retrying this error could succeed.
     ///
     /// - **Transient**: `Timeout`, `RateLimited`, `Io`, `Transport`, `Chain`,
-    ///   `Substrate`, `Agent` -- retry may succeed under a backoff policy.
+    ///   `Store`, `Agent` -- retry may succeed under a backoff policy.
     /// - **Permanent**: `NotFound`, `Rejected`, `Invalid`, `User`,
     ///   `PermissionDenied`, `BudgetExceeded`, `BodyEncode`, `BodyDecode`,
-    ///   `Json`, `Config`, `Planning`, `Gate`, `Tool`, `Cancelled` -- retry
+    ///   `Json`, `Config`, `Planning`, `Verify`, `Tool`, `Cancelled` -- retry
     ///   will not succeed without caller intervention.
     #[must_use]
     pub const fn is_transient(&self) -> bool {
@@ -308,7 +308,7 @@ impl RokoError {
     /// Transient errors each get a tuned policy:
     /// - `RateLimited`: aggressive backoff (longer base, 5 attempts)
     /// - `Timeout`: moderate backoff (3 attempts)
-    /// - `Io`, `Transport`, `Chain`, `Substrate`: standard backoff (3 attempts)
+    /// - `Io`, `Transport`, `Chain`, `Store`: standard backoff (3 attempts)
     /// - `Agent`: standard backoff (3 attempts)
     #[must_use]
     pub fn retry_policy(&self) -> Option<retry::RetryPolicy> {
@@ -335,8 +335,8 @@ impl RokoError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// See [`RokoError::Substrate`].
-    Substrate,
+    /// See [`RokoError::Store`].
+    Store,
     /// See [`RokoError::NotFound`].
     NotFound,
     /// See [`RokoError::BodyEncode`].
@@ -357,8 +357,8 @@ pub enum ErrorKind {
     Planning,
     /// See [`RokoError::Agent`].
     Agent,
-    /// See [`RokoError::Gate`].
-    Gate,
+    /// See [`RokoError::Verify`].
+    Verify,
     /// See [`RokoError::Tool`].
     Tool,
     /// See [`RokoError::Chain`].
@@ -384,7 +384,7 @@ impl ErrorKind {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Substrate => "substrate",
+            Self::Store => "substrate",
             Self::NotFound => "not_found",
             Self::BodyEncode => "body_encode",
             Self::BodyDecode => "body_decode",
@@ -395,7 +395,7 @@ impl ErrorKind {
             Self::Invalid => "invalid",
             Self::Planning => "planning",
             Self::Agent => "agent",
-            Self::Gate => "gate",
+            Self::Verify => "gate",
             Self::Tool => "tool",
             Self::Chain => "chain",
             Self::Config => "config",
@@ -419,7 +419,7 @@ impl ErrorKind {
             | Self::Io
             | Self::Transport
             | Self::Chain
-            | Self::Substrate
+            | Self::Store
             | Self::Agent => true,
 
             // Permanent -- caller must change input or give up.
@@ -434,7 +434,7 @@ impl ErrorKind {
             | Self::Json
             | Self::Config
             | Self::Planning
-            | Self::Gate
+            | Self::Verify
             | Self::Tool
             | Self::Cancelled => false,
         }
@@ -473,7 +473,7 @@ impl ErrorKind {
             | Self::Io
             | Self::Transport
             | Self::Chain
-            | Self::Substrate
+            | Self::Store
             | Self::Agent => "warn",
             // Permanent -- something is wrong and needs attention.
             Self::NotFound
@@ -486,7 +486,7 @@ impl ErrorKind {
             | Self::Json
             | Self::Config
             | Self::Planning
-            | Self::Gate
+            | Self::Verify
             | Self::Tool => "error",
         }
     }
@@ -532,7 +532,7 @@ mod tests {
         // breaks this test until it is covered here.
         fn example(kind: ErrorKind) -> RokoError {
             match kind {
-                ErrorKind::Substrate => RokoError::substrate("down"),
+                ErrorKind::Store => RokoError::substrate("down"),
                 ErrorKind::NotFound => RokoError::NotFound(crate::ContentHash([0; 32])),
                 ErrorKind::BodyEncode => RokoError::body_encode("bad"),
                 ErrorKind::BodyDecode => RokoError::body_decode("bad"),
@@ -551,7 +551,7 @@ mod tests {
                 ErrorKind::Invalid => RokoError::invalid("bad input"),
                 ErrorKind::Planning => RokoError::planning("no plan"),
                 ErrorKind::Agent => RokoError::agent("claude", "rate-limited"),
-                ErrorKind::Gate => RokoError::gate("compile", "failed"),
+                ErrorKind::Verify => RokoError::gate("compile", "failed"),
                 ErrorKind::Tool => RokoError::tool("read_file", "not found"),
                 ErrorKind::Chain => RokoError::chain("rpc down"),
                 ErrorKind::Config => RokoError::config("bad toml"),
@@ -565,7 +565,7 @@ mod tests {
         }
 
         let all = [
-            ErrorKind::Substrate,
+            ErrorKind::Store,
             ErrorKind::NotFound,
             ErrorKind::BodyEncode,
             ErrorKind::BodyDecode,
@@ -576,7 +576,7 @@ mod tests {
             ErrorKind::Invalid,
             ErrorKind::Planning,
             ErrorKind::Agent,
-            ErrorKind::Gate,
+            ErrorKind::Verify,
             ErrorKind::Tool,
             ErrorKind::Chain,
             ErrorKind::Config,
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn error_kind_as_str_stable() {
-        assert_eq!(ErrorKind::Substrate.as_str(), "substrate");
+        assert_eq!(ErrorKind::Store.as_str(), "substrate");
         assert_eq!(ErrorKind::NotFound.as_str(), "not_found");
         assert_eq!(ErrorKind::BodyEncode.as_str(), "body_encode");
         assert_eq!(ErrorKind::BodyDecode.as_str(), "body_decode");
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(ErrorKind::Invalid.as_str(), "invalid");
         assert_eq!(ErrorKind::Planning.as_str(), "planning");
         assert_eq!(ErrorKind::Agent.as_str(), "agent");
-        assert_eq!(ErrorKind::Gate.as_str(), "gate");
+        assert_eq!(ErrorKind::Verify.as_str(), "gate");
         assert_eq!(ErrorKind::Tool.as_str(), "tool");
         assert_eq!(ErrorKind::Chain.as_str(), "chain");
         assert_eq!(ErrorKind::Config.as_str(), "config");
@@ -653,9 +653,9 @@ mod tests {
         }
 
         let err = RokoError::gate("compile", "boom");
-        assert_eq!(err.kind(), ErrorKind::Gate);
+        assert_eq!(err.kind(), ErrorKind::Verify);
         match err {
-            RokoError::Gate { gate, message } => {
+            RokoError::Verify { gate, message } => {
                 assert_eq!(gate, "compile");
                 assert_eq!(message, "boom");
             }
@@ -713,10 +713,10 @@ mod tests {
     #[test]
     fn json_roundtrip_of_error_kind() {
         let kinds = [
-            ErrorKind::Substrate,
+            ErrorKind::Store,
             ErrorKind::NotFound,
             ErrorKind::Agent,
-            ErrorKind::Gate,
+            ErrorKind::Verify,
             ErrorKind::Tool,
             ErrorKind::Timeout,
             ErrorKind::RateLimited,
@@ -745,7 +745,7 @@ mod tests {
             ErrorKind::Json,
             ErrorKind::Config,
             ErrorKind::Planning,
-            ErrorKind::Gate,
+            ErrorKind::Verify,
             ErrorKind::Tool,
             ErrorKind::Cancelled,
         ];
@@ -765,7 +765,7 @@ mod tests {
             ErrorKind::Io,
             ErrorKind::Transport,
             ErrorKind::Chain,
-            ErrorKind::Substrate,
+            ErrorKind::Store,
             ErrorKind::Agent,
         ];
         for kind in transient {
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(ErrorKind::Io.log_level(), "warn");
         assert_eq!(ErrorKind::Transport.log_level(), "warn");
         assert_eq!(ErrorKind::Chain.log_level(), "warn");
-        assert_eq!(ErrorKind::Substrate.log_level(), "warn");
+        assert_eq!(ErrorKind::Store.log_level(), "warn");
         assert_eq!(ErrorKind::Agent.log_level(), "warn");
 
         // Expected flow -> info

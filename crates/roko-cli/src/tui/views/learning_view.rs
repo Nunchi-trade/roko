@@ -1,7 +1,7 @@
 //! F10 Learning view -- cascade router & model routing insights.
 //!
 //! Layout:
-//!   Sub-view 1 (Router): cascade stage + per-model stats table
+//!   Sub-view 1 (Route): cascade stage + per-model stats table
 //!   Sub-view 2 (History): stage transition timeline
 //!   Sub-view 3 (Efficiency): per-model cost/pass sparklines
 //!
@@ -48,7 +48,7 @@ pub(crate) fn render(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-view 1: Router overview
+// Sub-view 1: Route overview
 // ---------------------------------------------------------------------------
 
 fn render_router(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme: &Theme) {
@@ -57,7 +57,7 @@ fn render_router(frame: &mut Frame<'_>, area: Rect, tui_state: &TuiState, theme:
     if router.model_slugs.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Cascade Router ")
+            .title(" Cascade Route ")
             .border_style(Style::default().fg(theme.muted));
         let msg = Paragraph::new("No cascade router data. Run tasks to populate.")
             .alignment(Alignment::Center)

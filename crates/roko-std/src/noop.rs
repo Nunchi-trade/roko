@@ -7,15 +7,16 @@
 //! code should never block on missing implementations.
 
 use async_trait::async_trait;
+use roko_core::traits::Score as ScoreFn;
 use roko_core::{
-    Body, Budget, Composer, Context, Engram, Gate, Kind, Outcome, Policy, Router, Score, Scorer,
-    Selection, Verdict, error::Result,
+    Body, Budget, Compose, Context, Engram, Kind, Outcome, React, Route, Score, Selection, Verdict,
+    Verify, error::Result,
 };
 
 /// A scorer that returns `Score::NEUTRAL` for every signal.
 #[derive(Debug, Clone, Default)]
 pub struct NoOpScorer;
-impl Scorer for NoOpScorer {
+impl ScoreFn for NoOpScorer {
     fn score(&self, _s: &Engram, _ctx: &Context) -> Score {
         Score::NEUTRAL
     }
@@ -27,9 +28,22 @@ impl Scorer for NoOpScorer {
 /// A gate that always passes.
 #[derive(Debug, Clone, Default)]
 pub struct NoOpGate;
+
+impl roko_core::Cell for NoOpGate {
+    fn cell_id(&self) -> &str {
+        "noop-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "NoOpGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
-impl Gate for NoOpGate {
+impl Verify for NoOpGate {
     async fn verify(&self, _s: &Engram, _ctx: &Context) -> Verdict {
         Verdict::pass("noop_gate")
     }
@@ -42,7 +56,7 @@ impl Gate for NoOpGate {
 #[derive(Debug, Clone, Default)]
 pub struct NoOpRouter;
 #[allow(clippy::unnecessary_literal_bound)]
-impl Router for NoOpRouter {
+impl Route for NoOpRouter {
     fn select(&self, candidates: &[Engram], _ctx: &Context) -> Option<Selection> {
         candidates
             .first()
@@ -59,12 +73,12 @@ impl Router for NoOpRouter {
 #[derive(Debug, Clone, Default)]
 pub struct NoOpComposer;
 #[allow(clippy::unnecessary_literal_bound)]
-impl Composer for NoOpComposer {
+impl Compose for NoOpComposer {
     fn compose(
         &self,
         signals: &[Engram],
         _budget: &Budget,
-        _scorer: &dyn Scorer,
+        _scorer: &dyn ScoreFn,
         _ctx: &Context,
     ) -> Result<Engram> {
         Ok(signals.first().cloned().unwrap_or_else(|| {
@@ -82,7 +96,7 @@ impl Composer for NoOpComposer {
 #[derive(Debug, Clone, Default)]
 pub struct NoOpPolicy;
 #[allow(clippy::unnecessary_literal_bound)]
-impl Policy for NoOpPolicy {
+impl React for NoOpPolicy {
     fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         Vec::new()
     }

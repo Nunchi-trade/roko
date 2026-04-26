@@ -89,7 +89,7 @@ pub struct App {
     pub scroll_offset: HashMap<PageId, u16>,
     /// Selected signal row on the Signals page (legacy).
     pub signal_selection: usize,
-    /// Selected gate-failure row on the Gate Results page (legacy).
+    /// Selected gate-failure row on the Verify Results page (legacy).
     pub gate_failure_selection: usize,
     // -- Background I/O channels --
     /// Background system metrics receiver (CPU/MEM collected off main thread).
@@ -2840,10 +2840,11 @@ impl App {
             if self.agent_stream_clients.contains_key(&agent_id) {
                 continue;
             }
-            self.agent_stream_clients.insert(
-                agent_id.clone(),
-                AgentStreamClient::connect(agent_id, &server_url, auth_token.clone()),
-            );
+            if let Some(client) =
+                AgentStreamClient::connect(&agent_id, &server_url, auth_token.clone())
+            {
+                self.agent_stream_clients.insert(agent_id, client);
+            }
         }
     }
 

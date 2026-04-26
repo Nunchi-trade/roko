@@ -28,7 +28,7 @@ pub struct CalibrationCorrection {
     pub sample_count: usize,
 }
 
-/// Policy that processes event streams to maintain calibration state.
+/// React that processes event streams to maintain calibration state.
 ///
 /// The policy accumulates prediction residuals from completed turns and
 /// triggers corrections when systematic bias is detected. It operates

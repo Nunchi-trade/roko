@@ -1,4 +1,4 @@
-//! Substrate-backed verdict aggregation for gate observability.
+//! Store-backed verdict aggregation for gate observability.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use roko_core::{ContentHash, Context, Engram, FailureEntry, Kind, Query, Substrate, TrendBuckets};
+use roko_core::{ContentHash, Context, Engram, FailureEntry, Kind, Query, Store, TrendBuckets};
 use roko_fs::FileSubstrate;
 use tokio::runtime::{Builder, Runtime};
 
@@ -63,7 +63,7 @@ impl SubstrateCursor {
 /// Rolling per-gate statistics derived from persisted verdict engrams.
 #[derive(Debug, Clone, Default)]
 pub struct GateStats {
-    /// Gate name.
+    /// Verify name.
     pub name: String,
     /// Rolling 24x1h pass/fail buckets.
     pub buckets: TrendBuckets,

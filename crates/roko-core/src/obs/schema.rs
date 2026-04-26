@@ -32,7 +32,7 @@ pub const ROKO_PLANS_TOTAL: &str = "roko_plans_total";
 pub const ROKO_TASKS_TOTAL: &str = "roko_tasks_total";
 /// Total number of tool calls, by tool and outcome.
 pub const ROKO_TOOL_CALLS_TOTAL: &str = "roko_tool_calls_total";
-/// Gate verdicts, by gate and verdict.
+/// Verify verdicts, by gate and verdict.
 pub const ROKO_GATE_VERDICTS_TOTAL: &str = "roko_gate_verdicts_total";
 /// Agent turn duration in seconds, by backend and role.
 pub const ROKO_AGENT_DURATION_SECONDS: &str = "roko_agent_duration_seconds";
@@ -108,7 +108,7 @@ pub const ROKO_TOOL_CALLS_TOTAL_DESCRIPTOR: MetricDescriptor = MetricDescriptor 
 /// Canonical descriptor for `roko_gate_verdicts_total`.
 pub const ROKO_GATE_VERDICTS_TOTAL_DESCRIPTOR: MetricDescriptor = MetricDescriptor {
     name: ROKO_GATE_VERDICTS_TOTAL,
-    help: "Gate verdicts, by gate and verdict",
+    help: "Verify verdicts, by gate and verdict",
     kind: MetricKind::Counter,
     labels: &[LABEL_GATE, LABEL_VERDICT],
 };

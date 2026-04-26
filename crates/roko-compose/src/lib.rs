@@ -1,4 +1,4 @@
-//! [`Composer`](roko_core::Composer) implementations — assemble signals into
+//! [`Compose`](roko_core::Compose) implementations — assemble signals into
 //! structured outputs under resource budgets.
 //!
 //! This crate provides:
@@ -22,17 +22,21 @@ pub mod attention;
 pub mod auction;
 pub mod budget;
 pub mod budget_predictor;
+pub mod cognitive_workspace;
 pub mod compaction;
 pub mod context_assembler;
 pub mod context_mesh;
 pub mod context_provider;
 pub mod conventions;
+pub mod cost_attribution;
 pub mod enrichment;
 pub mod foraging;
+pub mod gate_feedback;
 pub mod prompt;
 pub mod prompt_hints;
 pub mod role_prompts;
 pub mod scorer;
+pub mod strategy;
 pub mod symbol_resolver;
 pub mod system_prompt_builder;
 pub mod task_brief;
@@ -45,33 +49,48 @@ pub use attention::{
 };
 pub use auction::{
     AffectModulation, AuctionDiagnostics, FairnessConfig, LearningBidder, SectionAllocation,
-    SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation, is_pareto_optimal, vcg_allocate,
+    SectionCostStats, SubsystemId, VcgAllocation, VcgBid, detect_bid_correlation,
+    is_pareto_optimal, vcg_allocate,
 };
 pub use budget::{AdjustedBudget, Complexity, adjusted_budget_for};
 pub use budget_predictor::{BudgetPredictor, SectionInfluence, TaskFeatures};
+pub use cognitive_workspace::{
+    CognitiveWorkspaceInput, build_cognitive_workspace, task_contract_from_prompt_context,
+};
 pub use compaction::{ChatMessage, CompactionPolicy, compact_history};
 pub use context_assembler::{ContextAssembler, ContextChunk, PadState};
 pub use context_mesh::{ContextMesh, SharedContextEntry};
 pub use context_provider::{
-    ContextBudgets, ContextProvider, ContextSection, ContextSource, ContextTier, PlanArtifacts,
-    PriorTaskOutput, ReadFileSpec, ResolvedContext, SiblingTask, TaskInput, VerifySpec,
-    is_local_model, pheromone_context,
+    ContextBidder, ContextBidderRegistry, ContextBudgets, ContextCandidate, ContextInjectionBudget,
+    ContextInjectionPolicy, ContextInjectionRecord, ContextProvider, ContextPurpose,
+    ContextRejection, ContextRejectionReason, ContextRequest, ContextScope, ContextSection,
+    ContextSource, ContextTier, DocsSourceMapBidder, LearningAttentionConfig,
+    LearningContextBidder, LearningPosterior, PlanArtifacts, PriorTaskOutput, ReadFileSpec,
+    RecentFailurePatternsBidder, ResolvedContext, RolePromptPolicyBidder, SiblingTask, TaskInput,
+    TaskRequirementsBidder, VerifySpec, is_local_model, pheromone_context,
 };
 pub use conventions::{ProjectConventions, detect_conventions};
+pub use cost_attribution::{CostAttribution, SectionCost};
 pub use foraging::{
     MultiPatchForager, RetrievalSignal, SourceForagingProfile, estimate_context_sufficiency,
     should_stop_searching, social_foraging_boost,
 };
+pub use gate_feedback::{GateFeedback, MAX_GATE_FEEDBACK_LINES};
 pub use prompt::{
-    AttentionBidder, CacheLayer, ContextStrategy, Placement, PromptBuild, PromptComposer,
+    AttentionBidder, COMPOSITION_MANIFEST_TAG, CacheLayer, CompositionManifest, ContextStrategy,
+    ExcludedSectionMeta, IncludedSectionMeta, Placement, PromptBuild, PromptComposer,
     PromptSection, SectionPriority, estimate_tokens,
 };
 pub use prompt_hints::prompt_hints_for;
 pub use role_prompts::{
-    DEFAULT_CONVENTIONS_SUFFIX, RoleSystemPromptSpec, TaskContext, role_identity_for,
+    BuiltinRolePolicy, DEFAULT_CONVENTIONS_SUFFIX, MANIFEST_BACKED_CORE_ROLES, RolePromptSource,
+    RoleSystemPromptSpec, TaskContext, builtin_prompt_policy_for,
+    builtin_role_policy_from_manifest, builtin_role_policy_manifest_for, builtin_role_profile_for,
+    manifest_backed_core_roles, role_identity_for, role_prompt_source_for,
     tool_allowlist_instructions,
 };
 pub use scorer::{ActiveInferenceScorer, GoalDirectedHeuristicScorer, SectionScorer};
+pub use strategy::{CompositionStrategy, DEFAULT_VCG_WARMUP_OBSERVATIONS};
 pub use system_prompt_builder::SystemPromptBuilder;
 pub use templates::{
     ConductorTemplate, PlanSlice, PromptAssembler, PromptBudget, QuickFixInput, QuickFixTemplate,

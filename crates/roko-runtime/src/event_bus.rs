@@ -76,6 +76,15 @@ pub struct GateVerdictSummary {
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,
+    /// Optional structured failure classification, such as `type_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// Stable failure pattern ids associated with this verdict.
+    #[serde(default)]
+    pub failure_pattern_ids: Vec<String>,
+    /// Blocking findings that make same-prompt retry insufficient.
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
     /// Optional free-form details from the gate or logger.
     pub details: Option<String>,
 }
@@ -106,12 +115,20 @@ pub enum PublishOrigin {
 pub enum RokoEvent {
     /// Emitted when repeated gate failures should trigger a plan revision.
     PlanRevision {
+        /// Durable request id for the future planner agent.
+        request_id: String,
         /// The plan being revised.
         plan_id: String,
         /// The task that exhausted its retries.
         task_id: String,
         /// The reason the plan revision was requested.
         reason: PlanRevisionReason,
+        /// Structured next action that produced this event.
+        required_next_action: String,
+        /// De-duplicated failure pattern ids across the request.
+        failure_pattern_ids: Vec<String>,
+        /// Blocking findings the planner must address.
+        blocking_findings: Vec<String>,
         /// Summaries of the failing gate verdicts.
         failing_verdicts: Vec<GateVerdictSummary>,
         /// Tail of the task log captured at the point of failure.
@@ -164,7 +181,7 @@ pub enum RokoEvent {
         /// UTC timestamp of the broadcast.
         broadcast_at: chrono::DateTime<chrono::Utc>,
     },
-    /// BEAT-05 REACT step: emitted when the Policy.decide() react hook fires.
+    /// BEAT-05 REACT step: emitted when the React.decide() react hook fires.
     ReactDecision {
         /// Tick that triggered the react.
         tick_id: u64,
@@ -390,18 +407,28 @@ mod tests {
     #[test]
     fn plan_revision_event_round_trips_through_json() {
         let event = RokoEvent::PlanRevision {
+            request_id: "replan-abc".into(),
             plan_id: "plan-123".into(),
             task_id: "task-abc".into(),
             reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            required_next_action: "needs_replan".into(),
+            failure_pattern_ids: vec!["E0277::src/lib.rs".into()],
+            blocking_findings: vec!["failure requires plan shape revision".into()],
             failing_verdicts: vec![
                 GateVerdictSummary {
                     gate: "compile".into(),
                     passed: false,
+                    classification: Some("type_error".into()),
+                    failure_pattern_ids: vec!["E0277::src/lib.rs".into()],
+                    blocking_findings: vec!["failure requires plan shape revision".into()],
                     details: Some("E0277".into()),
                 },
                 GateVerdictSummary {
                     gate: "clippy".into(),
                     passed: false,
+                    classification: None,
+                    failure_pattern_ids: Vec::new(),
+                    blocking_findings: Vec::new(),
                     details: None,
                 },
             ],
@@ -421,12 +448,19 @@ mod tests {
     fn plan_revision_event_flows_through_bus() {
         let bus = EventBus::new(8);
         let event = RokoEvent::PlanRevision {
+            request_id: "replan-def".into(),
             plan_id: "plan-123".into(),
             task_id: "task-abc".into(),
             reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            required_next_action: "needs_replan".into(),
+            failure_pattern_ids: vec!["test::panic".into()],
+            blocking_findings: vec!["repeated test failure exhausted retry budget".into()],
             failing_verdicts: vec![GateVerdictSummary {
                 gate: "test".into(),
                 passed: false,
+                classification: Some("test_expectation_failure".into()),
+                failure_pattern_ids: vec!["test::panic".into()],
+                blocking_findings: vec!["repeated test failure exhausted retry budget".into()],
                 details: Some("tests failed".into()),
             }],
             log_tail: "tail".into(),

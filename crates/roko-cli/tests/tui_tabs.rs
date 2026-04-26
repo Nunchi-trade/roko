@@ -59,7 +59,7 @@ fn learning_tab_basics() {
 fn learning_has_subviews() {
     let subs = SubView::for_tab(Tab::Learning);
     assert!(!subs.is_empty());
-    assert!(subs.iter().any(|s| s.label() == "Router"));
+    assert!(subs.iter().any(|s| s.label() == "Route"));
 }
 
 #[test]

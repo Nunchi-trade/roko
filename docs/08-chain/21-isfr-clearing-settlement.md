@@ -13,7 +13,7 @@
 
 ## Abstract
 
-The ISFR (Intersubjective Fact Registry) is the mechanism by which the Korai agent collective validates facts and discovers prices through aggregated subjective assessments. Rather than relying on a single oracle or a simple average, the ISFR uses a structured process where agents submit weighted opinions, these opinions are aggregated using reputation-weighted scoring, and the result is validated through a clearing mechanism that produces mathematically verifiable optimality proofs.
+The ISFR (Intersubjective Fact Registry) is the mechanism by which the Nunchi agent collective validates facts and discovers prices through aggregated subjective assessments. Rather than relying on a single oracle or a simple average, the ISFR uses a structured process where agents submit weighted opinions, these opinions are aggregated using reputation-weighted scoring, and the result is validated through a clearing mechanism that produces mathematically verifiable optimality proofs.
 
 The clearing mechanism is the settlement layer: it takes a set of orders (job bids, knowledge value claims, reputation adjustments) and finds the prices and allocations that satisfy all constraints while maximizing total welfare. The solver uses Quadratic Programming with bisection, running in O(80n) time, where n is the number of participants. Each clearing result comes with a KKT (Karush-Kuhn-Tucker) optimality certificate that can be verified on-chain in O(n) time.
 
@@ -25,7 +25,7 @@ The clearing mechanism is the settlement layer: it takes a set of orders (job bi
 
 The ISFR is an on-chain registry where agents submit claims about factual matters and the collective determines truth through weighted aggregation:
 
-- "The current fair price for a 1-hour security audit is 450 KORAI"
+- "The current fair price for a 1-hour security audit is 450 NUNCHI"
 - "Agent #42's recent contribution to the coding domain was quality 0.85"
 - "The HDC vector for concept X has similarity 0.73 with concept Y"
 
@@ -48,8 +48,8 @@ pub struct FactClaim {
     /// Confidence in the claim (0.0 to 1.0).
     pub confidence: f64,
 
-    /// The submitting agent's passport ID.
-    pub claimant_passport_id: u256,
+    /// The submitting agent's agent ID.
+    pub claimant_agent_id: u256,
 
     /// Domain for reputation weighting.
     pub domain: String,
@@ -76,7 +76,7 @@ pub enum FactValue {
     Numeric(f64),
     Boolean(bool),
     Score(f64),      // [0.0, 1.0]
-    Price(U256),     // in KORAI wei
+    Price(U256),     // in NUNCHI wei
 }
 ```
 
@@ -179,7 +179,7 @@ pub struct ClearingCertificate {
 }
 
 pub struct Allocation {
-    pub agent_passport_id: u256,
+    pub agent_agent_id: u256,
     pub job_id: [u8; 32],
     pub price: U256,
     pub quality_score: f64,
@@ -243,4 +243,4 @@ The clearing operator (a Protocol-tier agent or validator) bears the computation
 - See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace that generates clearing inputs
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for the reputation weights used in aggregation
 - See [06-erc-8004-registries.md](./06-erc-8004-registries.md) for the Validation Registry that stores clearing certificates
-- See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token flows in settlement
+- See [02-nunchi-token-economics.md](./02-nunchi-token-economics.md) for the NUNCHI token flows in settlement

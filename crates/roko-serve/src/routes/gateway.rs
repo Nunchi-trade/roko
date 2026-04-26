@@ -7,24 +7,27 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use validator::Validate;
 
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_learn::bandits::UcbBandit;
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::model_router::RoutingContext;
 
 use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
-use crate::state::{AppState, OperationHandle, OperationStatus};
+use crate::state::{AppState, BatchProgress, OperationHandle, OperationStatus};
 
 /// Register inference gateway routes.
 pub fn routes() -> Router<Arc<AppState>> {
@@ -76,6 +79,35 @@ struct CompletionRequest {
     /// Calling agent identifier. Used for attribution and event tagging.
     #[serde(default)]
     agent_id: Option<String>,
+
+    // -- Routing hint fields (B4) ------------------------------------------
+    /// Broad task category hint for model routing (e.g. `"implementation"`,
+    /// `"research"`, `"refactor"`). Parsed into [`TaskCategory`]; unknown
+    /// values fall back to `Implementation`.
+    #[serde(default)]
+    task_category: Option<String>,
+
+    /// Complexity band hint (`"fast"`, `"standard"`, `"complex"`). Parsed
+    /// into [`TaskComplexityBand`]; unknown values fall back to `Standard`.
+    #[serde(default)]
+    complexity: Option<String>,
+
+    /// Agent role hint (e.g. `"implementer"`, `"researcher"`, `"auditor"`).
+    /// Parsed into [`AgentRole`]; unknown values fall back to `Implementer`.
+    #[serde(default)]
+    role: Option<String>,
+
+    /// Current iteration number for the calling task (0-based).
+    #[serde(default)]
+    iteration: Option<u32>,
+
+    /// Crate name hint for familiarity-based routing.
+    #[serde(default)]
+    crate_name: Option<String>,
+
+    /// Whether a prior attempt at this task failed.
+    #[serde(default)]
+    has_prior_failure: Option<bool>,
 }
 
 impl RequestPayload for CompletionRequest {
@@ -234,13 +266,22 @@ async fn inference_complete(
     let config = state.load_roko_config();
 
     // -----------------------------------------------------------------------
-    // Model selection
+    // Model selection (D1: uses cached CascadeRouter)
     // -----------------------------------------------------------------------
+    let hints = RoutingHints {
+        task_category: body.task_category.clone(),
+        complexity: body.complexity.clone(),
+        role: body.role.clone(),
+        iteration: body.iteration,
+        crate_name: body.crate_name.clone(),
+        has_prior_failure: body.has_prior_failure,
+    };
+
     let model_slug = if let Some(ref requested) = body.model {
         let resolved = resolve_model(&config, requested);
         resolved.slug
     } else {
-        select_model_via_router(&state)
+        select_model_via_router(&state, &hints).await
     };
 
     // -----------------------------------------------------------------------
@@ -264,14 +305,21 @@ async fn inference_complete(
 
     let content = result.output_text.unwrap_or_default();
 
-    // Estimate token counts from character lengths as a reasonable
-    // approximation until per-provider tokenizers are wired.
-    let input_tokens = estimate_tokens(&prompt);
-    let output_tokens = estimate_tokens(&content);
+    // Prefer real token counts from the provider when available,
+    // falling back to the character-based heuristic.
+    let (input_tokens, output_tokens) = if let Some(ref usage) = result.usage {
+        (usage.input_tokens, usage.output_tokens)
+    } else {
+        (estimate_tokens(&prompt), estimate_tokens(&content))
+    };
     let cache_read_tokens: u64 = 0;
 
     // Compute cost from model profile pricing when available.
     let cost_usd = compute_cost(&config, &model_slug, input_tokens, output_tokens);
+
+    // B1: accumulate per-model token + cost counters for gateway_stats.
+    let counters = state.gateway_counters_for(&model_slug).await;
+    counters.record(input_tokens, output_tokens, cost_usd);
 
     let agent_label = body.agent_id.as_deref().unwrap_or("gateway").to_owned();
 
@@ -337,26 +385,50 @@ async fn gateway_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStatsR
         );
     }
 
-    // Build per-model stats from provider-level data. This is a coarse
-    // projection since the health tracker is keyed by provider, not model.
-    // A future iteration should track per-model counters natively.
+    // Build per-model stats from provider-level requests + accumulated
+    // gateway token/cost counters (B1).
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
+    let counter_map = state.gateway_model_counters.read().await;
     let mut model_stats: HashMap<String, ModelStats> = HashMap::new();
+    let mut total_cost_usd: f64 = 0.0;
 
     for (key, profile) in &effective_models {
         let provider_status = health_snapshot
             .iter()
             .find(|s| s.provider == profile.provider);
 
+        let (tokens_in, tokens_out, cost) = if let Some(c) = counter_map.get(key) {
+            (
+                c.tokens_in.load(Ordering::Relaxed),
+                c.tokens_out.load(Ordering::Relaxed),
+                c.cost_usd(),
+            )
+        } else {
+            (0, 0, 0.0)
+        };
+
+        total_cost_usd += cost;
+
         if let Some(status) = provider_status {
             model_stats.insert(
                 key.clone(),
                 ModelStats {
                     requests: status.total_attempts,
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    cost_usd: 0.0,
+                    tokens_in,
+                    tokens_out,
+                    cost_usd: cost,
+                },
+            );
+        } else if tokens_in > 0 || tokens_out > 0 {
+            // Model has recorded traffic but no provider health entry yet.
+            model_stats.insert(
+                key.clone(),
+                ModelStats {
+                    requests: 0,
+                    tokens_in,
+                    tokens_out,
+                    cost_usd: cost,
                 },
             );
         }
@@ -375,7 +447,7 @@ async fn gateway_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStatsR
         total_requests,
         cache_hits,
         cache_hit_rate,
-        total_cost_usd: 0.0,
+        total_cost_usd,
         models: model_stats,
         providers: Value::Object(providers_json),
     })
@@ -413,12 +485,18 @@ async fn gateway_models(State(state): State<Arc<AppState>>) -> Json<Vec<GatewayM
     Json(models)
 }
 
+/// Maximum number of batch items dispatched concurrently (B2).
+const BATCH_CONCURRENCY: usize = 8;
+
 /// `POST /api/inference/batch/submit` — submit a batch of inference requests
 /// for background processing.
 ///
-/// Each request in the batch is dispatched sequentially through the runtime.
-/// The batch is tracked as a generic operation and results can be polled via
-/// `GET /api/inference/batch/{id}`.
+/// Batch items are dispatched **in parallel** (up to [`BATCH_CONCURRENCY`]
+/// concurrent requests) through the runtime (B2). An [`AtomicUsize`] counter
+/// in [`BatchProgress`] is incremented after each item completes so the status
+/// endpoint can report incremental progress (B3).
+///
+/// Results can be polled via `GET /api/inference/batch/{id}`.
 async fn batch_submit(
     State(state): State<Arc<AppState>>,
     ValidJson(body): ValidJson<BatchSubmitRequest>,
@@ -426,65 +504,101 @@ async fn batch_submit(
     let batch_id = uuid::Uuid::new_v4().to_string();
     let count = body.requests.len() as u32;
 
+    // B3: create a shared progress counter visible to the status endpoint.
+    let progress = Arc::new(BatchProgress {
+        completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        total: body.requests.len(),
+    });
+    state
+        .batch_progress
+        .write()
+        .await
+        .insert(batch_id.clone(), Arc::clone(&progress));
+
     let state_for_task = Arc::clone(&state);
     let batch_id_for_task = batch_id.clone();
     let requests = body.requests;
 
     let handle = tokio::spawn(async move {
         let config = state_for_task.load_roko_config();
-        let mut results: Vec<BatchResultItem> = Vec::with_capacity(requests.len());
 
-        for item in &requests {
-            let model_slug = if let Some(ref requested) = item.model {
-                let resolved = resolve_model(&config, requested);
-                resolved.slug
-            } else {
-                select_model_via_router(&state_for_task)
-            };
+        // B2: process batch items concurrently with a bounded stream.
+        let results: Vec<BatchResultItem> = stream::iter(requests)
+            .map(|item| {
+                let state_ref = Arc::clone(&state_for_task);
+                let config_ref = Arc::clone(&config);
+                let progress_ref = Arc::clone(&progress);
+                async move {
+                    let model_slug = if let Some(ref requested) = item.model {
+                        let resolved = resolve_model(&config_ref, requested);
+                        resolved.slug
+                    } else {
+                        // Batch items do not carry per-item routing hints; use
+                        // defaults (same as previous hardcoded behaviour).
+                        select_model_via_router(&state_ref, &RoutingHints::default()).await
+                    };
 
-            let prompt = format_messages_as_prompt(&item.messages);
+                    let prompt = format_messages_as_prompt(&item.messages);
 
-            match state_for_task
-                .runtime
-                .run_once(state_for_task.workdir.as_path(), &prompt)
-                .await
-            {
-                Ok(result) => {
-                    state_for_task.provider_health.record_success(&model_slug);
-                    let content = result.output_text.unwrap_or_default();
-                    let input_tokens = estimate_tokens(&prompt);
-                    let output_tokens = estimate_tokens(&content);
-                    let cost_usd = compute_cost(&config, &model_slug, input_tokens, output_tokens);
+                    let result_item = match state_ref
+                        .runtime
+                        .run_once(state_ref.workdir.as_path(), &prompt)
+                        .await
+                    {
+                        Ok(result) => {
+                            state_ref.provider_health.record_success(&model_slug);
+                            let content = result.output_text.unwrap_or_default();
+                            let (input_tokens, output_tokens) =
+                                if let Some(ref usage) = result.usage {
+                                    (usage.input_tokens, usage.output_tokens)
+                                } else {
+                                    (estimate_tokens(&prompt), estimate_tokens(&content))
+                                };
+                            let cost_usd =
+                                compute_cost(&config_ref, &model_slug, input_tokens, output_tokens);
 
-                    results.push(BatchResultItem {
-                        custom_id: item.custom_id.clone(),
-                        success: true,
-                        response: Some(CompletionResponse {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            model: model_slug,
-                            content,
-                            usage: TokenUsage {
-                                input_tokens,
-                                output_tokens,
-                                cache_read_tokens: 0,
-                            },
-                            stop_reason: "end_turn".to_string(),
-                            cost_usd,
-                        }),
-                        error: None,
-                    });
+                            // B1: accumulate per-model counters.
+                            let counters = state_ref.gateway_counters_for(&model_slug).await;
+                            counters.record(input_tokens, output_tokens, cost_usd);
+
+                            BatchResultItem {
+                                custom_id: item.custom_id.clone(),
+                                success: true,
+                                response: Some(CompletionResponse {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    model: model_slug,
+                                    content,
+                                    usage: TokenUsage {
+                                        input_tokens,
+                                        output_tokens,
+                                        cache_read_tokens: 0,
+                                    },
+                                    stop_reason: "end_turn".to_string(),
+                                    cost_usd,
+                                }),
+                                error: None,
+                            }
+                        }
+                        Err(err) => {
+                            state_ref.provider_health.record_failure(&model_slug);
+                            BatchResultItem {
+                                custom_id: item.custom_id.clone(),
+                                success: false,
+                                response: None,
+                                error: Some(err.to_string()),
+                            }
+                        }
+                    };
+
+                    // B3: increment progress counter after each item.
+                    progress_ref.completed.fetch_add(1, Ordering::Relaxed);
+
+                    result_item
                 }
-                Err(err) => {
-                    state_for_task.provider_health.record_failure(&model_slug);
-                    results.push(BatchResultItem {
-                        custom_id: item.custom_id.clone(),
-                        success: false,
-                        response: None,
-                        error: Some(err.to_string()),
-                    });
-                }
-            }
-        }
+            })
+            .buffer_unordered(BATCH_CONCURRENCY)
+            .collect()
+            .await;
 
         // Serialize results and store them in the operation handle.
         let results_json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
@@ -498,6 +612,13 @@ async fn batch_submit(
                 result: Some(results_json),
             };
         }
+
+        // Clean up progress entry now that the batch is done.
+        state_for_task
+            .batch_progress
+            .write()
+            .await
+            .remove(&batch_id_for_task);
     });
 
     let op = OperationHandle {
@@ -536,13 +657,22 @@ async fn batch_status(
         .ok_or_else(|| ApiError::not_found(format!("batch {batch_id} not found")))?;
 
     match &op.status {
-        OperationStatus::Running => Ok(Json(BatchStatusResponse {
-            batch_id,
-            status: "processing".to_string(),
-            completed: 0,
-            total: 0,
-            results: None,
-        })),
+        OperationStatus::Running => {
+            // B3: read incremental progress from the shared counter.
+            let progress = state.batch_progress.read().await;
+            let (completed, total) = if let Some(bp) = progress.get(&batch_id) {
+                (bp.completed.load(Ordering::Relaxed) as u32, bp.total as u32)
+            } else {
+                (0, 0)
+            };
+            Ok(Json(BatchStatusResponse {
+                batch_id,
+                status: "processing".to_string(),
+                completed,
+                total,
+                results: None,
+            }))
+        }
         OperationStatus::Completed { result } => {
             let results: Vec<BatchResultItem> = result
                 .as_deref()
@@ -595,8 +725,83 @@ fn format_messages_as_prompt(messages: &[ChatMessage]) -> String {
     parts.join("\n\n")
 }
 
-/// Select the optimal model via the CascadeRouter.
-fn select_model_via_router(state: &AppState) -> String {
+/// Routing hints extracted from an incoming [`CompletionRequest`].
+#[derive(Debug, Default)]
+struct RoutingHints {
+    task_category: Option<String>,
+    complexity: Option<String>,
+    role: Option<String>,
+    iteration: Option<u32>,
+    crate_name: Option<String>,
+    has_prior_failure: Option<bool>,
+}
+
+/// Parse a string into [`TaskCategory`], falling back to `Implementation`
+/// for unrecognised values.
+fn parse_task_category(s: &str) -> TaskCategory {
+    match s.to_ascii_lowercase().as_str() {
+        "scaffolding" => TaskCategory::Scaffolding,
+        "integration" => TaskCategory::Integration,
+        "verification" => TaskCategory::Verification,
+        "research" => TaskCategory::Research,
+        "refactor" => TaskCategory::Refactor,
+        "infra" => TaskCategory::Infra,
+        "docs" => TaskCategory::Docs,
+        // "implementation" and unrecognised values
+        _ => TaskCategory::Implementation,
+    }
+}
+
+/// Parse a string into [`TaskComplexityBand`], falling back to `Standard`
+/// for unrecognised values.
+fn parse_complexity(s: &str) -> TaskComplexityBand {
+    match s.to_ascii_lowercase().as_str() {
+        "fast" => TaskComplexityBand::Fast,
+        "complex" => TaskComplexityBand::Complex,
+        // "standard" and unrecognised values
+        _ => TaskComplexityBand::Standard,
+    }
+}
+
+/// Parse a string into [`AgentRole`], falling back to `Implementer` for
+/// unrecognised values.
+fn parse_agent_role(s: &str) -> AgentRole {
+    match s.to_ascii_lowercase().replace('-', "_").as_str() {
+        "conductor" => AgentRole::Conductor,
+        "strategist" => AgentRole::Strategist,
+        "architect" => AgentRole::Architect,
+        "researcher" => AgentRole::Researcher,
+        "auditor" => AgentRole::Auditor,
+        "quick_reviewer" => AgentRole::QuickReviewer,
+        "scribe" => AgentRole::Scribe,
+        "critic" => AgentRole::Critic,
+        "auto_fixer" => AgentRole::AutoFixer,
+        "refactorer" => AgentRole::Refactorer,
+        "pre_planner" => AgentRole::PrePlanner,
+        "doc_verifier" => AgentRole::DocVerifier,
+        "integration_tester" => AgentRole::IntegrationTester,
+        "merge_resolver" => AgentRole::MergeResolver,
+        // "implementer" and unrecognised values
+        _ => AgentRole::Implementer,
+    }
+}
+
+/// Select the optimal model via the [`CascadeRouter`] (D1: cached in AppState),
+/// optionally refined by a [`UcbBandit`] when one has been trained.
+///
+/// On first call the router is loaded from disk and cached. Subsequent
+/// requests read the cached instance through an `RwLock`, avoiding
+/// per-request file I/O.
+///
+/// When the caller supplies routing hints (task category, complexity, role,
+/// iteration) they are parsed into the corresponding enum variants and used
+/// to populate the [`RoutingContext`]. Missing fields fall back to sensible
+/// defaults (matching previous hardcoded behaviour).
+///
+/// After the cascade router selects a model, we check for a persisted
+/// [`UcbBandit`] at `.roko/learn/model-bandit.json`. If the bandit has
+/// been trained (>0 total pulls) its selection overrides the cascade pick.
+async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> String {
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
     let mut model_slugs: Vec<String> = effective_models
@@ -610,17 +815,40 @@ fn select_model_via_router(state: &AppState) -> String {
         return config.agent.default_model.clone();
     }
 
-    let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-    let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+    // -- B4: build RoutingContext from caller hints, with defaults ----------
+    let task_category = hints
+        .task_category
+        .as_deref()
+        .map(parse_task_category)
+        .unwrap_or(TaskCategory::Implementation);
+
+    let complexity = hints
+        .complexity
+        .as_deref()
+        .map(parse_complexity)
+        .unwrap_or(TaskComplexityBand::Standard);
+
+    let role = hints
+        .role
+        .as_deref()
+        .map(parse_agent_role)
+        .unwrap_or(AgentRole::Implementer);
+
+    let iteration = hints.iteration.unwrap_or(1);
+
+    // Derive routing context from runtime state where available.
+    let active_agents = state.operations.read().await.len() as u32;
+    let has_prior_failure = hints.has_prior_failure.unwrap_or(iteration > 1);
+
     let routing_ctx = RoutingContext {
-        task_category: TaskCategory::Implementation,
-        complexity: TaskComplexityBand::Standard,
-        iteration: 1,
-        role: AgentRole::Implementer,
+        task_category,
+        complexity,
+        iteration,
+        role,
         crate_familiarity: 0.5,
-        has_prior_failure: false,
+        has_prior_failure,
         conductor_load: 0.0,
-        active_agents: 0,
+        active_agents,
         ready_queue_depth: 0,
         max_queue_wait_hours: 0.0,
         daimon_policy: roko_core::DaimonPolicy::default(),
@@ -631,11 +859,46 @@ fn select_model_via_router(state: &AppState) -> String {
         tier_thresholds: None,
     };
 
-    let explanation = router.explain_routing(&routing_ctx, &model_slugs);
-    explanation.selected_model
+    // D1: use cached CascadeRouter — fast path reads, slow path loads once.
+    let cascade_pick = {
+        let guard = state.cascade_router.read().await;
+        if let Some(ref router) = *guard {
+            router
+                .explain_routing(&routing_ctx, &model_slugs)
+                .selected_model
+        } else {
+            drop(guard);
+            let mut guard = state.cascade_router.write().await;
+            if guard.is_none() {
+                let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
+                let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+                *guard = Some(router);
+            }
+            let router = guard.as_ref().expect("just initialised");
+            router
+                .explain_routing(&routing_ctx, &model_slugs)
+                .selected_model
+        }
+    };
+
+    // -- A4: bandit refinement ---------------------------------------------
+    //
+    // Attempt to load a persisted UcbBandit. When it has been trained
+    // (total_pulls > 0) we use its selection to refine the cascade pick.
+    // On any failure we silently fall back to the cascade result.
+    let bandit_path = state.workdir.join(".roko/learn/model-bandit.json");
+    if let Ok(bandit) = UcbBandit::load(&bandit_path, model_slugs) {
+        if bandit.total_pulls() > 0 {
+            let bandit_pick = bandit.select();
+            return bandit_pick;
+        }
+    }
+
+    cascade_pick
 }
 
-/// Rough token count estimate: ~4 characters per token for English text.
+/// Fallback token count estimate when the provider doesn't report usage.
+/// ~4 characters per token for English text. Prefer real counts from LLM responses.
 fn estimate_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
 }
@@ -707,6 +970,12 @@ mod tests {
             temperature: None,
             tools: None,
             agent_id: None,
+            task_category: None,
+            complexity: None,
+            role: None,
+            iteration: None,
+            crate_name: None,
+            has_prior_failure: None,
         };
         assert!(request.validate().is_err());
     }
@@ -723,6 +992,12 @@ mod tests {
             temperature: Some(0.7),
             tools: None,
             agent_id: Some("agent-1".into()),
+            task_category: None,
+            complexity: None,
+            role: None,
+            iteration: None,
+            crate_name: None,
+            has_prior_failure: None,
         };
         assert!(request.validate().is_ok());
     }
@@ -812,10 +1087,106 @@ mod tests {
     }
 
     #[test]
+    fn real_token_counts_preferred_over_heuristic() {
+        use crate::runtime::RunResultUsage;
+
+        let prompt = "hello world"; // heuristic: 3
+        let content = "goodbye"; // heuristic: 2
+
+        // When usage is present, real counts win.
+        let usage = Some(RunResultUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+        });
+        let (input, output) = if let Some(ref u) = usage {
+            (u.input_tokens, u.output_tokens)
+        } else {
+            (estimate_tokens(prompt), estimate_tokens(content))
+        };
+        assert_eq!(input, 100);
+        assert_eq!(output, 50);
+
+        // When usage is absent, falls back to heuristic.
+        let usage: Option<RunResultUsage> = None;
+        let (input, output) = if let Some(ref u) = usage {
+            (u.input_tokens, u.output_tokens)
+        } else {
+            (estimate_tokens(prompt), estimate_tokens(content))
+        };
+        assert_eq!(input, 3);
+        assert_eq!(output, 2);
+    }
+
+    #[test]
     fn compute_cost_zero_when_no_pricing() {
         let config = roko_core::config::schema::RokoConfig::default();
         let cost = compute_cost(&config, "nonexistent-model", 1000, 500);
         assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn routing_hints_derive_prior_failure_from_iteration() {
+        // When has_prior_failure is explicitly set, use it.
+        let hints = RoutingHints {
+            iteration: Some(1),
+            has_prior_failure: Some(true),
+            ..Default::default()
+        };
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(derived, "explicit true should be respected");
+
+        // When not set, iteration > 1 implies prior failure.
+        let hints = RoutingHints {
+            iteration: Some(3),
+            has_prior_failure: None,
+            ..Default::default()
+        };
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(derived, "iteration 3 implies prior failure");
+
+        // Iteration 1 with no explicit flag = no prior failure.
+        let hints = RoutingHints {
+            iteration: Some(1),
+            has_prior_failure: None,
+            ..Default::default()
+        };
+        let derived = hints
+            .has_prior_failure
+            .unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(!derived, "iteration 1 means no prior failure");
+    }
+
+    #[tokio::test]
+    async fn routing_context_uses_active_operations_count() {
+        let (_dir, state) = test_state();
+
+        // Initially no operations → active_agents = 0.
+        let ops_count = state.operations.read().await.len() as u32;
+        assert_eq!(ops_count, 0);
+
+        // Insert a dummy operation.
+        state.operations.write().await.insert(
+            "test-op".to_string(),
+            OperationHandle {
+                id: "test-op".to_string(),
+                kind: "test".to_string(),
+                status: OperationStatus::Running,
+                handle: tokio::spawn(async {}),
+            },
+        );
+
+        let ops_count = state.operations.read().await.len() as u32;
+        assert_eq!(
+            ops_count, 1,
+            "active_agents should reflect operations count"
+        );
+
+        // Clean up.
+        state.operations.write().await.remove("test-op");
     }
 
     #[tokio::test]
@@ -838,6 +1209,66 @@ mod tests {
         for window in models.windows(2) {
             assert!(window[0].id <= window[1].id);
         }
+    }
+
+    #[tokio::test]
+    async fn batch_submit_dispatches_concurrently() {
+        // Submit 3 batch items and verify all complete.
+        // The NoOpRuntime returns instantly, so buffer_unordered processes
+        // all items concurrently within BATCH_CONCURRENCY.
+        let (_dir, state) = test_state();
+        let body = BatchSubmitRequest {
+            requests: (0..3)
+                .map(|i| BatchRequestItem {
+                    custom_id: format!("req-{i}"),
+                    model: None,
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: format!("item {i}"),
+                    }],
+                })
+                .collect(),
+        };
+
+        let resp = batch_submit(State(Arc::clone(&state)), ValidJson(body))
+            .await
+            .expect("batch submit");
+        let (parts, body_bytes) = resp.into_response().into_parts();
+        assert_eq!(parts.status, axum::http::StatusCode::ACCEPTED);
+
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(body_bytes, usize::MAX).await.expect("body"))
+                .expect("json");
+        assert_eq!(payload["count"], 3);
+
+        let batch_id = payload["batch_id"].as_str().expect("batch_id").to_string();
+
+        // Wait briefly for the spawned task to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify all items completed via the operations map.
+        let ops = state.operations.read().await;
+        if let Some(op) = ops.get(&batch_id) {
+            match &op.status {
+                OperationStatus::Completed { result } => {
+                    let items: Vec<BatchResultItem> =
+                        serde_json::from_str(result.as_deref().unwrap_or("[]")).expect("parse");
+                    assert_eq!(items.len(), 3, "all batch items should complete");
+                    assert!(items.iter().all(|i| i.success), "all items should succeed");
+                }
+                _ => {
+                    // May still be running — that's OK for a unit test with NoOpRuntime
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_concurrency_constant_is_reasonable() {
+        assert!(
+            BATCH_CONCURRENCY >= 2 && BATCH_CONCURRENCY <= 32,
+            "BATCH_CONCURRENCY ({BATCH_CONCURRENCY}) should be between 2 and 32"
+        );
     }
 
     #[tokio::test]

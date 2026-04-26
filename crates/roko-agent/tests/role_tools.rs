@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use roko_agent::dispatcher::{HandlerResolver, ToolDispatcher};
 use roko_agent::safety::SafetyLayer;
+use roko_agent::{MANIFEST_BACKED_BUILTIN_ROLE_IDS, RolePolicyManifest};
 use roko_core::config::schema::RokoConfig;
 use roko_core::tool::{
     NeverCancel, NoopAuditSink, NoopMetricsSink, NoopTraceSink, ToolCall, ToolCategory,
@@ -183,4 +184,30 @@ model = "mock"
         result.is_ok(),
         "expected missing tools whitelist to stay permissive, got {result:?}"
     );
+}
+
+#[test]
+fn bundled_builtin_role_manifest_loads_without_legacy_prompt_sources() {
+    let manifest = RolePolicyManifest::builtin_manifest().expect("built-in role manifest");
+
+    for role_id in MANIFEST_BACKED_BUILTIN_ROLE_IDS {
+        let (role, policy) = manifest
+            .role_with_default_prompt_policy(role_id)
+            .expect("manifest role policy");
+
+        assert_eq!(role.default_prompt_policy, policy.policy_id);
+        assert!(!role.version.trim().is_empty());
+        assert!(
+            policy
+                .sections
+                .iter()
+                .any(|section| section.section_id == "role_identity"
+                    && section.source.kind == "manifest"),
+            "{role_id} should use a manifest role_identity section"
+        );
+
+        let rendered = format!("{role:?}\n{policy:?}").to_lowercase();
+        assert!(!rendered.contains("mori"), "{role_id} leaked Mori source");
+        assert!(!rendered.contains("bardo"), "{role_id} leaked Bardo source");
+    }
 }

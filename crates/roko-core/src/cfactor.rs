@@ -6,11 +6,11 @@
 //! Five core process variables:
 //! 1. Turn-taking equality   (Pulse authorship entropy on Bus)
 //! 2. Social perceptiveness  (peer.prediction vs peer.outcome residuals)
-//! 3. Trust calibration      (citation reciprocity + gate survival in Substrate)
+//! 3. Trust calibration      (citation reciprocity + gate survival in Store)
 //! 4. Channel openness       (Bus delivery confirmation + subscriber reach)
 //! 5. Cognitive diversity    (HDC distance across cohort Engrams)
 
-use crate::{Body, Context, Engram, Kind, Policy, Provenance, Score};
+use crate::{Body, Context, Engram, Kind, Provenance, React, Score};
 use std::sync::Arc;
 
 /// The five Woolley process variables measured per cohort.
@@ -106,7 +106,7 @@ pub struct CFactorSummary {
     pub trend: f64,
     /// Fractional regression against the trailing window.
     pub regression_drop: f64,
-    /// Gate-pass component from the latest snapshot.
+    /// Verify-pass component from the latest snapshot.
     pub gate_pass_rate: f64,
 
     // --- Woolley five process variables (spec-aligned names) ---
@@ -148,7 +148,7 @@ pub trait CFactorSource: Send + Sync {
     fn summary(&self) -> Option<CFactorSummary>;
 }
 
-/// Policy that emits coordination warnings and strengths from C-Factor signals.
+/// React that emits coordination warnings and strengths from C-Factor signals.
 pub struct CFactorPolicy {
     source: Arc<dyn CFactorSource>,
     min_episode_count: usize,
@@ -178,7 +178,7 @@ impl CFactorPolicy {
     }
 }
 
-impl Policy for CFactorPolicy {
+impl React for CFactorPolicy {
     fn decide(&self, _stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         let Some(summary) = self.source.summary() else {
             return Vec::new();

@@ -6,7 +6,7 @@
 > **Implementation**: Deferred
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [02-korai-token-economics.md](./02-korai-token-economics.md), [10-spore-job-market.md](./10-spore-job-market.md)
+**Prerequisites**: [02-nunchi-token-economics.md](./02-nunchi-token-economics.md), [10-spore-job-market.md](./10-spore-job-market.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §VIII, `bardo-backup/tmp/agent-chain-new/12-agent-economy.md`
 
 ---
@@ -32,16 +32,16 @@ The core insight: agent-to-agent commerce has fundamentally different requiremen
 2. Server responds HTTP 402 Payment Required
    HTTP/1.1 402 Payment Required
    X-Payment-Required: {
-     "amount": "500000000000000000",   // 0.5 KORAI in wei
-     "asset": "KORAI",
-     "chain": "korai-mainnet",
+     "amount": "500000000000000000",   // 0.5 NUNCHI in wei
+     "asset": "NUNCHI",
+     "chain": "nunchi-mainnet",
      "recipient": "0xSERVICE_ADDRESS",
      "validUntil": 1712700000
    }
 
 3. Agent signs ERC-3009 transferWithAuthorization
    - Gasless, off-chain signature
-   - Authorizes transfer of 0.5 KORAI to service address
+   - Authorizes transfer of 0.5 NUNCHI to service address
    - Valid for limited time window
 
 4. Agent retries request with payment header
@@ -110,7 +110,7 @@ ERC-3009 hits the sweet spot: the agent's payment is a single off-chain signatur
 
 ---
 
-## Use Cases in the Korai Ecosystem
+## Use Cases in the Nunchi Ecosystem
 
 ### Agent Paying for MCP Services
 
@@ -121,7 +121,7 @@ Agent                     MCP Service (Security Auditor)
   │                                │
   ├── POST /tools/call ───────────→│
   │                                │
-  │←── 402 Payment Required ───────┤  "0.5 KORAI for security audit"
+  │←── 402 Payment Required ───────┤  "0.5 NUNCHI for security audit"
   │                                │
   ├── POST /tools/call ───────────→│  + X-Payment header
   │    + ERC-3009 signature        │
@@ -132,14 +132,14 @@ Agent                     MCP Service (Security Auditor)
 
 ### Agent Paying for Knowledge Queries
 
-Querying the Korai knowledge base costs KORAI (see [02-korai-token-economics.md](./02-korai-token-economics.md)). x402 enables pay-per-query:
+Querying the Nunchi knowledge base costs NUNCHI (see [02-nunchi-token-economics.md](./02-nunchi-token-economics.md)). x402 enables pay-per-query:
 
 ```
-Agent                     Korai Knowledge Node
+Agent                     Nunchi Knowledge Node
   │                                │
-  ├── korai_queryKnowledge ───────→│
+  ├── nunchi_queryKnowledge ───────→│
   │                                │
-  │←── 402: 0.01 KORAI ───────────┤
+  │←── 402: 0.01 NUNCHI ───────────┤
   │                                │
   ├── + X-Payment ────────────────→│
   │                                │
@@ -148,14 +148,14 @@ Agent                     Korai Knowledge Node
 
 ### Agent Self-Funding Loop
 
-The most powerful pattern: an agent earns KORAI by completing jobs and spends KORAI on services that help it complete more jobs:
+The most powerful pattern: an agent earns NUNCHI by completing jobs and spends NUNCHI on services that help it complete more jobs:
 
 ```
-1. Agent completes a coding job → earns 500 KORAI
-2. Agent pays 50 KORAI for a security audit of its work (x402)
-3. Agent pays 10 KORAI for knowledge queries to improve next task (x402)
-4. Agent pays 5 KORAI to post a knowledge entry from this task (x402)
-5. Net: 435 KORAI profit, plus knowledge contribution that earns future rewards
+1. Agent completes a coding job → earns 500 NUNCHI
+2. Agent pays 50 NUNCHI for a security audit of its work (x402)
+3. Agent pays 10 NUNCHI for knowledge queries to improve next task (x402)
+4. Agent pays 5 NUNCHI to post a knowledge entry from this task (x402)
+5. Net: 435 NUNCHI profit, plus knowledge contribution that earns future rewards
 ```
 
 The agent is economically autonomous: it earns, spends, invests in knowledge, and compounds its capabilities over time.
@@ -164,7 +164,7 @@ The agent is economically autonomous: it earns, spends, invests in knowledge, an
 
 ## Batch Settlement
 
-Individual x402 payments are small (0.01-5 KORAI). Settling each one as a separate on-chain transaction would be gas-wasteful. Instead, service providers batch settlements:
+Individual x402 payments are small (0.01-5 NUNCHI). Settling each one as a separate on-chain transaction would be gas-wasteful. Instead, service providers batch settlements:
 
 ```
 1. Collect ERC-3009 authorizations during an epoch
@@ -209,12 +209,12 @@ pub struct AgentPaymentChannel {
     /// Channel identifier (hash of creation params)
     pub channel_id: [u8; 32],
 
-    /// Agent A (payer) passport ID and address
+    /// Agent A (payer) ERC-8004 agent ID and address
     pub agent_a: ChannelParty,
-    /// Agent B (payee) passport ID and address
+    /// Agent B (payee) ERC-8004 agent ID and address
     pub agent_b: ChannelParty,
 
-    /// Total KORAI deposited by each party
+    /// Total NUNCHI deposited by each party
     pub deposit_a: U256,
     pub deposit_b: U256,
 
@@ -222,11 +222,11 @@ pub struct AgentPaymentChannel {
     pub state: ChannelState,
 
     /// Challenge window for dispute resolution (blocks)
-    pub challenge_window: u64,  // default: 100 (~40s on Korai)
+    pub challenge_window: u64,  // default: 100 (~40s on Nunchi)
 }
 
 pub struct ChannelParty {
-    pub passport_id: u256,
+    pub agent_id: u256,
     pub address: Address,
 }
 
@@ -245,29 +245,29 @@ pub struct ChannelState {
 ### Channel Lifecycle
 
 ```
-1. OPEN: Both agents deposit KORAI into the channel contract
-   Agent A deposits 500 KORAI, Agent B deposits 0 KORAI
+1. OPEN: Both agents deposit NUNCHI into the channel contract
+   Agent A deposits 500 NUNCHI, Agent B deposits 0 NUNCHI
    On-chain cost: 1 transaction per party
 
 2. TRANSACT (off-chain): Agents exchange signed state updates
-   Payment 1: A→B 5 KORAI → state: (495, 5, nonce=1)
-   Payment 2: A→B 3 KORAI → state: (492, 8, nonce=2)
+   Payment 1: A→B 5 NUNCHI → state: (495, 5, nonce=1)
+   Payment 2: A→B 3 NUNCHI → state: (492, 8, nonce=2)
    ...
-   Payment 1000: A→B 2 KORAI → state: (100, 400, nonce=1000)
+   Payment 1000: A→B 2 NUNCHI → state: (100, 400, nonce=1000)
    Off-chain cost: 0 gas per transaction (just signatures)
 
 3. CLOSE (cooperative): Both sign final state, submit to contract
    On-chain cost: 1 transaction
 
 4. CLOSE (dispute): One party submits their latest state
-   Challenge window opens (100 blocks / ~40s on Korai)
+   Challenge window opens (100 blocks / ~40s on Nunchi)
    Counterparty can submit higher-nonce state to override
    After window: contract distributes per the highest-nonce state
 ```
 
 ### Streaming Payments (Superfluid Integration)
 
-For continuous services (agent A pays agent B for ongoing monitoring), Korai supports Superfluid-style streaming payments:
+For continuous services (agent A pays agent B for ongoing monitoring), Nunchi supports Superfluid-style streaming payments:
 
 ```rust
 /// Continuous payment stream between two agents
@@ -276,10 +276,10 @@ pub struct PaymentStream {
     pub stream_id: [u8; 32],
 
     /// Sender and receiver
-    pub sender: u256,  // passport_id
+    pub sender: u256,  // agent_id
     pub receiver: u256,
 
-    /// Flow rate in KORAI wei per second
+    /// Flow rate in NUNCHI wei per second
     pub flow_rate: U256,
 
     /// Start time (block timestamp)
@@ -304,7 +304,7 @@ Streaming payments have zero per-second on-chain cost — the `balanceOf()` func
 
 | Agent Interaction Pattern | Recommended Payment Method | Cost per Payment |
 |---|---|---|
-| **Ad-hoc, different services** | x402 (ERC-3009) per-request | ~0.01-0.1 KORAI + L2 gas |
+| **Ad-hoc, different services** | x402 (ERC-3009) per-request | ~0.01-0.1 NUNCHI + L2 gas |
 | **Repeated, same counterparty (>100/hr)** | State channel | 0 gas (off-chain), amortized open/close |
 | **Continuous service** | Streaming payment | 0 gas per second, 1 tx to start/stop |
 | **Batch settlement (many small payments)** | Batched x402 (epoch settlement) | ~1/50th of individual gas per payment |
@@ -321,7 +321,7 @@ pub struct KnowledgeAttestation {
     pub entry_hash: [u8; 32],
 
     /// The attesting agent
-    pub attester_passport_id: u256,
+    pub attester_agent_id: u256,
 
     /// Attestation type
     pub attestation_type: AttestationType,
@@ -335,7 +335,7 @@ pub struct KnowledgeAttestation {
     /// Timestamp
     pub timestamp: u64,
 
-    /// Optional: stake KORAI as bond (slashed if attestation proven wrong)
+    /// Optional: stake NUNCHI as bond (slashed if attestation proven wrong)
     pub bond: Option<U256>,
 }
 
@@ -361,21 +361,21 @@ Level 1 — Optimistic acceptance (default)
   Cost: 0 (no on-chain action needed)
 
 Level 2 — Bond-escalating challenge
-  Challenger posts 1 KORAI bond
-  Original poster must respond with 2 KORAI bond (or lose)
-  Challenger responds with 4 KORAI bond (or lose)
+  Challenger posts 1 NUNCHI bond
+  Original poster must respond with 2 NUNCHI bond (or lose)
+  Challenger responds with 4 NUNCHI bond (or lose)
   Each round doubles the bond until one party concedes
   Cost: logarithmic in dispute intensity
 
 Level 3 — Peer jury resolution
-  If bonds exceed 100 KORAI, escalate to peer jury
+  If bonds exceed 100 NUNCHI, escalate to peer jury
   5 random agents with reputation > 0.7 in the relevant domain
   Majority vote determines outcome
   Jurors earn a share of the losing party's bond
-  Cost: ~50 KORAI from the losing party's bond
+  Cost: ~50 NUNCHI from the losing party's bond
 
 Level 4 — Governance resolution
-  If peer jury decision is appealed (requires 500 KORAI bond)
+  If peer jury decision is appealed (requires 500 NUNCHI bond)
   Full governance vote by Protocol and Sovereign tier agents
   Final and binding
 ```
@@ -439,16 +439,16 @@ pub enum DisputeOutcome {
 **Not yet built (Tier 6):**
 - x402 client library for Roko agents (§L1)
 - x402 server middleware for MCP services (§L2)
-- Batch settlement contract for Korai (§L3)
+- Batch settlement contract for Nunchi (§L3)
 - Balance verification and credit scoring (§L4)
-- Integration with Korai token contract (§L5)
+- Integration with Nunchi token contract (§L5)
 - Self-funding agent loop example (§L6)
 
 ---
 
 ## Cross-References
 
-- See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in payments
-- See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace where agents earn KORAI
+- See [02-nunchi-token-economics.md](./02-nunchi-token-economics.md) for the NUNCHI token used in payments
+- See [10-spore-job-market.md](./10-spore-job-market.md) for the marketplace where agents earn NUNCHI
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the wallet traits that sign ERC-3009 authorizations
 - See topic [05-tools](../18-tools/INDEX.md) for MCP service definitions

@@ -4,7 +4,7 @@
 //! - Signals from `.roko/engrams.jsonl`
 //! - Episodes from `.roko/episodes.jsonl`
 //! - Efficiency events from `.roko/learn/efficiency.jsonl`
-//! - Gate results from signal data
+//! - Verify results from signal data
 //!
 //! Each source is color-coded by type and severity.
 

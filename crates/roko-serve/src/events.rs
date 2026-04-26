@@ -18,6 +18,9 @@ pub enum ExecutionEvent {
     TaskStarted {
         /// Task identifier.
         task_id: String,
+        /// Human-readable task title.
+        #[serde(default)]
+        title: String,
         /// Phase the task is starting in.
         phase: String,
     },
@@ -36,7 +39,7 @@ pub enum ExecutionEvent {
     GateResult {
         /// Task identifier.
         task_id: String,
-        /// Gate name.
+        /// Verify name.
         gate: String,
         /// Whether the gate passed.
         passed: bool,
@@ -89,7 +92,12 @@ pub enum ServerEvent {
     PlanCompleted { plan_id: String, success: bool },
 
     /// An agent process was spawned.
-    AgentSpawned { agent_id: String, role: String },
+    AgentSpawned {
+        agent_id: String,
+        role: String,
+        #[serde(default)]
+        model: String,
+    },
 
     /// Incremental agent output (streamed, sanitized for consumers).
     AgentOutput {
@@ -127,7 +135,7 @@ pub enum ServerEvent {
     GateResult {
         plan_id: String,
         task_id: String,
-        /// Gate name (also exposed as `rung` for dashboard compat).
+        /// Verify name (also exposed as `rung` for dashboard compat).
         gate: String,
         /// Numeric rung index for dashboard display.
         #[serde(default)]
@@ -337,6 +345,22 @@ pub enum ServerEvent {
     /// A webhook signal was accepted and published for downstream processing.
     WebhookReceived { signal: Engram },
 
+    /// A vision-loop iteration completed.
+    VisionLoopIteration {
+        run_id: String,
+        iteration: u32,
+        score: f64,
+        notes: String,
+    },
+
+    /// A vision-loop run completed.
+    VisionLoopCompleted {
+        run_id: String,
+        iterations: u32,
+        best_score: f64,
+        stop_reason: String,
+    },
+
     /// Configuration was reloaded from disk (LIFE-07).
     ConfigReloaded {
         /// Summaries of sections that were hot-reloaded.
@@ -455,6 +479,18 @@ mod tests {
             },
             ServerEvent::Error {
                 message: "err".into(),
+            },
+            ServerEvent::VisionLoopIteration {
+                run_id: "v1".into(),
+                iteration: 1,
+                score: 7.5,
+                notes: "good".into(),
+            },
+            ServerEvent::VisionLoopCompleted {
+                run_id: "v1".into(),
+                iterations: 5,
+                best_score: 9.0,
+                stop_reason: "target_reached".into(),
             },
             ServerEvent::ServerShutdown,
         ];

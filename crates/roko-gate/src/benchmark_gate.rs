@@ -6,7 +6,7 @@
 //! infrastructure is added.
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -57,8 +57,14 @@ impl Default for BenchmarkRegressionGate {
     }
 }
 
+impl roko_core::Cell for BenchmarkRegressionGate {
+    fn cell_id(&self) -> &str { "benchmark-gate" }
+    fn cell_name(&self) -> &str { "BenchmarkRegressionGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
 #[async_trait]
-impl Gate for BenchmarkRegressionGate {
+impl Verify for BenchmarkRegressionGate {
     async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed_ms = || {

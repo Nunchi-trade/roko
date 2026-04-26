@@ -24,27 +24,27 @@ pub struct TopicEntry {
 pub static TOPICS: &[TopicEntry] = &[
     TopicEntry {
         name: "gates",
-        title: "Gate Pipeline",
+        title: "Verify Pipeline",
         summary: "Gates validate agent output before it is accepted. Each gate is a \
                   pass/fail check (compile, test, clippy, diff-review) that ensures \
                   code quality. Tasks must pass all configured gates to advance.",
         detail: "Roko runs a 7-rung gate pipeline after every agent turn. The rungs \
                  are: syntax, compile, test, clippy, diff, review, and integration. \
                  Each rung has an adaptive threshold that tunes itself based on \
-                 historical pass rates (EMA). Gate results are recorded in \
+                 historical pass rates (EMA). Verify results are recorded in \
                  `.roko/episodes.jsonl` and feed back into the learning subsystem. \
                  Configure gates in `roko.toml` under `[[gates]]`.",
-        internals: "Gate implementations live in `crates/roko-gate/src/`. The \
+        internals: "Verify implementations live in `crates/roko-gate/src/`. The \
                     `GatePipeline` struct runs gates sequentially or in parallel. \
                     Adaptive thresholds persist at `.roko/learn/gate-thresholds.json` \
                     and use exponential moving averages (alpha=0.1 by default). The \
                     `HotellingGate` uses Hotelling's T-squared statistic for \
-                    multivariate anomaly detection. Gate verdicts emit \
+                    multivariate anomaly detection. Verify verdicts emit \
                     `DashboardEvent::GateVerdict` for real-time TUI updates.",
     },
     TopicEntry {
         name: "routing",
-        title: "Cascade Router (Model Routing)",
+        title: "Cascade Route (Model Routing)",
         summary: "The cascade router selects which LLM model handles each task. It \
                   starts with the cheapest model and escalates to more capable (and \
                   expensive) models only when gates fail.",
@@ -64,13 +64,13 @@ pub static TOPICS: &[TopicEntry] = &[
         name: "cognitive",
         title: "Cognitive Architecture",
         summary: "Roko's cognitive architecture is built around one noun (Signal) and \
-                  six verb traits: Substrate, Scorer, Gate, Router, Composer, and \
-                  Policy. Every operation follows the universal loop: query, score, \
+                  six verb traits: Store, Score, Verify, Route, Compose, and \
+                  React. Every operation follows the universal loop: query, score, \
                   route, compose, act, verify, write, react.",
         detail: "The six traits define the contract for each phase of processing. \
-                 `Substrate` handles storage, `Scorer` evaluates quality, `Gate` \
-                 validates correctness, `Router` selects models/agents, `Composer` \
-                 assembles prompts, and `Policy` governs agent behavior. The \
+                 `Store` handles storage, `Score` evaluates quality, `Verify` \
+                 validates correctness, `Route` selects models/agents, `Compose` \
+                 assembles prompts, and `React` governs agent behavior. The \
                  `SystemPromptBuilder` in `roko-compose` assembles 9-layer prompts \
                  from role templates, domain context, and runtime state.",
         internals: "Trait definitions live in `crates/roko-core/src/lib.rs`. The \
@@ -106,7 +106,7 @@ pub static TOPICS: &[TopicEntry] = &[
                  confidence, etc.) as a value that shifts based on agent outcomes. \
                  High curiosity leads to more exploration; high caution triggers \
                  extra validation. Daimons influence prompt composition, model \
-                 selection, and gate thresholds through the Policy trait.",
+                 selection, and gate thresholds through the React trait.",
         internals: "Implementation is in `crates/roko-daimon/`. Affect values are \
                     f64 in [-1, 1] with drift and decay. The `AffectMap` struct \
                     holds all dimensions. Daimon state persists at `.roko/daimon/`. \
@@ -306,7 +306,7 @@ mod tests {
     fn render_depth_1_shows_summary_only() {
         let t = find_topic("gates").unwrap();
         let out = render_topic(t, 1);
-        assert!(out.contains("Gate Pipeline"));
+        assert!(out.contains("Verify Pipeline"));
         assert!(out.contains(t.summary));
         assert!(!out.contains("How it works"));
         assert!(!out.contains("Internals"));

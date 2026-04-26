@@ -6,7 +6,7 @@
 //!
 //! # Retention policies
 //!
-//! | Store | Default limit | Policy |
+//! | Store | Default limit | React |
 //! |-------|--------------|--------|
 //! | Episodes | 200 max | Keep most recent N |
 //! | Runs | 7 days | Delete runs older than N days |
@@ -415,7 +415,7 @@ mod tests {
             .await
             .expect("write episodes");
 
-        // Policy: max 5 episodes.
+        // React: max 5 episodes.
         let policy = RetentionPolicy {
             max_episodes: 5,
             ..Default::default()

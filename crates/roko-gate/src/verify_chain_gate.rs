@@ -38,7 +38,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,13 +52,13 @@ pub const VERIFY_SCRIPT_TAG: &str = "verify_script";
 /// [`Verdict::detail`] — keeps verdicts small on the event bus.
 const DETAIL_TAIL_BYTES: usize = 16 * 1024;
 
-/// Gate that runs a plan-specific `verify.sh` and parses its output.
+/// Verify that runs a plan-specific `verify.sh` and parses its output.
 ///
 /// See the module-level documentation for the script resolution and line
 /// protocol. Construct with [`VerifyChainGate::strict`] (no fallback) or
 /// [`VerifyChainGate::with_fallback`] (delegate on missing script).
 pub struct VerifyChainGate {
-    fallback: Option<Arc<dyn Gate>>,
+    fallback: Option<Arc<dyn Verify>>,
     timeout_ms: u64,
     retry_once: bool,
     zero_test_guard: bool,
@@ -91,7 +91,7 @@ impl VerifyChainGate {
     /// name — delegating to another `VerifyChainGate` would risk a cycle
     /// when the inner gate also fails to find a script.
     #[must_use]
-    pub fn with_fallback(fallback: Arc<dyn Gate>) -> Self {
+    pub fn with_fallback(fallback: Arc<dyn Verify>) -> Self {
         debug_assert!(
             fallback.name() != "verify_chain",
             "verify_chain fallback must not be another verify_chain gate (cycle risk)",
@@ -173,8 +173,20 @@ impl VerifyChainGate {
     }
 }
 
+impl roko_core::Cell for VerifyChainGate {
+    fn cell_id(&self) -> &str {
+        "verify-chain-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "VerifyChainGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for VerifyChainGate {
+impl Verify for VerifyChainGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = Instant::now();
         // GatePayload is optional: some callers may rely on absolute
@@ -867,7 +879,7 @@ mod tests {
         // equality check that triggers it.
         struct FakeCycle;
         #[async_trait]
-        impl Gate for FakeCycle {
+        impl Verify for FakeCycle {
             async fn verify(&self, _: &Engram, _: &Context) -> Verdict {
                 Verdict::pass("verify_chain")
             }

@@ -22,6 +22,7 @@ use roko_core::{Body, Context as RokoContext, Engram, Kind};
 use roko_learn::{
     cfactor::{CFactor, CFactorRegression, detect_cfactor_regression},
     episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage},
+    pattern_discovery::{CrossEpisodeConsolidationReport, CrossEpisodeConsolidator},
     playbook::{Playbook, PlaybookStep, PlaybookStore},
 };
 use roko_neuro::{
@@ -35,6 +36,9 @@ use serde_json::{Value, json};
 use crate::hypnagogia::HypnagogiaEngine;
 use crate::imagination::synthesize_hypotheses;
 use crate::phase2::sleep_time::{DreamBudgetTracker, DreamComputeBudget, DreamPhaseKind};
+use crate::routing_advice::{
+    DreamRoutingAdvice, generate_routing_advice, save_dream_routing_advice_at,
+};
 use crate::runner::DreamBudget;
 use crate::staging::{ConfidenceStage, StagingBuffer};
 use crate::threat::threat_warning_entries_with_floor;
@@ -84,6 +88,12 @@ pub struct DreamCycleReport {
     pub cfactor_regression: Option<CFactorRegression>,
     /// Cluster summaries discovered during the dream cycle.
     pub clusters: Vec<DreamClusterReport>,
+    /// Cross-episode structural consolidation report, when the batch was large enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_episode_report: Option<CrossEpisodeConsolidationReport>,
+    /// Number of dream routing recommendations written for later dispatch.
+    #[serde(default)]
+    pub routing_recommendations: usize,
     /// Number of knowledge entries written to the durable store.
     pub knowledge_entries_written: usize,
     /// Number of playbooks written to the durable store.
@@ -529,6 +539,27 @@ impl DreamCycle {
         progression.replay_heuristics(&mut analysis, &batch);
         let review_entries = review_insights_from_heuristics(&analysis, started_at);
         let performance_notes = performance_stall_notes(&batch);
+        let batch_for_cross_episode = batch.clone();
+        let cross_episode_report = build_cross_episode_report(&batch_for_cross_episode);
+        let source_dream_report = format!("dream-{}", started_at.timestamp_millis());
+        let routing_advice = cross_episode_report.as_ref().map(|report| {
+            generate_routing_advice(
+                report,
+                &batch_for_cross_episode,
+                started_at,
+                source_dream_report.clone(),
+            )
+        });
+        if let Some(report) = cross_episode_report.as_ref() {
+            self.write_cross_episode_report(report, started_at)?;
+        }
+        if let Some(advice) = routing_advice.as_ref() {
+            self.write_routing_advice(advice)?;
+        }
+        let routing_recommendations = routing_advice
+            .as_ref()
+            .map(|advice| advice.recommendations.len())
+            .unwrap_or(0);
         let mut clusters = cluster_episodes(batch);
         let mut written_knowledge_ids = BTreeSet::new();
 
@@ -716,6 +747,8 @@ impl DreamCycle {
             analysis,
             cfactor_regression,
             clusters: clusters.iter().map(DreamClusterReport::from).collect(),
+            cross_episode_report,
+            routing_recommendations,
             knowledge_entries_written,
             playbooks_created,
             regressions_detected,
@@ -902,6 +935,29 @@ impl DreamCycle {
         std::fs::write(&path, bytes)
             .with_context(|| format!("write dream report to {}", path.display()))?;
         Ok(())
+    }
+
+    fn write_cross_episode_report(
+        &self,
+        report: &CrossEpisodeConsolidationReport,
+        started_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let path = dream_cross_episode_report_path(self.episode_store.path(), started_at);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create cross-episode report directory {}", parent.display())
+            })?;
+        }
+        let bytes =
+            serde_json::to_vec_pretty(report).context("serialize cross-episode dream report")?;
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("write cross-episode dream report to {}", path.display()))?;
+        Ok(())
+    }
+
+    fn write_routing_advice(&self, advice: &DreamRoutingAdvice) -> Result<()> {
+        let path = dream_routing_advice_path_for_episode_log(self.episode_store.path());
+        save_dream_routing_advice_at(&path, advice)
     }
 
     fn write_counterfactuals(&self, counterfactuals: &[DreamCounterfactualRecord]) -> Result<()> {
@@ -2498,10 +2554,35 @@ fn render_playbook_content(playbook: &Playbook) -> String {
     out
 }
 
+fn build_cross_episode_report(episodes: &[Episode]) -> Option<CrossEpisodeConsolidationReport> {
+    if episodes.len() < 6 {
+        return None;
+    }
+    let consolidator =
+        CrossEpisodeConsolidator::new((episodes.len() / 3).max(2).min(8), 3, 50, 0.55);
+    Some(consolidator.discover(episodes))
+}
+
 fn dream_report_path(episode_path: &Path, started_at: DateTime<Utc>) -> PathBuf {
     dream_root_path(episode_path)
         .join("dreams")
         .join(format!("dream-{}.json", started_at.timestamp_millis()))
+}
+
+fn dream_cross_episode_report_path(episode_path: &Path, started_at: DateTime<Utc>) -> PathBuf {
+    dream_root_path(episode_path)
+        .join("dreams")
+        .join("cross-episode")
+        .join(format!(
+            "cross-episode-{}.json",
+            started_at.timestamp_millis()
+        ))
+}
+
+fn dream_routing_advice_path_for_episode_log(episode_path: &Path) -> PathBuf {
+    dream_root_path(episode_path)
+        .join("learn")
+        .join("dream-routing-advice.json")
 }
 
 fn dream_counterfactual_path(episode_path: &Path) -> PathBuf {
@@ -3368,6 +3449,8 @@ mod tests {
             },
             cfactor_regression: None,
             clusters: Vec::new(),
+            cross_episode_report: None,
+            routing_recommendations: 0,
             knowledge_entries_written: 3,
             playbooks_created: 1,
             regressions_detected: Vec::new(),

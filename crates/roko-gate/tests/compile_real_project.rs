@@ -5,7 +5,7 @@
 //! the failure path works too.
 
 use async_trait::async_trait;
-use roko_core::{Body, Context, Engram, Gate, Kind, Substrate};
+use roko_core::{Body, Context, Engram, Kind, Store, Verify};
 use roko_gate::{BuildSystem, CompileGate, GatePayload};
 use roko_std::MemorySubstrate;
 use std::path::Path;
@@ -121,7 +121,7 @@ async fn verdict_flows_back_into_substrate_as_signal() {
     let task_signal = payload_signal(tmp.path());
     substrate.put(task_signal.clone()).await.unwrap();
 
-    // 2. Gate verifies.
+    // 2. Verify verifies.
     let verdict = gate.verify(&task_signal, &Context::now()).await;
     assert!(verdict.passed);
 
@@ -147,15 +147,15 @@ async fn verdict_flows_back_into_substrate_as_signal() {
     assert_eq!(verdicts[0].tag("passed"), Some("true"));
 }
 
-/// A wrapper that upgrades a Gate into a Substrate-writing policy — showing
+/// A wrapper that upgrades a Verify into a Store-writing policy — showing
 /// how gates and substrates naturally compose.
-struct PersistingGate<G: Gate> {
+struct PersistingGate<G: Verify> {
     inner: G,
-    substrate: std::sync::Arc<dyn Substrate>,
+    substrate: std::sync::Arc<dyn Store>,
 }
 
 #[async_trait]
-impl<G: Gate> Gate for PersistingGate<G> {
+impl<G: Verify> Verify for PersistingGate<G> {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> roko_core::Verdict {
         let verdict = self.inner.verify(signal, ctx).await;
         let verdict_signal = signal
@@ -180,7 +180,7 @@ async fn gate_composes_with_substrate_as_adapter() {
     let tmp = TempDir::new().unwrap();
     scaffold_cargo_project(tmp.path(), "pub fn y() -> bool { true }\n").await;
 
-    let substrate: std::sync::Arc<dyn Substrate> = std::sync::Arc::new(MemorySubstrate::new());
+    let substrate: std::sync::Arc<dyn Store> = std::sync::Arc::new(MemorySubstrate::new());
     let gate = PersistingGate {
         inner: CompileGate::new(BuildSystem::Cargo).with_timeout_ms(120_000),
         substrate: substrate.clone(),

@@ -86,7 +86,7 @@ pub struct ActivityEntry {
     pub output_hash: String,
     /// Number of files changed in this activity.
     pub files_changed: u32,
-    /// Gate result string, if a gate ran (e.g. "pass", "fail:compile", "fail:test").
+    /// Verify result string, if a gate ran (e.g. "pass", "fail:compile", "fail:test").
     pub gate_result: Option<String>,
     /// Iteration number (monotonically increasing).
     pub iteration: u32,
@@ -1384,7 +1384,7 @@ mod tests {
         assert!(signal.is_none(), "unexpected: {signal:?}");
     }
 
-    // ---- Gate loop ----
+    // ---- Verify loop ----
 
     #[test]
     fn gate_loop_detected() {
@@ -1786,7 +1786,7 @@ mod tests {
 
     #[test]
     fn compile_fail_threshold_gate_only() {
-        // Gate result alone (without activity field) should also trigger.
+        // Verify result alone (without activity field) should also trigger.
         let history: Vec<ActivityEntry> = (0..3)
             .map(|i| {
                 ActivityEntry::new(

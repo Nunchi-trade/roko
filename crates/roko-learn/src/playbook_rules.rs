@@ -22,6 +22,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::episode_logger::Episode;
+use crate::post_gate_reflection::ReflectionAdmissionStatus;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,80 @@ pub struct Rule {
     /// Millisecond timestamp of the last demurrage decay application.
     #[serde(default)]
     pub last_decay_at_ms: i64,
+}
+
+/// A playbook rule proposed by repeated post-gate reflections.
+///
+/// Candidates are audit records. They do not affect prompt composition until
+/// [`PlaybookRules::admit_reflection_candidate`] explicitly admits them into
+/// the active rule store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReflectionPlaybookCandidate {
+    /// Stable candidate id derived from the reflection cluster.
+    pub candidate_id: String,
+    /// Rule id to use if the candidate is admitted.
+    pub rule_id: String,
+    /// Short human-readable title.
+    pub title: String,
+    /// Prompt body to inject after admission.
+    pub body: String,
+    /// Trigger conditions proposed by the reflection.
+    pub triggers: Triggers,
+    /// Confidence in `[0.0, 0.95]`.
+    pub confidence: f64,
+    /// Number of reflections supporting this candidate.
+    pub evidence_count: u32,
+    /// Admission status for this candidate.
+    pub admission_status: ReflectionAdmissionStatus,
+    /// Reflection ids that produced this candidate.
+    pub source_reflection_ids: Vec<String>,
+    /// Timestamp when the candidate was first created.
+    pub created_at: DateTime<Utc>,
+    /// Timestamp when the candidate was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Admission thresholds for reflection-derived playbook candidates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CandidateAdmissionConfig {
+    /// Minimum number of supporting reflections.
+    pub min_evidence_count: u32,
+    /// Minimum confidence score.
+    pub min_confidence: f64,
+}
+
+impl Default for CandidateAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            min_evidence_count: 3,
+            min_confidence: 0.65,
+        }
+    }
+}
+
+/// Result of attempting to admit a reflection-derived candidate.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CandidateAdmissionDecision {
+    /// Candidate was admitted as an active playbook rule.
+    Admitted {
+        /// Active rule id.
+        rule_id: String,
+    },
+    /// Candidate lacked enough repeated evidence.
+    RejectedLowEvidence {
+        /// Required evidence count.
+        required_evidence_count: u32,
+        /// Observed evidence count.
+        observed_evidence_count: u32,
+        /// Required confidence.
+        required_confidence: f64,
+        /// Observed confidence.
+        observed_confidence: f64,
+    },
+    /// Candidate had no actionable trigger conditions.
+    RejectedNoTriggers,
+    /// Candidate had no lesson body to inject.
+    RejectedNoLesson,
 }
 
 fn default_balance() -> f64 {
@@ -393,6 +468,52 @@ impl PlaybookRules {
             }
         }
         Ok(())
+    }
+
+    /// Admit a reflection-derived candidate into the active rule store.
+    ///
+    /// Low-evidence candidates are rejected without mutating rules. This keeps
+    /// post-gate reflection separate from automatic policy mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors from [`Self::upsert`] when the admitted rule
+    /// body is invalid.
+    pub fn admit_reflection_candidate(
+        &self,
+        candidate: &ReflectionPlaybookCandidate,
+        config: CandidateAdmissionConfig,
+    ) -> io::Result<CandidateAdmissionDecision> {
+        if candidate.evidence_count < config.min_evidence_count
+            || candidate.confidence < config.min_confidence
+        {
+            return Ok(CandidateAdmissionDecision::RejectedLowEvidence {
+                required_evidence_count: config.min_evidence_count,
+                observed_evidence_count: candidate.evidence_count,
+                required_confidence: config.min_confidence,
+                observed_confidence: candidate.confidence,
+            });
+        }
+        if candidate.body.trim().is_empty() {
+            return Ok(CandidateAdmissionDecision::RejectedNoLesson);
+        }
+        if candidate.triggers.is_empty() {
+            return Ok(CandidateAdmissionDecision::RejectedNoTriggers);
+        }
+
+        let mut rule = Rule::new(
+            &candidate.rule_id,
+            &candidate.title,
+            &candidate.body,
+            candidate.triggers.clone(),
+        );
+        rule.confidence = candidate.confidence;
+        rule.validations = candidate.evidence_count;
+        rule.source_episodes = candidate.source_reflection_ids.clone();
+        self.upsert(rule)?;
+        Ok(CandidateAdmissionDecision::Admitted {
+            rule_id: candidate.rule_id.clone(),
+        })
     }
 
     /// Adjust the confidence of the rule identified by `rule_id`.

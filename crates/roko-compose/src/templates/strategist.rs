@@ -1,6 +1,6 @@
 //! Strategist prompt template.
 //!
-//! Ports Mori's `strategist_prompt` into a typed, I/O-free API.
+//! Roko-owned strategist prompt template.
 //! The strategist analyzes a plan and produces a brief + structured TOML
 //! task checklist. On iteration 2+, it also processes prior review feedback
 //! and generates remediation instructions.
@@ -270,8 +270,8 @@ mod tests {
             decomposition: Some("Step 1: Define types.\nStep 2: Implement formulas.".into()),
             preflight: Some("all green, 142 tests passing".into()),
             ignored_tests: Some("test_old_feature: reason".into()),
-            brief_write_path: ".mori/plans/golem-mortality/brief.md".into(),
-            tasks_write_path: ".mori/plans/golem-mortality/042-tasks.toml".into(),
+            brief_write_path: ".roko/plans/golem-mortality/brief.md".into(),
+            tasks_write_path: ".roko/plans/golem-mortality/042-tasks.toml".into(),
         }
     }
 

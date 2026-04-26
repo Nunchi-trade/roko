@@ -1,7 +1,7 @@
 //! The `roko` binary's library surface.
 //!
-//! This crate wires Roko's primitives (Substrate, Composer, Agent, Gate,
-//! Policy) into a one-shot CLI loop. It does **not** implement a plan runner
+//! This crate wires Roko's primitives (Store, Compose, Agent, Verify,
+//! React) into a one-shot CLI loop. It does **not** implement a plan runner
 //! or DAG executor — it drives a single prompt through the universal loop
 //! and writes the resulting signals to disk.
 //!
@@ -40,28 +40,39 @@ pub mod chat;
 pub mod clean;
 pub mod config;
 pub mod config_cmd;
+pub mod config_helpers;
 pub mod credentials;
 pub mod custody;
 pub mod daemon;
 pub mod deployment;
+pub(crate) mod dispatch_helpers;
+pub mod dispatch_v2;
 pub mod doctor;
 pub mod episode;
 pub mod event_sources;
 pub mod explain;
+pub(crate) mod gate_runner;
 mod heartbeat;
 pub mod index;
 pub mod inject;
+pub(crate) mod knowledge_helpers;
+pub(crate) mod learning_helpers;
 pub mod oneshot;
+pub(crate) mod dispatch_helpers;
+pub(crate) mod knowledge_helpers;
+pub(crate) mod learning_helpers;
 pub mod orchestrate;
 pub mod pipe;
 pub mod plan;
 pub mod plan_generate;
 pub mod prd;
 pub mod prd_prompt;
+pub mod prompt_helpers;
 pub mod prompting;
 pub mod repl;
 pub mod research;
 pub mod run;
+pub mod runner;
 pub mod scaffold;
 pub mod secrets;
 pub mod snapshot_migrate;
@@ -69,8 +80,10 @@ pub mod snapshot_reconcile;
 pub mod status;
 pub mod subscriptions;
 pub mod surface_inventory;
+pub mod task_helpers;
 pub mod task_parser;
 pub mod tui;
+pub mod vision_loop;
 pub mod worker;
 pub mod workspace_paths;
 

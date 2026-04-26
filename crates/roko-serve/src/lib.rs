@@ -93,7 +93,9 @@ use tracing::{debug, info, warn};
 
 use roko_core::Engram;
 use roko_core::config::schema::RokoConfig;
+use roko_core::connector::{ConnectorHealth, ConnectorInfo, ConnectorKind, ConnectorStatus};
 use roko_core::dashboard_snapshot::DashboardEvent;
+use roko_core::feed::{FeedAccess, FeedInfo, FeedKind};
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::{ExecutionEvent, ServerEvent};
@@ -225,6 +227,7 @@ impl ServerBuilder {
         let _state_hub_bridge = start_state_hub_bridge(Arc::clone(&state));
         let _state_saver = start_state_snapshot_saver(Arc::clone(&state));
         let _job_runner = job_runner::start_job_runner(Arc::clone(&state));
+        let _cold_archival = start_cold_archival_timer(Arc::clone(&state));
 
         // Load persisted deployments from disk.
         routes::load_persisted_deployments(&state).await;
@@ -480,7 +483,140 @@ fn build_app_state(
             .state_hub
             .publish(DashboardEvent::KnowledgeEntriesUpdated { entries: knowledge });
     }
+
+    // Seed connector and feed registries with default entries so routes
+    // return real data instead of empty arrays (audit finding A3).
+    seed_default_registries(&state);
+
     state
+}
+
+/// Populate the connector and feed registries with default entries that
+/// reflect the actual on-disk data files. Called once during server startup
+/// before the `AppState` is shared behind an `Arc`.
+///
+/// Connectors registered:
+/// - **filesystem**: the local `.roko/` data directory (`Database` kind)
+/// - **neuro-store**: the durable knowledge store (`Database` kind)
+///
+/// Feeds registered:
+/// - **engrams**: `.roko/engrams.jsonl` — raw signal/engram log (`Raw` kind)
+/// - **episodes**: `.roko/memory/episodes.jsonl` — agent turn episodes (`Raw` kind)
+/// - **efficiency**: `.roko/learn/efficiency.jsonl` — per-turn metrics (`Derived` kind)
+/// - **knowledge**: neuro knowledge store entries (`Composite` kind)
+fn seed_default_registries(state: &AppState) {
+    // Use block_in_place so blocking_write doesn't panic inside a tokio runtime.
+    // This is safe because build_app_state is called once at startup.
+    tokio::task::block_in_place(|| seed_default_registries_inner(state));
+}
+
+fn seed_default_registries_inner(state: &AppState) {
+    let now = chrono::Utc::now();
+    let layout = &state.layout;
+
+    // ── Connectors ────────────────────────────────────────────────────
+    let mut connectors = state.connectors.blocking_write();
+
+    let roko_root = layout.root().to_string_lossy().to_string();
+    connectors.register(ConnectorInfo {
+        name: "filesystem".to_string(),
+        kind: ConnectorKind::Database,
+        health: ConnectorHealth {
+            status: ConnectorStatus::Connected,
+            latency_ms: 0,
+            last_check: now,
+        },
+        created_at: now,
+        metadata: serde_json::json!({
+            "description": "Local .roko/ data directory",
+            "path": roko_root,
+        }),
+    });
+
+    let neuro_path = layout.root().join("neuro");
+    connectors.register(ConnectorInfo {
+        name: "neuro-store".to_string(),
+        kind: ConnectorKind::Database,
+        health: ConnectorHealth {
+            status: if neuro_path.exists() {
+                ConnectorStatus::Connected
+            } else {
+                ConnectorStatus::Disconnected
+            },
+            latency_ms: 0,
+            last_check: now,
+        },
+        created_at: now,
+        metadata: serde_json::json!({
+            "description": "Durable knowledge store (neuro)",
+            "path": neuro_path.to_string_lossy(),
+        }),
+    });
+
+    let connector_count = connectors.list().len();
+    drop(connectors);
+
+    // ── Feeds ─────────────────────────────────────────────────────────
+    let mut feeds = state.feeds.blocking_write();
+
+    let engrams_path = layout.engrams_path();
+    feeds.register(FeedInfo {
+        id: String::new(), // assigned by registry
+        name: "engrams".to_string(),
+        kind: FeedKind::Raw,
+        access: FeedAccess::Public,
+        agent_id: "system".to_string(),
+        description: "Raw signal/engram log (.roko/engrams.jsonl)".to_string(),
+        schema: None,
+        created_at: now,
+    });
+
+    let episodes_path = layout.episodes_path();
+    feeds.register(FeedInfo {
+        id: String::new(),
+        name: "episodes".to_string(),
+        kind: FeedKind::Raw,
+        access: FeedAccess::Public,
+        agent_id: "system".to_string(),
+        description: "Agent turn episode log (.roko/memory/episodes.jsonl)".to_string(),
+        schema: None,
+        created_at: now,
+    });
+
+    let efficiency_path = layout.efficiency_path();
+    feeds.register(FeedInfo {
+        id: String::new(),
+        name: "efficiency".to_string(),
+        kind: FeedKind::Derived,
+        access: FeedAccess::Public,
+        agent_id: "system".to_string(),
+        description: "Per-turn efficiency metrics (.roko/learn/efficiency.jsonl)".to_string(),
+        schema: None,
+        created_at: now,
+    });
+
+    feeds.register(FeedInfo {
+        id: String::new(),
+        name: "knowledge".to_string(),
+        kind: FeedKind::Composite,
+        access: FeedAccess::Public,
+        agent_id: "system".to_string(),
+        description: "Durable knowledge entries from the neuro store".to_string(),
+        schema: None,
+        created_at: now,
+    });
+
+    let feed_count = feeds.list().len();
+    drop(feeds);
+
+    info!(
+        connectors = connector_count,
+        feeds = feed_count,
+        engrams_path = %engrams_path.display(),
+        episodes_path = %episodes_path.display(),
+        efficiency_path = %efficiency_path.display(),
+        "seeded default connector and feed registries"
+    );
 }
 
 /// Scan `.roko/jobs/*.json` and return a vec of `MarketplaceJob`.
@@ -615,9 +751,14 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             plan_id: plan_id.clone(),
             success: *success,
         }),
-        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+        ServerEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         ServerEvent::AgentOutput {
             agent_id, content, ..
@@ -638,9 +779,14 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             passed: *passed,
         }),
         ServerEvent::Execution { plan_id, event } => match event {
-            ExecutionEvent::TaskStarted { task_id, phase } => Some(DashboardEvent::TaskStarted {
+            ExecutionEvent::TaskStarted {
+                task_id,
+                title,
+                phase,
+            } => Some(DashboardEvent::TaskStarted {
                 plan_id: plan_id.clone(),
                 task_id: task_id.clone(),
+                title: title.clone(),
                 phase: phase.clone(),
             }),
             ExecutionEvent::TaskCompleted { task_id, outcome } => {
@@ -724,6 +870,7 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::AgentStarted { agent_id, .. } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: String::new(),
+            model: String::new(),
         }),
         ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
             agent_id: agent_id.clone(),
@@ -772,11 +919,13 @@ fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<Server
         DashboardEvent::TaskStarted {
             plan_id,
             task_id,
+            title,
             phase,
         } => Some(ServerEvent::Execution {
             plan_id: plan_id.clone(),
             event: ExecutionEvent::TaskStarted {
                 task_id: task_id.clone(),
+                title: title.clone(),
                 phase: phase.clone(),
             },
         }),
@@ -804,9 +953,14 @@ fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<Server
                 new_phase: new_phase.clone(),
             },
         }),
-        DashboardEvent::AgentSpawned { agent_id, role } => Some(ServerEvent::AgentSpawned {
+        DashboardEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(ServerEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         DashboardEvent::AgentOutput { agent_id, content } => Some(ServerEvent::AgentOutput {
             agent_id: agent_id.clone(),
@@ -931,6 +1085,101 @@ fn start_state_snapshot_saver(state: Arc<AppState>) -> JoinHandle<()> {
             }
         }
     })
+}
+
+/// Periodic cold archival: migrates aged-out engrams from the hot substrate
+/// (`.roko/engrams.jsonl` / `FileSubstrate`) to compressed monthly JSONL
+/// archives in `.roko/cold/`.
+///
+/// Runs every hour (default) or at the interval specified in the
+/// `archival_interval_secs` field. Each tick:
+///  1. Opens the hot `FileSubstrate`.
+///  2. Queries for engrams older than 7 days (default).
+///  3. Batch-archives them to `ArchiveColdSubstrate`.
+///  4. Applies retention compaction on observability artifacts.
+///
+/// Failures are logged but never crash the server.
+fn start_cold_archival_timer(state: Arc<AppState>) -> JoinHandle<()> {
+    // Default: run every hour.
+    const DEFAULT_INTERVAL_SECS: u64 = 3600;
+    // Default: archive engrams older than 7 days.
+    const DEFAULT_MAX_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
+    // Default: archive up to 500 engrams per tick.
+    const DEFAULT_BATCH_SIZE: usize = 500;
+
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(DEFAULT_INTERVAL_SECS));
+
+        // Skip the first immediate tick — let the server warm up.
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = state.cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+
+            let workdir = &state.workdir;
+            let roko_dir = workdir.join(".roko");
+            if !roko_dir.exists() {
+                continue;
+            }
+
+            // -- Phase 1: cold-archive aged-out engrams ----------------------
+            match run_cold_archival_tick(&roko_dir, DEFAULT_MAX_AGE_MS, DEFAULT_BATCH_SIZE).await {
+                Ok(0) => {
+                    debug!("cold archival tick: no engrams to archive");
+                }
+                Ok(n) => {
+                    info!(
+                        "cold archival tick: archived {n} engram(s) to {}",
+                        roko_dir.join("cold").display()
+                    );
+                }
+                Err(err) => {
+                    warn!(error = %err, "cold archival tick failed");
+                }
+            }
+
+            // -- Phase 2: apply retention compaction -------------------------
+            let actions = retention::apply_retention(workdir, false);
+            for action in &actions {
+                info!(
+                    artifact = %action.artifact,
+                    action = ?action.action,
+                    "retention compaction applied"
+                );
+            }
+        }
+    })
+}
+
+/// Execute a single cold-archival tick: query old engrams from the hot
+/// substrate and archive them to `.roko/cold/`.
+///
+/// Returns the number of engrams archived, or an error.
+async fn run_cold_archival_tick(
+    roko_dir: &std::path::Path,
+    max_age_ms: i64,
+    batch_size: usize,
+) -> anyhow::Result<usize> {
+    use roko_core::{ColdStore, Context, Query, Store};
+
+    let hot = roko_fs::FileSubstrate::open(roko_dir).await?;
+    let ctx = Context::now();
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - max_age_ms;
+    let query = Query::all().until(cutoff_ms).limit(batch_size);
+    let candidates = hot.query(&query, &ctx).await?;
+
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let cold_dir = roko_dir.join("cold");
+    let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
+    let archived = cold.archive_batch(candidates).await?;
+    Ok(archived)
 }
 
 fn start_builtin_event_sources(state: Arc<AppState>, roko_config: RokoConfig) {

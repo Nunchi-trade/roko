@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ReinforceKind {
-    /// Gate pipeline passed for a task.
+    /// Verify pipeline passed for a task.
     GatePass {
         /// Which gate rung (0..=6) passed.
         rung: u32,
     },
-    /// Gate pipeline failed for a task.
+    /// Verify pipeline failed for a task.
     GateFail {
         /// Which gate rung failed.
         rung: u32,

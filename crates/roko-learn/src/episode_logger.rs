@@ -88,7 +88,7 @@ pub enum LoggerError {
 /// Verdict produced by a single gate run on behalf of an agent turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GateVerdict {
-    /// Gate identifier ("compile", "test", "lint", …).
+    /// Verify identifier ("compile", "test", "lint", …).
     #[serde(default)]
     pub gate: String,
     /// Whether the gate passed.
@@ -236,6 +236,9 @@ pub struct Episode {
     /// Optional short failure reason (hashed, never raw output).
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// Optional post-gate reflection text for retry and playbook learning.
+    #[serde(default)]
+    pub reflection: Option<String>,
     /// Optional short reasoning summary for auditing and debugging.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
@@ -249,6 +252,12 @@ pub struct Episode {
     /// pruned by [`EpisodeLogger::compact`], regardless of age or count.
     #[serde(default)]
     pub headline: bool,
+    /// Snapshot of the prompt composition that produced the agent's system
+    /// prompt: which sections were included, their token counts, and
+    /// whether any were truncated or dropped due to budget pressure.
+    /// Populated at dispatch time from the `PromptSectionMeta` vector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_composition: Option<serde_json::Value>,
     /// Forward-compat extension bag. Must serialize to ≤
     /// [`MAX_EXTRA_BYTES`].
     #[serde(default)]
@@ -291,10 +300,12 @@ impl Episode {
             tokens_used: 0,
             external_actions: Vec::new(),
             failure_reason: None,
+            reflection: None,
             reasoning_summary: None,
             hdc_fingerprint: None,
             emotional_tag: None,
             headline: false,
+            prompt_composition: None,
             extra: HashMap::new(),
         }
     }

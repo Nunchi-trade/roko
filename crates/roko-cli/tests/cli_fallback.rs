@@ -128,7 +128,7 @@ const NESTED_COMMANDS: &[&[&str]] = &[
     &["knowledge", "custody", "verify"],
     &["knowledge", "archive"],
     &["learn", "all"],
-    &["learn", "router"],
+    &["learn", "route"],
     &["learn", "experiments"],
     &["learn", "efficiency"],
     &["learn", "episodes"],

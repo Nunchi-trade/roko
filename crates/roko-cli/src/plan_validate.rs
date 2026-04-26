@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail};
 use roko_core::AgentRole;
 use roko_core::config::schema::ModelProfile;
+use roko_gate::AcceptanceContract;
 use roko_orchestrator::detect_cycle_nodes;
 use serde::Serialize;
 use toml::Value;
@@ -75,9 +76,15 @@ struct TaskSnapshot {
     role: Option<String>,
     model: Option<String>,
     depends_on: Vec<String>,
+    has_depends_on_field: bool,
     gate_rung: Option<u32>,
     gate_rung_invalid: bool,
+    has_files: bool,
+    has_context_read_files: bool,
     has_verify_steps: bool,
+    acceptance_contract: Option<Value>,
+    has_required_parity_ledger_rows: bool,
+    deferral_missing_fields: Vec<&'static str>,
 }
 
 impl TaskSnapshot {
@@ -242,6 +249,10 @@ fn validate_tasks_file(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or(fallback_plan_id);
+    let is_architecture_queue = parsed
+        .get("meta")
+        .and_then(Value::as_table)
+        .is_some_and(is_architecture_queue_meta);
 
     let mut diagnostics = Vec::new();
     let tasks = parsed
@@ -313,6 +324,45 @@ fn validate_tasks_file(
                     task.label()
                 ),
             });
+        }
+
+        if let Some(contract_value) = &task.acceptance_contract {
+            match contract_value.clone().try_into::<AcceptanceContract>() {
+                Ok(contract) => {
+                    let decision = contract.validate_contract();
+                    for issue in decision.issues {
+                        diagnostics.push(Diagnostic {
+                            severity: if issue.blocking {
+                                Severity::Error
+                            } else {
+                                Severity::Warning
+                            },
+                            rule_id: issue.code,
+                            plan_id: Some(plan_id.clone()),
+                            task_id: task.task_id.clone(),
+                            message: format!(
+                                "task '{}' has invalid acceptance_contract: {}",
+                                task.label(),
+                                issue.message
+                            ),
+                        });
+                    }
+                }
+                Err(error) => diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    rule_id: "PLAN_012".to_string(),
+                    plan_id: Some(plan_id.clone()),
+                    task_id: task.task_id.clone(),
+                    message: format!(
+                        "task '{}' has malformed acceptance_contract: {error}",
+                        task.label()
+                    ),
+                }),
+            }
+        }
+
+        if is_architecture_queue {
+            validate_architecture_queue_task(&mut diagnostics, &plan_id, task);
         }
     }
 
@@ -479,6 +529,7 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
         model: table.and_then(|table| {
             string_field(table.get("model")).or_else(|| string_field(table.get("model_hint")))
         }),
+        has_depends_on_field: table.is_some_and(|table| table.contains_key("depends_on")),
         depends_on: table
             .and_then(|table| table.get("depends_on"))
             .and_then(Value::as_array)
@@ -497,11 +548,166 @@ fn snapshot_task(ordinal: usize, task: &Value) -> TaskSnapshot {
                 .and_then(Value::as_integer)
                 .and_then(|value| u32::try_from(value).ok())
                 .is_none(),
+        has_files: table
+            .and_then(|table| table.get("files"))
+            .or_else(|| table.and_then(|table| table.get("write_files")))
+            .and_then(Value::as_array)
+            .is_some_and(|files| files.iter().any(|file| string_field(Some(file)).is_some())),
+        has_context_read_files: table
+            .and_then(|table| table.get("context"))
+            .and_then(Value::as_table)
+            .and_then(|context| context.get("read_files"))
+            .and_then(Value::as_array)
+            .is_some_and(|files| {
+                files.iter().any(|file| {
+                    file.as_table()
+                        .and_then(|table| table.get("path"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|path| !path.trim().is_empty())
+                })
+            }),
         has_verify_steps: table
             .and_then(|table| table.get("verify"))
             .and_then(Value::as_array)
             .is_some_and(|steps| !steps.is_empty()),
+        acceptance_contract: table
+            .and_then(|table| table.get("acceptance_contract"))
+            .cloned(),
+        has_required_parity_ledger_rows: table.is_some_and(has_required_parity_ledger_rows),
+        deferral_missing_fields: table
+            .and_then(|table| table.get("deferral"))
+            .and_then(Value::as_table)
+            .map(deferral_missing_fields)
+            .unwrap_or_default(),
     }
+}
+
+fn is_architecture_queue_meta(meta: &toml::map::Map<String, Value>) -> bool {
+    ["queue_kind", "queue_schema", "kind"].iter().any(|field| {
+        meta.get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim() == "architecture_implementation")
+    })
+}
+
+fn validate_architecture_queue_task(
+    diagnostics: &mut Vec<Diagnostic>,
+    plan_id: &str,
+    task: &TaskSnapshot,
+) {
+    let requirements = [
+        (
+            !task.has_depends_on_field,
+            "PLAN_020",
+            "declares no depends_on array for dependency metadata",
+        ),
+        (
+            !task.has_context_read_files,
+            "PLAN_021",
+            "declares no context.read_files source docs",
+        ),
+        (
+            !task.has_files,
+            "PLAN_022",
+            "declares no files list for likely crates/artifacts",
+        ),
+        (
+            !task.has_verify_steps,
+            "PLAN_023",
+            "declares no executable verify steps",
+        ),
+        (
+            task.acceptance_contract.is_none(),
+            "PLAN_024",
+            "declares no typed acceptance_contract",
+        ),
+        (
+            !task.has_required_parity_ledger_rows,
+            "PLAN_025",
+            "declares no required parity ledger rows",
+        ),
+    ];
+
+    for (missing, rule_id, message) in requirements {
+        if missing {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                rule_id: rule_id.to_string(),
+                plan_id: Some(plan_id.to_string()),
+                task_id: task.task_id.clone(),
+                message: format!("architecture queue task '{}' {message}", task.label()),
+            });
+        }
+    }
+
+    for field in &task.deferral_missing_fields {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            rule_id: "PLAN_026".to_string(),
+            plan_id: Some(plan_id.to_string()),
+            task_id: task.task_id.clone(),
+            message: format!(
+                "architecture queue task '{}' has incomplete deferral metadata: missing {field}",
+                task.label()
+            ),
+        });
+    }
+}
+
+fn has_required_parity_ledger_rows(table: &toml::map::Map<String, Value>) -> bool {
+    table
+        .get("acceptance_contract")
+        .and_then(Value::as_table)
+        .and_then(|contract| contract.get("parity_ledger"))
+        .and_then(Value::as_table)
+        .filter(|parity| {
+            parity
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        })
+        .and_then(|parity| parity.get("rows"))
+        .and_then(Value::as_array)
+        .is_some_and(|rows| !rows.is_empty())
+}
+
+fn deferral_missing_fields(table: &toml::map::Map<String, Value>) -> Vec<&'static str> {
+    let string_array_present = |field: &str| {
+        table
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|value| !value.trim().is_empty()))
+            })
+    };
+
+    let mut missing = Vec::new();
+    if !table
+        .get("rationale")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        missing.push("deferral.rationale");
+    }
+    for field in [
+        "prerequisite_runtime_policy_gates",
+        "acceptance_gates",
+        "risk_notes",
+        "parity_requirements",
+    ] {
+        if !string_array_present(field) {
+            missing.push(match field {
+                "prerequisite_runtime_policy_gates" => "deferral.prerequisite_runtime_policy_gates",
+                "acceptance_gates" => "deferral.acceptance_gates",
+                "risk_notes" => "deferral.risk_notes",
+                "parity_requirements" => "deferral.parity_requirements",
+                _ => unreachable!("checked field list is exhaustive"),
+            });
+        }
+    }
+    missing
 }
 
 fn string_field(value: Option<&Value>) -> Option<String> {

@@ -390,12 +390,17 @@ timeout_ms = 5000
 "#;
     fs::write(workdir.join("roko.toml"), config).unwrap();
 
+    // Isolate from the user's global config and API keys so the test
+    // uses the subprocess path (`sh`) instead of a real provider.
     Command::cargo_bin("roko")
         .unwrap()
         .arg("run")
         .arg("whatever")
         .arg("--workdir")
         .arg(workdir)
+        .env("HOME", workdir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
         .success();
 

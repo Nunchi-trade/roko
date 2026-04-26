@@ -93,7 +93,7 @@ where
 
 /// A single wave: every task in `tasks` has no open dependencies and
 /// can run in parallel with its peers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionWave {
     /// Wave ordinal (0 is first).
     pub index: usize,
@@ -133,6 +133,118 @@ pub struct DagStats {
     pub waves: usize,
     /// Longest path by `estimated_minutes` (dynamic-programming walk).
     pub critical_path_minutes: u32,
+}
+
+/// Current schema version for [`DagExecutionSnapshot`].
+pub const DAG_EXECUTION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+/// Runtime status for one task in a DAG execution snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DagTaskExecutionStatus {
+    /// Waiting for dependencies to pass.
+    Pending,
+    /// Dependencies have passed and the task can be dispatched.
+    Ready,
+    /// An agent is currently working on this task.
+    Running,
+    /// Gate or verify checks are running for this task.
+    Gating,
+    /// Task completed successfully.
+    Passed,
+    /// Task is waiting for retry backoff to expire.
+    Retrying {
+        /// Retry attempt number.
+        attempt: u32,
+        /// Earliest Unix millisecond timestamp for retry.
+        backoff_until_ms: u64,
+    },
+    /// Task exhausted its retry budget.
+    Exhausted {
+        /// Number of attempts made.
+        attempts: u32,
+        /// Last error observed.
+        last_error: String,
+    },
+    /// Task was intentionally skipped.
+    Skipped,
+}
+
+impl DagTaskExecutionStatus {
+    /// Whether this status is terminal.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Passed | Self::Exhausted { .. } | Self::Skipped)
+    }
+
+    /// Whether this status satisfies dependencies for downstream tasks.
+    #[must_use]
+    pub const fn satisfies_dependency(&self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    /// Whether this status represents work that can be dispatched now.
+    #[must_use]
+    pub const fn is_dispatchable(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Serializable metadata for one DAG task at a point in time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagTaskExecutionMetadata {
+    /// Global task id.
+    pub task_id: GlobalTaskId,
+    /// Current execution status.
+    pub status: DagTaskExecutionStatus,
+    /// Direct dependencies of this task.
+    pub dependencies: Vec<GlobalTaskId>,
+    /// Tasks that depend on this task.
+    pub dependents: Vec<GlobalTaskId>,
+    /// Files declared by the task.
+    pub files: Vec<String>,
+    /// Estimated minutes, if declared.
+    pub estimated_minutes: Option<u32>,
+    /// Unix millisecond timestamp when this task metadata last changed.
+    pub updated_at_ms: u64,
+}
+
+/// Serializable runtime metadata for a unified DAG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DagExecutionSnapshot {
+    /// Snapshot schema version.
+    pub schema_version: u32,
+    /// Task metadata keyed by `plan:task`.
+    pub tasks: BTreeMap<String, DagTaskExecutionMetadata>,
+    /// Deterministic topological order.
+    pub topological_order: Vec<GlobalTaskId>,
+    /// Parallel execution waves.
+    pub waves: Vec<ExecutionWave>,
+    /// Unix millisecond timestamp when the snapshot was produced.
+    pub timestamp_ms: u64,
+}
+
+impl DagExecutionSnapshot {
+    /// Return tasks that are dispatchable now and whose dependencies passed.
+    #[must_use]
+    pub fn ready_tasks(&self) -> Vec<GlobalTaskId> {
+        self.topological_order
+            .iter()
+            .filter_map(|id| {
+                let key = id.to_string();
+                let metadata = self.tasks.get(&key)?;
+                if !metadata.status.is_dispatchable() {
+                    return None;
+                }
+                let deps_passed = metadata.dependencies.iter().all(|dep| {
+                    self.tasks
+                        .get(&dep.to_string())
+                        .is_some_and(|dep_meta| dep_meta.status.satisfies_dependency())
+                });
+                deps_passed.then(|| id.clone())
+            })
+            .collect()
+    }
 }
 
 /// Errors returned by DAG construction / traversal.
@@ -521,6 +633,57 @@ impl UnifiedTaskDag {
             waves: wave_count,
             critical_path_minutes: critical,
         }
+    }
+
+    /// Create a serializable execution metadata snapshot for this DAG.
+    ///
+    /// Callers may supply status overrides keyed by [`GlobalTaskId`]. Tasks
+    /// without an override default to [`DagTaskExecutionStatus::Ready`] when
+    /// they have no dependencies and [`DagTaskExecutionStatus::Pending`]
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DagError::Cycle`] if the DAG cannot be topologically sorted.
+    pub fn execution_snapshot(
+        &self,
+        statuses: &BTreeMap<GlobalTaskId, DagTaskExecutionStatus>,
+        timestamp_ms: u64,
+    ) -> Result<DagExecutionSnapshot, DagError> {
+        let topological_order = self.topological_sort()?;
+        let waves = self.waves()?;
+        let mut tasks = BTreeMap::new();
+
+        for id in &self.nodes {
+            let dependencies: Vec<_> = self.deps_of(id).iter().cloned().collect();
+            let dependents: Vec<_> = self.dependents_of(id).iter().cloned().collect();
+            let task = self.tasks.get(id);
+            let status = statuses.get(id).cloned().unwrap_or_else(|| {
+                if dependencies.is_empty() {
+                    DagTaskExecutionStatus::Ready
+                } else {
+                    DagTaskExecutionStatus::Pending
+                }
+            });
+            let metadata = DagTaskExecutionMetadata {
+                task_id: id.clone(),
+                status,
+                dependencies,
+                dependents,
+                files: task.map_or_else(Vec::new, |task| task.files.clone()),
+                estimated_minutes: task.and_then(|task| task.estimated_minutes),
+                updated_at_ms: timestamp_ms,
+            };
+            tasks.insert(id.to_string(), metadata);
+        }
+
+        Ok(DagExecutionSnapshot {
+            schema_version: DAG_EXECUTION_SNAPSHOT_SCHEMA_VERSION,
+            tasks,
+            topological_order,
+            waves,
+            timestamp_ms,
+        })
     }
 
     /// Remove tasks not required to produce the given target task IDs.

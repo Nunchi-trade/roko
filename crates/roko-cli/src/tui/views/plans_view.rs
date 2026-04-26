@@ -1032,7 +1032,7 @@ fn render_plan_gates(
     let block = Block::default()
         .borders(Borders::TOP)
         .title(Span::styled(
-            " Gate Results ",
+            " Verify Results ",
             Style::default().fg(theme.muted),
         ))
         .border_style(Style::default().fg(Color::Rgb(40, 35, 42)));

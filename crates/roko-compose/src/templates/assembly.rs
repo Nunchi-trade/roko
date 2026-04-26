@@ -9,9 +9,7 @@
 //! - U-shaped placement ordering (Start → Middle → End)
 //! - Metadata tracking (sections kept/dropped, token count, strategy)
 //!
-//! Ports Mori's prompt assembly logic from `prompts.rs` (the per-role
-//! `*_prompt()` functions that concatenate sections under budget) into a
-//! reusable, I/O-free assembler.
+//! Roko-owned reusable prompt assembler for role sections.
 
 use super::RolePromptTemplate;
 use super::common::{CONTEXT_LAYOUT_STANZA, MCP_TOOLS_STANZA};
@@ -130,6 +128,7 @@ impl PromptAssembler {
         }
 
         let total_sections = sections.len();
+        let all_sections = sections.clone();
 
         // Enforce per-section hard caps, then split critical vs optional.
         let (critical, mut optional): (Vec<_>, Vec<_>) = sections
@@ -159,6 +158,25 @@ impl PromptAssembler {
 
         let sections_kept = kept.len();
         let sections_dropped = total_sections - sections_kept;
+        let mut kept_ids = kept
+            .iter()
+            .map(PromptSection::stable_section_id)
+            .collect::<Vec<_>>();
+        let mut section_metadata = Vec::with_capacity(total_sections);
+        for section in &all_sections {
+            let capped = section.clone().enforce_hard_cap();
+            let section_id = capped.stable_section_id();
+            if let Some(index) = kept_ids.iter().position(|id| id == &section_id) {
+                kept_ids.remove(index);
+                section_metadata.push(capped.audit_row(
+                    true,
+                    capped.estimated_tokens(),
+                    "included_by_prompt_assembler",
+                ));
+            } else {
+                section_metadata.push(capped.audit_row(false, 0, "dropped_by_token_budget"));
+            }
+        }
 
         // Order by placement (U-shape): Start → Middle → End.
         kept.sort_by_key(|s| placement_order(s.placement));
@@ -169,6 +187,7 @@ impl PromptAssembler {
         PromptBuild::new(prompt)
             .with_strategy(strategy)
             .with_section_counts(sections_kept, sections_dropped)
+            .with_section_metadata(section_metadata)
     }
 
     /// Convenience: call `template.sections(input)` then `assemble()`.
@@ -296,6 +315,19 @@ mod tests {
         // role_identity (Critical) + important (Critical) kept; filler dropped
         assert_eq!(build.sections_kept, 2);
         assert_eq!(build.sections_dropped, 1);
+        let filler = build
+            .section_metadata
+            .iter()
+            .find(|section| section.section_name == "filler")
+            .expect("filler section metadata should be recorded");
+        assert!(!filler.included);
+        assert_eq!(filler.tokens_used, 0);
+        assert_eq!(filler.action_id, "prompt_section:filler");
+        assert!(
+            !serde_json::to_string(&build.section_metadata)
+                .expect("metadata serializes")
+                .contains(&"x".repeat(100))
+        );
     }
 
     #[test]

@@ -769,7 +769,7 @@ pub fn full_inventory() -> Vec<SurfaceEntry> {
         "AgentGateResults",
         SurfaceStatus::Wired,
         "StateHub gate_results_page",
-        "Gate results for the selected agent",
+        "Verify results for the selected agent",
     ));
     v.push(SurfaceEntry::subview(
         "AgentTokenBurn",
@@ -1122,7 +1122,7 @@ pub fn tui_parity_inventory() -> Vec<TuiParityDetail> {
         cli_equivalent: None,
         data_source: DataSourceKind::PushBased,
         parity_status: TuiParityStatus::Equivalent,
-        notes: "Gate results from TuiState.gate_result_summaries (push).".into(),
+        notes: "Verify results from TuiState.gate_result_summaries (push).".into(),
     });
     v.push(TuiParityDetail {
         tab: "F3 Agents".into(),

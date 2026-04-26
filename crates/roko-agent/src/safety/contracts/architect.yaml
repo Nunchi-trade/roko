@@ -1,0 +1,14 @@
+{
+  "role": "architect",
+  "invariants": [
+    { "MaxTokensPerTurn": 16000 }
+  ],
+  "governance": [
+    { "MaxToolCallsPerTurn": 6 },
+    { "ForbiddenTools": ["edit_file", "write_file", "multi_edit", "apply_patch", "bash"] },
+    { "RequireToolBeforeEdit": "read_file" }
+  ],
+  "recovery": [
+    { "trigger": "contract_violation", "action": "Alert" }
+  ]
+}

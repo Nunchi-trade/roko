@@ -575,6 +575,7 @@ mod tests {
             Ok(RunResult {
                 success: true,
                 output_text: None,
+                usage: None,
             })
         }
 

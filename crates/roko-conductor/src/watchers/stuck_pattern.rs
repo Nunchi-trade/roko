@@ -4,7 +4,7 @@
 //! [`MAX_IDENTICAL_ACTIONS`] consecutive times, the agent is stuck in a
 //! loop. This watcher fires a warning to trigger restart.
 
-use roko_core::{Body, Context, Engram, Kind, Policy};
+use roko_core::{Body, Context, Engram, Kind, React};
 
 /// Maximum consecutive identical actions before firing.
 pub const MAX_IDENTICAL_ACTIONS: usize = 4;
@@ -71,7 +71,7 @@ fn body_fingerprint(signal: &Engram) -> Option<String> {
     }
 }
 
-impl Policy for StuckPatternWatcher {
+impl React for StuckPatternWatcher {
     fn decide(&self, stream: &[Engram], _ctx: &Context) -> Vec<Engram> {
         // Walk backwards through action signals, counting consecutive identical ones.
         let mut consecutive = 0usize;

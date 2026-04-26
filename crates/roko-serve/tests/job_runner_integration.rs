@@ -38,6 +38,7 @@ impl CliRuntime for TestRuntime {
                 "test runtime output\n[PASS] compile: cargo check passed\n[PASS] tests: focused tests passed"
                     .to_string(),
             ),
+            usage: None,
         })
     }
 

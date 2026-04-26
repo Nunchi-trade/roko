@@ -1,23 +1,23 @@
 # Knowledge Futures Market
 
-> P3 deferred: a prediction market for committed knowledge production. Agents stake KORAI on their commitment to produce specific knowledge within a deadline. If they deliver validated knowledge, they earn the stake back plus a reward. If they fail, the stake is redistributed to agents who deliver the knowledge instead. Incentivizes proactive knowledge creation rather than reactive sharing.
+> P3 deferred: a prediction market for committed knowledge production. Agents stake NUNCHI on their commitment to produce specific knowledge within a deadline. If they deliver validated knowledge, they earn the stake back plus a reward. If they fail, the stake is redistributed to agents who deliver the knowledge instead. Incentivizes proactive knowledge creation rather than reactive sharing.
 
 
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [02-korai-token-economics.md](./02-korai-token-economics.md), [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md)
+**Prerequisites**: [02-nunchi-token-economics.md](./02-nunchi-token-economics.md), [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md)
 **Key sources**: `refactoring-prd/09-innovations.md` §XVI, `roko/tmp/implementation-plans/12b-chain-layer.md`
 
 ---
 
 ## Abstract
 
-The Knowledge Futures Market is a mechanism for incentivizing proactive knowledge creation. In the standard Korai knowledge flow, agents share knowledge after they have already produced it — reactive sharing. The futures market inverts this: agents commit to producing specific knowledge before it exists, staking KORAI as collateral on their commitment. If they deliver validated knowledge before the deadline, they earn their stake back plus a reward. If they fail, the stake is redistributed to agents who step in to produce the knowledge instead.
+The Knowledge Futures Market is a mechanism for incentivizing proactive knowledge creation. In the standard Nunchi knowledge flow, agents share knowledge after they have already produced it — reactive sharing. The futures market inverts this: agents commit to producing specific knowledge before it exists, staking NUNCHI as collateral on their commitment. If they deliver validated knowledge before the deadline, they earn their stake back plus a reward. If they fail, the stake is redistributed to agents who step in to produce the knowledge instead.
 
 This mechanism addresses a coordination failure in shared knowledge systems: agents that could produce valuable knowledge may not bother if the effort exceeds the expected reward from post-hoc knowledge sharing. The futures market creates a direct economic incentive for knowledge production by allowing agents (and the collective) to signal demand for specific knowledge and put capital behind that demand.
 
-**Current status**: P3 deferred. The knowledge futures market depends on mature implementations of the KORAI token (Tier 6), the reputation system (Tier 6), and the knowledge validation pipeline. It is specified here for completeness and to inform the design of prerequisite components.
+**Current status**: P3 deferred. The knowledge futures market depends on mature implementations of the NUNCHI token (Tier 6), the reputation system (Tier 6), and the knowledge validation pipeline. It is specified here for completeness and to inform the design of prerequisite components.
 
 ---
 
@@ -36,9 +36,9 @@ pub struct KnowledgeFuture {
     pub specification: KnowledgeSpec,
 
     /// Agent committing to produce the knowledge.
-    pub producer_passport_id: u256,
+    pub producer_agent_id: u256,
 
-    /// KORAI staked as collateral.
+    /// NUNCHI staked as collateral.
     pub stake: U256,
 
     /// Block number deadline for delivery.
@@ -87,12 +87,12 @@ pub enum FutureState {
 ```
 1. DEMAND SIGNAL
    - An agent (or group) signals demand for specific knowledge
-   - Deposits KORAI into a demand pool for the topic
+   - Deposits NUNCHI into a demand pool for the topic
    - Example: "We need a comprehensive analysis of Uniswap V4 hook security patterns"
 
 2. COMMITMENT
    - A producing agent commits to deliver the knowledge
-   - Stakes KORAI as collateral (proportional to the demand pool value)
+   - Stakes NUNCHI as collateral (proportional to the demand pool value)
    - Sets a deadline (must be within 30 days of commitment)
 
 3. PRODUCTION
@@ -100,7 +100,7 @@ pub enum FutureState {
    - May use the full cognitive stack (research agent, HDC encoding, etc.)
 
 4. SUBMISSION
-   - Agent posts the knowledge entry to the Korai chain
+   - Agent posts the knowledge entry to the Nunchi chain
    - Links it to the future via future_id
    - Knowledge entry goes through standard validation (gates, peer review)
 
@@ -153,14 +153,14 @@ Demand for specific knowledge can come from:
 
 ### Demand Pool
 
-KORAI deposited as demand aggregates into a pool per topic:
+NUNCHI deposited as demand aggregates into a pool per topic:
 
 ```rust
 pub struct DemandPool {
     /// Topic specification.
     pub spec: KnowledgeSpec,
 
-    /// Total KORAI deposited as demand.
+    /// Total NUNCHI deposited as demand.
     pub total_demand: U256,
 
     /// Individual demand deposits.
@@ -174,7 +174,7 @@ pub struct DemandPool {
 }
 
 pub struct DemandDeposit {
-    pub depositor_passport_id: u256,
+    pub depositor_agent_id: u256,
     pub amount: U256,
     pub deposited_at_block: u64,
 }
@@ -188,7 +188,7 @@ The reward for fulfilling a knowledge future increases with demand:
 reward = base_reward + demand_multiplier × total_demand
 
 where:
-  base_reward = 10 KORAI (minimum reward for any knowledge future)
+  base_reward = 10 NUNCHI (minimum reward for any knowledge future)
   demand_multiplier = 0.5 (50% of demand pool goes to producer)
   remaining 50% goes to validators and the protocol
 ```
@@ -224,7 +224,7 @@ Both mechanisms are necessary. Standard sharing captures opportunistic knowledge
 ## Current Status and Gaps
 
 **Status**: P3 deferred. The knowledge futures market is entirely unbuilt and depends on:
-- Mature KORAI token contract (Tier 6)
+- Mature NUNCHI token contract (Tier 6)
 - Working reputation system (Tier 6)
 - Knowledge validation pipeline (Tier 6)
 - HDC similarity search for acceptance criteria (Tier 6)
@@ -235,13 +235,13 @@ Both mechanisms are necessary. Standard sharing captures opportunistic knowledge
 - Validation integration for futures submissions
 - Market-making function
 - Early withdrawal penalty logic
-- Integration with gossip topic for demand signaling
+- Integration with EventBus for demand signaling
 
 ---
 
 ## Cross-References
 
-- See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in staking and rewards
+- See [02-nunchi-token-economics.md](./02-nunchi-token-economics.md) for the NUNCHI token used in staking and rewards
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for reputation effects of futures fulfillment
 - See [03-hdc-on-chain-precompile.md](./03-hdc-on-chain-precompile.md) for HDC similarity used in acceptance criteria validation
 - See [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md) for the clearing mechanism that may integrate with futures settlement

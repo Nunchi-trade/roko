@@ -43,6 +43,7 @@ pub mod post_merge;
 pub mod progress;
 pub mod repair;
 pub mod replan;
+pub mod runtime_snapshot;
 pub mod safety;
 pub mod worktree;
 
@@ -57,19 +58,26 @@ pub use coordination::{
     validate_custom_kind,
 };
 pub use dag::{
-    CpmAnalysis, DagConfig, DagError, DagMutation, DagMutationError, DagPartition, DagStats,
-    Durability, ExecutionWave, FusionConfig, IncrementalDag, UnifiedTaskDag, detect_cycle_nodes,
+    CpmAnalysis, DAG_EXECUTION_SNAPSHOT_SCHEMA_VERSION, DagConfig, DagError, DagExecutionSnapshot,
+    DagMutation, DagMutationError, DagPartition, DagStats, DagTaskExecutionMetadata,
+    DagTaskExecutionStatus, Durability, ExecutionWave, FusionConfig, IncrementalDag,
+    UnifiedTaskDag, detect_cycle_nodes,
 };
 pub use event_log::{EventEntry, EventKind, EventLog, EventLogSnapshot, IntegrityError};
 pub use executor::{
     CURRENT_SCHEMA_VERSION, DeltaSnapshot, EffectivePriorityTracker, ExecutorAction,
     ExecutorConfig, ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
     PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanResourceInfo,
-    PlanState, PlanStateMachine, PriorityCeiling, ResourceBudget, ResourceId, ResourceUsage,
-    SnapshotConfig, SnapshotIntegrityError, SnapshotVerifier, SpeculativeExecution,
-    TransitionError, current_schema_version,
+    PlanResumeDirective, PlanState, PlanStateMachine, PriorityCeiling, RecoveredPlanResume,
+    RecoveredState, RecoveryEngine, RecoveryError, RecoveryResumePlan, RecoveryWarning,
+    ResourceBudget, ResourceId, ResourceUsage, SnapshotConfig, SnapshotIntegrityError,
+    SnapshotVerifier, SpeculativeExecution, TransitionError, WarningSeverity,
+    current_schema_version,
 };
-pub use merge_queue::{MergeQueue, MergeRequest};
+pub use merge_queue::{
+    DEFAULT_MAX_MERGE_RETRIES, MergeConflict, MergeQueue, MergeQueueEntrySnapshot,
+    MergeQueueMetrics, MergeQueueSnapshot, MergeRequest, MergeStatus,
+};
 pub use mesh_relay::{MeshRelay, PeerState, SeqNo, SequencedPheromone};
 pub use plan_discovery::{
     DiscoveryError, PlanFrontmatter, PlanInfo, ValidationError, discover_plans, parse_frontmatter,
@@ -84,4 +92,14 @@ pub use repair::{
     FailureContext, RepairAction, RepairConfig, RepairDecision, RepairEngine, RepairLevel,
     StabilityMetric,
 };
-pub use replan::{ReplanResult, ReplanStrategy};
+pub use replan::{
+    FailureDisposition, PlanRevisionEvidence, PlanRevisionRequest, ReplanResult, ReplanStrategy,
+};
+pub use runtime_snapshot::{
+    ORCHESTRATOR_SNAPSHOT_SCHEMA_VERSION, OrchestratorSnapshot,
+    orchestrator_snapshot_schema_version,
+};
+pub use worktree::{
+    WorktreeConfig, WorktreeError, WorktreeHandle, WorktreeHealth, WorktreeIsolationStatus,
+    WorktreeManager, WorktreeSnapshot, format_branch_name,
+};

@@ -26,13 +26,13 @@
 //!
 //! # Acceptance
 //!
-//! - Gate **passes** when `verified / total >= min_confidence`
-//! - Gate **passes** when the output contains no verifiable claims (0/0 = 1.0)
-//! - Gate **fails** when fewer claims than the threshold are web-verifiable,
+//! - Verify **passes** when `verified / total >= min_confidence`
+//! - Verify **passes** when the output contains no verifiable claims (0/0 = 1.0)
+//! - Verify **fails** when fewer claims than the threshold are web-verifiable,
 //!   with a reason of the form `"Fact check: 2/4 claims verified (50%)"`
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -59,7 +59,7 @@ pub trait SearchOracle: Send + Sync {
     async fn search(&self, query: &str) -> Result<Vec<SearchHit>, String>;
 }
 
-// ─── Gate ─────────────────────────────────────────────────────────────────
+// ─── Verify ─────────────────────────────────────────────────────────────────
 
 /// Perplexity-backed fact-checking gate.
 ///
@@ -155,8 +155,20 @@ impl FactCheckGate {
     }
 }
 
+impl roko_core::Cell for FactCheckGate {
+    fn cell_id(&self) -> &str {
+        "fact-check-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "FactCheckGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for FactCheckGate {
+impl Verify for FactCheckGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let elapsed_ms = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);

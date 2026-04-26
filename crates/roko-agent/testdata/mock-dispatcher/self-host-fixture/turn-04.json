@@ -1,5 +1,5 @@
 {
-  "reply": "Implemented the single smoke-test task.",
+  "reply": "{\"outcome\":\"passed\",\"task_id\":\"T1\",\"summary\":\"Implemented the single smoke-test task and left the sample Rust project ready for cargo check.\",\"evidence_refs\":[\"Cargo.toml\",\"src/main.rs\"]}",
   "name": "self-host-fixture-turn-04",
   "usage": {
     "input_tokens": 11,

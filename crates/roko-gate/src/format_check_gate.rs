@@ -5,7 +5,7 @@
 
 use crate::payload::GatePayload;
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verify, Verdict};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -25,7 +25,13 @@ impl FormatCheckGate {
 }
 
 #[async_trait]
-impl Gate for FormatCheckGate {
+impl roko_core::Cell for FormatCheckGate {
+    fn cell_id(&self) -> &str { "format-check-gate" }
+    fn cell_name(&self) -> &str { "FormatCheckGate" }
+    fn protocols(&self) -> &[&str] { &["Verify"] }
+}
+
+impl Verify for FormatCheckGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let payload: Option<GatePayload> = signal.body.as_json().ok();

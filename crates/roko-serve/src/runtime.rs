@@ -9,6 +9,15 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Token usage reported by an LLM provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunResultUsage {
+    /// Number of input (prompt) tokens consumed.
+    pub input_tokens: u64,
+    /// Number of output (completion) tokens generated.
+    pub output_tokens: u64,
+}
+
 /// Result of a single `run_once()` invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
@@ -17,6 +26,10 @@ pub struct RunResult {
     /// Final text output produced by the run, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_text: Option<String>,
+    /// Real token usage from the provider, when available.
+    /// Gateway falls back to a character-based heuristic when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RunResultUsage>,
 }
 
 /// Result of generating an implementation plan from a PRD.
@@ -33,7 +46,7 @@ pub struct PlanGenerationResult {
 /// Structured gate result collected while executing a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeGateResult {
-    /// Gate name.
+    /// Verify name.
     pub gate: String,
     /// Whether the gate passed.
     pub passed: bool,
@@ -104,6 +117,7 @@ impl CliRuntime for NoOpRuntime {
         Ok(RunResult {
             success: true,
             output_text: None,
+            usage: None,
         })
     }
 

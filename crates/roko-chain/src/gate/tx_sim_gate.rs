@@ -1,4 +1,4 @@
-//! [`TxSimGate`] — §33.4.11: a [`Gate`] that runs a planned tx through a
+//! [`TxSimGate`] — §33.4.11: a [`Verify`] that runs a planned tx through a
 //! simulator before the agent signs it.
 //!
 //! `TxSimGate` is deliberately decoupled from any particular simulator. Users
@@ -18,7 +18,7 @@
 //! gates can verify.
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, traits::Gate, verdict::Verdict};
+use roko_core::{Context, Engram, traits::Verify, verdict::Verdict};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -95,7 +95,7 @@ impl Default for TxSimGateConfig {
     }
 }
 
-/// A [`Gate`] that simulates the planned tx and fails if the simulator reverts
+/// A [`Verify`] that simulates the planned tx and fails if the simulator reverts
 /// or the tx would consume more than the allowed portion of its gas budget.
 #[derive(Clone)]
 pub struct TxSimGate {
@@ -144,7 +144,7 @@ impl TxSimGate {
 }
 
 #[async_trait]
-impl Gate for TxSimGate {
+impl Verify for TxSimGate {
     async fn verify(&self, input: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
 

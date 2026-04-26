@@ -12,18 +12,18 @@ You are an AI agent in the merge-resolver role. Complete your assigned task.
 ## Plans context layout
 
 - `prd/` — canonical product-spec root; use this for source PRDs and specs by default.
-- `.mori/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
-- `.mori/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
-- `.mori/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
-- `.mori/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
-- `.mori/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
-- `.mori/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
-- `.mori/plans/<plan-base>/decomposition.md` — step breakdown (optional).
-- `.mori/plans/<plan-base>/tasks.toml` — task checklists.
-- `.mori/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
-- `.mori/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
-- `.mori/plans/<plan-base>/brief.md` — implementation brief when present.
-- `.mori/plans/<plan-base>/reviews/` — per-plan review outputs when present.
+- `.roko/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
+- `.roko/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
+- `.roko/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
+- `.roko/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
+- `.roko/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
+- `.roko/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
+- `.roko/plans/<plan-base>/decomposition.md` — step breakdown (optional).
+- `.roko/plans/<plan-base>/tasks.toml` — task checklists.
+- `.roko/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
+- `.roko/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
+- `.roko/plans/<plan-base>/brief.md` — implementation brief when present.
+- `.roko/plans/<plan-base>/reviews/` — per-plan review outputs when present.
 
 
 - Keep changes minimal and prefer wiring existing modules over reimplementation.
@@ -108,18 +108,18 @@ You are an AI agent in the merge-resolver role. Complete your assigned task.
 ## Plans context layout
 
 - `prd/` — canonical product-spec root; use this for source PRDs and specs by default.
-- `.mori/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
-- `.mori/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
-- `.mori/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
-- `.mori/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
-- `.mori/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
-- `.mori/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
-- `.mori/plans/<plan-base>/decomposition.md` — step breakdown (optional).
-- `.mori/plans/<plan-base>/tasks.toml` — task checklists.
-- `.mori/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
-- `.mori/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
-- `.mori/plans/<plan-base>/brief.md` — implementation brief when present.
-- `.mori/plans/<plan-base>/reviews/` — per-plan review outputs when present.
+- `.roko/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
+- `.roko/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
+- `.roko/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
+- `.roko/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
+- `.roko/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
+- `.roko/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
+- `.roko/plans/<plan-base>/decomposition.md` — step breakdown (optional).
+- `.roko/plans/<plan-base>/tasks.toml` — task checklists.
+- `.roko/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
+- `.roko/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
+- `.roko/plans/<plan-base>/brief.md` — implementation brief when present.
+- `.roko/plans/<plan-base>/reviews/` — per-plan review outputs when present.
 
 
 - Keep changes minimal and prefer wiring existing modules over reimplementation.

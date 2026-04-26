@@ -582,6 +582,7 @@ async fn create_job(
             DashboardEvent::TaskStarted {
                 plan_id: plan_id.clone(),
                 task_id: job.title.clone(),
+                title: String::new(),
                 phase: "open".into(),
             },
             DashboardEvent::EventLogEntry {
@@ -862,6 +863,7 @@ fn publish_job_dashboard_events(state: &AppState, job: &JobRecord, prev_status: 
             events.push(DashboardEvent::TaskStarted {
                 plan_id: plan_id.clone(),
                 task_id: task_id.clone(),
+                title: String::new(),
                 phase: "assigned".into(),
             });
             if !agent_id.is_empty() {

@@ -192,6 +192,7 @@ fn convert_agent(m: &MoriConfig) -> AgentConfig {
         tier_models: d.tier_models,
         fallback_model: m.fallback_model.clone().or(d.fallback_model),
         roles,
+        policy_manifests: Vec::new(),
         data_llm: None,
         mode: Default::default(),
         extensions: Vec::new(),
@@ -248,6 +249,7 @@ fn convert_conductor(m: &MoriConfig) -> ConductorConfig {
             scribe: m.scribe_enabled.unwrap_or(true),
             critic: m.critic_enabled.unwrap_or(true),
         },
+        watchers: d.watchers,
     }
 }
 

@@ -40,9 +40,13 @@ pub mod snapshot;
 pub mod state_machine;
 
 pub use action::ExecutorAction;
-pub use plan_state::{GateResult, PlanState};
+pub use plan_state::{GateResult, PlanResumeDirective, PlanState};
 pub use priority_ceiling::{
     EffectivePriorityTracker, PlanResourceInfo, PriorityCeiling, ResourceId,
+};
+pub use recovery::{
+    RecoveredPlanResume, RecoveredState, RecoveryEngine, RecoveryError, RecoveryResumePlan,
+    RecoveryWarning, WarningSeverity,
 };
 pub use reorder::{priority_reorder, reorder_queue};
 pub use resource_budget::{
@@ -274,6 +278,50 @@ impl ParallelExecutor {
             speculative_executions: snapshot.speculative_executions,
             audit_chain: None,
         }
+    }
+
+    /// Restore an executor from recovery output.
+    ///
+    /// This is useful when the caller only has a [`RecoveredState`] produced
+    /// by snapshot/event-log reconciliation rather than the original full
+    /// [`ExecutorSnapshot`]. Plan-level fields not present in recovery output
+    /// use [`PlanState`] defaults.
+    #[must_use]
+    pub fn from_recovered_state(config: ExecutorConfig, recovered: &RecoveredState) -> Self {
+        let mut executor = Self::new(config);
+        let mut queued = std::collections::BTreeSet::new();
+
+        for plan_id in &recovered.queue_order {
+            if let Some(info) = recovered.plan_states.get(plan_id) {
+                let mut state = PlanState::new(plan_id.clone());
+                state.current_phase = info.phase.clone();
+                state.iteration = info.iteration.max(1);
+                state.files_changed = info.files_changed.clone();
+                executor.plans.insert(plan_id.clone(), state);
+                executor.queue.push(plan_id.clone());
+                queued.insert(plan_id.clone());
+            }
+        }
+
+        let mut missing: Vec<_> = recovered
+            .plan_states
+            .keys()
+            .filter(|plan_id| !queued.contains(*plan_id))
+            .cloned()
+            .collect();
+        missing.sort();
+        for plan_id in missing {
+            if let Some(info) = recovered.plan_states.get(&plan_id) {
+                let mut state = PlanState::new(plan_id.clone());
+                state.current_phase = info.phase.clone();
+                state.iteration = info.iteration.max(1);
+                state.files_changed = info.files_changed.clone();
+                executor.plans.insert(plan_id.clone(), state);
+                executor.queue.push(plan_id);
+            }
+        }
+
+        executor
     }
 
     /// Add a plan to the executor queue.
@@ -527,6 +575,44 @@ impl ParallelExecutor {
         let previous_phase = state.current_phase.clone();
         state.restart_for_replan();
         Some(previous_phase)
+    }
+
+    /// Requeue a plan that is terminal but retryable on resume.
+    ///
+    /// Returns the resume directive that authorized the requeue. Non-retryable
+    /// terminal states and active plans are left unchanged.
+    pub fn requeue_retryable_terminal(&mut self, plan_id: &str) -> Option<PlanResumeDirective> {
+        let directive = self.plans.get_mut(plan_id)?.requeue_retryable_terminal()?;
+        if !self.queue.iter().any(|id| id == plan_id) {
+            self.queue.push(plan_id.to_string());
+        }
+        Some(directive)
+    }
+
+    /// Retryable terminal plans with their computed retry timestamps.
+    #[must_use]
+    pub fn retryable_terminal_plans(&self, now_ms: u64) -> Vec<RecoveredPlanResume> {
+        let mut out: Vec<_> = self
+            .plans
+            .values()
+            .filter_map(|state| {
+                let directive = state.resume_directive();
+                let retry_after_ms = directive
+                    .cooldown_secs()
+                    .map(|secs| now_ms.saturating_add(secs.saturating_mul(1_000)));
+                directive
+                    .is_retryable_terminal()
+                    .then(|| RecoveredPlanResume {
+                        plan_id: state.plan_id.clone(),
+                        phase: state.current_phase.clone(),
+                        iteration: state.iteration,
+                        directive,
+                        retry_after_ms,
+                    })
+            })
+            .collect();
+        out.sort_by(|a, b| a.plan_id.cmp(&b.plan_id));
+        out
     }
 
     /// Move a failed plan to the back of the queue.

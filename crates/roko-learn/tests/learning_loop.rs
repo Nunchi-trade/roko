@@ -121,7 +121,7 @@ fn auto_persist_on_update() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("auto.json");
 
-    // Router with persist_path — update() should auto-save.
+    // Route with persist_path — update() should auto-save.
     let router = LinUCBRouter::new(test_slugs()).with_persist_path(&path);
     let ctx = default_ctx();
     router.update(&ctx, "claude-sonnet-4-5", 0.8);

@@ -993,6 +993,7 @@ mod tests {
             Ok(RunResult {
                 success: self.success,
                 output_text: None,
+                usage: None,
             })
         }
 

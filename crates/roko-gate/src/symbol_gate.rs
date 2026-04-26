@@ -33,7 +33,7 @@
 //! ```
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -198,8 +198,20 @@ impl SymbolGate {
     }
 }
 
+impl roko_core::Cell for SymbolGate {
+    fn cell_id(&self) -> &str {
+        "symbol-gate"
+    }
+    fn cell_name(&self) -> &str {
+        "SymbolGate"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
 #[async_trait]
-impl Gate for SymbolGate {
+impl Verify for SymbolGate {
     async fn verify(&self, signal: &Engram, _ctx: &Context) -> Verdict {
         let started = Instant::now();
         let manifest: SymbolManifest = match signal.body.as_json() {

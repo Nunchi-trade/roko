@@ -50,7 +50,7 @@ impl TimestampedEvent {
 pub struct ForensicReplay {
     /// Task identifier being replayed.
     pub task_id: String,
-    /// Gate results from all episodes for this task.
+    /// Verify results from all episodes for this task.
     pub gate_results: Vec<GateVerdict>,
     /// Agent episodes (turns) for this task, in chronological order.
     pub agent_turns: Vec<Episode>,
@@ -102,7 +102,7 @@ impl ForensicReplay {
                 ),
             ));
 
-            // Gate check events.
+            // Verify check events.
             for verdict in &episode.gate_verdicts {
                 let event_kind = if verdict.passed {
                     "gate_pass"
@@ -114,7 +114,7 @@ impl ForensicReplay {
                         episode.completed_at,
                         event_kind,
                         format!(
-                            "Gate '{}': {}{}",
+                            "Verify '{}': {}{}",
                             verdict.gate,
                             if verdict.passed { "PASSED" } else { "FAILED" },
                             verdict

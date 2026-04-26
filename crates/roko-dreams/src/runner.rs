@@ -262,6 +262,46 @@ impl DreamTrigger {
     }
 }
 
+/// Policy for checking dream eligibility after a plan completes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCompletionTriggerPolicy {
+    /// Minimum new episodes since the latest dream report.
+    pub min_episodes: usize,
+    /// Minimum elapsed time since the latest dream report, in seconds.
+    pub min_elapsed_secs: u64,
+    /// Whether callers should run consolidation synchronously.
+    pub synchronous: bool,
+}
+
+impl Default for PlanCompletionTriggerPolicy {
+    fn default() -> Self {
+        Self {
+            min_episodes: 5,
+            min_elapsed_secs: 900,
+            synchronous: false,
+        }
+    }
+}
+
+impl PlanCompletionTriggerPolicy {
+    /// Return a dream trigger when the observed plan-completion state is
+    /// eligible for consolidation.
+    #[must_use]
+    pub fn should_trigger(
+        &self,
+        episodes_since_last_dream: usize,
+        seconds_since_last_dream: u64,
+    ) -> Option<DreamTrigger> {
+        if self.min_episodes > 0 && episodes_since_last_dream >= self.min_episodes {
+            return Some(DreamTrigger::EpisodeCount);
+        }
+        if seconds_since_last_dream >= self.min_elapsed_secs && episodes_since_last_dream >= 2 {
+            return Some(DreamTrigger::Idle);
+        }
+        None
+    }
+}
+
 /// Criteria for determining whether an engram is "dream-worthy" (DREAM-09).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BusPulseTriggerConfig {

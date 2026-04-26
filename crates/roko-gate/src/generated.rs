@@ -15,7 +15,7 @@ use std::process::Command;
 const GENERATED_SYMBOL_GATE: &str = "generated_symbol";
 const GENERATED_TAUTOLOGY_TEST: &str = "generated_tautology_check";
 
-/// Gate-generation errors reuse the crate's canonical core error type.
+/// Verify-generation errors reuse the crate's canonical core error type.
 pub type GateError = roko_core::RokoError;
 
 /// Produces verifier artifacts from acceptance criteria and task context.

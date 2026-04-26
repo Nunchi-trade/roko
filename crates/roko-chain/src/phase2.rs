@@ -667,14 +667,14 @@ pub struct VerifyChainGate {
 pub struct HeartbeatPolicy {
     /// Topic published by the policy.
     pub publish_topic: String,
-    /// Policy cadence in milliseconds.
+    /// React cadence in milliseconds.
     pub heartbeat_interval_ms: u64,
 }
 
 /// Deferred policy layer for the chain domain.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChainPolicy {
-    /// Policy name.
+    /// React name.
     pub name: String,
     /// Topics observed by the policy.
     pub subscriptions: Vec<String>,

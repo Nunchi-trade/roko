@@ -1,9 +1,9 @@
 //! Common prompt utilities shared across all role templates.
 //!
 //! Contains per-role token budgets, reusable stanza constants, and
-//! formatting helpers that multiple templates reference. Ports Mori's
-//! shared prompt infrastructure (budget tables, context layout, MCP
-//! tools, verdict format) into a typed, I/O-free module.
+//! formatting helpers that multiple templates reference. This module owns
+//! Roko's budget tables, context layout, MCP tools, and verdict format in a
+//! typed, I/O-free form.
 
 use roko_core::AgentRole;
 
@@ -11,8 +11,8 @@ use roko_core::AgentRole;
 
 /// Per-section character caps for a given agent role.
 ///
-/// Matches Mori's `PromptBudget` struct from `prompts.rs:46`. Each field
-/// is a maximum character count — the template truncates content to fit.
+/// Per-role prompt budget caps. Each field is a maximum character count — the
+/// template truncates content to fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PromptBudget {
     /// Plan markdown content cap.
@@ -37,9 +37,8 @@ pub struct PromptBudget {
 
 /// Return the per-section character budget for a given agent role.
 ///
-/// Budget values match Mori's `budget_for()` (`prompts.rs:62`). The
-/// model parameter is accepted for API compatibility but does not
-/// currently affect budgets (all models get the same caps per role).
+/// Budget values are Roko's built-in cold-start defaults. Model-specific
+/// budget tuning can layer on top of this function.
 #[must_use]
 pub const fn budget_for(role: AgentRole) -> PromptBudget {
     match role {
@@ -128,29 +127,29 @@ pub const fn budget_for(role: AgentRole) -> PromptBudget {
 /// Describes the canonical plans context layout for agents.
 ///
 /// Injected into prompts so agents know where to find plan artifacts
-/// without relying on `find`/`ls`. Matches Mori's `CONTEXT_LAYOUT_STANZA`.
+/// without relying on `find`/`ls`.
 pub const CONTEXT_LAYOUT_STANZA: &str = "\
 ## Plans context layout
 
 - `prd/` — canonical product-spec root; use this for source PRDs and specs by default.
-- `.mori/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
-- `.mori/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
-- `.mori/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
-- `.mori/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
-- `.mori/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
-- `.mori/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
-- `.mori/plans/<plan-base>/decomposition.md` — step breakdown (optional).
-- `.mori/plans/<plan-base>/tasks.toml` — task checklists.
-- `.mori/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
-- `.mori/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
-- `.mori/plans/<plan-base>/brief.md` — implementation brief when present.
-- `.mori/plans/<plan-base>/reviews/` — per-plan review outputs when present.
+- `.roko/plans/` — canonical plan-artifact root; use this for plan files, reviews, and caches.
+- `.roko/plans/workspace-map.md` — crate file tree; use this instead of `find`/`ls` on `crates/`.
+- `.roko/plans/preflight-snapshot.md` — ambient compile/test baseline when present.
+- `.roko/plans/CONTEXT.md` — cross-plan registry (types, boundaries, decisions).
+- `.roko/plans/ignored-tests.md` — ledger of `#[ignore]` tests.
+- `.roko/plans/<plan-base>/prd-extract.md` — PRD extracts per plan (optional).
+- `.roko/plans/<plan-base>/decomposition.md` — step breakdown (optional).
+- `.roko/plans/<plan-base>/tasks.toml` — task checklists.
+- `.roko/plans/<plan-base>/research.md`, `integration.md` — execution artifacts.
+- `.roko/plans/<plan-base>/verify.sh` — invariant runner when generated (optional).
+- `.roko/plans/<plan-base>/brief.md` — implementation brief when present.
+- `.roko/plans/<plan-base>/reviews/` — per-plan review outputs when present.
 ";
 
 /// MCP tools stanza — describes the free tools available to agents.
 ///
 /// Injected into prompts so agents prefer MCP tools over shelling out.
-/// Matches Mori's `MCP_TOOLS_STANZA`.
+/// Roko-owned MCP tools guidance.
 pub const MCP_TOOLS_STANZA: &str = "\
 ## MCP Tools (free, instant)
 
@@ -290,7 +289,8 @@ mod tests {
     #[test]
     fn context_layout_stanza_contains_key_paths() {
         assert!(CONTEXT_LAYOUT_STANZA.contains("`prd/`"));
-        assert!(CONTEXT_LAYOUT_STANZA.contains("`.mori/plans/`"));
+        assert!(CONTEXT_LAYOUT_STANZA.contains("`.roko/plans/`"));
+        assert!(!CONTEXT_LAYOUT_STANZA.contains(".mori"));
         assert!(CONTEXT_LAYOUT_STANZA.contains("workspace-map.md"));
         assert!(CONTEXT_LAYOUT_STANZA.contains("CONTEXT.md"));
     }

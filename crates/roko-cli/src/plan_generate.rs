@@ -68,7 +68,7 @@ impl PlanTemplateKind {
         }
     }
 
-    /// Gate strictness guidance for the template.
+    /// Verify strictness guidance for the template.
     #[must_use]
     pub(crate) const fn gate_strictness(self) -> &'static str {
         match self {

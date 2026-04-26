@@ -191,17 +191,7 @@ impl ConductorBandit {
                 .collect(),
             context_dim: self.context_dim,
         };
-        let json = serde_json::to_string_pretty(&snapshot)
-            .map_err(|err| io::Error::other(format!("serialize conductor snapshot: {err}")))?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        roko_fs::atomic_write_json(path, &snapshot)
     }
 
     /// Total observations across all arms (used for warmup detection).

@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
-use roko_agent::chat_types::FinishReason;
 use roko_agent::gemini::{Content, GeminiCacheClient, Part};
 use roko_agent::mcp::{McpConfig, McpServerConfig};
 use roko_agent::perplexity::PerplexitySearchClient;
@@ -28,8 +27,10 @@ use roko_agent::task_runner::{
     ConductorBandit as RunnerConductorBandit, CostTable as RunnerCostTable,
     EventBus as RunnerEventBus, ModelPricing as RunnerModelPricing, TaskRunner, TaskRunnerError,
 };
-use roko_agent::translate::{ClaudeTranslator, RenderedTools, Translator};
-use roko_agent::{Agent, AgentResult, MultiAgentPool, SafetyLayer};
+use roko_agent::{
+    Agent, AgentInvocationSession, AgentResult, InvocationState, MultiAgentPool, ReuseScope,
+    SafetyLayer, WarmReusePolicy, fingerprint_text,
+};
 use roko_chain::alloy_impl::{AlloyChainClient, AlloyChainWallet};
 use roko_chain::{ChainClient, ChainWallet};
 use roko_compose::enrichment::{
@@ -38,9 +39,8 @@ use roko_compose::enrichment::{
     StepOutcome, StepSelector, estimate_enrichment,
 };
 use roko_compose::{
-    AttentionBidder, Complexity as PromptComplexity, ContextProvider, PadState, Placement,
-    PlanArtifacts, PromptComposer, PromptSection, SectionPriority, SectionScorer, TaskContext,
-    estimate_tokens,
+    AttentionBidder, ContextProvider, PadState, Placement, PlanArtifacts, PromptComposer,
+    PromptSection, SectionPriority, SectionScorer, TaskContext,
 };
 use roko_conductor::diagnosis::{
     DiagnosisEngine, DiagnosisResult, ErrorCategory, SuggestedIntervention,
@@ -49,12 +49,13 @@ use roko_conductor::health::{HealthMonitor, HealthStatus, SystemSnapshot};
 use roko_conductor::stuck_detection::{ActivityEntry, MetaCognitionHook, StuckDetector, StuckKind};
 use roko_conductor::{CircuitBreakerState, Conductor, ConductorDecision, FailureRecord};
 use roko_core::DaimonPolicy;
-use roko_core::Policy;
+use roko_core::React;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::attestation::{self, SigningKey};
 use roko_core::config::schema::{
     GatesConfig, LearningConfig as RuntimeLearningConfig, RokoConfig, RoleOverride,
 };
+use roko_core::extension::ExtensionChain;
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::obs::health::{AlwaysUpProbe, ProbeRegistry};
 use roko_core::obs::{LabelSet, MetricRegistry};
@@ -62,10 +63,10 @@ use roko_core::tool::TraceId;
 use roko_core::tool::trace::{FailureKind, FailureTrace, TraceStep};
 use roko_core::tool::{FormatBandit, ProfileBandit, ToolTraceEvent, TraceSink};
 use roko_core::{
-    AgentRole, Body, Budget, Composer, ContentHash, Context, Decay, Engram, Gate, Kind,
-    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Substrate, Task,
-    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, TaskStatus, ToolRegistry,
-    Verdict, score_model_for_task,
+    AgentRole, Body, Budget, Compose, ContentHash, Context, Decay, Engram, Kind,
+    OperatingFrequency, OperatingFrequencyScheduleContext, PhaseKind, Provenance, Store,
+    TaskCategory, TaskComplexityBand, TaskDomain, TaskRequirements, ToolRegistry, Verdict, Verify,
+    score_model_for_task,
 };
 use roko_core::{
     CFactorPolicy, CFactorSource, CFactorSummary, CatalystImpactSummary, CatalystScorer,
@@ -80,14 +81,19 @@ use roko_fs::FileSubstrate;
 use roko_fs::RokoLayout;
 use roko_fs::observability::FsObservabilitySinks;
 use roko_gate::{
-    ArtifactStore as GateArtifactStore, ClippyGate, CompileGate, GateRatchet, SearchHit,
-    SearchOracle, ShellGate, TestGate, VerdictPublisher,
+    AcceptanceDecision, AcceptanceEvidence, AcceptanceOutcome, ArtifactStore as GateArtifactStore,
+    ClippyGate, CompileGate, FailureClass, GateEvidence, GateFailureAction, GateRatchet,
+    ParityLedgerEvidenceRow, ParityLedgerStatus, ParsedReviewVerdict, RecoveryEvidence,
+    ReviewVerdictContext, ReviewVerdictEvidence, SearchHit, SearchOracle, ShellGate,
+    StructuredOutputEvidence, TestGate, VerdictPublisher,
     adaptive_threshold::AdaptiveThresholds,
-    feedback_for_agent,
+    classify_gate_failure, feedback_for_agent,
     gate_pipeline::GatePipeline,
     generated_test_gate::{ArtifactStore as GeneratedArtifactStore, GeneratedTestGate},
     llm_judge_gate::{JudgeOracle, JudgePayload},
+    parse_structured_review_verdict,
     payload::{BuildSystem, GatePayload},
+    records_from_classification,
     rung_dispatch::{RungExecutionConfig, RungExecutionInputs, run_rung},
     rung_selector::{PlanComplexity, Rung, RungCaps, select_rungs},
     symbol_gate::{SymbolExpectation, SymbolKind, SymbolManifest, Visibility},
@@ -106,11 +112,14 @@ use roko_learn::efficiency::{
     AgentEfficiencyEvent, FleetCFactor, PromptSectionMeta, compute_fleet_cfactor,
 };
 use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict, Usage};
+use roko_learn::error_pattern_store::{
+    ErrorPatternStore, FailurePatternQuery, GateFailureObservation, GateFailureSource,
+};
 use roko_learn::events::{AgentEvent, EventBus as LearningEventBus};
 use roko_learn::hdc_fingerprint::{encode as encode_hdc_fingerprint, fingerprint_episode};
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::model_experiment::ModelExperimentStore;
-use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore, QueryContext};
+use roko_learn::playbook::PlaybookStore;
 use roko_learn::prediction::CalibrationTracker;
 use roko_learn::prompt_experiment::DEFAULT_STATIC_OVERRIDES_PATH;
 use roko_learn::routing_log::{
@@ -120,14 +129,15 @@ use roko_learn::runtime_feedback::{
     CompletedRunInput, LearningRuntime, LearningUpdate, read_efficiency_events,
     refresh_cfactor_snapshot,
 };
-use roko_learn::section_effect::{PriorityChange, SectionEffectivenessRegistry};
+use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_learn::skill_library::Skill;
 use roko_learn::skill_library::{
     SkillExtractionRequest, SkillGateResult, SkillLibrary, SkillQuery,
 };
 use roko_neuro::tier_progression::{TierProgression, TierProgressionDecision};
 use roko_neuro::{
-    ContextAssembler, EmotionalProvenance, KnowledgeEntry, KnowledgeKind, KnowledgeStore,
+    ContextAssembler, EmotionalProvenance, KnowledgeAdmissionOutcome, KnowledgeAdmissionStore,
+    KnowledgeCandidateRecord, KnowledgeEntry, KnowledgeKind, KnowledgeScope, KnowledgeStore,
     KnowledgeTier, NeuroStore,
 };
 use roko_orchestrator::coordination::{Pheromone, PheromoneKind, PheromoneScope};
@@ -138,22 +148,19 @@ use roko_orchestrator::worktree::{
 use roko_orchestrator::{
     CURRENT_SCHEMA_VERSION, DagConfig, EventKind, EventLog, EventLogSnapshot, ExecutorAction,
     ExecutorEvent, ExecutorSnapshot, GateResult, ParallelExecutor,
-    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanState, PostMergeRunner,
-    ReplanResult, ReplanStrategy, UnifiedTaskDag, discover_plans,
+    PersistedCircuitBreakerFailureRecord, PersistedCircuitBreakerState, PlanRevisionEvidence,
+    PlanRevisionRequest, PlanState, PostMergeRunner, ReplanResult, ReplanStrategy, UnifiedTaskDag,
+    discover_plans,
 };
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::event_bus::{
     Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
     PlanRevisionReason, RokoEvent,
 };
-use roko_runtime::lifecycle::{
-    AgentLifecycleState, LifecycleTransition, LifecycleTransitionReason,
-};
 use roko_runtime::process::ProcessSupervisor;
 use roko_std::StaticToolRegistry;
 use roko_std::SumScorer;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -166,38 +173,58 @@ use crate::agent_config::{
 use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_with_layer};
 use crate::chain_registry::{chain_aware_resolver, chain_handler_map};
 use crate::config::Config;
+use crate::dispatch_helpers::{
+    TASK_FAILURE_OUTPUT_TAIL_LINES, apply_section_effectiveness_to_prompt_section,
+    build_daimon_context_section, build_relevant_context_layer, build_system_prompt,
+    build_system_prompt_with_context_validated, claude_task_tool_allowlist_with,
+    claude_tool_allowlist, claude_tool_allowlist_with, code_context_for_task,
+    default_task_category, effective_context_window_tokens, extract_task_symbols,
+    file_contains_public_api, load_prior_task_outputs, save_task_output, tail_output_lines,
+    task_def_to_dag_task, task_def_to_input, task_read_cli_args, truncate_doc_snippet,
+    truncate_output, with_task_failure_context,
+};
 use crate::heartbeat::{
     HeartbeatClock, HeartbeatProbeKind, HeartbeatProbeResult, HeartbeatSnapshot,
     persist_heartbeat_snapshot,
 };
-use crate::plan::plans_dir;
-use crate::prompting::{
-    PromptBuildOptions, build_role_system_prompt, build_role_system_prompt_validated,
+use crate::knowledge_helpers::{
+    apply_neuro_gate_hints, build_knowledge_routing_advice, build_strategy_fragment_context,
+    build_success_knowledge_entry, knowledge_routing_boost, query_anti_knowledge_patterns,
+    record_lifecycle_knowledge, render_neuro_chunk,
 };
+use crate::learning_helpers::{
+    TurnLearningFeedback, apply_concluded_experiment_overrides, build_task_playbook,
+    install_episode_distillation_hook, learned_error_signature, load_efficiency_cost_signals,
+    load_efficiency_signals_sync, load_or_create_playbook_store, load_or_create_skill_library,
+    load_recent_signals, playbook_query_context, publish_turn_learning_feedback,
+    render_prior_experience, warn_if_distillation_disabled,
+};
+use crate::plan::plans_dir;
+use crate::prompting::{PromptBuildOptions, build_role_system_prompt};
 use crate::snapshot_migrate;
 use crate::task_parser::{TaskValidationIssue, TasksFile};
 use crate::tui::ApprovalRequest;
 use crate::worker::cloud::CloudExecution;
 use crate::workspace_paths::find_prd_path;
 
+// Verify-related free functions and types extracted to gate_runner.rs.
+use crate::gate_runner::{
+    FsGeneratedArtifactStore, RecordedGateVerdict, RecordingGate, acceptance_task_dir,
+    domain_uses_compiled_gates, format_acceptance_decision, gate_artifact_store_path,
+    gate_ratchet_path, gate_result_matches_requirement, primary_gate_phase_to_rung,
+    scan_no_stub_evidence,
+};
+
 /// Default number of actions between auto-saves.
 const AUTOSAVE_INTERVAL: usize = 5;
 const DEFAULT_WORKTREE_IDLE_TTL_SECS: u64 = 30 * 60;
 const WATCHER_INTERVAL_SECS: u64 = 30;
 const WATCHER_SIGNAL_TAIL: usize = 200;
-const EFFICIENCY_SIGNAL_TAIL: usize = 256;
 const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
-const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
-
-/// Whether this domain uses compiled (compile/test/clippy) gates.
-fn domain_uses_compiled_gates(domain: &TaskDomain) -> bool {
-    matches!(
-        domain,
-        TaskDomain::Code | TaskDomain::Chain | TaskDomain::Custom(_)
-    )
-}
+const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 3;
+const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
 fn domain_uses_git(domain: &TaskDomain) -> bool {
@@ -222,15 +249,18 @@ fn model_experiments_path(workdir: &Path) -> PathBuf {
         .join("model-experiments.json")
 }
 
-fn gate_artifact_store_path(workdir: &Path) -> PathBuf {
-    workdir.join(".roko").join("artifacts")
-}
-
-fn gate_ratchet_path(workdir: &Path) -> PathBuf {
+fn failure_pattern_store_path(workdir: &Path) -> PathBuf {
     workdir
         .join(".roko")
         .join("learn")
-        .join("gate-ratchet.json")
+        .join("discovered-patterns.json")
+}
+
+fn pre_agent_remediation_log_path(workdir: &Path) -> PathBuf {
+    workdir
+        .join(".roko")
+        .join("learn")
+        .join("pre-agent-remediation.jsonl")
 }
 
 fn daimon_state_path(workdir: &Path) -> PathBuf {
@@ -244,7 +274,7 @@ fn latency_registry_path(workdir: &Path) -> PathBuf {
         .join("latency-stats.json")
 }
 
-fn static_overrides_path(workdir: &Path) -> PathBuf {
+pub(crate) fn static_overrides_path(workdir: &Path) -> PathBuf {
     workdir.join(DEFAULT_STATIC_OVERRIDES_PATH)
 }
 
@@ -636,124 +666,59 @@ fn scrub_agent_result(result: &AgentResult, policy: &ScrubPolicy) -> AgentResult
     }
 }
 
-#[derive(Debug, Clone)]
-struct TurnLearningFeedback {
-    task_id: String,
-    model: String,
-    provider: String,
-    timestamp_ms: i64,
-    prompt_hash: u64,
-    ttft_ms: u64,
-    total_ms: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-    usage: roko_agent::Usage,
-    success: bool,
-}
-
-fn publish_turn_learning_feedback(
-    event_bus: &LearningEventBus,
-    latency_registry: &LatencyRegistry,
-    anomaly_detector: &mut AnomalyDetector,
-    feedback: TurnLearningFeedback,
-) {
-    let mut rx = event_bus.subscribe();
-    event_bus.publish(AgentEvent::TurnStarted {
-        task_id: feedback.task_id.clone(),
-        model: feedback.model.clone(),
-        provider: feedback.provider.clone(),
-        timestamp_ms: feedback.timestamp_ms,
-    });
-    event_bus.publish(AgentEvent::TurnCompleted {
-        turn: 1,
-        usage: feedback.usage,
-        tool_call_count: 0,
-        gate_passed: Some(feedback.success),
-        finish_reason: if feedback.success {
-            FinishReason::Stop
-        } else {
-            FinishReason::Error("agent failed".to_string())
-        },
-    });
-    event_bus.publish(AgentEvent::CostRecorded {
-        model: feedback.model.clone(),
-        provider: feedback.provider.clone(),
-        cost_usd: feedback.cost_usd,
-        tokens: u64::from(feedback.usage.total_tokens()),
-    });
-
-    drain_turn_learning_events(&mut rx, latency_registry, anomaly_detector, &feedback);
-}
-
-fn drain_turn_learning_events(
-    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
-    latency_registry: &LatencyRegistry,
-    anomaly_detector: &mut AnomalyDetector,
-    feedback: &TurnLearningFeedback,
-) {
-    loop {
-        match rx.try_recv() {
-            Ok(AgentEvent::TurnStarted { .. }) => {
-                if let Some(anomaly) = anomaly_detector.check_prompt(feedback.prompt_hash) {
-                    tracing::warn!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        ?anomaly,
-                        "learning anomaly detected from prompt"
-                    );
-                }
-            }
-            Ok(AgentEvent::TurnCompleted { .. }) => {
-                latency_registry.record(
-                    &feedback.model,
-                    &feedback.provider,
-                    feedback.ttft_ms as f64,
-                    feedback.total_ms as f64,
-                    feedback.output_tokens,
-                );
-                tracing::info!(
-                    model = %feedback.model,
-                    provider = %feedback.provider,
-                    ttft_ms = feedback.ttft_ms,
-                    total_ms = feedback.total_ms,
-                    output_tokens = feedback.output_tokens,
-                    "learning latency recorded"
-                );
-            }
-            Ok(AgentEvent::CostRecorded { .. }) => {
-                if let Some(anomaly) = anomaly_detector.check_cost(feedback.cost_usd) {
-                    tracing::warn!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        ?anomaly,
-                        "learning anomaly detected from cost"
-                    );
-                } else {
-                    tracing::info!(
-                        model = %feedback.model,
-                        provider = %feedback.provider,
-                        "learning anomaly scan complete"
-                    );
-                }
-            }
-            Ok(_) => {}
-            Err(
-                tokio::sync::broadcast::error::TryRecvError::Empty
-                | tokio::sync::broadcast::error::TryRecvError::Closed,
-            ) => break,
-            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "learning feedback lagged behind event stream");
-            }
-        }
-    }
-}
-
 fn state_dir(workdir: &Path) -> PathBuf {
     workdir.join(".roko").join("state")
 }
 
 fn executor_snapshot_path(workdir: &Path) -> PathBuf {
     state_dir(workdir).join("executor.json")
+}
+
+fn agent_invocation_ledger_path(workdir: &Path) -> PathBuf {
+    state_dir(workdir).join("agent-invocations.jsonl")
+}
+
+fn append_agent_invocation_record(workdir: &Path, record: &AgentInvocationSession) {
+    let path = agent_invocation_ledger_path(workdir);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(path = %parent.display(), error = %err, "failed to create invocation ledger dir");
+        return;
+    }
+    let rendered = match serde_json::to_string(record) {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize agent invocation record");
+            return;
+        }
+    };
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(err) = writeln!(file, "{rendered}") {
+                tracing::warn!(path = %path.display(), error = %err, "failed to write invocation ledger");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "failed to open invocation ledger");
+        }
+    }
+}
+
+fn invocation_state_from_agent_result(result: &AgentResult) -> InvocationState {
+    if result.success {
+        return InvocationState::Succeeded;
+    }
+    let output = result.output.body.as_text().unwrap_or_default();
+    if output.to_ascii_lowercase().contains("timed out") {
+        InvocationState::TimedOut
+    } else {
+        InvocationState::Failed
+    }
 }
 
 /// Persist an executor snapshot via `tmp + rename`.
@@ -855,35 +820,6 @@ fn sync_file_if_present(path: &Path) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
     }
-}
-
-fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
-    let distillation_workdir = workdir.to_path_buf();
-    learning.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
-    });
-}
-
-/// Log a one-time warning if `ANTHROPIC_API_KEY` is not set, which means
-/// episode distillation into the neuro knowledge store will be silently
-/// skipped.  Called at the start of each `PlanRunner::run_task_plans_inner`
-/// invocation but only emits the warning once per process.
-fn warn_if_distillation_disabled() {
-    use std::sync::Once;
-    static WARN: Once = Once::new();
-    WARN.call_once(|| {
-        let key_set = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_owned())
-            .is_some_and(|k| !k.is_empty());
-        if !key_set {
-            tracing::warn!(
-                "ANTHROPIC_API_KEY is not set; episode distillation into the neuro \
-                 knowledge store is disabled. Set it to enable automatic learning \
-                 from completed episodes."
-            );
-        }
-    });
 }
 
 fn load_roko_config(workdir: &Path) -> Result<RokoConfig> {
@@ -1239,7 +1175,7 @@ impl CrateFamiliarityTracker {
 }
 
 /// Derive a crate name from the task's modified files.
-fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
+pub(crate) fn task_crate_name(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
     let mut seen = HashSet::new();
     task_def
         .into_iter()
@@ -1973,7 +1909,7 @@ pub struct PlanRunReport {
     pub succeeded: bool,
     /// Number of agent invocations for this plan.
     pub agent_calls: usize,
-    /// Gate results collected during execution.
+    /// Verify results collected during execution.
     pub gate_results: Vec<(String, bool)>,
 }
 
@@ -2144,227 +2080,6 @@ impl WatcherRunner {
     }
 }
 
-async fn load_recent_signals(path: &Path, tail_len: usize) -> std::io::Result<Vec<Engram>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let text = tokio::fs::read_to_string(path).await?;
-    let lines: Vec<&str> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(tail_len);
-    let mut signals = Vec::with_capacity(lines.len().saturating_sub(start));
-    for line in &lines[start..] {
-        if let Ok(signal) = serde_json::from_str::<Engram>(line) {
-            signals.push(signal);
-        }
-    }
-    Ok(signals)
-}
-
-/// Load the latest efficiency entries and convert them into cost metric signals.
-async fn load_efficiency_cost_signals(
-    path: &Path,
-    budget_usd: Option<f64>,
-) -> std::io::Result<Vec<Engram>> {
-    let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) else {
-        return Ok(Vec::new());
-    };
-
-    let text = tokio::fs::read_to_string(path).await?;
-    Ok(build_cost_overrun_signals(&text, budget_usd))
-}
-
-/// Synchronous variant used by the main conductor check path.
-fn load_efficiency_signals_sync(
-    path: &Path,
-    budget_usd: Option<f64>,
-) -> std::io::Result<Vec<Engram>> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(build_efficiency_signals(&text, budget_usd))
-}
-
-async fn load_or_create_skill_library(path: &Path) -> Result<SkillLibrary> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .await
-    {
-        Ok(mut file) => {
-            file.write_all(b"[]").await?;
-            file.flush().await?;
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(err.into()),
-    }
-
-    Ok(SkillLibrary::new(path).await?)
-}
-
-async fn load_or_create_playbook_store(path: &Path) -> Result<PlaybookStore> {
-    tokio::fs::create_dir_all(path).await?;
-    Ok(PlaybookStore::new(path))
-}
-
-fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
-    let overrides_path = static_overrides_path(workdir);
-    let winners = {
-        let store = learning.experiment_store().lock();
-        let winners = store.concluded_winners();
-        if let Err(err) = store.apply_winners_to(&winners, &overrides_path) {
-            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to persist experiment winners");
-        }
-        winners
-    };
-
-    if winners.is_empty() {
-        return;
-    }
-
-    match learning
-        .cascade_router()
-        .load_static_overrides(&overrides_path)
-    {
-        Ok(applied) => {
-            tracing::info!(applied, path = %overrides_path.display(), "applied static routing overrides")
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, path = %overrides_path.display(), "failed to load static routing overrides")
-        }
-    }
-}
-
-/// Convert the latest efficiency entries into the signals expected by the conductor.
-fn build_efficiency_signals(text: &str, budget_usd: Option<f64>) -> Vec<Engram> {
-    let mut signals = Vec::new();
-
-    if let Some(budget_usd) = budget_usd.filter(|budget| *budget > 0.0) {
-        signals.extend(build_cost_overrun_signals(text, budget_usd));
-    }
-
-    if let Some(signal) = build_context_window_pressure_signal(text) {
-        signals.push(signal);
-    }
-
-    signals
-}
-
-/// Sum the cost from the latest valid efficiency events in the JSONL log.
-fn latest_efficiency_cost(text: &str) -> Option<f64> {
-    let mut total = 0.0;
-    let mut seen = 0usize;
-
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
-            total += event.cost_usd;
-            seen += 1;
-            if seen >= EFFICIENCY_SIGNAL_TAIL {
-                break;
-            }
-        }
-    }
-
-    (seen > 0).then_some(total)
-}
-
-fn build_cost_overrun_signals(text: &str, budget_usd: f64) -> Vec<Engram> {
-    let Some(cost_usd) = latest_efficiency_cost(text) else {
-        return Vec::new();
-    };
-
-    vec![
-        Engram::builder(Kind::Metric)
-            .body(Body::text("plan cost"))
-            .tag("name", "plan_cost")
-            .tag("value", format!("{cost_usd:.6}"))
-            .build(),
-        Engram::builder(Kind::Metric)
-            .body(Body::text("plan budget"))
-            .tag("name", "plan_budget")
-            .tag("value", format!("{budget_usd:.6}"))
-            .build(),
-    ]
-}
-
-fn build_context_window_pressure_signal(text: &str) -> Option<Engram> {
-    let event = latest_efficiency_event(text)?;
-    let body = Body::from_json(&event).unwrap_or_else(|_| {
-        Body::text(format!(
-            "{} tokens used on {}",
-            event.total_prompt_tokens, event.model
-        ))
-    });
-
-    Some(
-        Engram::builder(Kind::TokenUsage)
-            .body(body)
-            .tag("plan_id", event.plan_id)
-            .tag("task_id", event.task_id)
-            .tag("role", event.role)
-            .tag("model", event.model)
-            .tag("tokens_used", event.total_prompt_tokens.to_string())
-            .build(),
-    )
-}
-
-/// Render up to 3 prior skills into a "## Prior Experience" context section.
-///
-/// Follows the same pattern as `render_knowledge_context` — a markdown heading
-/// followed by numbered entries with key metadata so the agent can leverage
-/// successful approaches from prior tasks.
-fn render_prior_experience(skills: &[Skill]) -> String {
-    use std::fmt::Write as _;
-
-    let mut content = String::from(
-        "## Relevant Skills\n\nThe following skills were high-confidence matches for this task:\n",
-    );
-    for (idx, skill) in skills.iter().enumerate() {
-        let _ = write!(
-            content,
-            "\n### {}. {} (confidence: {:.0}%)\n",
-            idx + 1,
-            skill.name,
-            (skill.score.clamp(0.0, 1.0) * 100.0).round(),
-        );
-        let _ = writeln!(content, "Summary: {}", skill.summary);
-        if skill.usage_count > 0 {
-            let _ = writeln!(
-                content,
-                "Telemetry: {:.0}% success over {} uses",
-                (skill.success_rate.clamp(0.0, 1.0) * 100.0).round(),
-                skill.usage_count
-            );
-        }
-        if skill.validated_count > 0 {
-            let _ = writeln!(content, "Validated matches: {}", skill.validated_count);
-        }
-        if !skill.description.is_empty() {
-            let _ = writeln!(content, "Description: {}", skill.description);
-        }
-        if !skill.files.is_empty() {
-            let _ = writeln!(content, "Files: {}", skill.files.join(", "));
-        }
-        if !skill.pattern.is_empty() {
-            let _ = writeln!(content, "Pattern:\n{}", skill.pattern);
-        }
-        if !skill.prompt_template.is_empty() {
-            let _ = writeln!(content, "Template:\n{}", skill.prompt_template);
-        }
-    }
-    content
-}
-
 fn select_prompt_skills(
     skill_library: &SkillLibrary,
     task_def: Option<&crate::task_parser::TaskDef>,
@@ -2444,41 +2159,6 @@ fn learned_query_context(
     }
 }
 
-fn learned_error_signature(last_gate_failure: Option<&str>) -> Option<String> {
-    let failure = last_gate_failure?.trim();
-    if failure.is_empty() {
-        return None;
-    }
-
-    if let Some(code) = extract_rust_error_code(failure) {
-        return Some(code);
-    }
-
-    failure
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(160).collect())
-}
-
-fn extract_rust_error_code(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 {
-        return None;
-    }
-
-    for idx in 0..=bytes.len() - 5 {
-        if bytes[idx] != b'E' {
-            continue;
-        }
-        if bytes[idx + 1..idx + 5].iter().all(u8::is_ascii_digit) {
-            return text.get(idx..idx + 5).map(str::to_string);
-        }
-    }
-
-    None
-}
-
 fn routing_budget_pressure(
     budget: &crate::config::BudgetConfig,
     plan_spent: f64,
@@ -2534,410 +2214,6 @@ fn cascade_routing_bias_from_conductor(
         prefer_cheaper: bias.prefer_cheaper,
         reason: bias.reason.clone(),
     }
-}
-
-fn neuro_prompt_task_category(role: AgentRole) -> TaskCategory {
-    match role {
-        AgentRole::Researcher | AgentRole::PrePlanner | AgentRole::Strategist => {
-            TaskCategory::Research
-        }
-        AgentRole::Refactorer => TaskCategory::Refactor,
-        AgentRole::Scribe => TaskCategory::Docs,
-        AgentRole::DocVerifier
-        | AgentRole::IntegrationTester
-        | AgentRole::TerminalValidator
-        | AgentRole::GolemLifecycleTester
-        | AgentRole::RegressionDetector
-        | AgentRole::CoverageTracker
-        | AgentRole::CrossSystemTester
-        | AgentRole::DependencyValidator
-        | AgentRole::FullLoopValidator => TaskCategory::Verification,
-        _ => TaskCategory::Implementation,
-    }
-}
-
-fn strategy_fragment_query(
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-) -> String {
-    let mut query_parts = vec![
-        neuro_prompt_task_category(role).label().to_string(),
-        task_text.trim().to_string(),
-    ];
-    if let Some(crate_name) = task_crate_name(task_def) {
-        query_parts.push(crate_name);
-    }
-    query_parts.retain(|part| !part.trim().is_empty());
-    query_parts.join(" ")
-}
-
-fn select_strategy_fragments(
-    knowledge_store: &KnowledgeStore,
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-    current_model: &str,
-    limit: usize,
-) -> Vec<KnowledgeEntry> {
-    let query = strategy_fragment_query(role, task_def, task_text);
-    knowledge_store
-        .query_kind(
-            &query,
-            KnowledgeKind::StrategyFragment,
-            limit.saturating_mul(3).max(limit),
-        )
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| entry.confidence > 0.0)
-        .filter(|entry| entry.applies_to_model(current_model))
-        .take(limit)
-        .collect()
-}
-
-fn render_strategy_fragments(entries: &[KnowledgeEntry]) -> String {
-    use std::fmt::Write as _;
-
-    let mut content = String::from(
-        "## Strategy Fragments\n\nThe following reusable approach fragments were distilled from repeated successful runs:\n",
-    );
-    for (idx, entry) in entries.iter().enumerate() {
-        let confidence = entry.confidence.clamp(0.0, 1.0);
-        let tags = if entry.tags.is_empty() {
-            String::from("-")
-        } else {
-            entry.tags.join(", ")
-        };
-        let _ = write!(
-            content,
-            "\n### {}. Strategy fragment ({:.0}%)\nTags: {}\n\n{}\n",
-            idx + 1,
-            confidence * 100.0,
-            tags,
-            entry.content.trim()
-        );
-    }
-    content
-}
-
-/// Query AntiKnowledge entries from the neuro store and convert them to
-/// anti-pattern strings for injection into layer 7 of the system prompt.
-fn query_anti_knowledge_patterns(
-    knowledge_store: &KnowledgeStore,
-    task_text: &str,
-    limit: usize,
-) -> Vec<String> {
-    match knowledge_store.query_kind(task_text, KnowledgeKind::AntiKnowledge, limit) {
-        Ok(entries) => entries.into_iter().map(|entry| entry.content).collect(),
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to query AntiKnowledge for anti-patterns");
-            Vec::new()
-        }
-    }
-}
-
-/// Query the knowledge store for routing-relevant entries about a model and return
-/// a small confidence-weighted boost in `[0.0, 0.3]`.
-///
-/// This is a lightweight, non-blocking query: it scans at most 5 entries whose tags
-/// or content mention the model slug combined with the role/task-type context.
-/// Positive entries (Heuristic/Insight) contribute a positive boost proportional
-/// to their confidence; AntiKnowledge entries contribute a negative signal.
-fn knowledge_routing_boost(
-    knowledge_store: &KnowledgeStore,
-    model_slug: &str,
-    role: AgentRole,
-    task_category: &str,
-) -> f64 {
-    let query = format!("{} {} routing model", role.label(), task_category);
-    let entries = match knowledge_store.query(&query, 5) {
-        Ok(entries) => entries,
-        Err(_) => return 0.0,
-    };
-
-    let mut boost = 0.0_f64;
-    for entry in &entries {
-        // Only consider entries that mention this specific model.
-        let slug_lower = model_slug.to_lowercase();
-        let content_matches = entry.content.to_lowercase().contains(&slug_lower)
-            || entry
-                .source_model
-                .as_deref()
-                .is_some_and(|sm| sm.eq_ignore_ascii_case(model_slug))
-            || entry
-                .tags
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(model_slug));
-        if !content_matches {
-            continue;
-        }
-
-        let weight = entry.confidence.clamp(0.0, 1.0);
-        if entry.kind == KnowledgeKind::AntiKnowledge {
-            boost -= weight * 0.15;
-        } else {
-            boost += weight * 0.10;
-        }
-    }
-
-    boost.clamp(-0.3, 0.3)
-}
-
-/// INT-20: Record significant lifecycle transitions as knowledge entries in the
-/// neuro store.
-///
-/// Restores, degradation events, and metamorphosis are operationally significant
-/// -- they capture when and why agents changed state.  Recording them as
-/// knowledge enables future sessions to learn from operational history (e.g.
-/// "agent X was degraded due to budget constraints 5 times last week").
-fn record_lifecycle_knowledge(knowledge_store: &KnowledgeStore, transition: &LifecycleTransition) {
-    // Only record significant transitions -- skip routine Active/Waiting/Initiated.
-    let is_significant = matches!(
-        &transition.to,
-        AgentLifecycleState::Hibernated
-            | AgentLifecycleState::Metamorphosing
-            | AgentLifecycleState::Degraded { .. }
-            | AgentLifecycleState::Deleted
-    ) || matches!(
-        &transition.reason,
-        LifecycleTransitionReason::OperatorResume
-            | LifecycleTransitionReason::BudgetConstrained
-            | LifecycleTransitionReason::BudgetRestored
-            | LifecycleTransitionReason::MetamorphosisFinished
-    );
-
-    if !is_significant {
-        return;
-    }
-
-    let content = format!(
-        "Agent '{}' transitioned from {:?} to {:?} (reason: {:?}) at {}",
-        transition.agent_id,
-        transition.from,
-        transition.to,
-        transition.reason,
-        transition.occurred_at.format("%Y-%m-%d %H:%M:%S UTC"),
-    );
-
-    let kind = if matches!(
-        &transition.to,
-        AgentLifecycleState::Degraded { .. } | AgentLifecycleState::Deleted
-    ) {
-        KnowledgeKind::AntiKnowledge
-    } else {
-        KnowledgeKind::Heuristic
-    };
-
-    let mut entry = KnowledgeEntry {
-        id: format!(
-            "lifecycle-{}-{}",
-            transition.agent_id,
-            transition.occurred_at.timestamp_millis()
-        ),
-        kind,
-        content,
-        tags: vec![
-            "lifecycle".to_string(),
-            format!("agent:{}", transition.agent_id),
-            format!("state:{:?}", transition.to),
-        ],
-        confidence: 1.0,
-        source_episodes: Vec::new(),
-        tier: roko_neuro::KnowledgeTier::Transient,
-        half_life_days: 30.0,
-        created_at: transition.occurred_at,
-        ..KnowledgeEntry::default()
-    };
-    entry.source = Some("lifecycle-monitor".to_string());
-
-    if let Err(err) = knowledge_store.add(entry) {
-        tracing::debug!(error = %err, "INT-20: failed to record lifecycle knowledge");
-    }
-}
-
-/// INT-15: Query neuro knowledge for gate-related failure and stability
-/// patterns and apply them as hints to the adaptive gate thresholds.
-///
-/// This bridges neuro (durable knowledge) with the gate verification pipeline,
-/// so that known problematic or reliably stable rungs are tuned accordingly
-/// before the plan run begins.
-fn apply_neuro_gate_hints(knowledge_store: &KnowledgeStore, thresholds: &mut AdaptiveThresholds) {
-    let failure_rungs = match knowledge_store.query("gate failure compile lint test", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint")
-                    || content_lower.contains("clippy")
-                    || content_lower.contains("rung 1")
-                {
-                    Some(1)
-                } else if content_lower.contains("test fail") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            tracing::debug!(error = %err, "INT-15: skipping neuro gate hints (query failed)");
-            return;
-        }
-    };
-
-    let stable_rungs = match knowledge_store.query("gate stable passing consistently", 10) {
-        Ok(entries) => entries
-            .into_iter()
-            .filter_map(|entry| {
-                let content_lower = entry.content.to_lowercase();
-                if content_lower.contains("compile") || content_lower.contains("rung 0") {
-                    Some(0u32)
-                } else if content_lower.contains("lint") || content_lower.contains("rung 1") {
-                    Some(1)
-                } else if content_lower.contains("test") || content_lower.contains("rung 2") {
-                    Some(2)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
-
-    if !failure_rungs.is_empty() || !stable_rungs.is_empty() {
-        tracing::info!(
-            failure_rungs = ?failure_rungs,
-            stable_rungs = ?stable_rungs,
-            "INT-15: applying neuro knowledge hints to adaptive gate thresholds"
-        );
-        thresholds.apply_neuro_hints(&failure_rungs, &stable_rungs);
-    }
-}
-
-fn build_strategy_fragment_context(
-    knowledge_store: &KnowledgeStore,
-    role: AgentRole,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    task_text: &str,
-    current_model: &str,
-) -> Option<String> {
-    let fragments =
-        select_strategy_fragments(knowledge_store, role, task_def, task_text, current_model, 3);
-    if fragments.is_empty() {
-        None
-    } else {
-        Some(render_strategy_fragments(&fragments))
-    }
-}
-
-fn playbook_query(
-    task: &str,
-    task_text: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    let mut parts = vec![task.to_string(), task_text.to_string()];
-    if let Some(task_def) = task_def {
-        parts.push(task_def.title.clone());
-        if let Some(description) = &task_def.description {
-            parts.push(description.clone());
-        }
-        if !task_def.files.is_empty() {
-            parts.push(task_def.files.join(" "));
-        }
-        if !task_def.acceptance.is_empty() {
-            parts.push(task_def.acceptance.join(" "));
-        }
-    }
-    parts.join("\n")
-}
-
-fn playbook_query_context(
-    role: AgentRole,
-    task: &str,
-    task_text: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> QueryContext {
-    let task_title = task_def
-        .map(|task_def| task_def.title.clone())
-        .unwrap_or_else(|| task.to_string());
-    QueryContext::new(
-        task,
-        task_title,
-        playbook_query(task, task_text, task_def),
-        role.label(),
-        10,
-        3,
-    )
-}
-
-fn build_task_playbook(task_def: &crate::task_parser::TaskDef) -> Playbook {
-    let goal = task_def
-        .description
-        .clone()
-        .unwrap_or_else(|| task_def.title.clone());
-    let mut playbook = Playbook::new(task_def.id.clone(), goal);
-    playbook.name = task_def.title.clone();
-
-    let mut next_index = 0u32;
-    playbook.steps.push(PlaybookStep::new(
-        next_index,
-        task_def
-            .description
-            .clone()
-            .unwrap_or_else(|| task_def.title.clone()),
-        task_def
-            .role
-            .clone()
-            .unwrap_or_else(|| "execute_task".to_string()),
-        if task_def.acceptance.is_empty() {
-            vec!["task_success".to_string()]
-        } else {
-            task_def.acceptance.clone()
-        },
-    ));
-    next_index += 1;
-
-    if !task_def.files.is_empty() {
-        playbook.steps.push(PlaybookStep::new(
-            next_index,
-            format!("Touch files: {}", task_def.files.join(", ")),
-            "edit_file",
-            task_def.files.clone(),
-        ));
-        next_index += 1;
-    }
-
-    if !task_def.verify.is_empty() {
-        let signals = task_def
-            .verify
-            .iter()
-            .map(|step| step.phase.clone())
-            .collect::<Vec<_>>();
-        playbook.steps.push(PlaybookStep::new(
-            next_index,
-            format!("Verify task with {} checks", task_def.verify.len()),
-            "verify",
-            signals,
-        ));
-    }
-
-    playbook
-}
-
-fn latest_efficiency_event(text: &str) -> Option<AgentEfficiencyEvent> {
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(event) = serde_json::from_str::<AgentEfficiencyEvent>(trimmed) {
-            return Some(event);
-        }
-    }
-
-    None
 }
 
 /// Enrich a task with search context from Perplexity Sonar before dispatch.
@@ -3086,6 +2362,8 @@ pub struct PlanRunner {
     playbook: PlaybookStore,
     /// Durable knowledge store queried per task for task-scoped context.
     knowledge_store: KnowledgeStore,
+    /// Evidence-based admission controller that gates writes to the knowledge store.
+    knowledge_admission: Option<KnowledgeAdmissionStore>,
     /// Process supervisor for tracking and cleaning up agent subprocesses.
     supervisor: Arc<ProcessSupervisor>,
     /// Root cancellation token for coordinated shutdown.
@@ -3200,6 +2478,8 @@ pub struct PlanRunner {
     code_index_cache: Option<(std::time::Instant, roko_index::WorkspaceIndex)>,
     /// Append-only custody logger for audit chain records.
     custody_logger: CustodyLogger,
+    /// Extension chain for composable agent behavior hooks (A1 audit finding).
+    extension_chain: ExtensionChain,
 }
 
 /// Tracks per-task completion within a plan. Lives in PlanRunner (CLI crate),
@@ -3232,6 +2512,8 @@ struct TaskTracker {
     last_gate_verdicts: Vec<GateVerdict>,
     /// Last runtime-facing gate verdict summaries emitted for this plan.
     last_gate_verdict_summaries: Vec<GateVerdictSummary>,
+    /// Last structured reviewer verdict parsed for this plan.
+    last_review_verdict: Option<ReviewVerdictEvidence>,
     review_feedback: Option<String>,
     impl_round: u32,
     /// Skill matched during the last dispatch (for confidence updates).
@@ -3252,10 +2534,45 @@ struct TaskTracker {
     activity_history: Vec<ActivityEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreAgentRemediationCommand {
+    program: String,
+    args: Vec<String>,
+    exit_code: Option<i32>,
+    success: bool,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreAgentRemediationRecord {
+    plan_id: String,
+    gate_phase: String,
+    status: String,
+    commands: Vec<PreAgentRemediationCommand>,
+    classification: serde_json::Value,
+    changed_files_before: Vec<String>,
+    changed_files_after: Vec<String>,
+    new_changed_files: Vec<String>,
+    allowed_files: Vec<String>,
+    resolved: bool,
+    agent_retry_needed: bool,
+    reason: String,
+    created_at: String,
+}
+
+impl PreAgentRemediationRecord {
+    fn retry_needed(&self) -> bool {
+        self.agent_retry_needed
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ReplanLedger {
     seen_failure_keys: HashSet<String>,
     replans_seen: HashMap<String, u32>,
+    #[serde(default)]
+    revision_requests: Vec<PlanRevisionRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3273,6 +2590,9 @@ enum PlanRevisionOutcome {
     RegenerationFailed,
     Disabled,
     NotEligible,
+    Retry,
+    Blocked,
+    HumanNeeded,
 }
 
 #[derive(Debug, Clone)]
@@ -3566,109 +2886,7 @@ fn fallback_plan_complexity(tasks: &[crate::task_parser::TaskDef]) -> PlanComple
         .unwrap_or(PlanComplexity::Simple)
 }
 
-fn primary_gate_phase_to_rung(phase: &str) -> Option<Rung> {
-    match phase {
-        gate if gate.starts_with("compile") => Some(Rung::Compile),
-        gate if gate.starts_with("clippy") => Some(Rung::Lint),
-        gate if gate.starts_with("test") => Some(Rung::Test),
-        "symbol" => Some(Rung::Symbol),
-        gate if gate.starts_with("generated_test") || gate == "verify_chain" => {
-            Some(Rung::GeneratedTest)
-        }
-        gate if gate.starts_with("property_test") || gate == "fact_check" => {
-            Some(Rung::PropertyTest)
-        }
-        gate if gate == "llm_judge" || gate.starts_with("integration") => Some(Rung::Integration),
-        _ => None,
-    }
-}
-
-#[derive(Clone)]
-struct RecordedGateVerdict {
-    rung: Rung,
-    verdict: Verdict,
-}
-
-struct RecordingGate {
-    rung: Rung,
-    inner: Box<dyn Gate>,
-    sink: Arc<Mutex<Vec<RecordedGateVerdict>>>,
-}
-
-impl RecordingGate {
-    fn new(rung: Rung, inner: Box<dyn Gate>, sink: Arc<Mutex<Vec<RecordedGateVerdict>>>) -> Self {
-        Self { rung, inner, sink }
-    }
-}
-
-#[async_trait::async_trait]
-impl Gate for RecordingGate {
-    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
-        let verdict = self.inner.verify(signal, ctx).await;
-        self.sink
-            .lock()
-            .expect("recorded gate sink poisoned")
-            .push(RecordedGateVerdict {
-                rung: self.rung,
-                verdict: verdict.clone(),
-            });
-        verdict
-    }
-
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FsGeneratedArtifactStore {
-    root: PathBuf,
-}
-
-impl FsGeneratedArtifactStore {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn artifact_dir(&self) -> PathBuf {
-        self.root.join("generated-tests")
-    }
-
-    fn matching_entries(&self, prefix: &str) -> Vec<String> {
-        let dir = self.artifact_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-
-        let mut names: Vec<String> = entries
-            .filter_map(std::result::Result::ok)
-            .filter_map(|entry| {
-                entry.file_type().ok().filter(|kind| kind.is_file())?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let logical = format!("generated-tests/{name}");
-                logical.starts_with(prefix).then_some(logical)
-            })
-            .collect();
-        names.sort();
-        names
-    }
-}
-
-impl GeneratedArtifactStore for FsGeneratedArtifactStore {
-    fn list(&self, _plan: &str, prefix: &str) -> Vec<String> {
-        self.matching_entries(prefix)
-    }
-
-    fn read(&self, _plan: &str, name: &str) -> Option<Vec<u8>> {
-        let relative = name.strip_prefix("generated-tests/")?;
-        if relative.contains("..") || relative.contains('/') {
-            return None;
-        }
-        std::fs::read(self.artifact_dir().join(relative)).ok()
-    }
-}
-
-// ─── Gate Oracle Adapters ────────────────────────────────────────────────
+// ─── Verify Oracle Adapters ────────────────────────────────────────────────
 
 /// Adapts [`PerplexitySearchClient`] to the [`SearchOracle`] trait expected
 /// by `FactCheckGate`. Each `search` call issues a single-query batch and
@@ -3812,6 +3030,7 @@ impl TaskTracker {
             last_context_knowledge_ids: Vec::new(),
             last_gate_verdicts: Vec::new(),
             last_gate_verdict_summaries: Vec::new(),
+            last_review_verdict: None,
             review_feedback: None,
             impl_round: 0,
             last_matched_skill_id: None,
@@ -3845,6 +3064,7 @@ impl TaskTracker {
             .collect();
         self.ready_since_ms
             .retain(|task_id, _| task_ids.contains(task_id));
+        self.last_review_verdict = None;
         self.current_group_index = 0;
         self.advance_group_index();
     }
@@ -3985,6 +3205,7 @@ impl TaskTracker {
         self.current_group_index = 0;
         self.ready_since_ms.clear();
         self.last_gate_verdict_summaries.clear();
+        self.last_review_verdict = None;
         self.impl_round += 1;
         self.advance_group_index();
         Ok(())
@@ -4033,6 +3254,7 @@ impl TaskTracker {
         self.current_group_index = 0;
         self.ready_since_ms.clear();
         self.last_gate_verdict_summaries.clear();
+        self.last_review_verdict = None;
         self.impl_round += 1;
     }
 
@@ -4164,6 +3386,50 @@ fn merge_completed_tasks(tracker: &mut TaskTracker, completed_tasks: &[String]) 
     {
         tracker.current_group_index += 1;
     }
+}
+
+// ─── Post-plan cold archival ─────────────────────────────────────────────
+
+/// Migrate aged-out engrams from the hot substrate to cold storage after a
+/// plan run completes.
+///
+/// This is the non-interactive equivalent of `roko knowledge archive --older-than 7d`.
+/// It queries the hot `FileSubstrate` for engrams older than 7 days and
+/// batch-archives them into `.roko/cold/` using `ArchiveColdSubstrate`.
+///
+/// Errors are propagated to the caller, which logs and continues (non-fatal).
+async fn post_plan_cold_archival(workdir: &Path) -> Result<()> {
+    use roko_core::{ColdStore, Context, Query, Store};
+
+    let roko_dir = workdir.join(".roko");
+    if !roko_dir.exists() {
+        return Ok(());
+    }
+
+    // Archive engrams older than 7 days, up to 500 per run.
+    const MAX_AGE_MS: i64 = 7 * 24 * 3600 * 1000;
+    const BATCH_SIZE: usize = 500;
+
+    let hot = roko_fs::FileSubstrate::open(&roko_dir).await?;
+    let ctx = Context::now();
+    let cutoff_ms = chrono::Utc::now().timestamp_millis() - MAX_AGE_MS;
+    let query = Query::all().until(cutoff_ms).limit(BATCH_SIZE);
+    let candidates = hot.query(&query, &ctx).await?;
+
+    if candidates.is_empty() {
+        tracing::debug!("[orchestrate] post-plan cold archival: no aged engrams found");
+        return Ok(());
+    }
+
+    let cold_dir = roko_dir.join("cold");
+    let cold = roko_fs::ArchiveColdSubstrate::open(&cold_dir).await?;
+    let archived = cold.archive_batch(candidates).await?;
+    tracing::info!(
+        "[orchestrate] post-plan cold archival: archived {archived} engram(s) to {}",
+        cold_dir.display()
+    );
+
+    Ok(())
 }
 
 fn normalize_task_title(title: &str) -> String {
@@ -4517,7 +3783,40 @@ impl PlanRunner {
             ));
         }
 
-        let plans = discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+        // When the target directory IS a plan (has tasks.toml), rewrite
+        // `plans_dir` to its parent so that `plans_dir.join(base)` resolves
+        // correctly throughout the rest of this function.
+        //
+        // `discover_plans` scans for *.md files and would pick up enrichment
+        // artifacts (brief.md, research.md, etc.) as phantom plans.
+        let (plans_dir, plans) = if plans_dir.join("tasks.toml").exists() {
+            let plan_md = plans_dir.join("plan.md");
+            let md_path = if plan_md.exists() {
+                plan_md
+            } else {
+                plans_dir.to_path_buf()
+            };
+            let base = plans_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let parent = plans_dir.parent().unwrap_or(plans_dir);
+            (
+                parent,
+                vec![roko_orchestrator::plan_discovery::PlanInfo {
+                    base,
+                    num: String::new(),
+                    path: md_path,
+                    frontmatter: None,
+                }],
+            )
+        } else {
+            (
+                plans_dir.as_ref(),
+                discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?,
+            )
+        };
 
         if plans.is_empty() {
             return Err(anyhow!("no plans found in {}", plans_dir.display()));
@@ -4662,6 +3961,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let selected_mcp_servers = if any_task_without_mcp_list || requested_mcp_servers.is_empty()
         {
             None
@@ -4796,6 +4096,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -4808,6 +4109,12 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            // TODO(M-future): Load extensions from `config.agent.extensions` and
+            // per-role overrides into the chain. Currently the chain is empty
+            // because no extension loader/factory exists yet — all dispatch
+            // hooks (pre/post_inference, on_gate, on_error) are already wired
+            // and will fire once extensions are registered here.
+            extension_chain: ExtensionChain::new(),
         })
     }
 
@@ -4870,6 +4177,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -4998,6 +4306,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -5010,6 +4319,7 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            extension_chain: ExtensionChain::new(),
         })
     }
 
@@ -5074,6 +4384,7 @@ impl PlanRunner {
         let knowledge_store =
             KnowledgeStore::init(&workdir.join(".roko").join("neuro").join("knowledge.jsonl"))
                 .context("init knowledge store")?;
+        let knowledge_admission = Some(KnowledgeAdmissionStore::for_workdir(workdir));
         let (mcp_clients, tool_registry, mcp_server_names, mcp_server_configs) =
             Self::setup_mcp(&config, workdir, None).await;
         let obs_sinks = FsObservabilitySinks::for_workdir(workdir);
@@ -5202,6 +4513,7 @@ impl PlanRunner {
             cloud_execution: None,
             playbook,
             knowledge_store,
+            knowledge_admission,
             search_client: std::env::var("PERPLEXITY_API_KEY")
                 .ok()
                 .map(PerplexitySearchClient::new),
@@ -5214,7 +4526,86 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            extension_chain: ExtensionChain::new(),
         })
+    }
+
+    /// Submit a single knowledge entry through the admission store when
+    /// available, falling back to a direct `knowledge_store.add` otherwise.
+    fn admit_knowledge_entry(&self, entry: KnowledgeEntry) -> anyhow::Result<()> {
+        let Some(admission) = self.knowledge_admission.as_ref() else {
+            return self.knowledge_store.add(entry);
+        };
+
+        let candidate = KnowledgeCandidateRecord::new(
+            &entry.id,
+            entry.kind,
+            entry.source.as_deref().unwrap_or("orchestrate"),
+            &entry.content,
+            entry.confidence,
+        )
+        .with_scope(KnowledgeScope {
+            tags: entry.tags.clone(),
+            ..KnowledgeScope::default()
+        })
+        .with_tags(entry.tags.clone());
+
+        let decision = admission.submit_candidate(candidate)?;
+        match decision.outcome {
+            KnowledgeAdmissionOutcome::Admitted => {
+                tracing::debug!(
+                    candidate_id = %decision.candidate_id,
+                    "knowledge entry admitted via admission store"
+                );
+            }
+            other => {
+                tracing::debug!(
+                    candidate_id = %decision.candidate_id,
+                    outcome = ?other,
+                    reason = ?decision.reason,
+                    "knowledge entry not admitted (outcome={other:?}); raw candidate persisted"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit a batch of knowledge entries through the admission store,
+    /// falling back to direct `knowledge_store.ingest` when the admission
+    /// store is not configured.
+    fn admit_knowledge_batch(&self, entries: Vec<KnowledgeEntry>) -> anyhow::Result<()> {
+        let Some(admission) = self.knowledge_admission.as_ref() else {
+            return self.knowledge_store.ingest(entries);
+        };
+
+        for entry in entries {
+            let candidate = KnowledgeCandidateRecord::new(
+                &entry.id,
+                entry.kind,
+                entry.source.as_deref().unwrap_or("orchestrate"),
+                &entry.content,
+                entry.confidence,
+            )
+            .with_scope(KnowledgeScope {
+                tags: entry.tags.clone(),
+                ..KnowledgeScope::default()
+            })
+            .with_tags(entry.tags.clone());
+
+            match admission.submit_candidate(candidate) {
+                Ok(decision) => {
+                    tracing::debug!(
+                        candidate_id = %decision.candidate_id,
+                        outcome = ?decision.outcome,
+                        "batch admission decision"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "batch admission submit failed");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_executor_recovery_snapshot(snapshot_json: &str) -> Result<()> {
@@ -5345,6 +4736,7 @@ impl PlanRunner {
     fn format_plan_revision_prompt(
         task_id: &str,
         reason: &PlanRevisionReason,
+        request: &PlanRevisionRequest,
         failing_verdicts: &[GateVerdictSummary],
         log_tail: &str,
     ) -> String {
@@ -5357,24 +4749,91 @@ impl PlanRunner {
             .iter()
             .map(|verdict| match verdict.details.as_deref() {
                 Some(details) if !details.is_empty() => {
-                    format!(
+                    let mut line = format!(
                         "- {}: passed={}, details={details}",
                         verdict.gate, verdict.passed
-                    )
+                    );
+                    if let Some(classification) = verdict.classification.as_deref() {
+                        line.push_str(&format!(", classification={classification}"));
+                    }
+                    if !verdict.failure_pattern_ids.is_empty() {
+                        line.push_str(&format!(", patterns={:?}", verdict.failure_pattern_ids));
+                    }
+                    line
                 }
                 _ => format!("- {}: passed={}", verdict.gate, verdict.passed),
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let blocking_findings = if request.blocking_findings.is_empty() {
+            "none".to_string()
+        } else {
+            request
+                .blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         format!(
             "## Previous plan failed at task `{task_id}`\n\n\
+             Request id: {}\n\
+             Required next action: {}\n\
              Reason: {reason_line}.\n\
+             Failure pattern ids: {:?}\n\
+             Blocking findings:\n\
+             {blocking_findings}\n\n\
              Failing gates:\n\
              {gates}\n\n\
              Log tail (last 40 lines):\n```\n{log_tail}\n```\n\n\
              Design the revised plan to address this specific failure mode first. \
-             Do not just re-propose the same task shape."
+             Do not just re-propose the same task shape.",
+            request.request_id, request.disposition, request.failure_pattern_ids
         )
+    }
+
+    fn gate_failure_next_action(
+        attempts: u32,
+        attempt_limit: u32,
+        failing_verdicts: &[GateVerdictSummary],
+    ) -> GateFailureAction {
+        let has_class = |needle: &str| {
+            failing_verdicts
+                .iter()
+                .any(|verdict| verdict.classification.as_deref() == Some(needle))
+        };
+        if has_class("role_tool_permission") {
+            GateFailureAction::NeedsHuman
+        } else if has_class("external_environment") {
+            GateFailureAction::Blocked
+        } else if has_class("unsafe_stub_or_pass_behavior")
+            || has_class("prompt_context_insufficiency")
+            || has_class("architectural_conflict_requires_replan")
+            || attempts >= attempt_limit
+        {
+            GateFailureAction::NeedsReplan
+        } else {
+            GateFailureAction::Retry
+        }
+    }
+
+    fn plan_revision_request_from_gate_failure(
+        plan_id: &str,
+        task_id: &str,
+        attempts: u32,
+        failing_verdicts: &[GateVerdictSummary],
+    ) -> PlanRevisionRequest {
+        let evidence = failing_verdicts
+            .iter()
+            .map(|verdict| {
+                PlanRevisionEvidence::gate(verdict.gate.clone())
+                    .with_classification(verdict.classification.clone())
+                    .with_failure_pattern_ids(verdict.failure_pattern_ids.clone())
+                    .with_blocking_findings(verdict.blocking_findings.clone())
+                    .with_detail(verdict.details.clone())
+            })
+            .collect();
+        PlanRevisionRequest::gate_failure_limit(plan_id, task_id, attempts, evidence)
     }
 
     fn plan_revision_failure_hash(
@@ -5401,6 +4860,7 @@ impl PlanRunner {
         reason: &PlanRevisionReason,
         failing_verdicts: &[GateVerdictSummary],
         log_tail: &str,
+        request: PlanRevisionRequest,
     ) -> Result<PlanRevisionClaim> {
         let failure_hash = Self::plan_revision_failure_hash(reason, failing_verdicts, log_tail);
         let dedupe_key = Self::plan_revision_dedupe_key(plan_id, task_id, &failure_hash);
@@ -5424,6 +4884,7 @@ impl PlanRunner {
         self.replan_ledger
             .replans_seen
             .insert(plan_id.to_string(), seen.saturating_add(1));
+        self.replan_ledger.revision_requests.push(request);
         self.replan_ledger
             .save(&replan_ledger_path(&self.workdir))?;
         Ok(PlanRevisionClaim::Trigger { dedupe_key })
@@ -5431,10 +4892,6 @@ impl PlanRunner {
 
     fn build_gate_failure_plan_revision(&self, plan_id: &str, task_id: &str) -> Option<RokoEvent> {
         let tracker = self.task_trackers.get(plan_id)?;
-        if tracker.gate_failure_count < self.gate_failure_replan_attempt_limit() {
-            return None;
-        }
-
         let failing_verdicts = tracker
             .last_gate_verdict_summaries
             .iter()
@@ -5447,12 +4904,21 @@ impl PlanRunner {
 
         let failure_context = tracker.last_gate_failure.clone().unwrap_or_default();
         let log_tail = self.task_log_tail(task_id, &failure_context, 40);
+        let attempts = tracker.gate_failure_count;
+        let request = Self::plan_revision_request_from_gate_failure(
+            plan_id,
+            task_id,
+            attempts,
+            &failing_verdicts,
+        );
         Some(RokoEvent::PlanRevision {
+            request_id: request.request_id,
             plan_id: plan_id.to_string(),
             task_id: task_id.to_string(),
-            reason: PlanRevisionReason::GateFailureLimit {
-                attempts: tracker.gate_failure_count,
-            },
+            reason: PlanRevisionReason::GateFailureLimit { attempts },
+            required_next_action: request.disposition.to_string(),
+            failure_pattern_ids: request.failure_pattern_ids,
+            blocking_findings: request.blocking_findings,
             failing_verdicts,
             log_tail,
             issued_at: chrono::Utc::now(),
@@ -5491,9 +4957,19 @@ impl PlanRunner {
                 log_tail,
                 ..
             } => {
+                let attempts = match &reason {
+                    PlanRevisionReason::GateFailureLimit { attempts } => *attempts,
+                };
+                let request = Self::plan_revision_request_from_gate_failure(
+                    &plan_id,
+                    &task_id,
+                    attempts,
+                    &failing_verdicts,
+                );
                 let failure_summary = Self::format_plan_revision_prompt(
                     &task_id,
                     &reason,
+                    &request,
                     &failing_verdicts,
                     &log_tail,
                 );
@@ -5513,7 +4989,11 @@ impl PlanRunner {
             // degradation) as knowledge entries so that future sessions can
             // learn from operational history.
             RokoEvent::AgentLifecycleTransition(ref transition) => {
-                record_lifecycle_knowledge(&self.knowledge_store, transition);
+                record_lifecycle_knowledge(
+                    &self.knowledge_store,
+                    self.knowledge_admission.as_ref(),
+                    transition,
+                );
                 false
             }
             RokoEvent::HeartbeatTick(_)
@@ -5533,6 +5013,30 @@ impl PlanRunner {
             return PlanRevisionOutcome::Disabled;
         }
 
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return PlanRevisionOutcome::NotEligible;
+        };
+        let failing_verdicts = tracker
+            .last_gate_verdict_summaries
+            .iter()
+            .filter(|verdict| !verdict.passed)
+            .cloned()
+            .collect::<Vec<_>>();
+        if failing_verdicts.is_empty() {
+            return PlanRevisionOutcome::NotEligible;
+        }
+        let next_action = Self::gate_failure_next_action(
+            tracker.gate_failure_count,
+            self.gate_failure_replan_attempt_limit(),
+            &failing_verdicts,
+        );
+        match next_action {
+            GateFailureAction::Retry => return PlanRevisionOutcome::Retry,
+            GateFailureAction::Blocked => return PlanRevisionOutcome::Blocked,
+            GateFailureAction::NeedsHuman => return PlanRevisionOutcome::HumanNeeded,
+            GateFailureAction::NeedsReplan => {}
+        }
+
         let Some(event) = self.build_gate_failure_plan_revision(plan_id, task_id) else {
             return PlanRevisionOutcome::NotEligible;
         };
@@ -5546,8 +5050,24 @@ impl PlanRunner {
         else {
             return PlanRevisionOutcome::NotEligible;
         };
+        let attempts = match reason {
+            PlanRevisionReason::GateFailureLimit { attempts } => *attempts,
+        };
+        let request = Self::plan_revision_request_from_gate_failure(
+            plan_id,
+            task_id,
+            attempts,
+            failing_verdicts,
+        );
 
-        match self.claim_plan_revision(plan_id, task_id, reason, failing_verdicts, log_tail) {
+        match self.claim_plan_revision(
+            plan_id,
+            task_id,
+            reason,
+            failing_verdicts,
+            log_tail,
+            request,
+        ) {
             Ok(PlanRevisionClaim::Duplicate { dedupe_key }) => {
                 tracing::info!(
                     plan_id,
@@ -5694,8 +5214,15 @@ impl PlanRunner {
         if let Ok(new_phase) = self.executor.apply_event(plan_id, event) {
             let new_phase_label = Self::phase_label(new_phase.kind()).to_string();
             let exec_event = if old_phase == "queued" {
+                let title = self
+                    .task_trackers
+                    .get(plan_id)
+                    .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == *task_id))
+                    .map(|td| td.title.clone())
+                    .unwrap_or_default();
                 crate::serve::events::ExecutionEvent::TaskStarted {
                     task_id: task_id.to_string(),
+                    title,
                     phase: new_phase_label,
                 }
             } else if status == "completed" {
@@ -5711,6 +5238,12 @@ impl PlanRunner {
                 }
             };
             self.emit_execution_event(plan_id, exec_event);
+
+            // Persist state after every phase transition so crash doesn't
+            // lose progress. save_state() uses atomic write-then-rename.
+            if let Err(e) = self.save_state() {
+                tracing::warn!("[orchestrate] failed to persist state after transition: {e}");
+            }
         }
     }
 
@@ -5741,7 +5274,12 @@ impl PlanRunner {
     }
 
     /// Gracefully shut down all managed agent processes.
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&mut self) {
+        // A1: Tear down extension chain hooks in reverse order.
+        let ext_shutdown_errors = self.extension_chain.shutdown_all().await;
+        for (name, err) in &ext_shutdown_errors {
+            tracing::warn!(extension = %name, error = %err, "extension shutdown_all failed");
+        }
         let outcomes = self.supervisor.shutdown_all().await;
         if !outcomes.is_empty() {
             tracing::info!("[orchestrate] shut down {} agent processes", outcomes.len());
@@ -5793,7 +5331,12 @@ impl PlanRunner {
     }
 
     /// Force-kill all managed agent processes, then persist runtime artifacts.
-    async fn force_shutdown(&self) {
+    ///
+    /// After killing tracked processes we also send `SIGTERM` to the entire
+    /// process group (`kill(0, SIGTERM)`) to catch grandchild processes that
+    /// were spawned by agents (e.g. the Claude CLI spawns its own
+    /// subprocesses).
+    async fn force_shutdown(&mut self) {
         let killed = self.supervisor.kill_all().await;
         if !killed.is_empty() {
             tracing::warn!(
@@ -5801,6 +5344,23 @@ impl PlanRunner {
                 killed.len()
             );
         }
+
+        // Kill the entire process group to catch grandchild processes.
+        // We temporarily ignore SIGTERM for ourselves so we survive the
+        // group-wide signal and can finish cleanup (persist state, etc.).
+        #[cfg(unix)]
+        {
+            #[allow(unsafe_code)]
+            unsafe {
+                // Ignore SIGTERM for ourselves before sending to the group.
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::kill(0, libc::SIGTERM);
+                // Restore default SIGTERM disposition after a short delay so
+                // a subsequent Ctrl-C / kill still works.
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            }
+        }
+
         self.shutdown().await;
     }
 
@@ -5808,6 +5368,13 @@ impl PlanRunner {
     async fn flush_logs(&self) -> Result<()> {
         sync_file_if_present(&self.workdir.join(".roko").join("engrams.jsonl"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("episodes.jsonl"))?;
+        sync_file_if_present(
+            &self
+                .workdir
+                .join(".roko")
+                .join("learn")
+                .join("efficiency.jsonl"),
+        )?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.log"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.err"))?;
         std::io::stdout().flush().context("flush stdout")?;
@@ -8020,6 +7587,11 @@ impl PlanRunner {
 
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     async fn run_task_plans_inner(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        // A1: Initialize extension chain hooks before the main run loop.
+        let ext_init_errors = self.extension_chain.init_all().await;
+        for (name, err) in &ext_init_errors {
+            tracing::warn!(extension = %name, error = %err, "extension init_all failed");
+        }
         warn_if_distillation_disabled();
         let watcher_cancel = TokioCancellationToken::new();
         let watcher_task = WatcherRunner {
@@ -8063,6 +7635,14 @@ impl PlanRunner {
 
         if let Err(e) = refresh_cfactor_snapshot(self.learning.paths().root.clone()).await {
             tracing::warn!(error = %e, "failed to refresh c-factor snapshot after plan run");
+        }
+
+        // Post-plan cold archival: migrate aged-out engrams to `.roko/cold/`.
+        // This runs non-interactively after every plan execution, archiving
+        // engrams older than 7 days (same defaults as the `roko knowledge archive`
+        // CLI command).  Errors are logged but never fail the plan run.
+        if let Err(e) = post_plan_cold_archival(&self.workdir).await {
+            tracing::warn!(error = %e, "post-plan cold archival failed (non-fatal)");
         }
 
         result
@@ -8128,6 +7708,7 @@ impl PlanRunner {
                 self.emit_server_event(crate::serve::events::ServerEvent::AgentSpawned {
                     agent_id: format!("{plan_id}:{task}"),
                     role: format!("{role:?}"),
+                    model: String::new(),
                 });
 
                 match (role, task.as_str()) {
@@ -8179,7 +7760,7 @@ impl PlanRunner {
                         // Record gate episode.
                         let wall_ms =
                             u64::try_from(gate_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        // Gate runs are local process work, so the episode records zero USD cost
+                        // Verify runs are local process work, so the episode records zero USD cost
                         // while still carrying the latency field alongside it.
                         let gate_cost_usd = 0.0;
                         let mut ep =
@@ -8311,7 +7892,7 @@ impl PlanRunner {
                                 .unwrap_or_else(|| format!("rung-{effective_rung}"));
                             let anti_content = if failure_context.is_empty() {
                                 format!(
-                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
+                                    "Verify '{phase}' failed for task {anti_task_id} in plan {plan_id}: {}",
                                     failed_gates
                                         .iter()
                                         .map(|g| format!("{}: {}", g.gate_name, g.summary))
@@ -8325,7 +7906,7 @@ impl PlanRunner {
                                     &failure_context
                                 };
                                 format!(
-                                    "Gate '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
+                                    "Verify '{phase}' failed for task {anti_task_id} in plan {plan_id}: {snippet}"
                                 )
                             };
                             let gate_failure_tag = self.daimon.emotional_tag("gate_failure");
@@ -8362,7 +7943,7 @@ impl PlanRunner {
                                 frozen: false,
                                 catalytic_score: 0,
                             };
-                            if let Err(e) = self.knowledge_store.add(anti_entry) {
+                            if let Err(e) = self.admit_knowledge_entry(anti_entry) {
                                 tracing::warn!(
                                     plan_id = %plan_id,
                                     phase = %phase,
@@ -8872,6 +8453,19 @@ impl PlanRunner {
         // Ensure tracker is loaded
         self.ensure_task_tracker(plan_id);
 
+        // Skip enrichment when the plan's [meta] says so (pre-authored plans).
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            if tracker.tasks_file.meta.skip_enrichment {
+                tracing::info!(
+                    "[orchestrate] Enriching {plan_id}: skip_enrichment=true, transitioning directly to implementing"
+                );
+                let event = ExecutorEvent::EnrichmentDone;
+                self.log_transition(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "enrich", &event, "transitioned");
+                return;
+            }
+        }
+
         let started = std::time::Instant::now();
         let pipeline_summary = match self.run_enrichment_pipeline(plan_id).await {
             Ok(summary) => Some(summary),
@@ -8974,6 +8568,10 @@ impl PlanRunner {
     /// unblocked. Single-task dispatch includes retry logic; parallel batches
     /// fail individual tasks without retries (the next tick re-evaluates).
     async fn handle_implementing(&mut self, plan_id: &str) {
+        // Ensure task tracker is loaded (may have been missed if enrichment
+        // was skipped or the plan was resumed from snapshot).
+        self.ensure_task_tracker(plan_id);
+
         // If no tracker, fall through to generic agent
         if !self.task_trackers.contains_key(plan_id) {
             self.handle_generic_agent(plan_id, AgentRole::Implementer, "next")
@@ -9289,12 +8887,18 @@ impl PlanRunner {
             .as_ref()
             .map(|task| task.tier.clone())
             .unwrap_or_else(|| "focused".to_string());
-        let base_prompt_text = task_def
+        let task_prompt_text = task_def
             .as_ref()
             .map(|task| task.build_prompt(plan_id, &self.workdir))
             .unwrap_or_else(|| {
                 format!("Plan: {plan_id}\nTask: {task_id}\n\nImplement the task described above.")
             });
+        let failure_memory = self.failure_pattern_retry_context(plan_id, Some(task_id), None, None);
+        let base_prompt_text = if failure_memory.trim().is_empty() {
+            task_prompt_text
+        } else {
+            format!("{failure_memory}\n\n---\n\n{task_prompt_text}")
+        };
         let base_retry_model = self.task_retry_model(plan_id, task_id);
         let mut retry_model = base_retry_model.clone();
         let mut retry_prompt_override: Option<String> = None;
@@ -9369,6 +8973,30 @@ impl PlanRunner {
                     if let Some((state, action)) = pending_feedback.take() {
                         self.retry_conductor.record_outcome(&state, action, true);
                         self.persist_retry_conductor();
+                    }
+                    if let Err(e) = self.record_structured_agent_output_evidence(
+                        plan_id,
+                        task_id,
+                        task_def.as_ref(),
+                        &result,
+                    ) {
+                        tracing::error!(
+                            "[orchestrate] structured agent output validation failed for {plan_id}/{task_id}: {e}"
+                        );
+                        if total_dispatches >= max_dispatches {
+                            terminal_error = Some(e);
+                            break;
+                        }
+                        retry_prompt_override = Some(self.build_conductor_retry_prompt(
+                            plan_id,
+                            task_id,
+                            task_def.as_ref(),
+                            &format!("{e:#}"),
+                            Some("agent_output"),
+                            Some(HintType::ErrorDigest),
+                        ));
+                        retry_iteration = retry_iteration.saturating_add(1);
+                        continue;
                     }
                     let domain = self.current_task_domain(plan_id);
                     if let Err(e) = self
@@ -9848,6 +9476,30 @@ impl PlanRunner {
                 let task_def = tasks_file
                     .as_ref()
                     .and_then(|tf| tf.tasks.iter().find(|task| task.id == *tid).cloned());
+                if let Err(e) = self.record_structured_agent_output_evidence(
+                    plan_id,
+                    tid,
+                    task_def.as_ref(),
+                    &task_result.result,
+                ) {
+                    tracing::error!(
+                        "[orchestrate] parallel task {tid} structured output validation failed: {e}"
+                    );
+                    self.record_task_failure(
+                        plan_id,
+                        tid,
+                        Some(task_result.prompt_text.as_str()),
+                        Some(task_result.model.as_str()),
+                        &e,
+                        &started,
+                        &task_result.backend_id,
+                        Some(&task_result.result),
+                        0,
+                    )
+                    .await;
+                    any_fatal = true;
+                    continue;
+                }
                 if let Err(e) = self
                     .finish_task_post_processing(
                         plan_id,
@@ -10017,6 +9669,19 @@ impl PlanRunner {
         ep.extra
             .entry("task_category".to_string())
             .or_insert_with(|| serde_json::json!(default_task_category(role)));
+
+        // B5: Persist prompt composition snapshot into the episode so auditors
+        // can inspect which sections were included, their token budgets, and
+        // whether any were truncated or dropped due to budget pressure.
+        if ep.prompt_composition.is_none() {
+            if let Some(tracker) = self.task_trackers.get(plan_id) {
+                if !tracker.last_prompt_sections.is_empty() {
+                    ep.prompt_composition =
+                        serde_json::to_value(&tracker.last_prompt_sections).ok();
+                }
+            }
+        }
+
         attach_episode_hdc_fingerprint(&mut ep, prompt, outcome);
 
         let provider = self.provider_id_for_model(model);
@@ -10283,6 +9948,13 @@ impl PlanRunner {
                     truncate_output(error_output)
                 )
             });
+        let failure_memory =
+            self.failure_pattern_retry_context(plan_id, Some(task_id), Some(gate), None);
+        let prompt = if failure_memory.trim().is_empty() {
+            prompt
+        } else {
+            format!("{failure_memory}\n\n---\n\n{prompt}")
+        };
 
         match hint {
             Some(hint) => format!(
@@ -10719,7 +10391,8 @@ impl PlanRunner {
         }
 
         // UX34: when a force_backend override was used, feed the outcome into
-        // the cascade router so it learns which backend works for this role.
+        // the cascade router with a dampened reward so it learns which backend
+        // works for this task category without letting user bias dominate.
         {
             let routing_reason = self
                 .task_trackers
@@ -10727,15 +10400,24 @@ impl PlanRunner {
                 .and_then(|t| t.last_routing_reason.clone());
             if routing_reason.as_deref() == Some("role_force_backend") {
                 let model = self.effective_model();
-                self.learning
-                    .cascade_router()
-                    .record_outcome(&model, result.success);
+                let ctx = cascade_routing_context(
+                    self,
+                    plan_id,
+                    task_id,
+                    AgentRole::Implementer,
+                    task_def.as_ref(),
+                );
+                self.learning.cascade_router().record_override_outcome(
+                    &model,
+                    &ctx,
+                    result.success,
+                );
                 tracing::debug!(
                     plan_id = %plan_id,
                     task_id = %task_id,
                     model = %model,
                     success = result.success,
-                    "UX34: persisted force_backend outcome to cascade router"
+                    "UX34: persisted force_backend override outcome to cascade router (dampened)"
                 );
             }
         }
@@ -10813,7 +10495,7 @@ impl PlanRunner {
             &model,
             &success_episode_id,
         );
-        if let Err(err) = self.knowledge_store.ingest(vec![success_entry]) {
+        if let Err(err) = self.admit_knowledge_batch(vec![success_entry]) {
             tracing::warn!(
                 plan_id = %plan_id,
                 task_id = %task_id,
@@ -10926,6 +10608,308 @@ impl PlanRunner {
         Ok(())
     }
 
+    /// Parse and persist required structured output evidence before a task can
+    /// count as implemented. Missing or malformed output fails closed and
+    /// routes through the existing retry path.
+    fn record_structured_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        result: &AgentResult,
+    ) -> Result<()> {
+        let Some(requirement) = task_def
+            .and_then(|task| task.acceptance_contract.as_ref())
+            .and_then(|contract| contract.agent_output.as_ref())
+            .filter(|requirement| requirement.required)
+        else {
+            return Ok(());
+        };
+
+        let output_text = result.output.body.as_text().unwrap_or_default();
+        let raw_output_ref = result.output.id.to_string();
+        let evidence = parse_structured_agent_output_evidence(
+            output_text,
+            task_id,
+            &requirement.schema,
+            raw_output_ref,
+        );
+        self.persist_agent_output_evidence(plan_id, task_id, &evidence)?;
+
+        if evidence.parsed && evidence.schema_valid {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "structured agent output for {plan_id}/{task_id} did not satisfy schema {}",
+                requirement.schema
+            ))
+        }
+    }
+
+    fn persist_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        evidence: &StructuredOutputEvidence,
+    ) -> Result<()> {
+        let dir = acceptance_task_dir(&self.workdir, plan_id, task_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("agent-output-evidence.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(evidence)?)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
+    fn validate_acceptance_contracts_for_plan(
+        &mut self,
+        plan_id: &str,
+        review: &ReviewVerdictEvidence,
+    ) -> Result<()> {
+        let Some(tracker) = self.task_trackers.get(plan_id) else {
+            return Ok(());
+        };
+        let tasks = tracker.tasks_file.tasks.clone();
+        let mut failures = Vec::new();
+
+        for task in tasks
+            .iter()
+            .filter(|task| task.acceptance_contract.is_some())
+        {
+            let contract = task
+                .acceptance_contract
+                .as_ref()
+                .expect("filtered acceptance contract");
+            let evidence = self.acceptance_evidence_for_task(plan_id, task, review)?;
+            let decision = contract.validate_evidence(&evidence);
+            self.persist_acceptance_decision(plan_id, &task.id, &evidence, &decision)?;
+            if !decision.passed() {
+                failures.push(format_acceptance_decision(&task.id, &decision));
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(failures.join("\n\n")))
+        }
+    }
+
+    fn acceptance_evidence_for_task(
+        &self,
+        plan_id: &str,
+        task: &crate::task_parser::TaskDef,
+        review: &ReviewVerdictEvidence,
+    ) -> Result<AcceptanceEvidence> {
+        let contract = task
+            .acceptance_contract
+            .as_ref()
+            .expect("acceptance contract exists");
+        let gate_results = self
+            .executor
+            .plan_state(plan_id)
+            .map(|state| state.gate_results.as_slice())
+            .unwrap_or(&[]);
+        let gates: Vec<GateEvidence> = contract
+            .gates
+            .iter()
+            .map(|requirement| {
+                let matched = gate_results
+                    .iter()
+                    .find(|result| gate_result_matches_requirement(result, requirement));
+                GateEvidence {
+                    gate_id: requirement.id.clone(),
+                    outcome: matched.map_or(AcceptanceOutcome::Failed, |result| {
+                        if result.passed {
+                            AcceptanceOutcome::Passed
+                        } else {
+                            AcceptanceOutcome::Failed
+                        }
+                    }),
+                    evidence_ref: matched
+                        .map(|result| {
+                            format!(
+                                ".roko/gates/{plan_id}/rung-{}:{}",
+                                result.rung, result.gate_name
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!(".roko/acceptance/{plan_id}/{}/missing-gate", task.id)
+                        }),
+                }
+            })
+            .collect();
+
+        let no_stub = contract
+            .no_stub
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| scan_no_stub_evidence(&self.workdir, &requirement.production_paths));
+
+        let agent_output = contract
+            .agent_output
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|_| self.load_agent_output_evidence(plan_id, &task.id))
+            .transpose()?;
+
+        let parity_ledger_rows = contract
+            .parity_ledger
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| {
+                requirement
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let test_evidence_refs = row
+                            .test_evidence_refs
+                            .iter()
+                            .filter(|value| !value.trim().is_empty())
+                            .cloned()
+                            .chain(gates.iter().filter_map(|gate| {
+                                (gate.outcome == AcceptanceOutcome::Passed
+                                    && !gate.evidence_ref.trim().is_empty())
+                                .then(|| gate.evidence_ref.clone())
+                            }))
+                            .collect::<Vec<_>>();
+                        let implementation_refs = row
+                            .implementation_refs
+                            .iter()
+                            .filter(|value| !value.trim().is_empty())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let has_implementation_ref =
+                            !implementation_refs.is_empty() || !row.evidence_ref.trim().is_empty();
+                        let verified = !row.source_ref.trim().is_empty()
+                            && has_implementation_ref
+                            && !test_evidence_refs.is_empty();
+                        ParityLedgerEvidenceRow {
+                            requirement_id: row.requirement_id.clone(),
+                            outcome: if verified {
+                                AcceptanceOutcome::Passed
+                            } else {
+                                AcceptanceOutcome::NeedsWork
+                            },
+                            status: if verified {
+                                ParityLedgerStatus::Verified
+                            } else {
+                                ParityLedgerStatus::NeedsWork
+                            },
+                            source_ref: row.source_ref.clone(),
+                            evidence_ref: row.evidence_ref.clone(),
+                            implementation_refs,
+                            test_evidence_refs,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.persist_parity_rows(plan_id, &task.id, &parity_ledger_rows)?;
+
+        let recovery = contract
+            .recovery
+            .as_ref()
+            .filter(|requirement| requirement.required)
+            .map(|_| {
+                let tracker = self.task_trackers.get(plan_id);
+                RecoveryEvidence {
+                    retry_recorded: tracker.is_some_and(|tracker| tracker.impl_round > 0),
+                    reflection_recorded: tracker
+                        .is_some_and(|tracker| tracker.review_feedback.is_some()),
+                    replan_recorded: self
+                        .replan_ledger
+                        .replans_seen
+                        .get(plan_id)
+                        .is_some_and(|count| *count > 0),
+                }
+            });
+
+        Ok(AcceptanceEvidence {
+            outcome: AcceptanceOutcome::Passed,
+            gates,
+            no_stub,
+            agent_output,
+            review_verdict: contract
+                .review_verdict
+                .as_ref()
+                .filter(|requirement| requirement.required)
+                .map(|_| review.clone()),
+            recovery,
+            parity_ledger_rows,
+        })
+    }
+
+    fn load_agent_output_evidence(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+    ) -> Result<StructuredOutputEvidence> {
+        let path =
+            acceptance_task_dir(&self.workdir, plan_id, task_id).join("agent-output-evidence.json");
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    }
+
+    fn persist_acceptance_decision(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        evidence: &AcceptanceEvidence,
+        decision: &AcceptanceDecision,
+    ) -> Result<()> {
+        let dir = acceptance_task_dir(&self.workdir, plan_id, task_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = dir.join("decision.json");
+        let record = serde_json::json!({
+            "plan_id": plan_id,
+            "task_id": task_id,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "decision": decision,
+            "evidence": evidence,
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&record)?)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
+    fn persist_parity_rows(
+        &self,
+        plan_id: &str,
+        task_id: &str,
+        rows: &[ParityLedgerEvidenceRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let path = self.workdir.join(".roko").join("parity-ledger.jsonl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        for row in rows {
+            let record = serde_json::json!({
+                "plan_id": plan_id,
+                "task_id": task_id,
+                "requirement_id": row.requirement_id,
+                "outcome": row.outcome,
+                "status": row.status,
+                "source_ref": row.source_ref,
+                "evidence_ref": row.evidence_ref,
+                "implementation_refs": row.implementation_refs,
+                "test_evidence_refs": row.test_evidence_refs,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            writeln!(file, "{record}").with_context(|| format!("write {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     /// Record a completed run and check the returned `LearningUpdate` for
     /// regression alerts.
     async fn record_and_check_learning(&mut self, input: CompletedRunInput, plan_id: &str) {
@@ -11032,7 +11016,7 @@ impl PlanRunner {
         prompt.push_str(&original_task.build_prompt(plan_id, &self.workdir));
 
         if !gate_report.trim().is_empty() {
-            prompt.push_str("\n\n## Gate failure outputs\n");
+            prompt.push_str("\n\n## Verify failure outputs\n");
             prompt.push_str(gate_report);
         }
 
@@ -12193,6 +12177,7 @@ impl PlanRunner {
                 timeout_secs: 30,
                 max_retries: 0,
                 acceptance: Vec::new(),
+                acceptance_contract: None,
                 domain: None,
             });
         let mut regenerated_task = template_task.clone();
@@ -12213,6 +12198,7 @@ impl PlanRunner {
                 status: "ready".to_string(),
                 max_parallel: old_tasks.meta.max_parallel,
                 estimated_total_minutes: old_tasks.meta.estimated_total_minutes,
+                skip_enrichment: old_tasks.meta.skip_enrichment,
             },
             tasks: vec![regenerated_task.clone()],
         };
@@ -12362,10 +12348,118 @@ impl PlanRunner {
         }
     }
 
+    fn record_gate_failure_patterns(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        verdicts: &[Verdict],
+    ) -> Vec<String> {
+        let path = failure_pattern_store_path(&self.workdir);
+        let mut store = ErrorPatternStore::load(&path);
+        let mut observed = 0usize;
+        let mut pattern_ids = Vec::new();
+
+        for verdict in verdicts.iter().filter(|verdict| !verdict.passed) {
+            let classification = Self::classify_runtime_verdict(verdict);
+            for record in records_from_classification(&classification) {
+                if !pattern_ids.contains(&record.key) {
+                    pattern_ids.push(record.key.clone());
+                }
+                let observation = GateFailureObservation::new(
+                    record.key,
+                    plan_id,
+                    task_id.map(str::to_string),
+                    record.gate,
+                    record.classification,
+                    record.digest,
+                    GateFailureSource::GateClassification,
+                )
+                .with_suggestion(record.suggestion);
+                let _ = store.observe_gate_failure(observation);
+                observed += 1;
+            }
+        }
+
+        if observed > 0
+            && let Err(error) = store.save(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to persist gate failure patterns"
+            );
+        }
+        pattern_ids
+    }
+
+    fn classify_runtime_verdict(verdict: &Verdict) -> roko_gate::GateFailureClassification {
+        let raw = verdict
+            .error_digest
+            .as_deref()
+            .or(verdict.detail.as_deref())
+            .unwrap_or(&verdict.reason);
+        verdict
+            .error_digest
+            .as_deref()
+            .and_then(|digest| serde_json::from_str(digest).ok())
+            .unwrap_or_else(|| classify_gate_failure(&verdict.gate, raw))
+    }
+
+    fn failure_pattern_ids_from_classification(
+        classification: &roko_gate::GateFailureClassification,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        for record in records_from_classification(classification) {
+            if !ids.contains(&record.key) {
+                ids.push(record.key);
+            }
+        }
+        ids
+    }
+
+    fn failure_class_label(class: &FailureClass) -> String {
+        serde_json::to_value(class)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("{class:?}"))
+    }
+
+    fn failure_pattern_retry_context(
+        &self,
+        plan_id: &str,
+        task_id: Option<&str>,
+        gate: Option<&str>,
+        classification: Option<&str>,
+    ) -> String {
+        let store = ErrorPatternStore::load(&failure_pattern_store_path(&self.workdir));
+        store
+            .bounded_summary(
+                FailurePatternQuery {
+                    plan_id: Some(plan_id),
+                    task_id,
+                    gate,
+                    classification,
+                },
+                5,
+                1_600,
+            )
+            .format_for_prompt()
+    }
+
     fn summarize_runtime_verdicts(verdicts: &[Verdict]) -> Vec<GateVerdictSummary> {
         verdicts
             .iter()
             .map(|verdict| {
+                let (classification, failure_pattern_ids, blocking_findings) = if verdict.passed {
+                    (None, Vec::new(), Vec::new())
+                } else {
+                    let gate_classification = Self::classify_runtime_verdict(verdict);
+                    (
+                        Some(Self::failure_class_label(&gate_classification.primary)),
+                        Self::failure_pattern_ids_from_classification(&gate_classification),
+                        gate_classification.blocking_findings,
+                    )
+                };
                 let details = verdict
                     .error_digest
                     .clone()
@@ -12374,6 +12468,9 @@ impl PlanRunner {
                 GateVerdictSummary {
                     gate: verdict.gate.clone(),
                     passed: verdict.passed,
+                    classification,
+                    failure_pattern_ids,
+                    blocking_findings,
                     details,
                 }
             })
@@ -12430,7 +12527,8 @@ impl PlanRunner {
         if let Some(model) = selected_model {
             self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
         }
-        // UX34: record force_backend failure outcome so the router learns.
+        // UX34: record force_backend failure with dampened reward so the
+        // router learns from override failures without over-penalizing.
         {
             let routing_reason = self
                 .task_trackers
@@ -12438,12 +12536,21 @@ impl PlanRunner {
                 .and_then(|t| t.last_routing_reason.clone());
             if routing_reason.as_deref() == Some("role_force_backend") {
                 if let Some(model) = selected_model {
-                    self.learning.cascade_router().record_outcome(model, false);
+                    let ctx = cascade_routing_context(
+                        self,
+                        plan_id,
+                        task_id,
+                        AgentRole::Implementer,
+                        task_def.as_ref(),
+                    );
+                    self.learning
+                        .cascade_router()
+                        .record_override_outcome(model, &ctx, false);
                     tracing::debug!(
                         plan_id = %plan_id,
                         task_id = %task_id,
                         model = %model,
-                        "UX34: persisted force_backend failure to cascade router"
+                        "UX34: persisted force_backend failure to cascade router (dampened)"
                     );
                 }
             }
@@ -12689,13 +12796,196 @@ impl PlanRunner {
             gate_results,
         ))
     }
+
+    async fn try_pre_agent_cargo_remediation(
+        &self,
+        plan_id: &str,
+        gate_phase: &str,
+        exec_dir: &Path,
+        task_def: Option<&crate::task_parser::TaskDef>,
+        gate_context: &str,
+    ) -> Option<PreAgentRemediationRecord> {
+        if gate_phase != "compile" && gate_phase != "clippy" {
+            return None;
+        }
+
+        let initial_classification =
+            classify_gate_failure(&format!("{gate_phase}:cargo"), gate_context);
+        let allowed_files = task_def.map(|task| task.files.clone()).unwrap_or_default();
+        if allowed_files.is_empty() {
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "skipped_unscoped".to_string(),
+                commands: Vec::new(),
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: Vec::new(),
+                changed_files_after: Vec::new(),
+                new_changed_files: Vec::new(),
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "task has no declared file scope; cargo fix would be too broad".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        if !is_safe_cargo_fix_class(&initial_classification.primary) {
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "skipped_unsafe_class".to_string(),
+                commands: Vec::new(),
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: Vec::new(),
+                changed_files_after: Vec::new(),
+                new_changed_files: Vec::new(),
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "failure class is not safe for deterministic cargo fix".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        let before = self.git_changed_files(exec_dir).await.unwrap_or_default();
+        let package = task_crate_name(task_def).filter(|name| name != "workspace");
+        let mut commands = Vec::new();
+        let fix_args = cargo_fix_args(package.as_deref());
+        let fix = run_pre_agent_command(exec_dir, "cargo", &fix_args).await;
+        let fix_succeeded = fix.success;
+        commands.push(fix);
+
+        if !fix_succeeded {
+            let after = self.git_changed_files(exec_dir).await.unwrap_or_default();
+            let new_changed_files = remediation_new_changed_files(&before, &after);
+            return Some(PreAgentRemediationRecord {
+                plan_id: plan_id.to_string(),
+                gate_phase: gate_phase.to_string(),
+                status: "cargo_fix_failed".to_string(),
+                commands,
+                classification: serde_json::to_value(initial_classification).unwrap_or_default(),
+                changed_files_before: before,
+                changed_files_after: after,
+                new_changed_files,
+                allowed_files,
+                resolved: false,
+                agent_retry_needed: true,
+                reason: "cargo fix exited non-zero; falling through to agent retry".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        let rustfmt_files = scoped_rustfmt_files(exec_dir, &allowed_files);
+        if !rustfmt_files.is_empty() {
+            let rustfmt_args = rustfmt_files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            commands.push(run_pre_agent_command(exec_dir, "rustfmt", &rustfmt_args).await);
+        }
+
+        let check_args = cargo_check_json_args(package.as_deref());
+        let check = run_pre_agent_command(exec_dir, "cargo", &check_args).await;
+        let check_succeeded = check.success;
+        let check_output = format!("{}\n{}", check.stdout_tail, check.stderr_tail);
+        commands.push(check);
+
+        let after = self.git_changed_files(exec_dir).await.unwrap_or_default();
+        let new_changed_files = remediation_new_changed_files(&before, &after);
+        let scope_ok = remediation_scope_ok(plan_id, &new_changed_files, &allowed_files);
+        let classification = classify_gate_failure(&format!("{gate_phase}:cargo"), &check_output);
+        let resolved = check_succeeded && scope_ok;
+        let status = if resolved {
+            "resolved"
+        } else if check_succeeded {
+            "unsafe_scope"
+        } else {
+            "unresolved"
+        };
+        let reason = if resolved {
+            "cargo fix/rustfmt/check resolved the gate before agent retry".to_string()
+        } else if check_succeeded {
+            "cargo check passed, but remediation changed files outside declared scope".to_string()
+        } else {
+            "cargo check still fails after deterministic remediation".to_string()
+        };
+
+        Some(PreAgentRemediationRecord {
+            plan_id: plan_id.to_string(),
+            gate_phase: gate_phase.to_string(),
+            status: status.to_string(),
+            commands,
+            classification: serde_json::to_value(classification).unwrap_or_default(),
+            changed_files_before: before,
+            changed_files_after: after,
+            new_changed_files,
+            allowed_files,
+            resolved,
+            agent_retry_needed: !resolved,
+            reason,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    fn persist_pre_agent_remediation(&mut self, record: &PreAgentRemediationRecord) {
+        self.event_log.append(
+            EventKind::GateResult,
+            serde_json::json!({
+                "plan_id": record.plan_id,
+                "gate": format!("pre-agent-remediation:{}", record.gate_phase),
+                "passed": record.resolved,
+                "status": record.status,
+                "agent_retry_needed": record.retry_needed(),
+                "changed_files": record.new_changed_files,
+            }),
+        );
+
+        let path = pre_agent_remediation_log_path(&self.workdir);
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %err,
+                "failed to create pre-agent remediation log directory"
+            );
+            return;
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(err) = writeln!(
+                    file,
+                    "{}",
+                    serde_json::to_string(record).unwrap_or_else(|_| "{}".to_string())
+                ) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "failed to append pre-agent remediation record"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to open pre-agent remediation log"
+                );
+            }
+        }
+    }
     ///
     /// Uses `TaskDef::build_fix_prompt` to produce a targeted prompt that includes
     /// the original task, the failing phase, and the error output. Selects the model
     /// based on error type: Haiku for compile errors (fast iteration), Sonnet for
     /// test/clippy failures (needs reasoning).
     async fn handle_autofix(&mut self, plan_id: &str) {
-        let gate_context = self
+        let mut gate_context = self
             .task_trackers
             .get(plan_id)
             .and_then(|t| t.last_gate_failure.clone())
@@ -12719,9 +13009,44 @@ impl PlanRunner {
 
         let tracker = self.task_trackers.get(plan_id);
         let last_task_id = tracker.and_then(|t| t.last_impl_task_id.as_deref());
-        let task_def = tracker.and_then(|t| {
-            last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
-        });
+        let task_def = tracker
+            .and_then(|t| {
+                last_task_id.and_then(|tid| t.tasks_file.tasks.iter().find(|td| td.id == tid))
+            })
+            .cloned();
+
+        if let Ok(exec_dir) = self.ensure_plan_exec_dir(plan_id).await
+            && let Some(record) = self
+                .try_pre_agent_cargo_remediation(
+                    plan_id,
+                    &gate_phase,
+                    &exec_dir,
+                    task_def.as_ref(),
+                    &gate_context,
+                )
+                .await
+        {
+            let record_json =
+                serde_json::to_string_pretty(&record).unwrap_or_else(|_| "{}".to_string());
+            self.persist_pre_agent_remediation(&record);
+            if record.resolved {
+                tracing::info!(
+                    plan_id = %plan_id,
+                    gate_phase = %gate_phase,
+                    "pre-agent cargo remediation resolved gate failure"
+                );
+                if let Some(state) = self.executor.plan_state_mut(plan_id) {
+                    state.reset_for_retry();
+                }
+                let event = ExecutorEvent::AutoFixDone;
+                self.log_transition(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "pre-agent-remediation", &event, "transitioned");
+                return;
+            }
+
+            gate_context.push_str("\n\n## Pre-Agent Remediation Attempt\n");
+            gate_context.push_str(&record_json);
+        }
 
         let domain = self.current_task_domain(plan_id);
         let fix_tier = if domain
@@ -12763,7 +13088,7 @@ impl PlanRunner {
             let feedback =
                 feedback_for_agent(&gate_output, u8::try_from(gate_rung).unwrap_or(u8::MAX));
             if !feedback.is_empty() {
-                let mut structured = String::from("\n\n## Structured Gate Feedback\n");
+                let mut structured = String::from("\n\n## Structured Verify Feedback\n");
                 if !feedback.errors.is_empty() {
                     structured.push_str("Errors:\n");
                     for error in &feedback.errors {
@@ -13025,7 +13350,18 @@ impl PlanRunner {
                 let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let output_text = result.output.body.as_text().unwrap_or_default().to_string();
 
-                let mut approved = parse_review_verdict(&output_text);
+                let parsed_review = parse_structured_review_verdict(
+                    &output_text,
+                    ReviewVerdictContext {
+                        verdict_id: format!("review:{plan_id}:{}", result.output.id),
+                        batch_id: plan_id.to_string(),
+                        task_id: plan_id.to_string(),
+                        reviewer_role_id: AgentRole::Auditor.label().to_string(),
+                        raw_output_ref: result.output.id.to_string(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                let mut approved = parsed_review.passed();
                 let drift_report = self
                     .task_trackers
                     .get(plan_id)
@@ -13036,7 +13372,11 @@ impl PlanRunner {
                     }
                 }
                 tracing::info!(
-                    "[orchestrate] Review {plan_id}: verdict={} drift={}",
+                    "[orchestrate] Review {plan_id}: status={:?} action={:?} confidence={} source={:?} approved={} drift={}",
+                    parsed_review.evidence.status,
+                    parsed_review.evidence.required_next_action,
+                    parsed_review.evidence.confidence,
+                    parsed_review.source,
                     if approved { "approved" } else { "revise" },
                     drift_report
                         .as_ref()
@@ -13050,6 +13390,14 @@ impl PlanRunner {
                         })
                         .unwrap_or_else(|| "n/a".into())
                 );
+                if let Some(error) = &parsed_review.parse_error {
+                    tracing::warn!(
+                        "[orchestrate] Review {plan_id} failed closed while parsing verdict: {error}"
+                    );
+                }
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.last_review_verdict = Some(parsed_review.evidence.clone());
+                }
 
                 let mut ep = Episode::new("Auditor", "review").succeeded();
                 ep.usage = Usage {
@@ -13078,6 +13426,21 @@ impl PlanRunner {
                 );
                 self.record_and_check_learning(input, plan_id).await;
 
+                let mut acceptance_rejection_feedback = None;
+                if approved {
+                    if let Err(error) = self
+                        .validate_acceptance_contracts_for_plan(plan_id, &parsed_review.evidence)
+                    {
+                        tracing::warn!(
+                            "[orchestrate] Acceptance contract rejected {plan_id}: {error:#}"
+                        );
+                        approved = false;
+                        acceptance_rejection_feedback = Some(format!(
+                            "Acceptance contract failed after gates and review:\n{error:#}"
+                        ));
+                    }
+                }
+
                 if approved {
                     let event = ExecutorEvent::ReviewApproved;
                     self.log_transition(plan_id, &event);
@@ -13085,20 +13448,22 @@ impl PlanRunner {
                 } else {
                     // Store feedback and reset tracker for reimplementation
                     if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
-                        tracker.review_feedback = Some(match drift_report {
-                            Some(report) if report.drifted() => format!(
-                                "Spec drift detected while reviewing task output.\n\
-                                 Coverage: {:.1}% ({}/{})\n\
-                                 Missing anchors: {}\n\n\
-                                 Reviewer output:\n{}",
-                                report.coverage() * 100.0,
-                                report.matched,
-                                report.expected,
-                                report.missing.join(", "),
-                                output_text
-                            ),
-                            _ => output_text.clone(),
-                        });
+                        tracker.review_feedback = Some(
+                            acceptance_rejection_feedback.unwrap_or_else(|| match drift_report {
+                                Some(report) if report.drifted() => format!(
+                                    "Spec drift detected while reviewing task output.\n\
+                                     Coverage: {:.1}% ({}/{})\n\
+                                     Missing anchors: {}\n\n\
+                                     Reviewer output:\n{}",
+                                    report.coverage() * 100.0,
+                                    report.matched,
+                                    report.expected,
+                                    report.missing.join(", "),
+                                    output_text
+                                ),
+                                _ => structured_review_feedback(&parsed_review),
+                            }),
+                        );
                         tracker.reset_for_reimpl();
                     }
                     let event = ExecutorEvent::ReviewRejected;
@@ -13107,9 +13472,14 @@ impl PlanRunner {
                 }
             }
             Err(e) => {
-                // On infrastructure error, auto-approve (don't block pipeline)
-                tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — auto-approving");
-                let event = ExecutorEvent::ReviewApproved;
+                tracing::error!("[orchestrate] Review failed for {plan_id}: {e} — rejecting");
+                if let Some(tracker) = self.task_trackers.get_mut(plan_id) {
+                    tracker.review_feedback = Some(format!(
+                        "Reviewer dispatch failed before producing a structured verdict: {e}"
+                    ));
+                    tracker.reset_for_reimpl();
+                }
+                let event = ExecutorEvent::ReviewRejected;
                 self.log_transition(plan_id, &event);
                 self.apply_event_and_emit(plan_id, "review", &event, "transitioned");
             }
@@ -13309,12 +13679,21 @@ impl PlanRunner {
         if self.task_trackers.contains_key(plan_id) {
             return;
         }
-        let plan_dir = plans_dir(&self.workdir).join(plan_id);
-        let tasks_path = plan_dir.join("tasks.toml");
-        if tasks_path.exists() {
-            if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                self.task_trackers
-                    .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
+        // Check both the resolved plans_dir (may be `plans/`) and the
+        // `.roko/plans/` fallback — the user may have placed the plan in
+        // either location.
+        let candidates = [
+            plans_dir(&self.workdir).join(plan_id),
+            self.workdir.join(".roko").join("plans").join(plan_id),
+        ];
+        for plan_dir in candidates {
+            let tasks_path = plan_dir.join("tasks.toml");
+            if tasks_path.exists() {
+                if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    self.task_trackers
+                        .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
+                }
+                return;
             }
         }
     }
@@ -13555,7 +13934,19 @@ impl PlanRunner {
             routing_budget_pressure(&self.config.budget, plan_spent, last_cost_usd);
 
         // ── Try to load structured task definition ──────────────────
-        let plan_dir = plans_dir(&self.workdir).join(plan_id);
+        let plan_dir = {
+            let primary = plans_dir(&self.workdir).join(plan_id);
+            if primary.join("tasks.toml").exists() {
+                primary
+            } else {
+                let fallback = self.workdir.join(".roko").join("plans").join(plan_id);
+                if fallback.join("tasks.toml").exists() {
+                    fallback
+                } else {
+                    primary
+                }
+            }
+        };
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -13667,9 +14058,14 @@ impl PlanRunner {
             );
             selected_model = forced_model;
         } else if task_def.is_none() {
-            if let Some((role_model, reason)) =
-                apply_role_routing_override(&roko_config, role.label(), &model_providers, &[])
-            {
+            let fallback_candidates: Vec<String> =
+                roko_config.effective_models().keys().cloned().collect();
+            if let Some((role_model, reason)) = apply_role_routing_override(
+                &roko_config,
+                role.label(),
+                &model_providers,
+                &fallback_candidates,
+            ) {
                 selected_model = role_model;
                 routing_reason = reason;
                 routing_stage = "static".to_string();
@@ -13702,18 +14098,29 @@ impl PlanRunner {
                 .await
                 .unwrap_or(false);
             let agent_id = format!("{role:?}");
-            let all_model_slugs = cascade_router
-                .linucb()
-                .arm_stats()
-                .into_iter()
-                .map(|arm| arm.slug)
-                .collect::<Vec<_>>();
+            let effective_models = roko_config.effective_models();
+            // Merge configured models with observed models so candidates
+            // always include every model the user explicitly set up, even
+            // when no LinUCB observations exist yet.
+            let all_model_slugs = {
+                let mut slugs: Vec<String> = cascade_router
+                    .linucb()
+                    .arm_stats()
+                    .into_iter()
+                    .map(|arm| arm.slug)
+                    .collect();
+                for key in effective_models.keys() {
+                    if !slugs.iter().any(|s| s == key) {
+                        slugs.push(key.clone());
+                    }
+                }
+                slugs
+            };
             let healthy_models =
                 self.learning
                     .healthy_model_slugs(&all_model_slugs, |model_slug| {
                         provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
                     });
-            let effective_models = roko_config.effective_models();
             let task_requirements = task_requirements_for_routing(
                 Some(td),
                 role,
@@ -13783,6 +14190,26 @@ impl PlanRunner {
             } else {
                 routing_explanation =
                     Some(cascade_router.explain_route(&routing_ctx, Some(&healthy_models)));
+
+                // Apply knowledge-informed routing advice to the explanation.
+                // This adjusts candidate scores based on past model/task
+                // performance stored in the neuro knowledge store.
+                if let Some(ref mut explanation) = routing_explanation {
+                    let knowledge_advice = build_knowledge_routing_advice(
+                        &self.knowledge_store,
+                        &healthy_models,
+                        role,
+                        routing_ctx.task_category.label(),
+                    );
+                    if knowledge_advice.has_signal {
+                        tracing::info!(
+                            hints = knowledge_advice.hints.len(),
+                            "[orchestrate] applying knowledge routing advice to cascade explanation"
+                        );
+                    }
+                    cascade_router.apply_knowledge_advice(explanation, knowledge_advice);
+                }
+
                 if let Some(explanation) = routing_explanation.as_ref() {
                     routing_stage = explanation.stage.label().to_string();
                     routing_reason = if cost_spike {
@@ -14501,7 +14928,7 @@ impl PlanRunner {
             registry: section_effectiveness.clone(),
             role: role_key.clone(),
         });
-        let mut scorers: Vec<Box<dyn roko_core::Scorer>> = vec![
+        let mut scorers: Vec<Box<dyn roko_core::traits::Score>> = vec![
             Box::new(SectionScorer::new()),
             Box::new(CatalystScorer::new(catalyst_source)),
         ];
@@ -14514,7 +14941,7 @@ impl PlanRunner {
                 }),
             ));
         }
-        let section_scorer: Box<dyn roko_core::Scorer> = Box::new(SumScorer::new(scorers));
+        let section_scorer: Box<dyn roko_core::traits::Score> = Box::new(SumScorer::new(scorers));
         let prompt_ctx = ctx
             .clone()
             .with_attr("roko.model_slug", &selected_model)
@@ -14592,6 +15019,55 @@ impl PlanRunner {
                 violation.message
             ));
         }
+
+        // ── A1: Extension pre-inference hook ──────────────────────────
+        {
+            let mut req = roko_core::extension::InferenceRequest {
+                plan_id: plan_id.to_string(),
+                task: task.to_string(),
+                role: format!("{role:?}"),
+                model: selected_model.clone(),
+                prompt_tokens: task_text.len() / 4,
+                extra: serde_json::Value::Null,
+            };
+            if let Err(err) = self.extension_chain.run_pre_inference(&mut req).await {
+                tracing::warn!(error = %err, "extension pre_inference hook failed");
+            }
+        }
+
+        let started_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let mut invocation_record = AgentInvocationSession {
+            invocation_id: format!("{plan_id}:{task}:{started_at_ms}"),
+            provider_session_id: self.claude_resume_session.clone(),
+            backend_id: self.config.agent.command.clone(),
+            model: selected_model.clone(),
+            role: resolved_dispatch_role_label.clone(),
+            plan_id: Some(plan_id.to_string()),
+            task_id: Some(task.to_string()),
+            prompt_fingerprint: prompt
+                .body
+                .as_text()
+                .map(fingerprint_text)
+                .unwrap_or_else(|_| fingerprint_text(&format!("{:?}", prompt.body))),
+            context_fingerprint: Some(fingerprint_text(&role_instruction)),
+            reuse_policy: WarmReusePolicy {
+                policy_id: "plan-task-dispatch".to_string(),
+                scope: ReuseScope::Task,
+                max_idle_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+                plan_id: Some(plan_id.to_string()),
+                task_id: Some(task.to_string()),
+                session_id: self.claude_resume_session.clone(),
+                prompt_policy_fingerprint: Some(fingerprint_text(&role_instruction)),
+                context_fingerprint: Some(fingerprint_text(&role_instruction)),
+                allow_context_carryover: false,
+            },
+            working_dir: Some(exec_dir.clone()),
+            started_at_ms,
+            ended_at_ms: None,
+            timeout_ms: Some(self.effective_task_timeout_ms(task_def.as_ref())),
+            state: InvocationState::InProgress,
+        };
+        append_agent_invocation_record(&self.workdir, &invocation_record);
 
         // ── Run the agent with per-task model selection ─────────────
         let ctx = ctx
@@ -14935,6 +15411,28 @@ impl PlanRunner {
             )
         };
         let result = scrub_agent_result(&result, &self.safety_layer.scrub_policy);
+        invocation_record.backend_id = backend_id.clone();
+        invocation_record.ended_at_ms =
+            Some(u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0));
+        invocation_record.state = invocation_state_from_agent_result(&result);
+        append_agent_invocation_record(&self.workdir, &invocation_record);
+
+        // ── A1: Extension post-inference hook ─────────────────────
+        {
+            let mut resp = roko_core::extension::InferenceResponse {
+                plan_id: plan_id.to_string(),
+                task: task.to_string(),
+                role: format!("{role:?}"),
+                model: selected_model.clone(),
+                success: result.success,
+                cost_usd: result.usage.cost_usd as f64,
+                wall_ms: result.usage.wall_ms,
+                extra: serde_json::Value::Null,
+            };
+            if let Err(err) = self.extension_chain.run_post_inference(&mut resp).await {
+                tracing::warn!(error = %err, "extension post_inference hook failed");
+            }
+        }
 
         // ── AGT-01: Post-dispatch safety check ─────────────────────
         let post_changed_files = if uses_git {
@@ -15315,6 +15813,24 @@ impl PlanRunner {
                 )?;
             }
             Err(err) => {
+                // A1: Extension on_error (Recovery layer) hook.
+                let error_event = roko_core::extension::ErrorEvent {
+                    error_message: err.to_string(),
+                    source: format!("{plan_id}:{task}"),
+                    extra: serde_json::Value::Null,
+                };
+                let recovery = self.extension_chain.run_on_error(&error_event).await;
+                match recovery {
+                    Ok(roko_core::extension::RecoveryAction::Propagate) | Err(_) => {
+                        // Default: propagate the error up.
+                    }
+                    Ok(action) => {
+                        tracing::info!(
+                            recovery_action = ?action,
+                            "extension on_error hook suggested non-propagate recovery"
+                        );
+                    }
+                }
                 self.record_model_experiment_outcome(
                     selected_model_experiment.as_ref(),
                     false,
@@ -15322,6 +15838,47 @@ impl PlanRunner {
                 )?;
                 return Err(err);
             }
+        }
+
+        // Re-emit AgentSpawned with model now that we know which model was used.
+        self.emit_server_event(crate::serve::events::ServerEvent::AgentSpawned {
+            agent_id: format!("{plan_id}:{task}"),
+            role: format!("{role:?}"),
+            model: selected_model.clone(),
+        });
+
+        // Publish agent output to the event bus so the TUI can display it.
+        let output_text = result.output.body.as_text().unwrap_or_default().to_string();
+        if !output_text.is_empty() {
+            self.emit_server_event(crate::serve::events::ServerEvent::AgentOutput {
+                agent_id: format!("{plan_id}:{task}"),
+                run_id: None,
+                content: output_text,
+                done: true,
+                metadata: Some(serde_json::json!({
+                    "plan_id": plan_id,
+                    "task": task,
+                    "role": format!("{role:?}"),
+                    "model": &selected_model,
+                    "input_tokens": result.usage.input_tokens,
+                    "output_tokens": result.usage.output_tokens,
+                    "cost_usd": f64::from(result.usage.cost_usd),
+                })),
+            });
+        }
+
+        // Emit token/cost EfficiencyEvents so the TUI can display real counters.
+        for (metric, value) in [
+            ("input_tokens", f64::from(result.usage.input_tokens)),
+            ("output_tokens", f64::from(result.usage.output_tokens)),
+            ("cost_usd", f64::from(result.usage.cost_usd)),
+        ] {
+            self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.to_string(),
+                task_id: task.to_string(),
+                metric: metric.to_string(),
+                value,
+            });
         }
 
         Ok(DispatchOutcome {
@@ -15665,6 +16222,12 @@ impl PlanRunner {
         );
 
         if !all_passed {
+            let task_id = self
+                .task_trackers
+                .get(plan_id)
+                .and_then(|tracker| tracker.last_impl_task_id.as_deref());
+            self.record_gate_failure_patterns(plan_id, task_id, &verdicts);
+
             if let Some(state) = self.executor.plan_state_mut(plan_id) {
                 state.last_error = Some(Self::format_gate_failure_context(&verdicts));
             }
@@ -15679,6 +16242,26 @@ impl PlanRunner {
                 );
             }
         }
+
+        // ── A1: Extension on_gate (Cognition layer) hook ─────────────
+        {
+            let verdict_names: Vec<&str> = verdicts.iter().map(|v| v.gate.as_str()).collect();
+            let mut gate_event = roko_core::extension::GateEvent {
+                plan_id: plan_id.to_string(),
+                gate_name: format!("pipeline:rung-{rung}"),
+                passed: all_passed,
+                rung: format!("{rung}"),
+                duration_ms: wall_ms,
+                details: serde_json::json!({
+                    "verdict_count": verdicts.len(),
+                    "verdict_names": verdict_names,
+                }),
+            };
+            if let Err(err) = self.extension_chain.run_on_gate(&mut gate_event).await {
+                tracing::warn!(error = %err, "extension on_gate hook failed");
+            }
+        }
+
         Ok(all_passed)
     }
 
@@ -15918,7 +16501,7 @@ impl PlanRunner {
         task.effective_domain(config_default.as_ref())
     }
 
-    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Gate>)> {
+    fn selected_gate_steps(&self, plan_id: &str, exec_dir: &Path) -> Vec<(Rung, Box<dyn Verify>)> {
         let domain = self.current_task_domain(plan_id);
 
         // For non-code domains, use verify steps or domain-specific gate config
@@ -15950,7 +16533,7 @@ impl PlanRunner {
             !self.should_skip_selected_rung(*rung)
         });
 
-        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+        let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
         for rung in selected {
             match rung {
                 Rung::Compile => {
@@ -15980,8 +16563,12 @@ impl PlanRunner {
 
     /// Build gate steps for a non-code domain. Uses task verify steps, config
     /// domain_gates, or a pass-through ShellGate as fallback.
-    fn domain_gate_steps(&self, plan_id: &str, domain: &TaskDomain) -> Vec<(Rung, Box<dyn Gate>)> {
-        let mut steps: Vec<(Rung, Box<dyn Gate>)> = Vec::new();
+    fn domain_gate_steps(
+        &self,
+        plan_id: &str,
+        domain: &TaskDomain,
+    ) -> Vec<(Rung, Box<dyn Verify>)> {
+        let mut steps: Vec<(Rung, Box<dyn Verify>)> = Vec::new();
 
         // 1. Check for per-task verify steps.
         if let Some(tracker) = self.task_trackers.get(plan_id) {
@@ -16226,7 +16813,7 @@ impl PlanRunner {
             let task_id = t.last_impl_task_id.as_deref()?;
             t.tasks_file.tasks.iter().find(|task| task.id == task_id)
         });
-        // Gate runs are less frequent than dispatches; pass None to avoid
+        // Verify runs are less frequent than dispatches; pass None to avoid
         // requiring &mut self here.  The dispatch path uses the cached index.
         let code_intel_hints = task_def
             .and_then(|td| td.description.as_deref())
@@ -17123,20 +17710,6 @@ impl PlanRunner {
     }
 }
 
-fn render_neuro_chunk(chunk: &roko_neuro::ContextChunk) -> Option<String> {
-    let heading = match &chunk.source {
-        roko_compose::ContextSource::KnowledgeEntry { .. } => "## Neuro Knowledge",
-        roko_compose::ContextSource::Episode { .. } => "## Neuro Episodes",
-        roko_compose::ContextSource::RecentSignal { .. } => "## Neuro Signals",
-        _ => return None,
-    };
-    let body = chunk.content.trim();
-    if body.is_empty() {
-        return None;
-    }
-    Some(format!("{heading}\n\n{body}"))
-}
-
 impl PlanRunner {
     fn build_context_assembler_sections(
         &self,
@@ -17233,163 +17806,6 @@ impl PlanRunner {
     }
 }
 
-fn build_success_knowledge_entry(
-    plan_id: &str,
-    task_id: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    result: &AgentResult,
-    model: &str,
-    episode_id: &str,
-) -> KnowledgeEntry {
-    let kind = infer_success_knowledge_kind(task_def, result);
-    let title = task_def
-        .map(|task| task.title.trim())
-        .filter(|title| !title.is_empty())
-        .unwrap_or(task_id);
-    let description = task_def
-        .and_then(|task| task.description.as_deref())
-        .map(str::trim)
-        .filter(|description| !description.is_empty());
-    let output_summary = result
-        .output
-        .body
-        .as_text()
-        .ok()
-        .map(|text| truncate_doc_snippet(text, 600))
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "Task completed with {} output.",
-                result.output.kind.as_str()
-            )
-        });
-
-    let mut content = format!("Task `{task_id}` succeeded: {title}.");
-    if let Some(description) = description {
-        content.push_str("\n\nWhy it worked:\n");
-        content.push_str(description);
-    }
-    content.push_str("\n\nSuccessful outcome:\n");
-    content.push_str(&output_summary);
-
-    let mut tags = vec![
-        "task-success".to_string(),
-        format!("plan:{plan_id}"),
-        format!("task:{task_id}"),
-        kind.as_str().to_string(),
-    ];
-    if let Some(task) = task_def {
-        tags.push(format!("tier:{}", task.tier));
-        if task.files.len() > 1 {
-            tags.push("multi-file".to_string());
-        } else if let Some(path) = task.files.first() {
-            tags.push(format!("file:{path}"));
-        }
-    }
-    if let Some(emotional_tag) = result.output.emotional_tag.as_ref() {
-        tags.push(format!(
-            "emotion_trigger:{}",
-            emotional_tag.trigger.trim().to_ascii_lowercase()
-        ));
-        tags.push(emotion_valence_tag(emotional_tag).to_string());
-        tags.push(emotion_arousal_tag(emotional_tag).to_string());
-    }
-    tags.sort();
-    tags.dedup();
-
-    KnowledgeEntry {
-        id: format!("task-success:{plan_id}:{task_id}:{}", result.output.id),
-        kind,
-        source: Some("task-success".to_string()),
-        content,
-        confidence: 0.75,
-        confidence_weight: 0.75,
-        refuted_insight_id: None,
-        refutation_evidence: None,
-        source_episodes: vec![episode_id.to_string()],
-        tags,
-        source_model: Some(model.to_string()),
-        model_generality: 0.9,
-        created_at: chrono::Utc::now(),
-        half_life_days: kind.default_half_life_days(),
-        tier: KnowledgeTier::Transient,
-        emotional_tag: result.output.emotional_tag.clone(),
-        emotional_provenance: result
-            .output
-            .emotional_tag
-            .as_ref()
-            .map(EmotionalProvenance::from_tag),
-        hdc_vector: None,
-        confirmation_count: 0,
-        distinct_contexts: Vec::new(),
-        deprecated: false,
-        balance: 1.0,
-        frozen: false,
-        catalytic_score: 0,
-    }
-}
-
-fn emotion_valence_tag(tag: &roko_core::EmotionalTag) -> &'static str {
-    if tag.pad.pleasure >= 0.2 {
-        "emotion_valence:positive"
-    } else if tag.pad.pleasure <= -0.2 {
-        "emotion_valence:negative"
-    } else {
-        "emotion_valence:neutral"
-    }
-}
-
-fn emotion_arousal_tag(tag: &roko_core::EmotionalTag) -> &'static str {
-    if tag.pad.arousal >= 0.35 {
-        "emotion_arousal:high"
-    } else if tag.pad.arousal <= -0.35 {
-        "emotion_arousal:low"
-    } else {
-        "emotion_arousal:mid"
-    }
-}
-
-fn infer_success_knowledge_kind(
-    task_def: Option<&crate::task_parser::TaskDef>,
-    result: &AgentResult,
-) -> KnowledgeKind {
-    let mut hint_text = task_def
-        .map(|task| {
-            format!(
-                "{} {}",
-                task.title,
-                task.description.as_deref().unwrap_or_default()
-            )
-        })
-        .unwrap_or_default();
-    if let Ok(output_text) = result.output.body.as_text() {
-        hint_text.push(' ');
-        hint_text.push_str(output_text);
-    }
-    let hint_text = hint_text.to_ascii_lowercase();
-    let looks_reusable = task_def.is_some_and(|task| task.files.len() > 1)
-        || [
-            "refactor",
-            "standardize",
-            "reuse",
-            "reusable",
-            "pattern",
-            "workflow",
-            "pipeline",
-            "template",
-            "guardrail",
-            "strategy",
-        ]
-        .iter()
-        .any(|needle| hint_text.contains(needle));
-
-    if looks_reusable {
-        KnowledgeKind::Heuristic
-    } else {
-        KnowledgeKind::Insight
-    }
-}
-
 fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     let mut changed: Vec<String> = status
         .lines()
@@ -17410,6 +17826,120 @@ fn parse_git_status_changed_files(status: &str) -> Vec<String> {
     changed.sort();
     changed.dedup();
     changed
+}
+
+fn cargo_fix_args(package: Option<&str>) -> Vec<String> {
+    let mut args = vec!["fix".to_string()];
+    if let Some(package) = package {
+        args.push("-p".to_string());
+        args.push(package.to_string());
+    } else {
+        args.push("--workspace".to_string());
+    }
+    args.extend([
+        "--all-targets".to_string(),
+        "--allow-dirty".to_string(),
+        "--allow-staged".to_string(),
+    ]);
+    args
+}
+
+fn cargo_check_json_args(package: Option<&str>) -> Vec<String> {
+    let mut args = vec!["check".to_string()];
+    if let Some(package) = package {
+        args.push("-p".to_string());
+        args.push(package.to_string());
+    } else {
+        args.push("--workspace".to_string());
+    }
+    args.extend([
+        "--all-targets".to_string(),
+        "--message-format=json".to_string(),
+    ]);
+    args
+}
+
+fn scoped_rustfmt_files(exec_dir: &Path, allowed_files: &[String]) -> Vec<PathBuf> {
+    allowed_files
+        .iter()
+        .filter(|file| file.ends_with(".rs"))
+        .map(|file| exec_dir.join(file))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+fn remediation_new_changed_files(before: &[String], after: &[String]) -> Vec<String> {
+    let before = before.iter().collect::<HashSet<_>>();
+    after
+        .iter()
+        .filter(|path| !before.contains(path))
+        .cloned()
+        .collect()
+}
+
+fn remediation_scope_ok(plan_id: &str, changed_files: &[String], allowed_files: &[String]) -> bool {
+    changed_files.iter().all(|path| {
+        is_build_artifact_path(path)
+            || is_plan_enrichment_artifact(plan_id, path)
+            || allowed_files.iter().any(|allowed| {
+                path == allowed
+                    || path.starts_with(&format!("{allowed}/"))
+                    || path.starts_with(&format!("{allowed}\\"))
+            })
+    })
+}
+
+fn is_safe_cargo_fix_class(class: &FailureClass) -> bool {
+    matches!(
+        class,
+        FailureClass::SyntaxError | FailureClass::ImportError | FailureClass::TypeError
+    )
+}
+
+async fn run_pre_agent_command(
+    exec_dir: &Path,
+    program: &str,
+    args: &[String],
+) -> PreAgentRemediationCommand {
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .current_dir(exec_dir)
+        .kill_on_drop(true)
+        .output()
+        .await;
+
+    match output {
+        Ok(output) => PreAgentRemediationCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            exit_code: output.status.code(),
+            success: output.status.success(),
+            stdout_tail: tail_chars(
+                &String::from_utf8_lossy(&output.stdout),
+                PRE_AGENT_REMEDIATION_OUTPUT_TAIL,
+            ),
+            stderr_tail: tail_chars(
+                &String::from_utf8_lossy(&output.stderr),
+                PRE_AGENT_REMEDIATION_OUTPUT_TAIL,
+            ),
+        },
+        Err(err) => PreAgentRemediationCommand {
+            program: program.to_string(),
+            args: args.to_vec(),
+            exit_code: None,
+            success: false,
+            stdout_tail: String::new(),
+            stderr_tail: format!("spawn failed: {err}"),
+        },
+    }
+}
+
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    chars[chars.len() - max_chars..].iter().collect()
 }
 
 fn is_plan_enrichment_artifact(plan_id: &str, path: &str) -> bool {
@@ -17593,9 +18123,14 @@ fn server_event_to_dashboard(
             plan_id: plan_id.clone(),
             success: *success,
         }),
-        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+        ServerEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         ServerEvent::AgentOutput {
             agent_id, content, ..
@@ -17618,13 +18153,16 @@ fn server_event_to_dashboard(
         ServerEvent::Execution { plan_id, event } => {
             use crate::serve::events::ExecutionEvent;
             match event {
-                ExecutionEvent::TaskStarted { task_id, phase } => {
-                    Some(DashboardEvent::TaskStarted {
-                        plan_id: plan_id.clone(),
-                        task_id: task_id.clone(),
-                        phase: phase.clone(),
-                    })
-                }
+                ExecutionEvent::TaskStarted {
+                    task_id,
+                    title,
+                    phase,
+                } => Some(DashboardEvent::TaskStarted {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    title: title.clone(),
+                    phase: phase.clone(),
+                }),
                 ExecutionEvent::TaskCompleted { task_id, outcome } => {
                     Some(DashboardEvent::TaskCompleted {
                         plan_id: plan_id.clone(),
@@ -17704,7 +18242,11 @@ fn execution_event_summary(
 ) -> (String, String, String) {
     use crate::serve::events::ExecutionEvent;
     match event {
-        ExecutionEvent::TaskStarted { task_id, phase } => (
+        ExecutionEvent::TaskStarted {
+            task_id,
+            title: _,
+            phase,
+        } => (
             "task_started".to_string(),
             task_id.clone(),
             format!("Task started: phase={phase}"),
@@ -17731,7 +18273,10 @@ fn execution_event_summary(
         } => (
             "gate_result".to_string(),
             task_id.clone(),
-            format!("Gate {gate}: {}", if *passed { "passed" } else { "failed" }),
+            format!(
+                "Verify {gate}: {}",
+                if *passed { "passed" } else { "failed" }
+            ),
         ),
         _ => ("execution".to_string(), String::new(), String::new()),
     }
@@ -17864,384 +18409,6 @@ fn detect_cost_anomaly_override(
     }
 }
 
-fn task_dispatch_conventions(task_def: Option<&crate::task_parser::TaskDef>) -> Option<String> {
-    let task_def = task_def?;
-    let mut sections = Vec::new();
-
-    if !task_def.files.is_empty() {
-        let mut write_scope = String::from(
-            "Honor the declared write scope strictly. Only create, edit, move, or delete files in this allowlist unless the user explicitly expands it:",
-        );
-        for path in &task_def.files {
-            write_scope.push_str("\n- ");
-            write_scope.push_str(path);
-        }
-        sections.push(write_scope);
-    }
-
-    if let Some(max_loc) = task_def.max_loc {
-        sections.push(format!(
-            "Keep the total code delta within roughly {max_loc} lines of change unless verification requires a tightly scoped follow-up."
-        ));
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n\n"))
-    }
-}
-
-fn build_system_prompt(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    build_system_prompt_with_context(role, plan_id, task, tools_csv, None, None, task_def)
-}
-
-fn build_system_prompt_with_context(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    context_layer: Option<&str>,
-    affect_state: Option<PadState>,
-    task_def: Option<&crate::task_parser::TaskDef>,
-) -> String {
-    let mut task_context = TaskContext::new(task)
-        .with_plan_id(plan_id)
-        .with_workspace("roko-cli orchestration");
-    if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
-        task_context = task_context.with_context(context);
-    }
-    build_role_system_prompt(
-        role,
-        task_context,
-        tools_csv,
-        PromptBuildOptions {
-            affect_state,
-            complexity: Some(prompt_budget_complexity(task_def)),
-            extra_conventions: task_dispatch_conventions(task_def),
-            ..PromptBuildOptions::default()
-        },
-    )
-}
-
-fn build_system_prompt_with_context_validated(
-    role: AgentRole,
-    plan_id: &str,
-    task: &str,
-    tools_csv: &str,
-    context_layer: Option<&str>,
-    affect_state: Option<PadState>,
-    task_def: Option<&crate::task_parser::TaskDef>,
-    relevant_skills: &[Skill],
-    relevant_playbooks: &[Playbook],
-    context_window_tokens: usize,
-    section_effectiveness: Option<&SectionEffectivenessRegistry>,
-    code_context: Vec<String>,
-    pheromones: Vec<roko_compose::ContextChunk>,
-    extra_anti_patterns: Vec<String>,
-) -> Result<String> {
-    let mut task_context = TaskContext::new(task)
-        .with_plan_id(plan_id)
-        .with_workspace("roko-cli orchestration");
-    if let Some(context) = context_layer.filter(|context| !context.trim().is_empty()) {
-        task_context = task_context.with_context(context);
-    }
-    build_role_system_prompt_validated(
-        role,
-        task_context,
-        tools_csv,
-        PromptBuildOptions {
-            affect_state,
-            complexity: Some(prompt_budget_complexity(task_def)),
-            extra_conventions: task_dispatch_conventions(task_def),
-            extra_anti_patterns,
-            relevant_skills: relevant_skills.to_vec(),
-            relevant_playbooks: relevant_playbooks.to_vec(),
-            code_context,
-            pheromones,
-        },
-        context_window_tokens,
-        section_effectiveness,
-    )
-}
-
-fn prompt_budget_complexity(task_def: Option<&crate::task_parser::TaskDef>) -> PromptComplexity {
-    match task_def.map(|task| task.tier.as_str()) {
-        Some("fast" | "mechanical") => PromptComplexity::Trivial,
-        Some("complex" | "premium" | "architectural") => PromptComplexity::Complex,
-        _ => PromptComplexity::Standard,
-    }
-}
-
-fn effective_context_window_tokens(config: &Config) -> usize {
-    config.prompt.token_budget
-}
-
-fn build_relevant_context_layer(context_sections: &[PromptSection]) -> Option<String> {
-    let non_empty_sections = context_sections
-        .iter()
-        .map(|section| section.content.trim())
-        .filter(|section| !section.is_empty())
-        .count();
-    let content = context_sections
-        .iter()
-        .map(|section| section.content.trim())
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    if content.is_empty() {
-        return None;
-    }
-
-    let token_estimate = estimate_tokens(&content);
-    if non_empty_sections < 2 && token_estimate < 48 {
-        tracing::debug!(
-            non_empty_sections,
-            token_estimate,
-            "skipping underspecified relevant-context layer"
-        );
-        None
-    } else {
-        Some(format!("## Relevant Context\n\n{content}"))
-    }
-}
-
-/// Extract code-intelligence context chunks for a task description.
-///
-/// When `cached_index` is `Some`, uses the pre-built index instead of loading
-/// from disk. This avoids a full workspace scan on every dispatch when the
-/// caller maintains a `code_index_cache` (see `PlanRunner::cached_code_index`).
-///
-/// Falls back to loading from `workdir` when no cached index is available.
-/// Returns an empty vec if the index cannot be built or yields no results.
-fn code_context_for_task(
-    workdir: &Path,
-    task_description: &str,
-    cached_index: Option<&roko_index::WorkspaceIndex>,
-) -> Vec<String> {
-    const MAX_RESULTS: usize = 15;
-    const MAX_TOKENS: usize = 3000;
-    const TOKENS_PER_RESULT: usize = 200;
-
-    // Use the cached index if provided, otherwise load fresh.
-    let owned_index;
-    let index: &roko_index::WorkspaceIndex = if let Some(idx) = cached_index {
-        idx
-    } else {
-        match roko_index::WorkspaceIndex::load(workdir) {
-            Ok(idx) => {
-                owned_index = idx;
-                &owned_index
-            }
-            Err(err) => {
-                tracing::debug!(error = %err, "code-context: skipping (index unavailable)");
-                return Vec::new();
-            }
-        }
-    };
-
-    let keywords = extract_task_keywords(task_description);
-    if keywords.is_empty() {
-        return Vec::new();
-    }
-
-    let query_text = keywords.join(" ");
-    let strategy = roko_index::SearchStrategy::Hybrid {
-        keyword: Some(roko_index::KeywordQuery {
-            text: query_text,
-            scope: roko_index::SearchScope::Both,
-            case_sensitive: false,
-            whole_word: false,
-        }),
-        structural: None,
-        hdc: None,
-    };
-
-    let results = index.search(strategy, MAX_RESULTS);
-    if results.is_empty() {
-        return Vec::new();
-    }
-
-    let mut chunks = Vec::new();
-    let mut total_tokens = 0;
-    for result in &results {
-        let chunk = format!(
-            "- `{}` ({:?}) in `{}` line {} (score: {:.3})",
-            result.symbol.id.symbol_name,
-            result.symbol.id.kind,
-            result.symbol.id.file_path,
-            result.symbol.line,
-            result.score,
-        );
-        let est = estimate_tokens(&chunk);
-        if total_tokens + est > MAX_TOKENS {
-            break;
-        }
-        total_tokens += est.min(TOKENS_PER_RESULT);
-        chunks.push(chunk);
-    }
-
-    if chunks.is_empty() {
-        return Vec::new();
-    }
-
-    vec![format!(
-        "### Relevant Code Symbols\n\n{}",
-        chunks.join("\n")
-    )]
-}
-
-/// Extract meaningful keywords from a task description for code search.
-fn extract_task_keywords(description: &str) -> Vec<String> {
-    static STOP_WORDS: &[&str] = &[
-        "the",
-        "a",
-        "an",
-        "in",
-        "on",
-        "at",
-        "to",
-        "for",
-        "of",
-        "and",
-        "or",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "could",
-        "should",
-        "may",
-        "might",
-        "shall",
-        "can",
-        "need",
-        "must",
-        "it",
-        "its",
-        "this",
-        "that",
-        "these",
-        "those",
-        "with",
-        "from",
-        "by",
-        "as",
-        "into",
-        "not",
-        "no",
-        "if",
-        "then",
-        "else",
-        "when",
-        "where",
-        "which",
-        "who",
-        "what",
-        "how",
-        "all",
-        "each",
-        "every",
-        "both",
-        "few",
-        "more",
-        "most",
-        "other",
-        "some",
-        "such",
-        "only",
-        "own",
-        "same",
-        "so",
-        "than",
-        "too",
-        "very",
-        "just",
-        "but",
-        "also",
-        "about",
-        "above",
-        "after",
-        "before",
-        "between",
-        "through",
-        "during",
-        "up",
-        "down",
-        "out",
-        "over",
-        "under",
-        "again",
-        "further",
-        "implement",
-        "add",
-        "create",
-        "make",
-        "use",
-        "update",
-        "fix",
-        "change",
-        "ensure",
-    ];
-
-    description
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .filter(|w| w.len() >= 3)
-        .map(|w| w.to_lowercase())
-        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .take(10)
-        .collect()
-}
-
-fn adjust_priority_from_section_learning(
-    priority: SectionPriority,
-    section_name: &str,
-    role: &str,
-    registry: &SectionEffectivenessRegistry,
-) -> SectionPriority {
-    let next = match registry.recommend_priority_change(section_name, role) {
-        PriorityChange::Increase => (priority as u8).saturating_add(1),
-        PriorityChange::Decrease => (priority as u8).saturating_sub(1),
-        PriorityChange::NoChange | PriorityChange::InsufficientData => priority as u8,
-    };
-    match next {
-        0 => SectionPriority::Low,
-        1 => SectionPriority::Normal,
-        2 => SectionPriority::High,
-        _ => SectionPriority::Critical,
-    }
-}
-
-fn apply_section_effectiveness_to_prompt_section(
-    mut section: PromptSection,
-    role: &str,
-    registry: &SectionEffectivenessRegistry,
-) -> PromptSection {
-    section.priority =
-        adjust_priority_from_section_learning(section.priority, &section.name, role, registry);
-    section
-}
-
 fn prompt_section_meta_from_sections(
     sections: &[Engram],
     prompt: &Engram,
@@ -18272,46 +18439,6 @@ fn prompt_section_meta_from_sections(
             }
         })
         .collect()
-}
-
-fn build_daimon_context_section(
-    affect_state: PadState,
-    behavioral_state: roko_core::BehavioralState,
-) -> Option<PromptSection> {
-    let pad_magnitude = affect_state.pleasure.abs()
-        + affect_state.arousal.abs()
-        + affect_state.dominance.abs()
-        + affect_state.somatic_intensity;
-    if pad_magnitude < 0.35 {
-        return None;
-    }
-
-    let mut content = format!(
-        "## Daimon state\nBehavioral state: {behavioral_state:?}\nPAD: pleasure={:.2}, arousal={:.2}, dominance={:.2}\n",
-        affect_state.pleasure, affect_state.arousal, affect_state.dominance
-    );
-    if affect_state.somatic_intensity >= 0.15 {
-        content.push_str(&format!(
-            "Somatic hint: valence={:.2}, intensity={:.2}\n",
-            affect_state.somatic_valence, affect_state.somatic_intensity
-        ));
-        if affect_state.somatic_valence <= -0.2 {
-            content
-                .push_str("Interpretation: slow down, prefer caution, and verify risky moves.\n");
-        } else if affect_state.somatic_valence >= 0.2 {
-            content.push_str(
-                "Interpretation: this strategy region has positive prior outcomes; keep momentum without skipping checks.\n",
-            );
-        }
-    }
-
-    Some(
-        PromptSection::new("daimon-state", content)
-            .with_priority(SectionPriority::Normal)
-            .with_placement(Placement::Middle)
-            .with_bidder(AttentionBidder::Daimon)
-            .with_hard_cap(256),
-    )
 }
 
 impl PlanRunner {
@@ -18607,94 +18734,6 @@ impl PlanRunner {
     }
 }
 
-fn default_task_category(role: &str) -> &'static str {
-    if role.eq_ignore_ascii_case("Implementer") || role.eq_ignore_ascii_case("AutoFixer") {
-        "implementation"
-    } else if role.eq_ignore_ascii_case("Strategist") {
-        "planning"
-    } else if role.eq_ignore_ascii_case("Auditor") {
-        "review"
-    } else if role.eq_ignore_ascii_case("Scribe") {
-        "documentation"
-    } else {
-        "implementation"
-    }
-}
-
-fn claude_tool_allowlist(role: AgentRole) -> String {
-    claude_tool_allowlist_with(role, None)
-}
-
-fn claude_tool_allowlist_with(
-    role: AgentRole,
-    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
-) -> String {
-    use roko_core::tool::ToolRegistry;
-    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
-        registry.for_role(role).into_iter().cloned().collect()
-    } else {
-        let registry = StaticToolRegistry::new();
-        registry.for_role(role).into_iter().cloned().collect()
-    };
-    match ClaudeTranslator.render_tools(&tools) {
-        RenderedTools::CliFlag(csv) => csv,
-        _ => String::new(),
-    }
-}
-
-fn claude_task_tool_allowlist_with(
-    role: AgentRole,
-    allowed_tools: Option<&[String]>,
-    denied_tools: Option<&[String]>,
-    dynamic_registry: Option<&roko_agent::mcp::DynamicToolRegistry>,
-) -> String {
-    use roko_core::tool::ToolRegistry;
-
-    let allowed: Option<HashSet<&str>> =
-        allowed_tools.map(|tools| tools.iter().map(String::as_str).collect());
-    let denied: Option<HashSet<&str>> =
-        denied_tools.map(|tools| tools.iter().map(String::as_str).collect());
-    let tools: Vec<roko_core::tool::ToolDef> = if let Some(registry) = dynamic_registry {
-        registry
-            .for_role(role)
-            .into_iter()
-            .filter(|tool| {
-                allowed
-                    .as_ref()
-                    .is_none_or(|set| set.contains(tool.name.as_str()))
-            })
-            .filter(|tool| {
-                denied
-                    .as_ref()
-                    .is_none_or(|set| !set.contains(tool.name.as_str()))
-            })
-            .cloned()
-            .collect()
-    } else {
-        let registry = StaticToolRegistry::new();
-        registry
-            .for_role(role)
-            .into_iter()
-            .filter(|tool| {
-                allowed
-                    .as_ref()
-                    .is_none_or(|set| set.contains(tool.name.as_str()))
-            })
-            .filter(|tool| {
-                denied
-                    .as_ref()
-                    .is_none_or(|set| !set.contains(tool.name.as_str()))
-            })
-            .cloned()
-            .collect()
-    };
-
-    match ClaudeTranslator.render_tools(&tools) {
-        RenderedTools::CliFlag(csv) => csv,
-        _ => String::new(),
-    }
-}
-
 /// Summary of how tightly a review output stays anchored to the task spec.
 #[derive(Debug, Clone, PartialEq)]
 struct ReviewDriftReport {
@@ -18894,275 +18933,154 @@ fn review_drift_report(tasks_file: &TasksFile, output: &str) -> Option<ReviewDri
     })
 }
 
-/// Parse a review verdict from agent output text.
-///
-/// Looks for `verdict = "approve"` / `verdict = "revise"` patterns,
-/// falls back to keyword matching. Returns `true` for approve.
-fn parse_review_verdict(output: &str) -> bool {
-    let lower = output.to_lowercase();
-    // Structured verdict
-    if lower.contains("verdict = \"approve\"") || lower.contains("verdict: approve") {
-        return true;
+/// Render structured review evidence into feedback for the next implementer.
+fn structured_review_feedback(parsed: &ParsedReviewVerdict) -> String {
+    let evidence = &parsed.evidence;
+    let mut lines = vec![
+        "Structured review verdict did not approve this task.".to_string(),
+        format!(
+            "status={:?} confidence={} required_next_action={:?} source={:?}",
+            evidence.status, evidence.confidence, evidence.required_next_action, parsed.source
+        ),
+    ];
+
+    if let Some(error) = &parsed.parse_error {
+        lines.push(format!("parse_error={error}"));
     }
-    if lower.contains("verdict = \"revise\"")
-        || lower.contains("verdict: revise")
-        || lower.contains("verdict = \"reject\"")
-        || lower.contains("verdict: reject")
-    {
-        return false;
+    if !evidence.blocking_findings.is_empty() {
+        lines.push("blocking_findings:".to_string());
+        lines.extend(
+            evidence
+                .blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}")),
+        );
     }
-    // Keyword fallback
-    if lower.contains("approved") || lower.contains("lgtm") || lower.contains("looks good") {
-        return true;
+    if !evidence.non_blocking_findings.is_empty() {
+        lines.push("non_blocking_findings:".to_string());
+        lines.extend(
+            evidence
+                .non_blocking_findings
+                .iter()
+                .map(|finding| format!("- {finding}")),
+        );
     }
-    if lower.contains("revise") || lower.contains("reject") || lower.contains("rework") {
-        return false;
+    if !evidence.evidence_refs.is_empty() {
+        lines.push(format!(
+            "evidence_refs: {}",
+            evidence.evidence_refs.join(", ")
+        ));
     }
-    // Default: approve (don't block pipeline on ambiguous output)
-    true
+    lines.push("raw_reviewer_output:".to_string());
+    lines.push(parsed.raw_output.clone());
+    lines.join("\n")
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct AgentOutputPayload {
+    #[serde(
+        alias = "status",
+        alias = "outcome",
+        alias = "verdict",
+        deserialize_with = "deserialize_agent_output_status"
+    )]
+    outcome: AcceptanceOutcome,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    evidence_refs: Vec<String>,
+}
+
+fn parse_structured_agent_output_evidence(
+    output: &str,
+    expected_task_id: &str,
+    schema: &str,
+    raw_output_ref: String,
+) -> StructuredOutputEvidence {
+    let parsed = parse_agent_output_payload(output);
+    let schema_valid = parsed.as_ref().is_ok_and(|payload| {
+        schema == "roko.acceptance.agent_output.v1"
+            && payload.outcome == AcceptanceOutcome::Passed
+            && payload
+                .task_id
+                .as_deref()
+                .is_none_or(|task_id| task_id == expected_task_id)
+            && !payload.summary.trim().is_empty()
+    });
+
+    StructuredOutputEvidence {
+        parsed: parsed.is_ok(),
+        schema_valid,
+        raw_output_ref,
+    }
+}
+
+fn parse_agent_output_payload(output: &str) -> Result<AgentOutputPayload> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("agent output is empty"));
+    }
+    if let Ok(payload) = serde_json::from_str::<AgentOutputPayload>(trimmed) {
+        return Ok(payload);
+    }
+    if let Some(block) = extract_fenced_block(trimmed, "json") {
+        return serde_json::from_str::<AgentOutputPayload>(&block)
+            .context("json code block did not match agent output schema");
+    }
+    if let Some(block) = extract_fenced_block(trimmed, "toml") {
+        return toml::from_str::<AgentOutputPayload>(&block)
+            .context("toml code block did not match agent output schema");
+    }
+    Err(anyhow!(
+        "agent output did not contain structured JSON or TOML"
+    ))
+}
+
+fn extract_fenced_block(output: &str, language: &str) -> Option<String> {
+    let fence = format!("```{language}");
+    let start = output.find(&fence)?;
+    let after_fence = output[start + fence.len()..].strip_prefix('\r').unwrap_or(
+        output[start + fence.len()..]
+            .strip_prefix('\n')
+            .unwrap_or(&output[start + fence.len()..]),
+    );
+    let after_fence = after_fence.strip_prefix('\n').unwrap_or(after_fence);
+    let end = after_fence.find("```")?;
+    Some(after_fence[..end].trim().to_string())
+}
+
+fn deserialize_agent_output_status<'de, D>(
+    deserializer: D,
+) -> std::result::Result<AcceptanceOutcome, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Some(raw) = value.as_str() else {
+        return Err(serde::de::Error::custom("outcome must be a string"));
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pass" | "passed" | "approve" | "approved" | "success" | "succeeded" | "complete"
+        | "completed" => Ok(AcceptanceOutcome::Passed),
+        "fail" | "failed" | "revise" | "reject" | "rejected" => Ok(AcceptanceOutcome::Failed),
+        "blocked" => Ok(AcceptanceOutcome::Blocked),
+        "timed_out" | "timeout" => Ok(AcceptanceOutcome::TimedOut),
+        "cancelled" | "canceled" => Ok(AcceptanceOutcome::Cancelled),
+        "needs_retry" | "retry" => Ok(AcceptanceOutcome::NeedsRetry),
+        "needs_replan" | "replan" => Ok(AcceptanceOutcome::NeedsReplan),
+        "needs_human" | "human" | "needs-human" => Ok(AcceptanceOutcome::NeedsHuman),
+        "needs_work" | "needs-work" | "work" => Ok(AcceptanceOutcome::NeedsWork),
+        other => Err(serde::de::Error::custom(format!(
+            "unsupported agent output outcome '{other}'"
+        ))),
+    }
 }
 
 /// Convert a `TaskDef` (from the CLI's task_parser) into a `TaskInput`
 /// (from roko-compose's `context_provider`). This bridges the two crate
 /// boundaries without creating a dependency.
-fn task_def_to_input(td: &crate::task_parser::TaskDef) -> roko_compose::TaskInput {
-    let (read_files, symbols, anti_patterns, prior_failures) = match &td.context {
-        Some(ctx) => (
-            ctx.read_files
-                .iter()
-                .map(|rf| roko_compose::ReadFileSpec {
-                    path: rf.path.clone(),
-                    lines: rf.lines.clone(),
-                    why: rf.why.clone(),
-                })
-                .collect(),
-            ctx.symbols.clone(),
-            ctx.anti_patterns.clone(),
-            ctx.prior_failures.clone(),
-        ),
-        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-    };
-
-    roko_compose::TaskInput {
-        id: td.id.clone(),
-        title: td.title.clone(),
-        description: td.description.clone(),
-        tier: td.tier.clone(),
-        files: td.files.clone(),
-        read_files,
-        symbols,
-        anti_patterns,
-        prior_failures,
-        verify_commands: td
-            .verify
-            .iter()
-            .map(|v| roko_compose::VerifySpec {
-                phase: v.phase.clone(),
-                command: v.command.clone(),
-                fail_msg: v.fail_msg.clone(),
-            })
-            .collect(),
-        acceptance: td.acceptance.clone(),
-        depends_on: td.depends_on.clone(),
-        max_loc: td.max_loc,
-    }
-}
-
-fn task_def_to_dag_task(task: &crate::task_parser::TaskDef, completed: bool) -> Task {
-    let mut dag_task = Task::new(task.id.clone(), task.title.clone());
-    dag_task.status = if completed {
-        TaskStatus::Done
-    } else {
-        TaskStatus::Pending
-    };
-    dag_task.files = task.files.clone();
-    dag_task.role = task.role.clone();
-    dag_task.acceptance = task.acceptance.clone();
-    dag_task.depends_on = task.depends_on.clone();
-    dag_task
-}
-
-/// Convert declared task context files into Claude CLI `--read` args.
-fn task_read_cli_args(task_def: &crate::task_parser::TaskDef) -> Vec<String> {
-    task_def
-        .context
-        .as_ref()
-        .map(|ctx| {
-            ctx.read_files
-                .iter()
-                .flat_map(|rf| ["--read".to_string(), rf.path.clone()])
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn file_contains_public_api(path: &str, content: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    if normalized.ends_with("/src/lib.rs") || normalized.ends_with("/src/mod.rs") {
-        return true;
-    }
-
-    content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("pub fn ")
-            || trimmed.starts_with("pub struct ")
-            || trimmed.starts_with("pub enum ")
-            || trimmed.starts_with("pub trait ")
-            || trimmed.starts_with("pub type ")
-            || trimmed.starts_with("pub use ")
-            || trimmed.starts_with("pub mod ")
-    })
-}
-
-fn truncate_doc_snippet(content: &str, max_chars: usize) -> String {
-    let mut chars = content.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_none() {
-        content.to_string()
-    } else {
-        format!("{truncated}\n\n[... truncated]")
-    }
-}
-
-/// Load prior task outputs from `.roko/task-outputs/{task_id}.txt`.
-///
-/// When a task completes successfully, we persist a summary of its output
-/// so that downstream tasks can reference it. If no outputs exist on disk,
-/// returns an empty vec.
-fn load_prior_task_outputs(
-    workdir: &Path,
-    depends_on: &[String],
-) -> Vec<roko_compose::PriorTaskOutput> {
-    let output_dir = workdir.join(".roko").join("task-outputs");
-    let mut outputs = Vec::new();
-
-    for dep_id in depends_on {
-        let output_path = output_dir.join(format!("{dep_id}.txt"));
-        if let Ok(summary) = std::fs::read_to_string(&output_path) {
-            if !summary.trim().is_empty() {
-                outputs.push(roko_compose::PriorTaskOutput {
-                    task_id: dep_id.clone(),
-                    summary,
-                });
-            }
-        }
-    }
-
-    outputs
-}
-
-/// Maximum output size stored in task outputs and episode context (32 KB).
-const MAX_OUTPUT_BYTES: usize = 32_768;
-/// Number of output lines to include in task failure logs.
-const TASK_FAILURE_OUTPUT_TAIL_LINES: usize = 20;
-
-/// Truncate an agent output string, keeping the last N lines if it exceeds
-/// `MAX_OUTPUT_BYTES` and prepending a truncation header.
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_string();
-    }
-    // Keep the tail — the most recent output is usually most relevant.
-    let tail = &output[output.len() - MAX_OUTPUT_BYTES..];
-    // Find the first newline to avoid a partial first line.
-    let start = tail.find('\n').map_or(0, |i| i + 1);
-    format!(
-        "[truncated: original {} bytes, showing last {} bytes]\n{}",
-        output.len(),
-        MAX_OUTPUT_BYTES,
-        &tail[start..]
-    )
-}
-
-/// Return the last `line_count` lines from `output`, preserving order.
-fn tail_output_lines(output: &str, line_count: usize) -> String {
-    if output.is_empty() || line_count == 0 {
-        return String::new();
-    }
-
-    let mut lines: Vec<&str> = output.lines().rev().take(line_count).collect();
-    lines.reverse();
-    lines.join("\n")
-}
-
-/// Pull likely Rust symbol names out of task text for skill extraction.
-fn extract_task_symbols(text: &str) -> Vec<String> {
-    let mut symbols = Vec::new();
-    let mut seen = HashSet::new();
-
-    for raw in text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')) {
-        if raw.is_empty() {
-            continue;
-        }
-
-        for candidate in raw.split("::") {
-            let candidate =
-                candidate.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
-            if candidate.len() < 3 {
-                continue;
-            }
-            let has_underscore = candidate.contains('_');
-            let has_upper = candidate.chars().any(|ch| ch.is_ascii_uppercase());
-            if !has_underscore && !has_upper {
-                continue;
-            }
-
-            let candidate = candidate.to_string();
-            if seen.insert(candidate.clone()) {
-                symbols.push(candidate);
-            }
-        }
-    }
-
-    symbols
-}
-
-/// Add task failure context to an error chain.
-fn with_task_failure_context(
-    error: anyhow::Error,
-    task_id: &str,
-    phase: &str,
-    gate: &str,
-    output_tail: Option<&str>,
-) -> anyhow::Error {
-    let error = error
-        .context(format!("task_id={task_id}"))
-        .context(format!("phase={phase}"))
-        .context(format!("gate={gate}"));
-
-    match output_tail {
-        Some(tail) if !tail.trim().is_empty() => error.context(format!(
-            "agent_output_tail_last_{}_lines:\n{}",
-            TASK_FAILURE_OUTPUT_TAIL_LINES, tail
-        )),
-        _ => error.context(format!(
-            "agent_output_tail_last_{}_lines: <unavailable>",
-            TASK_FAILURE_OUTPUT_TAIL_LINES
-        )),
-    }
-}
-
-/// Persist a task's output summary so downstream tasks can reference it.
-fn save_task_output(
-    workdir: &Path,
-    task_id: &str,
-    output: &str,
-    hub: Option<&roko_core::StateHubSender>,
-) {
-    let output_dir = workdir.join(".roko").join("task-outputs");
-    let _ = std::fs::create_dir_all(&output_dir);
-    let output_path = output_dir.join(format!("{task_id}.txt"));
-    let summary = truncate_output(output);
-    let _ = std::fs::write(output_path, &summary);
-
-    if let Some(hub) = hub {
-        let lines: Vec<String> = summary.lines().map(String::from).collect();
-        hub.publish(roko_core::DashboardEvent::TaskOutputAppended {
-            task_id: task_id.to_string(),
-            lines,
-        });
-    }
-}
 
 fn attestation_signing_key_from_env() -> Option<SigningKey> {
     let seed = std::env::var("ROKO_ATTEST_SIGNING_KEY_HEX").ok()?;
@@ -19246,6 +19164,7 @@ mod tests {
             Ok(roko_serve::runtime::RunResult {
                 success: true,
                 output_text: None,
+                usage: None,
             })
         }
 
@@ -19452,6 +19371,9 @@ acceptance = []
         tracker.last_gate_verdict_summaries = vec![GateVerdictSummary {
             gate: "compile".to_string(),
             passed: false,
+            classification: Some("type_error".to_string()),
+            failure_pattern_ids: vec![format!("compile::{detail}")],
+            blocking_findings: Vec::new(),
             details: Some(detail.to_string()),
         }];
     }
@@ -19667,6 +19589,75 @@ acceptance = []
         let ledger_json =
             std::fs::read_to_string(replan_ledger_path(tmp.path())).expect("read replans ledger");
         assert!(ledger_json.contains("\"plan-1\": 2"));
+        let ledger: ReplanLedger = serde_json::from_str(&ledger_json).expect("parse replan ledger");
+        assert_eq!(ledger.revision_requests.len(), 2);
+        assert_eq!(
+            ledger.revision_requests[0].failure_pattern_ids,
+            vec!["compile::E0425 first failure".to_string()]
+        );
+        assert_eq!(
+            ledger.revision_requests[0].disposition.to_string(),
+            "needs_replan"
+        );
+    }
+
+    #[test]
+    fn gate_failure_next_action_distinguishes_retry_replan_blocked_and_human() {
+        let retry = vec![GateVerdictSummary {
+            gate: "compile".into(),
+            passed: false,
+            classification: Some("type_error".into()),
+            failure_pattern_ids: vec!["E0308::src/lib.rs".into()],
+            blocking_findings: Vec::new(),
+            details: Some("E0308".into()),
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(1, 3, &retry),
+            GateFailureAction::Retry
+        );
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &retry),
+            GateFailureAction::NeedsReplan
+        );
+
+        let replan = vec![GateVerdictSummary {
+            gate: "review".into(),
+            passed: false,
+            classification: Some("architectural_conflict_requires_replan".into()),
+            failure_pattern_ids: vec!["arch::plan-shape".into()],
+            blocking_findings: vec!["failure requires plan shape or dependency revision".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(1, 3, &replan),
+            GateFailureAction::NeedsReplan
+        );
+
+        let blocked = vec![GateVerdictSummary {
+            gate: "compile".into(),
+            passed: false,
+            classification: Some("external_environment".into()),
+            failure_pattern_ids: Vec::new(),
+            blocking_findings: vec!["external environment must recover before retry".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &blocked),
+            GateFailureAction::Blocked
+        );
+
+        let human = vec![GateVerdictSummary {
+            gate: "tool".into(),
+            passed: false,
+            classification: Some("role_tool_permission".into()),
+            failure_pattern_ids: Vec::new(),
+            blocking_findings: vec!["required role/tool permission is unavailable".into()],
+            details: None,
+        }];
+        assert_eq!(
+            PlanRunner::gate_failure_next_action(3, 3, &human),
+            GateFailureAction::NeedsHuman
+        );
     }
 
     #[test]
@@ -19903,6 +19894,7 @@ acceptance = []
 
     #[test]
     fn task_dispatch_conventions_include_write_scope_and_loc() {
+        use crate::dispatch_helpers::task_dispatch_conventions;
         let task: crate::task_parser::TaskDef = toml::from_str(
             r#"
 id = "T1"
@@ -20496,21 +20488,96 @@ acceptance = []
     }
 
     #[test]
-    fn parse_review_verdict_structured() {
-        assert!(parse_review_verdict("verdict = \"approve\""));
-        assert!(!parse_review_verdict("verdict = \"revise\""));
-        assert!(parse_review_verdict("verdict: approve"));
-        assert!(!parse_review_verdict("verdict: reject"));
+    fn review_verdict_free_text_fails_closed() {
+        let parsed = parse_structured_review_verdict(
+            "The code looks good, LGTM!",
+            ReviewVerdictContext {
+                verdict_id: "v1".into(),
+                batch_id: "p1".into(),
+                task_id: "p1".into(),
+                reviewer_role_id: "auditor".into(),
+                raw_output_ref: "signal:raw".into(),
+                created_at: "2026-04-25T12:43:56Z".into(),
+            },
+        );
+
+        assert!(!parsed.passed());
+        assert!(structured_review_feedback(&parsed).contains("required_next_action=Human"));
     }
 
     #[test]
-    fn parse_review_verdict_keyword_fallback() {
-        assert!(parse_review_verdict("The code looks good, LGTM!"));
-        assert!(parse_review_verdict("Changes approved."));
-        assert!(!parse_review_verdict("Please revise the implementation."));
-        assert!(!parse_review_verdict("I reject this change due to bugs."));
-        // Ambiguous → default approve
-        assert!(parse_review_verdict("I have some minor comments."));
+    fn review_verdict_structured_json_can_approve() {
+        let parsed = parse_structured_review_verdict(
+            r#"{
+                "status": "passed",
+                "confidence": 0.8,
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+                "required_next_action": "none",
+                "evidence_refs": ["artifact://diff"]
+            }"#,
+            ReviewVerdictContext {
+                verdict_id: "v1".into(),
+                batch_id: "p1".into(),
+                task_id: "p1".into(),
+                reviewer_role_id: "auditor".into(),
+                raw_output_ref: "signal:raw".into(),
+                created_at: "2026-04-25T12:43:56Z".into(),
+            },
+        );
+
+        assert!(parsed.passed(), "{parsed:?}");
+    }
+
+    #[test]
+    fn structured_agent_output_json_satisfies_known_schema() {
+        let evidence = parse_structured_agent_output_evidence(
+            r#"{
+                "outcome": "passed",
+                "task_id": "T1",
+                "summary": "Implemented the requested task.",
+                "evidence_refs": ["src/lib.rs"]
+            }"#,
+            "T1",
+            "roko.acceptance.agent_output.v1",
+            "signal:raw".into(),
+        );
+
+        assert!(evidence.parsed);
+        assert!(evidence.schema_valid);
+    }
+
+    #[test]
+    fn structured_agent_output_free_text_fails_closed() {
+        let evidence = parse_structured_agent_output_evidence(
+            "Looks done to me.",
+            "T1",
+            "roko.acceptance.agent_output.v1",
+            "signal:raw".into(),
+        );
+
+        assert!(!evidence.parsed);
+        assert!(!evidence.schema_valid);
+    }
+
+    #[test]
+    fn gate_result_matches_acceptance_requirement_by_kind() {
+        let result = GateResult {
+            gate_name: "compile".into(),
+            rung: 0,
+            passed: true,
+            summary: "ok".into(),
+            duration_ms: 5,
+            test_count: None,
+        };
+        let requirement = roko_gate::GateRequirement {
+            id: "cargo-check".into(),
+            kind: roko_gate::GateRequirementKind::Compile,
+            command: Some("cargo check".into()),
+            required: true,
+        };
+
+        assert!(gate_result_matches_requirement(&result, &requirement));
     }
 
     #[test]
@@ -20934,6 +21001,70 @@ read_files = [
             Some("workspace".to_string())
         );
         assert_eq!(crate_name_for_path("README.md"), None);
+    }
+
+    #[test]
+    fn pre_agent_remediation_builds_scoped_cargo_commands() {
+        assert_eq!(
+            cargo_fix_args(Some("roko-gate")),
+            vec![
+                "fix",
+                "-p",
+                "roko-gate",
+                "--all-targets",
+                "--allow-dirty",
+                "--allow-staged"
+            ]
+        );
+        assert_eq!(
+            cargo_check_json_args(Some("roko-cli")),
+            vec![
+                "check",
+                "-p",
+                "roko-cli",
+                "--all-targets",
+                "--message-format=json"
+            ]
+        );
+        assert!(cargo_fix_args(None).contains(&"--workspace".to_string()));
+    }
+
+    #[test]
+    fn pre_agent_remediation_tracks_new_and_out_of_scope_changes() {
+        let before = vec![
+            "crates/roko-cli/src/orchestrate.rs".to_string(),
+            "plans/p1/brief.md".to_string(),
+        ];
+        let after = vec![
+            "crates/roko-cli/src/orchestrate.rs".to_string(),
+            "crates/roko-cli/src/run.rs".to_string(),
+            "plans/p1/brief.md".to_string(),
+        ];
+        assert_eq!(
+            remediation_new_changed_files(&before, &after),
+            vec!["crates/roko-cli/src/run.rs".to_string()]
+        );
+
+        let allowed = vec!["crates/roko-cli/src/orchestrate.rs".to_string()];
+        assert!(remediation_scope_ok(
+            "p1",
+            &["crates/roko-cli/src/orchestrate.rs".to_string()],
+            &allowed
+        ));
+        assert!(!remediation_scope_ok(
+            "p1",
+            &["crates/roko-cli/src/run.rs".to_string()],
+            &allowed
+        ));
+        assert!(remediation_scope_ok(
+            "p1",
+            &["target/debug/build/foo".to_string()],
+            &allowed
+        ));
+        assert!(is_safe_cargo_fix_class(&FailureClass::ImportError));
+        assert!(!is_safe_cargo_fix_class(
+            &FailureClass::MissingDependencyOrFeature
+        ));
     }
 
     #[test]

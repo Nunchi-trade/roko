@@ -1,6 +1,6 @@
 //! Standalone gate combinators: ParallelGate, VotingGate, FallbackGate (GATE-04).
 //!
-//! Each combinator wraps inner gates and itself implements [`Gate`], enabling
+//! Each combinator wraps inner gates and itself implements [`Verify`], enabling
 //! algebraic composition of verification pipelines.
 //!
 //! | Combinator | Strategy | Aggregate |
@@ -10,7 +10,7 @@
 //! | [`FallbackGate`] | Try primary; on failure try fallback | first passing verdict |
 
 use async_trait::async_trait;
-use roko_core::{Context, Engram, Gate, Verdict};
+use roko_core::{Context, Engram, Verdict, Verify};
 use std::fmt;
 
 // ─── ParallelGate ────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ use std::fmt;
 /// If any gate fails, the aggregate fails. Use when inner gates are independent
 /// and can safely run simultaneously (e.g., CompileGate + LintGate).
 pub struct ParallelGate {
-    gates: Vec<Box<dyn Gate>>,
+    gates: Vec<Box<dyn Verify>>,
     name: String,
 }
 
@@ -35,13 +35,13 @@ impl ParallelGate {
     }
 
     /// Append an inner gate.
-    pub fn push(&mut self, gate: Box<dyn Gate>) {
+    pub fn push(&mut self, gate: Box<dyn Verify>) {
         self.gates.push(gate);
     }
 
     /// Chainable gate append.
     #[must_use]
-    pub fn with_gate(mut self, gate: Box<dyn Gate>) -> Self {
+    pub fn with_gate(mut self, gate: Box<dyn Verify>) -> Self {
         self.push(gate);
         self
     }
@@ -69,7 +69,7 @@ impl fmt::Debug for ParallelGate {
 }
 
 #[async_trait]
-impl Gate for ParallelGate {
+impl Verify for ParallelGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
@@ -150,7 +150,7 @@ impl Gate for ParallelGate {
 /// Aggregate score = mean of passing verdicts' scores. Use when multiple
 /// reviewers must agree (e.g., 2-of-3 code review gates).
 pub struct VotingGate {
-    gates: Vec<Box<dyn Gate>>,
+    gates: Vec<Box<dyn Verify>>,
     required_passes: usize,
     name: String,
 }
@@ -167,13 +167,13 @@ impl VotingGate {
     }
 
     /// Append an inner gate.
-    pub fn push(&mut self, gate: Box<dyn Gate>) {
+    pub fn push(&mut self, gate: Box<dyn Verify>) {
         self.gates.push(gate);
     }
 
     /// Chainable gate append.
     #[must_use]
-    pub fn with_gate(mut self, gate: Box<dyn Gate>) -> Self {
+    pub fn with_gate(mut self, gate: Box<dyn Verify>) -> Self {
         self.push(gate);
         self
     }
@@ -202,7 +202,7 @@ impl fmt::Debug for VotingGate {
 }
 
 #[async_trait]
-impl Gate for VotingGate {
+impl Verify for VotingGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
@@ -282,15 +282,19 @@ impl Gate for VotingGate {
 /// The first passing verdict wins. Use when you want to try a fast check
 /// first and fall back to a more thorough one on failure.
 pub struct FallbackGate {
-    primary: Box<dyn Gate>,
-    fallback: Box<dyn Gate>,
+    primary: Box<dyn Verify>,
+    fallback: Box<dyn Verify>,
     name: String,
 }
 
 impl FallbackGate {
     /// Create a fallback gate with the given primary and fallback.
     #[must_use]
-    pub fn new(name: impl Into<String>, primary: Box<dyn Gate>, fallback: Box<dyn Gate>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        primary: Box<dyn Verify>,
+        fallback: Box<dyn Verify>,
+    ) -> Self {
         Self {
             primary,
             fallback,
@@ -310,7 +314,7 @@ impl fmt::Debug for FallbackGate {
 }
 
 #[async_trait]
-impl Gate for FallbackGate {
+impl Verify for FallbackGate {
     async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
         let started = std::time::Instant::now();
 
@@ -370,7 +374,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use roko_core::{Body, Context, Engram, Gate, Kind, Verdict};
+    use roko_core::{Body, Context, Engram, Kind, Verdict, Verify};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -395,7 +399,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Gate for MockGate {
+    impl Verify for MockGate {
         async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.pass {

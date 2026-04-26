@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use roko_core::ContentHash;
+use roko_core::{CognitiveWorkspace, ContentHash};
 use serde::{Deserialize, Serialize};
 
 // ─── EventKind ──────────────────────────────────────────────────────────
@@ -32,6 +32,8 @@ pub enum EventKind {
     TaskAssigned,
     /// An agent process has been spawned.
     AgentSpawned,
+    /// A cognitive workspace audit object was recorded for an agent invocation.
+    CognitiveWorkspaceRecorded,
     /// A gate (compile, test, clippy, etc.) produced a result.
     GateResult,
     /// A merge was attempted.
@@ -56,6 +58,7 @@ impl std::fmt::Display for EventKind {
             Self::PlanStarted => write!(f, "plan.started"),
             Self::TaskAssigned => write!(f, "task.assigned"),
             Self::AgentSpawned => write!(f, "agent.spawned"),
+            Self::CognitiveWorkspaceRecorded => write!(f, "cognitive_workspace.recorded"),
             Self::GateResult => write!(f, "gate.result"),
             Self::MergeAttempted => write!(f, "merge.attempted"),
             Self::PlanCompleted => write!(f, "plan.completed"),
@@ -241,6 +244,19 @@ impl EventLog {
         entry
     }
 
+    /// Append a cognitive workspace audit object as a structured event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the workspace cannot be encoded as JSON.
+    pub fn append_cognitive_workspace(
+        &self,
+        workspace: &CognitiveWorkspace,
+    ) -> Result<EventEntry, serde_json::Error> {
+        let payload = serde_json::to_value(workspace)?;
+        Ok(self.append(EventKind::CognitiveWorkspaceRecorded, payload))
+    }
+
     /// Replay all events in insertion order.
     pub fn replay(&self) -> Vec<EventEntry> {
         self.inner.lock().entries.clone()
@@ -366,6 +382,7 @@ impl EventLog {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use roko_core::{ModelChoice, PolicyVersionRef, TaskInvocationContract};
     use serde_json::json;
 
     #[test]
@@ -387,6 +404,28 @@ mod tests {
         assert_eq!(e1.sequence_number, 1);
         assert_eq!(e2.sequence_number, 2);
         assert_eq!(log.len(), 3);
+    }
+
+    #[test]
+    fn appends_cognitive_workspace_event_payload() {
+        let workspace = CognitiveWorkspace::new(
+            "cw-1",
+            "invoke-1",
+            TaskInvocationContract::from_prompt_context(Some("P1".into()), "T1", "Audit task"),
+            PolicyVersionRef::new("implementer", "1.0.0"),
+            PolicyVersionRef::new("roko.builtin.prompt.implementer", "1.0.0"),
+            ModelChoice::new("codex", "gpt-5.5"),
+        );
+        let log = EventLog::new();
+
+        let entry = log
+            .append_cognitive_workspace(&workspace)
+            .expect("workspace serializes");
+
+        assert_eq!(entry.event_kind, EventKind::CognitiveWorkspaceRecorded);
+        assert_eq!(entry.payload["workspace_id"], "cw-1");
+        assert_eq!(entry.payload["task_contract"]["task_id"], "T1");
+        assert!(log.verify_integrity().is_ok());
     }
 
     #[test]

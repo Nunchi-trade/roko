@@ -47,7 +47,7 @@ impl ChatMessage {
     }
 }
 
-/// Policy controlling when and how conversation history is compacted.
+/// React controlling when and how conversation history is compacted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionPolicy {
     /// Compact when the compactable region occupies at least this fraction of

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use roko_agent::Agent;
 use roko_agent::gemini::{CodeExecutionResultPart, GeminiMetadata, GeminiNativeAgent};
-use roko_core::{Body, Context, Engram, Gate, Kind, Verdict};
+use roko_core::{Body, Context, Engram, Kind, Verdict, Verify};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -75,7 +75,7 @@ impl CodeExecutionBackend for GeminiNativeAgent {
     }
 }
 
-/// Gate that verifies changes using Gemini's built-in Python sandbox.
+/// Verify that verifies changes using Gemini's built-in Python sandbox.
 pub struct CodeExecutionGate<A = GeminiNativeAgent> {
     agent: A,
     name: String,
@@ -137,7 +137,7 @@ impl<A> CodeExecutionGate<A> {
 }
 
 #[async_trait]
-impl<A> Gate for CodeExecutionGate<A>
+impl<A> Verify for CodeExecutionGate<A>
 where
     A: CodeExecutionBackend,
 {

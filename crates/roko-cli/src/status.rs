@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use crate::daemon::DaemonInfo;
 use roko_learn::cfactor::CFactor;
 use roko_learn::episode_logger::Episode;
+use roko_runtime::process::{
+    ProcessSessionLedger, ProcessSessionStateSummary, default_process_session_ledger_path,
+};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 /// Information about a session's current state.
@@ -32,6 +35,10 @@ pub struct SessionStatus {
     pub total_cost_usd: Option<f64>,
     /// Recorded cost for the current UTC day in USD.
     pub today_cost_usd: Option<f64>,
+    /// Durable process-session ledger path, when readable or configured.
+    pub process_session_ledger: Option<PathBuf>,
+    /// Durable process-session state summary for restart/resume diagnosis.
+    pub process_sessions: Option<ProcessSessionStateSummary>,
 }
 
 impl SessionStatus {
@@ -48,6 +55,8 @@ impl SessionStatus {
             cfactor: None,
             total_cost_usd: None,
             today_cost_usd: None,
+            process_session_ledger: None,
+            process_sessions: None,
         }
     }
 
@@ -88,6 +97,21 @@ impl SessionStatus {
         if let Some(cost) = self.today_cost_usd {
             lines.push(format!("today cost: ${cost:.4}"));
         }
+        if let Some(summary) = &self.process_sessions {
+            lines.push(format!(
+                "process sessions: total={} started={} timed_out={} cancelled={} failed={} resumable={} stale={}",
+                summary.total,
+                summary.started,
+                summary.timed_out,
+                summary.cancelled,
+                summary.failed,
+                summary.resumable,
+                summary.stale
+            ));
+            if let Some(path) = &self.process_session_ledger {
+                lines.push(format!("  ledger: {}", path.display()));
+            }
+        }
         if let Some(cfactor) = &self.cfactor {
             lines.push(format!(
                 "cfactor: {:.3} (episodes: {}, computed: {})",
@@ -118,43 +142,23 @@ impl SessionStatus {
     /// Format this status as JSON.
     #[must_use]
     pub fn display_json(&self) -> String {
-        // Manual JSON to avoid pulling in extra serde derives just for status.
-        let session = self
-            .session_id
-            .as_deref()
-            .map_or_else(|| "null".to_string(), |s| format!("\"{s}\""));
-        let signals = self
-            .signal_count
-            .map_or_else(|| "null".to_string(), |n| n.to_string());
-        let episodes = self
-            .episode_count
-            .map_or_else(|| "null".to_string(), |n| n.to_string());
-        let last = self
-            .last_episode_passed
-            .map_or_else(|| "null".to_string(), |b| b.to_string());
-        let cfactor = self.cfactor.as_ref().map_or_else(
-            || "null".to_string(),
-            |value| serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
-        );
-        let total_cost = self
-            .total_cost_usd
-            .map_or_else(|| "null".to_string(), |value| format!("{value:.6}"));
-        let today_cost = self
-            .today_cost_usd
-            .map_or_else(|| "null".to_string(), |value| format!("{value:.6}"));
-
-        format!(
-            r#"{{"workdir":"{}","session":{},"daemon_running":{},"signal_count":{},"episode_count":{},"last_episode_passed":{},"cfactor":{},"total_cost_usd":{},"today_cost_usd":{}}}"#,
-            self.workdir.display(),
-            session,
-            self.daemon_running,
-            signals,
-            episodes,
-            last,
-            cfactor,
-            total_cost,
-            today_cost,
-        )
+        serde_json::json!({
+            "workdir": self.workdir.display().to_string(),
+            "session": &self.session_id,
+            "daemon_running": self.daemon_running,
+            "signal_count": self.signal_count,
+            "episode_count": self.episode_count,
+            "last_episode_passed": self.last_episode_passed,
+            "cfactor": &self.cfactor,
+            "total_cost_usd": self.total_cost_usd,
+            "today_cost_usd": self.today_cost_usd,
+            "process_session_ledger": self
+                .process_session_ledger
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            "process_sessions": &self.process_sessions,
+        })
+        .to_string()
     }
 }
 
@@ -171,11 +175,26 @@ pub fn daemon_socket_exists(workdir: &Path, session_id: &str) -> bool {
 /// Collect a lightweight status snapshot from on-disk workspace state.
 #[must_use]
 pub fn collect_session_status(workdir: &Path) -> SessionStatus {
+    collect_session_status_with_process_ledger(
+        workdir,
+        &default_process_session_ledger_path(workdir),
+        Some(24 * 60 * 60 * 1_000),
+    )
+}
+
+/// Collect status and summarize a configured process-session ledger.
+#[must_use]
+pub fn collect_session_status_with_process_ledger(
+    workdir: &Path,
+    ledger_path: &Path,
+    stale_after_ms: Option<u64>,
+) -> SessionStatus {
     let daemon_info = read_daemon_info(workdir);
     let signal_count = Some(count_non_empty_lines(
         &workdir.join(".roko").join("engrams.jsonl"),
     ));
     let (episode_count, last_episode_passed) = read_episode_summary(workdir);
+    let process_sessions = read_process_session_summary(ledger_path, stale_after_ms);
 
     SessionStatus {
         session_id: daemon_info.as_ref().map(|info| info.session_id.clone()),
@@ -189,7 +208,28 @@ pub fn collect_session_status(workdir: &Path) -> SessionStatus {
         cfactor: None,
         total_cost_usd: None,
         today_cost_usd: None,
+        process_session_ledger: Some(ledger_path.to_path_buf()),
+        process_sessions,
     }
+}
+
+fn read_process_session_summary(
+    ledger_path: &Path,
+    stale_after_ms: Option<u64>,
+) -> Option<ProcessSessionStateSummary> {
+    if !ledger_path.is_file() {
+        return None;
+    }
+    let ledger = ProcessSessionLedger::load(ledger_path).ok()?;
+    Some(ledger.state_summary(stale_after_ms, unix_ms()))
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
+        })
 }
 
 fn read_daemon_info(workdir: &Path) -> Option<DaemonInfo> {
@@ -255,6 +295,8 @@ mod tests {
             cfactor: None,
             total_cost_usd: Some(12.5),
             today_cost_usd: Some(1.25),
+            process_session_ledger: None,
+            process_sessions: None,
         };
         let text = status.display_text();
         assert!(text.contains("/project"));
@@ -286,13 +328,15 @@ mod tests {
             cfactor: None,
             total_cost_usd: Some(4.2),
             today_cost_usd: Some(0.7),
+            process_session_ledger: None,
+            process_sessions: None,
         };
         let json = status.display_json();
         assert!(json.contains(r#""session":"s1""#));
         assert!(json.contains(r#""daemon_running":false"#));
         assert!(json.contains(r#""signal_count":10"#));
         assert!(json.contains(r#""last_episode_passed":false"#));
-        assert!(json.contains(r#""total_cost_usd":4.200000"#));
+        assert!(json.contains(r#""total_cost_usd":4.2"#));
     }
 
     #[test]
@@ -327,5 +371,39 @@ mod tests {
         assert_eq!(status.episode_count, Some(2));
         assert_eq!(status.last_episode_passed, Some(true));
         assert!(!status.daemon_running);
+    }
+
+    #[test]
+    fn collect_session_status_reads_process_session_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger_path = tmp.path().join(".roko/state/process-sessions.json");
+        let mut ledger = ProcessSessionLedger::default();
+        ledger.upsert(roko_runtime::process::ProcessSessionRecord {
+            session_id: "session-1".into(),
+            invocation_id: "invocation-1".into(),
+            backend_id: "backend".into(),
+            task_id: Some("task-1".into()),
+            reuse_policy_id: None,
+            resumable: true,
+            process_id: roko_runtime::process::ProcessId(1),
+            os_pid: None,
+            label: "agent".into(),
+            program: "sleep".into(),
+            args: Vec::new(),
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            ended_at_ms: None,
+            timeout_ms: None,
+            state: roko_runtime::process::ProcessSessionState::TimedOut,
+            reason: None,
+        });
+        ledger.save(&ledger_path).unwrap();
+
+        let status = collect_session_status_with_process_ledger(tmp.path(), &ledger_path, Some(1));
+        let summary = status.process_sessions.expect("process summary");
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.timed_out, 1);
+        assert_eq!(summary.resumable, 1);
+        assert_eq!(summary.stale, 1);
     }
 }

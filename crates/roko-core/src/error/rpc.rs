@@ -37,7 +37,7 @@ pub const INTERNAL_ERROR: i64 = -32603;
 
 /// Agent backend failure (Claude/Codex/etc.).
 pub const AGENT_FAILURE: i64 = -32000;
-/// Gate verification failure.
+/// Verify verification failure.
 pub const GATE_FAILURE: i64 = -32001;
 /// Operation timed out.
 pub const TIMEOUT: i64 = -32002;
@@ -84,7 +84,7 @@ impl std::error::Error for RpcError {}
 /// | `Invalid`, `User` | -32602 | Invalid params |
 /// | `NotFound` | -32601 | Method not found |
 /// | `Agent` | -32000 | Agent failure |
-/// | `Gate`, `Rejected` | -32001 | Gate failure |
+/// | `Verify`, `Rejected` | -32001 | Verify failure |
 /// | `Timeout` | -32002 | Timeout |
 /// | `BudgetExceeded` | -32003 | Budget exceeded |
 /// | everything else | -32603 | Internal error |
@@ -104,7 +104,7 @@ pub fn to_rpc_error(error: &RokoError) -> RpcError {
         RokoError::Agent { .. } => (AGENT_FAILURE, format!("{error}")),
 
         // Custom: gate failure
-        RokoError::Gate { .. } | RokoError::Rejected(_) => (GATE_FAILURE, format!("{error}")),
+        RokoError::Verify { .. } | RokoError::Rejected(_) => (GATE_FAILURE, format!("{error}")),
 
         // Custom: timeout
         RokoError::Timeout { .. } => (TIMEOUT, format!("{error}")),

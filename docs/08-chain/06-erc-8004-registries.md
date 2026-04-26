@@ -1,12 +1,12 @@
 # ERC-8004: Three Agent Registries
 
-> ERC-8004 defines three on-chain registries for agent identity: Identity Registry (passport issuance, soulbound ERC-721), Reputation Registry (authorized feedback, per-domain EMA scores), and Validation Registry (work verification proofs, clearing certificates). Together they form the trust infrastructure of the Korai agent marketplace.
+> ERC-8004 is the native identity standard on Nunchi, implemented to its full spec. It defines three on-chain registries: Identity Registry (agent registration, capabilities, tiers), Reputation Registry (authorized feedback, per-domain EMA scores), and Validation Registry (work verification proofs, clearing certificates). Together they form the trust infrastructure of the Nunchi agent economy.
 
 
 > **Implementation**: Deferred
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md), [05-ventriloquist-defense.md](./05-ventriloquist-defense.md)
+**Prerequisites**: [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §A, `refactoring-prd/04-knowledge-and-mesh.md` §ERC-8004, `bardo-backup/prd/shared/chains.md`
 
 ---
@@ -15,13 +15,13 @@
 
 ERC-8004 is a proposed standard for on-chain agent identity and coordination. It defines three registries that together provide a complete trust infrastructure for agent marketplaces:
 
-1. **Identity Registry** — Issues and manages Korai Passports (soulbound ERC-721 NFTs). Handles agent registration, tier classification, capability declaration, and prompt hash commitment.
+1. **Identity Registry** — Issues and manages agent identities natively. Handles agent registration, tier classification, and capability declaration.
 
 2. **Reputation Registry** — Stores per-domain reputation scores and controls who is authorized to submit feedback. Only designated feedback sources (job marketplace contracts, clearing contracts, peer review contracts) can update an agent's reputation. This prevents reputation manipulation by unauthorized parties.
 
 3. **Validation Registry** — Records proofs of completed work: clearing certificates (see [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md)), gate pass records, and Merkle proofs of deliverables. Provides an auditable trail of agent contributions.
 
-The three registries are separate contracts that reference each other through the passport ID. An agent's passport ID is its universal key across all three registries.
+The three registries are separate contracts that reference each other through the agent ID. An agent's ERC-8004 ID is its universal key across all three registries.
 
 ---
 
@@ -33,21 +33,21 @@ The three registries are deliberately separated rather than combined into a sing
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    Korai Agent Infrastructure                 │
+│                    Nunchi Agent Infrastructure                 │
 │                                                              │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌────────────┐  │
 │  │ Identity Registry│  │Reputation Registry│  │ Validation │  │
 │  │                  │  │                  │  │  Registry  │  │
-│  │ - Passport mint  │  │ - Domain scores  │  │ - Work     │  │
+│  │ - Agent register │  │ - Domain scores  │  │ - Work     │  │
 │  │ - Tier mgmt      │  │ - Feedback auth  │  │   proofs   │  │
 │  │ - Capability bits│  │ - EMA updates    │  │ - Clearing │  │
-│  │ - Prompt hash    │  │ - Slash records  │  │   certs    │  │
+│  │                  │  │ - Slash records  │  │   certs    │  │
 │  │ - TEE attestation│  │ - Decay ticks    │  │ - Gate     │  │
 │  │ - Stake tracking │  │ - Discipline     │  │   results  │  │
 │  └────────┬─────────┘  └────────┬─────────┘  └──────┬─────┘  │
 │           │                     │                    │        │
 │           └─────────────────────┼────────────────────┘        │
-│                         passport_id                           │
+│                          agent_id                             │
 │                    (universal agent key)                       │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -66,101 +66,74 @@ The three registries are deliberately separated rather than combined into a sing
 ### Contract Interface
 
 ```solidity
-interface IKoraiIdentityRegistry {
-    /// Mint a new soulbound passport. Called once per agent.
-    function registerPassport(
+interface INunchiIdentityRegistry {
+    /// Register a new agent identity. Called once per agent.
+    function registerAgent(
         address owner,
         uint64 capabilityBitmask,
-        bytes32 systemPromptHash,
         bytes32 teeAttestation,     // 0x0 if no TEE
         uint64 teeExpiry            // 0 if no TEE
-    ) external returns (uint256 passportId);
+    ) external returns (uint256 agentId);
 
     /// Update capability bitmask.
     function updateCapabilities(
-        uint256 passportId,
+        uint256 agentId,
         uint64 newCapabilities
-    ) external;
-
-    /// Update system prompt hash (24h timelock).
-    function updatePromptHash(
-        uint256 passportId,
-        bytes32 newHash
     ) external;
 
     /// Update TEE attestation.
     function updateAttestation(
-        uint256 passportId,
+        uint256 agentId,
         bytes32 attestationHash,
         uint64 expiry
     ) external;
 
-    /// Stake KORAI into a domain.
+    /// Stake NUNCHI into a domain.
     function stakeIntoDomain(
-        uint256 passportId,
+        uint256 agentId,
         string calldata domain,
         uint256 amount
     ) external;
 
     /// Withdraw stake from a domain (subject to cooldown).
     function withdrawFromDomain(
-        uint256 passportId,
+        uint256 agentId,
         string calldata domain,
         uint256 amount
     ) external;
 
-    /// Query passport data.
-    function getPassport(uint256 passportId)
-        external view returns (AgentPassport memory);
+    /// Query agent identity data.
+    function getAgent(uint256 agentId)
+        external view returns (AgentIdentity memory);
 
     /// Query tier.
-    function getTier(uint256 passportId)
+    function getTier(uint256 agentId)
         external view returns (uint8);
 
-    /// Check if passport has capability.
-    function hasCapability(uint256 passportId, uint8 capBit)
+    /// Check if agent has capability.
+    function hasCapability(uint256 agentId, uint8 capBit)
         external view returns (bool);
-
-    /// ERC-721 soulbound: transfer always reverts.
-    /// ERC-5192 compliant.
 }
 ```
 
-### Passport Minting
+### Agent Registration
 
-The `registerPassport` function:
+The `registerAgent` function:
 
-1. Verifies the caller has not already registered (one passport per address)
-2. Auto-increments the passport ID
-3. Mints a soulbound ERC-721 token (transfer and approve functions revert)
+1. Verifies the caller has not already registered (one identity per address)
+2. Auto-increments the agent ID
+3. Creates a non-transferable ERC-8004 identity record
 4. Sets initial tier based on stake amount:
    - No stake → Tier 3 (Edge)
-   - 5,000+ KORAI → Tier 2 (Worker)
-   - 25,000+ KORAI → Tier 1 (Sovereign)
+   - 5,000+ NUNCHI → Tier 2 (Worker)
+   - 25,000+ NUNCHI → Tier 1 (Sovereign)
    - Tier 0 (Protocol) requires governance approval
 5. Initializes reputation to 0.5 (neutral) across all declared capability domains
-6. Records system prompt hash for ventriloquist defense
-7. Emits `PassportMinted(passportId, owner, tier, capabilities)`
+6. Emits `AgentRegistered(agentId, owner, tier, capabilities)`
 
-### Soulbound Enforcement
+### Non-Transferable Identity
 
-Per ERC-5192, the following functions always revert:
-
-```solidity
-function transferFrom(address, address, uint256) public pure override {
-    revert("KoraiPassport: soulbound, non-transferable");
-}
-
-function safeTransferFrom(address, address, uint256) public pure override {
-    revert("KoraiPassport: soulbound, non-transferable");
-}
-
-function approve(address, uint256) public pure override {
-    revert("KoraiPassport: soulbound, non-transferable");
-}
-```
-
-This prevents reputation laundering — an agent cannot sell its identity to another party.
+ERC-8004 identities are non-transferable by design. An agent cannot sell, transfer, or clone its identity. This prevents reputation laundering — a common attack in decentralized identity systems where bad actors create new identities and buy reputation from established accounts.
 
 ---
 
@@ -169,10 +142,10 @@ This prevents reputation laundering — an agent cannot sell its identity to ano
 ### Contract Interface
 
 ```solidity
-interface IKoraiReputationRegistry {
+interface INunchiReputationRegistry {
     /// Submit feedback for an agent. Only callable by authorized contracts.
     function submitFeedback(
-        uint256 passportId,
+        uint256 agentId,
         string calldata domain,
         int256 score,           // [-1e18, 1e18] scaled
         bytes32 jobHash,        // reference to the job
@@ -180,26 +153,26 @@ interface IKoraiReputationRegistry {
     ) external;
 
     /// Apply demurrage decay tick. Called by the chain's epoch handler.
-    function applyDecayTick(uint256 passportId) external;
+    function applyDecayTick(uint256 agentId) external;
 
     /// Slash agent for violation.
     function slash(
-        uint256 passportId,
+        uint256 agentId,
         uint8 violationType,
         uint256 amount,
         string calldata reason
     ) external;
 
     /// Query current reputation in a domain.
-    function getReputation(uint256 passportId, string calldata domain)
+    function getReputation(uint256 agentId, string calldata domain)
         external view returns (uint256 score, uint64 jobCount, uint64 lastUpdate);
 
     /// Query all domain reputations.
-    function getAllReputations(uint256 passportId)
+    function getAllReputations(uint256 agentId)
         external view returns (DomainReputation[] memory);
 
     /// Query slash history.
-    function getSlashHistory(uint256 passportId)
+    function getSlashHistory(uint256 agentId)
         external view returns (SlashRecord[] memory);
 
     /// Check if an address is an authorized feedback source.
@@ -217,7 +190,7 @@ The critical security property of the Reputation Registry is its **access contro
 
 | Source Contract | Feedback Type | Authorized By |
 |---|---|---|
-| Spore Marketplace | Job completion quality | Governance approval |
+| ERC-8183 Job Market | Job completion quality | Governance approval |
 | Clearing Contract | Settlement accuracy | Governance approval |
 | Peer Review Contract | Code/knowledge review quality | Governance approval |
 | Slashing Contract | Violation penalties | Governance approval |
@@ -251,10 +224,10 @@ The EMA smooths individual feedback events, preventing a single bad job from des
 ### Contract Interface
 
 ```solidity
-interface IKoraiValidationRegistry {
+interface INunchiValidationRegistry {
     /// Submit a work proof.
     function submitWorkProof(
-        uint256 passportId,
+        uint256 agentId,
         bytes32 jobHash,
         bytes32 deliverableMerkleRoot,
         uint8[] calldata gateResults,   // per-gate pass/fail
@@ -266,16 +239,16 @@ interface IKoraiValidationRegistry {
         external view returns (WorkProof memory);
 
     /// Query work proofs for an agent.
-    function getWorkProofs(uint256 passportId, uint64 fromBlock, uint64 toBlock)
+    function getWorkProofs(uint256 agentId, uint64 fromBlock, uint64 toBlock)
         external view returns (WorkProof[] memory);
 
     /// Query gate pass rate for an agent in a domain.
-    function getGatePassRate(uint256 passportId, string calldata domain)
+    function getGatePassRate(uint256 agentId, string calldata domain)
         external view returns (uint256 passRate, uint64 totalJobs);
 }
 
 struct WorkProof {
-    uint256 passportId;
+    uint256 agentId;
     bytes32 jobHash;
     bytes32 deliverableMerkleRoot;
     uint8[] gateResults;
@@ -309,27 +282,27 @@ The Validation Registry provides a complete audit trail:
 ### Registration Flow
 
 ```
-1. Agent calls IdentityRegistry.registerPassport(...)
-   → Passport minted with ID, tier, capabilities, prompt hash
+1. Agent calls IdentityRegistry.registerAgent(...)
+   → Identity created with ID, tier, capabilities
 
 2. IdentityRegistry notifies ReputationRegistry
    → Initial reputation of 0.5 set for each declared capability domain
 
-3. Agent begins accepting jobs from the Spore marketplace
+3. Agent begins accepting jobs from the ERC-8183 job market
 ```
 
 ### Job Completion Flow
 
 ```
-1. Agent completes job from Spore marketplace
+1. Agent completes job from ERC-8183 job market
 
 2. Marketplace calls ReputationRegistry.submitFeedback(
-       passportId, domain, score, jobHash, reason
+       agentId, domain, score, jobHash, reason
    )
    → EMA reputation updated
 
 3. Agent (or marketplace) calls ValidationRegistry.submitWorkProof(
-       passportId, jobHash, merkleRoot, gateResults, clearingCert
+       agentId, jobHash, merkleRoot, gateResults, clearingCert
    )
    → Work proof recorded
 
@@ -342,17 +315,17 @@ The Validation Registry provides a complete audit trail:
 ### Slashing Flow
 
 ```
-1. ReputationRegistry.slash(passportId, violation, amount, reason)
+1. ReputationRegistry.slash(agentId, violation, amount, reason)
    → Slash amount deducted from agent's domain stake
-   → SlashRecord added to passport's slash_history
+   → SlashRecord added to agent's slash_history
 
 2. If stake drops below tier threshold:
-   IdentityRegistry.demoteTier(passportId)
+   IdentityRegistry.demoteTier(agentId)
    → Tier reduced (e.g., Sovereign → Worker)
    → Privileges revoked
 
 3. If TEE violation:
-   IdentityRegistry.demoteTier(passportId, EDGE)
+   IdentityRegistry.demoteTier(agentId, EDGE)
    → Immediate demotion to Edge
    → 90-day cooldown
 ```
@@ -363,7 +336,7 @@ The Validation Registry provides a complete audit trail:
 
 ### Contract Addresses
 
-On the Korai chain, the three registries are deployed at deterministic addresses:
+On the Nunchi chain, the three registries are deployed at deterministic addresses:
 
 | Registry | Address (Planned) | Notes |
 |---|---|---|
@@ -375,15 +348,14 @@ Predeployment at genesis ensures the registries are available from the first blo
 
 ### mirage-rs Emulation
 
-During development, mirage-rs (see [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md)) provides in-process emulations of all three registries. The emulations implement the same interface but use in-memory storage instead of on-chain state. This allows full integration testing without running a Korai validator.
+During development, mirage-rs (see [18-mirage-rs-evm-simulator.md](./18-mirage-rs-evm-simulator.md)) provides in-process emulations of all three registries. The emulations implement the same interface but use in-memory storage instead of on-chain state. This allows full integration testing without running a Nunchi validator.
 
 ---
 
 ## Academic Foundations
 
-- ERC-721 (Ethereum Improvement Proposal 721) — Non-fungible token standard. The Identity Registry extends ERC-721 with soulbound properties.
-- ERC-5192 — Minimal soulbound NFT interface. Prevents transfer and approve operations on passports.
-- (Weyl, Ohlhaver, Buterin, 2022) — "Decentralized Society: Finding Web3's Soul." Theoretical foundation for soulbound tokens and non-transferable reputation.
+- ERC-8004 — Agent identity standard. Native identity with capabilities, reputation, and non-transferable properties.
+- (Weyl, Ohlhaver, Buterin, 2022) — "Decentralized Society: Finding Web3's Soul." Theoretical foundation for non-transferable identity and reputation.
 - Woolley, A.W. et al. (2010). "Evidence for a Collective Intelligence Factor in the Performance of Human Groups." *Science*. — C-factor research motivating the design of reputation as a collective signal, not individual assessment.
 
 ---
@@ -391,7 +363,7 @@ During development, mirage-rs (see [18-mirage-rs-evm-simulator.md](./18-mirage-r
 ## Current Status and Gaps
 
 **Scaffold:**
-- `AgentPassport` struct defined in implementation plan §A1
+- `AgentIdentity` struct defined in implementation plan §A1
 - ERC-8004 concept referenced in `refactoring-prd/04-knowledge-and-mesh.md`
 - `bardo-backup/prd/shared/chains.md` lists ERC-8004 registry deployment info
 
@@ -408,8 +380,6 @@ During development, mirage-rs (see [18-mirage-rs-evm-simulator.md](./18-mirage-r
 
 ## Cross-References
 
-- See [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md) for the passport struct stored in the Identity Registry
-- See [05-ventriloquist-defense.md](./05-ventriloquist-defense.md) for the prompt hash field in the Identity Registry
 - See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md) for the EMA scoring algorithm in the Reputation Registry
 - See [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md) for clearing certificates in the Validation Registry
 - See [24-current-status-and-6-contracts.md](./24-current-status-and-6-contracts.md) for all 6 Solidity contracts including the registries

@@ -1,23 +1,23 @@
-# Spore: Job Marketplace Protocol
+# ERC-8183: Agent Job Market
 
-> Spore is the Korai job posting protocol. Jobs are posted with budget, deadline, domain, capability requirements, and hiring model (random VRF, blind auction, or direct hire). Jobs flow from posting through matching to assignment, with escrow protecting both parties.
+> The Nunchi job market uses ERC-8183 for on-chain agent task coordination. Jobs are posted with budget, deadline, domain, capability requirements, and hiring model (random VRF, blind auction, or direct hire). Jobs flow from posting through matching to assignment, with escrow protecting both parties.
 
 
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [04-korai-passport-erc-721-soulbound.md](./04-korai-passport-erc-721-soulbound.md), [06-erc-8004-registries.md](./06-erc-8004-registries.md)
+**Prerequisites**: [06-erc-8004-registries.md](./06-erc-8004-registries.md)
 **Key sources**: `roko/tmp/implementation-plans/12b-chain-layer.md` §C, `refactoring-prd/04-knowledge-and-mesh.md`, `bardo-backup/tmp/agent-chain-new/12-agent-economy.md`
 
 ---
 
 ## Abstract
 
-Spore is the job marketplace protocol for the Korai chain. It handles the full lifecycle of agent work: posting jobs, matching agents to jobs, managing escrow, tracking deliverables, and settling payments. Spore is the demand side of the Korai agent economy — it connects job posters (who need work done) with agents (who can do the work).
+The Nunchi job market implements ERC-8183 for on-chain agent task coordination. It handles the full lifecycle of agent work: posting jobs, matching agents to jobs, managing escrow, tracking deliverables, and settling payments. The job market is the demand side of the Nunchi agent economy — it connects job posters (who need work done) with agents (who can do the work).
 
-The name "Spore" reflects the protocol's design philosophy: jobs are scattered across the marketplace like spores, and the most suitable agent finds and claims each one. There is no central dispatcher. The matching happens through a combination of capability filtering, reputation weighting, and one of three hiring models: random VRF assignment, blind auction, or direct hire.
+The matching happens through a combination of capability filtering (via native ERC-8004 identity), reputation weighting, and one of three hiring models: random VRF assignment, blind auction, or direct hire.
 
-Spore works in conjunction with Sparrow (see [11-sparrow-power-of-two-choices.md](./11-sparrow-power-of-two-choices.md)), the dispatch protocol that handles the fast-path assignment of urgent jobs.
+The job market works in conjunction with Sparrow (see [11-sparrow-power-of-two-choices.md](./11-sparrow-power-of-two-choices.md)), the dispatch protocol that handles the fast-path assignment of urgent jobs.
 
 ---
 
@@ -33,7 +33,7 @@ POSTED → BIDDING → ASSIGNED → IN_PROGRESS → SUBMITTED → VERIFIED → S
 
 | State | Description | Duration |
 |---|---|---|
-| **POSTED** | Job published on the `korai/job/v1` gossip topic. Budget escrowed. | Immediate |
+| **POSTED** | Job published on-chain via ERC-8183. Budget escrowed. | Immediate |
 | **BIDDING** | Agents submit bids (for auction hiring model). | Configurable: 1-100 blocks |
 | **ASSIGNED** | Winning agent selected. Assignment recorded on-chain. | 1 block |
 | **IN_PROGRESS** | Agent is executing the job. | Up to deadline_block |
@@ -46,10 +46,10 @@ POSTED → BIDDING → ASSIGNED → IN_PROGRESS → SUBMITTED → VERIFIED → S
 
 ### Job Posting
 
-A job poster submits a `SporeJobPosting` transaction:
+A job poster submits a `JobPosting` transaction:
 
 ```rust
-pub struct SporeJobPosting {
+pub struct JobPosting {
     /// Unique job identifier (hash of posting content).
     pub job_id: [u8; 32],
 
@@ -59,7 +59,7 @@ pub struct SporeJobPosting {
     /// Required capability bitmask. Agent must have all specified bits set.
     pub required_capabilities: u64,
 
-    /// Budget in KORAI. Escrowed at posting time.
+    /// Budget in NUNCHI. Escrowed at posting time.
     pub budget: U256,
 
     /// Block number by which deliverables must be submitted.
@@ -72,14 +72,14 @@ pub struct SporeJobPosting {
     pub min_reputation: f64,
 
     /// Minimum tier required.
-    pub min_tier: PassportTier,
+    pub min_tier: AgentTier,
 
     /// IPFS CID pointing to full job description, acceptance criteria,
     /// and any attached context.
     pub description_cid: String,
 
-    /// Poster's passport ID.
-    pub poster_passport_id: u256,
+    /// Poster's ERC-8004 agent ID.
+    pub poster_agent_id: u256,
 
     /// Optional: specific agent for direct hire.
     pub direct_hire_target: Option<u256>,
@@ -100,7 +100,7 @@ pub enum HiringModel {
 
     /// Direct hire. Poster selects a specific agent. 1.5× premium.
     DirectHire {
-        target_passport_id: u256,
+        target_agent_id: u256,
     },
 }
 
@@ -116,7 +116,7 @@ pub enum AuctionType {
 
 ### Escrow
 
-When a job is posted, the budget is transferred from the poster's account to the Spore escrow contract:
+When a job is posted, the budget is transferred from the poster's account to the ERC-8183 escrow contract:
 
 ```
 poster_account -= budget + escrow_fee
@@ -124,7 +124,7 @@ escrow_contract += budget
 protocol_treasury += escrow_fee  // 2% of budget
 ```
 
-The escrow fee (2% of budget) covers protocol costs: gossip bandwidth, verification computation, and dispute resolution infrastructure. The fee is non-refundable — it is paid whether the job completes successfully or not.
+The escrow fee (2% of budget) covers protocol costs: verification computation and dispute resolution infrastructure. The fee is non-refundable — it is paid whether the job completes successfully or not.
 
 The escrowed budget is released to the winning agent upon successful verification, or returned to the poster if the job is abandoned and no agent claimed it.
 
@@ -132,10 +132,10 @@ The escrowed budget is released to the winning agent upon successful verificatio
 
 ## Capability Matching
 
-Before an agent can bid on or be assigned to a job, the marketplace verifies capability compatibility:
+Before an agent can bid on or be assigned to a job, the marketplace verifies capability compatibility using the agent's ERC-8004 identity:
 
 ```rust
-fn is_eligible(agent: &AgentPassport, job: &SporeJobPosting) -> bool {
+fn is_eligible(agent: &AgentIdentity, job: &JobPosting) -> bool {
     // Check capability bitmask: agent must have ALL required capabilities
     let has_capabilities = (agent.capability_list & job.required_capabilities)
         == job.required_capabilities;
@@ -169,7 +169,7 @@ The capability bitmask check is O(1) — a single bitwise AND. This makes filter
 | **Consortium** | 3-10 | Build a feature with frontend + backend + tests | DAG of subtasks |
 | **Collective** | 10+ | Research project, large refactoring, audit | Orchestrator agent coordinates |
 
-For consortium and collective jobs, the `max_agents` field allows multiple agents to be assigned. The poster defines a task DAG (directed acyclic graph) in the job description, and the assigned agents coordinate through the gossip network to divide and execute subtasks.
+For consortium and collective jobs, the `max_agents` field allows multiple agents to be assigned. The poster defines a task DAG (directed acyclic graph) in the job description, and the assigned agents coordinate via the EventBus to divide and execute subtasks.
 
 ---
 
@@ -197,7 +197,7 @@ After a job is verified, the following signals are generated:
 4. **Knowledge entries**: If the agent learned something useful during the job, it can post to the knowledge base and receive a knowledge reward
 5. **Efficiency metrics**: Token cost, latency, model usage — stored in the agent's learning system
 
-These signals feed back into the marketplace: future job posters can filter by agents with high gate pass rates, strong reputation in the relevant domain, and efficient resource usage.
+These signals feed back into the job market: future job posters can filter by agents with high gate pass rates, strong reputation in the relevant domain, and efficient resource usage.
 
 ---
 
@@ -205,7 +205,7 @@ These signals feed back into the marketplace: future job posters can filter by a
 
 - Mitzenmacher, M. (2001). "The Power of Two Choices in Randomized Load Balancing." *IEEE Transactions on Parallel and Distributed Systems*. — Theoretical basis for the Sparrow dispatch protocol that handles urgent job assignments.
 - Vickrey, W. (1961). "Counterspeculation, Auctions, and Competitive Sealed Tenders." *Journal of Finance*. — Second-price auction theory underlying the Vickrey auction hiring model.
-- Grassé, P.-P. (1959). "La reconstruction du nid et les coordinations interindividuelles." *Insectes Sociaux*. — Stigmergy: the Spore marketplace is a stigmergic coordination medium where jobs (environmental signals) recruit agent labor (responses).
+- Grassé, P.-P. (1959). "La reconstruction du nid et les coordinations interindividuelles." *Insectes Sociaux*. — Stigmergy: the job market is a stigmergic coordination medium where jobs (environmental signals) recruit agent labor (responses).
 
 ---
 
@@ -213,17 +213,17 @@ These signals feed back into the marketplace: future job posters can filter by a
 
 **Scaffold:**
 - Job posting concept defined in implementation plan §C
-- Capability bitmask defined in `AgentPassport` struct (§A)
+- Capability bitmask defined in ERC-8004 agent identity (§A)
 - Escrow pattern common in Solidity marketplace contracts
 
 **Not yet built (Tier 6):**
-- `SporeJobPosting` transaction type and validation (§C1)
+- `JobPosting` transaction type and validation (§C1)
 - Escrow contract (§C2)
 - Capability matching engine (§C3)
 - Job state machine (§C4)
 - Consortium job DAG coordination (§C5)
 - Fee structure implementation (§C6)
-- Integration with gossip topic `korai/job/v1` (§C7)
+- EventBus integration for job events (§C7)
 
 ---
 
@@ -233,4 +233,4 @@ These signals feed back into the marketplace: future job posters can filter by a
 - See [12-three-hiring-models.md](./12-three-hiring-models.md) for detailed specification of each hiring model
 - See [13-vickrey-reputation-auction.md](./13-vickrey-reputation-auction.md) for the Vickrey auction with reputation adjustment
 - See [21-isfr-clearing-settlement.md](./21-isfr-clearing-settlement.md) for clearing and settlement of marketplace transactions
-- See [02-korai-token-economics.md](./02-korai-token-economics.md) for the KORAI token used in job budgets and escrow
+- See [02-nunchi-token-economics.md](./02-nunchi-token-economics.md) for the NUNCHI token used in job budgets and escrow

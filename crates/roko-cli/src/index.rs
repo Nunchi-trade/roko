@@ -159,9 +159,7 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
         let tasks_path = dir.join("tasks.toml");
         let content = std::fs::read_to_string(&tasks_path).unwrap_or_default();
 
-        let tasks: u32 = content.matches("[[task]]").count() as u32;
-        let done: u32 = content.matches("status = \"done\"").count() as u32;
-        let ready: u32 = content.matches("status = \"ready\"").count() as u32;
+        let (tasks, done, ready) = count_top_level_tasks(&content);
         let max_parallel = extract_toml_value(&content, "max_parallel").unwrap_or_default();
 
         let status = if done == tasks && tasks > 0 {
@@ -195,6 +193,36 @@ pub fn rebuild_plans_index(workdir: &Path) -> Result<()> {
 
     std::fs::write(plans_index_path(workdir), &out)?;
     Ok(())
+}
+
+fn count_top_level_tasks(content: &str) -> (u32, u32, u32) {
+    let Ok(parsed) = toml::from_str::<toml::Value>(content) else {
+        return (
+            content.matches("[[task]]").count() as u32,
+            content.matches("status = \"done\"").count() as u32,
+            content.matches("status = \"ready\"").count() as u32,
+        );
+    };
+
+    let Some(tasks) = parsed.get("task").and_then(toml::Value::as_array) else {
+        return (0, 0, 0);
+    };
+
+    let mut done = 0u32;
+    let mut ready = 0u32;
+    for task in tasks {
+        match task
+            .as_table()
+            .and_then(|table| table.get("status"))
+            .and_then(toml::Value::as_str)
+        {
+            Some("done") => done += 1,
+            Some("ready") | None => ready += 1,
+            _ => {}
+        }
+    }
+
+    (tasks.len() as u32, done, ready)
 }
 
 // ─── Research index ────────────────────────────────────────────────
@@ -461,6 +489,29 @@ mod tests {
         assert!(content.contains("test-plan"));
         assert!(content.contains("2")); // 2 tasks
         assert!(content.contains("1")); // 1 done
+    }
+
+    #[test]
+    fn plans_index_ignores_nested_acceptance_contract_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = plans_dir(tmp.path()).join("contract-plan");
+        std::fs::create_dir_all(&plan).unwrap();
+        std::fs::write(
+            plan.join("tasks.toml"),
+            "[meta]\nplan = \"contract\"\nmax_parallel = 1\n\n\
+             [[task]]\nid = \"T1\"\ntitle = \"Task\"\nstatus = \"ready\"\n\n\
+             [task.acceptance_contract]\nversion = 1\n\n\
+             [[task.acceptance_contract.gates]]\nid = \"compile\"\nkind = \"compile\"\ncommand = \"cargo check\"\n",
+        )
+        .unwrap();
+
+        rebuild_plans_index(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(plans_index_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("| `contract-plan` | 1 | 0 | 1 |"),
+            "nested gate id/status changed plan counts: {content}"
+        );
     }
 
     #[test]

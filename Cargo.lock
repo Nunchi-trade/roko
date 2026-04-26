@@ -6049,6 +6049,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -6105,6 +6106,7 @@ dependencies = [
  "roko-agent",
  "roko-core",
  "roko-daimon",
+ "roko-fs",
  "roko-primitives",
  "serde",
  "serde_json",
@@ -6259,6 +6261,7 @@ dependencies = [
  "roko-primitives",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

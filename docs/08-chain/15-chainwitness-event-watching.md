@@ -8,7 +8,7 @@
 > **Implementation**: Built
 
 **Topic**: [08-chain](./INDEX.md)
-**Prerequisites**: [01-korai-chain-spec.md](./01-korai-chain-spec.md)
+**Prerequisites**: [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md)
 **Key sources**: `bardo-backup/prd/14-chain/01-witness.md`, `bardo-backup/prd/14-chain/00-architecture.md`, `roko/tmp/implementation-plans/12b-chain-layer.md` §H
 
 ---
@@ -254,6 +254,6 @@ Filter hit rate (`hits / (hits + misses)`) is the primary tuning metric. If it e
 - See [16-triage-curiosity-midas.md](./16-triage-curiosity-midas.md) for the downstream consumer of witness output
 - See [17-chain-client-wallet-traits.md](./17-chain-client-wallet-traits.md) for the `ChainClient` trait that provides RPC methods
 - See [19-chain-agent-heartbeat.md](./19-chain-agent-heartbeat.md) for how the witness feeds into the 9-step heartbeat (OBSERVE step)
-- See [01-korai-chain-spec.md](./01-korai-chain-spec.md) for the chain architecture that the witness monitors
+- See [01-nunchi-chain-spec.md](./01-nunchi-chain-spec.md) for the chain architecture that the witness monitors
 - See `tmp/refinements/09-phase-2-implications.md` for the Phase 2+ `ChainBus` / `ChainSubstrate` split and HTTP projection implications
 - See [01-naming-and-glossary.md](../00-architecture/01-naming-and-glossary.md) for Bus, Pulse, Topic, and `ChainBus` vocabulary
