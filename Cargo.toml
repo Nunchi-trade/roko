@@ -50,6 +50,8 @@ members = [
     "crates/roko-serve",
     # Per-agent HTTP server extracted from the legacy mirage dashboard surface.
     "crates/roko-agent-server",
+    # ACP server surface for editor integrations.
+    "crates/roko-acp",
 
     # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
     "crates/roko-conductor",
