@@ -211,7 +211,7 @@ COMMAND GROUPS:
   Benchmarks:        bench
   Configuration:     config (providers, models, subscriptions, plugins, secrets)
   Code intelligence: index
-  Server:            up, serve, daemon, deploy, worker
+  Server:            up, serve, acp, daemon, deploy, worker
   Interactive:       dashboard
   Utilities:         replay, inject, completions, new, explain"
 )]
@@ -440,6 +440,21 @@ Examples:
         /// (zero-copy, no file polling).
         #[arg(long)]
         tui: bool,
+    },
+    /// Start ACP (Agent Client Protocol) server for editor integration.
+    Acp {
+        /// Working directory.
+        #[arg(long, default_value = ".")]
+        workdir: PathBuf,
+        /// Configuration profile.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Path to roko.toml config file.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Log file path (stdout is the protocol channel).
+        #[arg(long, default_value = ".roko/acp.log")]
+        log_file: PathBuf,
     },
     /// Manage daemon mode (start, stop, status, logs, install).
     Daemon {
@@ -1971,6 +1986,21 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 Ok(EXIT_SUCCESS)
             }
         }
+        Command::Acp {
+            workdir,
+            profile,
+            config,
+            log_file,
+        } => {
+            let acp_config = roko_acp::AcpConfig {
+                workdir,
+                profile,
+                config_path: config,
+                log_file,
+            };
+            roko_acp::run_acp_server(acp_config).await?;
+            Ok(EXIT_SUCCESS)
+        }
         Command::Daemon { cmd } => commands::server::cmd_daemon(cli, cmd).await,
         Command::Deploy { cmd } => commands::server::cmd_deploy(cli, cmd).await,
         Command::Worker { port } => {
@@ -2610,6 +2640,35 @@ mod tests {
                 workdir: Some(_),
                 serve_url: Some(_),
             })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_acp_subcommand() {
+        let cli = Cli::try_parse_from([
+            "roko",
+            "acp",
+            "--workdir",
+            "/tmp/project",
+            "--profile",
+            "editor",
+            "--config",
+            "/tmp/project/roko.toml",
+            "--log-file",
+            ".roko/editor-acp.log",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Acp {
+                workdir,
+                profile,
+                config: Some(config),
+                log_file,
+            }) if workdir == PathBuf::from("/tmp/project")
+                && profile == "editor"
+                && config == PathBuf::from("/tmp/project/roko.toml")
+                && log_file == PathBuf::from(".roko/editor-acp.log")
         ));
     }
 

@@ -33,6 +33,7 @@ roko-runtime = { path = "../roko-runtime" }
 roko-serve = { path = "../roko-serve" }
 roko-index = { path = "../roko-index" }
 roko-chain = { path = "../roko-chain", features = ["alloy-backend"] }
+roko-acp = { path = "../roko-acp" }
 
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "signal", "io-util"] }

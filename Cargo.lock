@@ -5907,6 +5907,7 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest 0.12.28",
+ "roko-acp",
  "roko-agent",
  "roko-agent-server",
  "roko-chain",
