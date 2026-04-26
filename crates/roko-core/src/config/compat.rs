@@ -134,7 +134,6 @@ fn convert(m: &MoriConfig) -> RokoConfig {
         energy: EnergyConfig::default(),
         tools: ToolsConfig::default(),
         oneirography: OneirographyConfig::default(),
-        relay: RelayConfig::default(),
         agents: Vec::new(),
     }
 }
