@@ -174,7 +174,7 @@ use crate::dispatch_helpers::{
     claude_tool_allowlist, claude_tool_allowlist_with, code_context_for_task,
     default_task_category, effective_context_window_tokens, extract_task_symbols,
     file_contains_public_api, load_prior_task_outputs, save_task_output, tail_output_lines,
-    task_def_to_dag_task, task_def_to_input, task_dispatch_conventions, task_read_cli_args,
+    task_def_to_dag_task, task_def_to_input, task_read_cli_args,
     truncate_doc_snippet, truncate_output, with_task_failure_context,
 };
 use crate::learning_helpers::{
@@ -19710,6 +19710,7 @@ acceptance = []
 
     #[test]
     fn task_dispatch_conventions_include_write_scope_and_loc() {
+        use crate::dispatch_helpers::task_dispatch_conventions;
         let task: crate::task_parser::TaskDef = toml::from_str(
             r#"
 id = "T1"
