@@ -256,7 +256,7 @@ impl CascadeRouter {
         drop(stats);
 
         // Update LinUCB (always, so it's ready when stage transitions).
-        self.linucb.update(ctx, model_slug, reward);
+        self.linucb.update(ctx, model_slug, reward, success);
     }
 
     /// Access the underlying `LinUCB` router (for introspection / persistence).

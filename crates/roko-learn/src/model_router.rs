@@ -40,11 +40,14 @@
 //! be shared across async tasks via `Arc<LinUCBRouter>`.
 
 use parking_lot::Mutex;
-use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::agent::{AgentBackend, AgentRole, ModelSpec, ModelTier};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_fs::BanditStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::provider_health::ProviderHealthTracker;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -315,6 +318,12 @@ pub struct LinUCBRouter {
     persist_path: Option<PathBuf>,
     /// Static fallback table: tier -> model slug.
     static_table: HashMap<ModelTier, String>,
+    /// Per-provider circuit breaker (§I.3.5).
+    health_tracker: ProviderHealthTracker,
+    /// Optional append-only bandit arm store for JSONL persistence (§I.3.6).
+    bandit_store: Option<BanditStore>,
+    /// Key used for bandit store lookups.
+    bandit_key: String,
 }
 
 /// Interior mutable state protected by the mutex.
@@ -343,6 +352,9 @@ impl LinUCBRouter {
             }),
             persist_path: None,
             static_table: default_static_table(),
+            health_tracker: ProviderHealthTracker::new(),
+            bandit_store: None,
+            bandit_key: "linucb_router".to_owned(),
         }
     }
 
@@ -358,6 +370,33 @@ impl LinUCBRouter {
     pub fn with_static_table(mut self, table: HashMap<ModelTier, String>) -> Self {
         self.static_table = table;
         self
+    }
+
+    /// Attach a `BanditStore` for JSONL-based arm persistence (builder pattern).
+    #[must_use]
+    pub fn with_bandit_store(mut self, store: BanditStore) -> Self {
+        self.bandit_store = Some(store);
+        self
+    }
+
+    /// Override the bandit store key (builder pattern).
+    #[must_use]
+    pub fn with_bandit_key(mut self, key: impl Into<String>) -> Self {
+        self.bandit_key = key.into();
+        self
+    }
+
+    /// Override the provider health tracker (builder pattern).
+    #[must_use]
+    pub fn with_health_tracker(mut self, tracker: ProviderHealthTracker) -> Self {
+        self.health_tracker = tracker;
+        self
+    }
+
+    /// Read-only access to the health tracker.
+    #[must_use]
+    pub const fn health_tracker(&self) -> &ProviderHealthTracker {
+        &self.health_tracker
     }
 
     /// Current exploration parameter alpha, decaying exponentially.
@@ -379,6 +418,10 @@ impl LinUCBRouter {
     ///
     /// If `total_observations < COLD_START_THRESHOLD`, returns the static
     /// fallback model for the context's complexity band tier.
+    ///
+    /// Unhealthy providers (as reported by the [`ProviderHealthTracker`]) are
+    /// excluded from selection. If every arm is unhealthy, the filter is
+    /// bypassed to avoid returning nothing.
     pub fn select_model(&self, ctx: &RoutingContext) -> ModelSpec {
         let state = self.state.lock();
 
@@ -397,10 +440,24 @@ impl LinUCBRouter {
         let alpha = alpha_for_observations(state.total_observations);
         let x = ctx.to_features();
 
-        let mut best_slug = state.arms[0].slug.clone();
+        // Filter unhealthy providers (§I.3.5). If all arms are
+        // unhealthy, bypass the filter to avoid returning nothing.
+        let healthy_arms: Vec<&ArmState> = state
+            .arms
+            .iter()
+            .filter(|arm| self.health_tracker.is_healthy(&slug_to_provider(&arm.slug)))
+            .collect();
+        let candidates: &[&ArmState] = if healthy_arms.is_empty() {
+            // Fallback: consider all arms rather than returning nothing.
+            &state.arms.iter().collect::<Vec<_>>()
+        } else {
+            &healthy_arms
+        };
+
+        let mut best_slug = candidates[0].slug.clone();
         let mut best_score = f64::NEG_INFINITY;
 
-        for arm in &state.arms {
+        for arm in candidates {
             let score = linucb_score(arm, &x, alpha);
             if score > best_score {
                 best_score = score;
@@ -417,7 +474,18 @@ impl LinUCBRouter {
     /// `LinUCB` update rules:
     /// - `A_a = A_a + x * x^T`
     /// - `b_a = b_a + reward * x`
-    pub fn update(&self, ctx: &RoutingContext, model_slug: &str, reward: f64) {
+    ///
+    /// Additionally records a success or failure in the
+    /// [`ProviderHealthTracker`] (§I.3.5) and persists the router state
+    /// to disk if a `persist_path` is configured (§I.3.6). Persistence
+    /// errors are logged to stderr but do not propagate.
+    pub fn update(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        reward: f64,
+        gate_passed: bool,
+    ) {
         let x = ctx.to_features();
         let mut state = self.state.lock();
 
@@ -434,6 +502,23 @@ impl LinUCBRouter {
             }
             arm.observations += 1;
             state.total_observations += 1;
+        }
+
+        drop(state);
+
+        // §I.3.5: record health outcome for the provider.
+        let provider = slug_to_provider(model_slug);
+        if gate_passed {
+            self.health_tracker.record_success(&provider);
+        } else {
+            self.health_tracker.record_failure(&provider);
+        }
+
+        // §I.3.6: persist to disk after each update.
+        if self.persist_path.is_some() {
+            if let Err(e) = self.save() {
+                eprintln!("warning: LinUCBRouter persist failed: {e}");
+            }
         }
     }
 
@@ -520,6 +605,9 @@ impl LinUCBRouter {
             }),
             persist_path: Some(path.to_path_buf()),
             static_table: default_static_table(),
+            health_tracker: ProviderHealthTracker::new(),
+            bandit_store: None,
+            bandit_key: "linucb_router".to_owned(),
         })
     }
 }
@@ -574,6 +662,14 @@ const fn complexity_to_tier(band: TaskComplexityBand) -> ModelTier {
         // Standard and forward-compat
         _ => ModelTier::Standard,
     }
+}
+
+/// Extract a stable provider label from a model slug by inferring its
+/// [`AgentBackend`] and returning the backend short code. This keeps
+/// the health tracker keys consistent with the rest of the codebase.
+fn slug_to_provider(slug: &str) -> String {
+    let backend = AgentBackend::from_model(slug);
+    backend.short().to_owned()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -798,8 +894,8 @@ mod tests {
         let router = LinUCBRouter::new(test_slugs());
         let ctx = default_ctx();
 
-        router.update(&ctx, "claude-sonnet-4-5", 0.8);
-        router.update(&ctx, "claude-sonnet-4-5", 0.6);
+        router.update(&ctx, "claude-sonnet-4-5", 0.8, true);
+        router.update(&ctx, "claude-sonnet-4-5", 0.6, true);
 
         assert_eq!(router.total_observations(), 2);
 
@@ -820,7 +916,7 @@ mod tests {
         let a_diag_before = arm_before.a_matrix[0][0];
         let b0_before = arm_before.b_vector[0];
 
-        router.update(&ctx, "claude-sonnet-4-5", 1.0);
+        router.update(&ctx, "claude-sonnet-4-5", 1.0, true);
 
         let after = router.arm_stats();
         let arm_after = after.iter().find(|a| a.slug == "claude-sonnet-4-5").unwrap();
@@ -853,9 +949,9 @@ mod tests {
 
         // Train heavily: sonnet always gets reward 1.0, others get 0.0.
         for _ in 0..80 {
-            router.update(&ctx, "claude-sonnet-4-5", 1.0);
-            router.update(&ctx, "claude-haiku-3-5", 0.0);
-            router.update(&ctx, "claude-opus-4", 0.0);
+            router.update(&ctx, "claude-sonnet-4-5", 1.0, true);
+            router.update(&ctx, "claude-haiku-3-5", 0.0, false);
+            router.update(&ctx, "claude-opus-4", 0.0, false);
         }
 
         // Now past cold-start threshold, should pick sonnet.
@@ -913,8 +1009,8 @@ mod tests {
 
         let router = LinUCBRouter::new(test_slugs()).with_persist_path(&path);
         let ctx = default_ctx();
-        router.update(&ctx, "claude-sonnet-4-5", 0.9);
-        router.update(&ctx, "claude-haiku-3-5", 0.3);
+        router.update(&ctx, "claude-sonnet-4-5", 0.9, true);
+        router.update(&ctx, "claude-haiku-3-5", 0.3, true);
         router.save().expect("save");
 
         let loaded = LinUCBRouter::load(&path, test_slugs()).expect("load");
@@ -944,7 +1040,7 @@ mod tests {
         let router = LinUCBRouter::new(test_slugs());
         let ctx = default_ctx();
 
-        router.update(&ctx, "unknown-model-42", 1.0);
+        router.update(&ctx, "unknown-model-42", 1.0, true);
         assert_eq!(router.total_observations(), 0);
     }
 

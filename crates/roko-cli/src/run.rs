@@ -16,6 +16,7 @@ use roko_core::{
 };
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
+use roko_learn::episode_logger::{Episode, EpisodeLogger, GateVerdict as EpGateVerdict, Usage};
 use roko_std::NoOpScorer;
 use std::path::{Path, PathBuf};
 
@@ -187,6 +188,30 @@ pub async fn run_once(
         .len()
         .await
         .map_err(|e| anyhow!("count signals: {e}"))?;
+
+    // ── Episode JSONL logging (§I.3.1) ──────────────────────────────────
+    //
+    // Persist a structured Episode record to `.roko/memory/episodes.jsonl`
+    // so the learning subsystem can replay history. Logging errors are
+    // intentionally non-fatal: a failed append must never fail the run.
+    let ep_path = workdir.join(".roko/memory/episodes.jsonl");
+    let ep_logger = EpisodeLogger::new(&ep_path);
+    let overall_ok = agent_result.success && verdict_summary.iter().all(|(_, ok)| *ok);
+    let mut ep_record = Episode::new("roko-cli", prompt.id.to_hex());
+    ep_record.input_signal_hash = prompt.id.to_hex();
+    ep_record.output_signal_hash = final_output_sig.id.to_hex();
+    ep_record.gate_verdicts = verdict_summary
+        .iter()
+        .map(|(name, passed)| EpGateVerdict::new(name, *passed))
+        .collect();
+    ep_record.success = overall_ok;
+    ep_record.usage = Usage {
+        wall_ms: u64::try_from(ctx.now_ms).unwrap_or(0),
+        ..Usage::default()
+    };
+    if let Err(e) = ep_logger.append(&ep_record).await {
+        eprintln!("warning: episode log append failed: {e}");
+    }
 
     Ok(RunReport {
         episode_id: episode.id.to_hex(),
