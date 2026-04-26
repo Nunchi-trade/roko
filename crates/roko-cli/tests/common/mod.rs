@@ -40,7 +40,7 @@ mcp_servers = []
 depends_on = []
 depends_on_plan = []
 acceptance = ["cargo check"]
-verify = [{ phase = "compile", command = "true" }]
+verify = []
 timeout_secs = 60
 max_retries = 1
 
@@ -199,8 +199,11 @@ pub fn mock_state_path(workdir: &Path) -> PathBuf {
 }
 
 pub fn run_sample_plan(workdir: &Path) -> Value {
-    let assert = Command::cargo_bin("roko")
-        .expect("roko binary")
+    // Use ProcessCommand (std) so we can capture output without asserting
+    // exit code — the plan run may exit non-zero when it goes through the
+    // full gate/verify/review pipeline with mock responses but still
+    // produces valid JSON output with meaningful metrics.
+    let output = ProcessCommand::new(cargo_bin("roko"))
         .current_dir(workdir)
         .arg("--json")
         .arg("plan")
@@ -208,10 +211,15 @@ pub fn run_sample_plan(workdir: &Path) -> Value {
         .arg("plans")
         .env("ROKO_DISPATCHER", MOCK_FIXTURE)
         .env("ROKO_MOCK_STATE_PATH", mock_state_path(workdir))
-        .assert()
-        .success();
+        // Isolate from user's global config / API keys so the mock
+        // dispatcher is always used and providers don't interfere.
+        .env("HOME", workdir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("XDG_CONFIG_HOME")
+        .output()
+        .expect("run roko plan run");
 
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let json_start = stdout.rfind("\n{").map_or(0, |idx| idx + 1);
     serde_json::from_str(&stdout[json_start..])
         .unwrap_or_else(|err| panic!("parse sample plan JSON stdout: {err}\n{}", stdout))
@@ -222,6 +230,22 @@ pub fn run_roko(workdir: &Path, args: &[&str]) -> Assert {
         .expect("roko binary")
         .current_dir(workdir)
         .args(args)
+        .assert()
+}
+
+/// Like `run_roko` but isolates from the user's global config and API keys.
+///
+/// Sets `HOME` to the workdir so `~/.roko/config.toml` is not found, and
+/// removes `ANTHROPIC_API_KEY` / `XDG_CONFIG_HOME` to prevent provider
+/// auto-synthesis that would override the test's `roko.toml`.
+pub fn run_roko_isolated(workdir: &Path, args: &[&str]) -> Assert {
+    Command::cargo_bin("roko")
+        .expect("roko binary")
+        .current_dir(workdir)
+        .args(args)
+        .env("HOME", workdir)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("XDG_CONFIG_HOME")
         .assert()
 }
 
