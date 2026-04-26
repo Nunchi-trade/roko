@@ -66,6 +66,7 @@ pub mod prompting;
 pub mod repl;
 pub mod research;
 pub mod run;
+pub mod runner;
 pub mod scaffold;
 pub mod secrets;
 pub mod snapshot_migrate;

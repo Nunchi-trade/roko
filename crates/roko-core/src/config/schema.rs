@@ -607,9 +607,12 @@ impl RokoConfig {
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         let config: Self = toml::from_str(s)?;
         if config.config_version == 1 {
-            tracing::warn!(
-                "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "roko.toml uses config version 1 (no [providers] section)\n  hint: run `roko config migrate` to upgrade"
+                );
+            });
         }
         Ok(config)
     }

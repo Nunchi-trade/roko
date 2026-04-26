@@ -2045,13 +2045,17 @@ impl TuiState {
                     .or_default()
                     .push(TaskEntry {
                         id: task.task_id.clone(),
-                        name: task.task_id.clone(),
+                        name: if task.title.is_empty() { task.task_id.clone() } else { task.title.clone() },
                         status,
                         agent_id: None,
                     });
                 TaskRow {
                     id: task.task_id.clone(),
-                    title: task.task_id.clone(),
+                    title: if task.title.is_empty() {
+                        task.task_id.clone()
+                    } else {
+                        task.title.clone()
+                    },
                     status,
                     elapsed_secs: prev_task_elapsed.get(&task.task_id).copied().unwrap_or(0.0),
                 }
@@ -4712,6 +4716,7 @@ tier = "focused"
             "plan-a/task-1".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-1".into(),
+                title: String::new(),
                 plan_id: "plan-a".into(),
                 phase: "implementer".into(),
                 outcome: None,
@@ -4721,6 +4726,7 @@ tier = "focused"
             "plan-a/task-2".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-2".into(),
+                title: String::new(),
                 plan_id: "plan-a".into(),
                 phase: "completed".into(),
                 outcome: Some("success".into()),
@@ -4894,6 +4900,7 @@ tier = "focused"
             "plan-b/task-2".into(),
             roko_core::dashboard_snapshot::TaskState {
                 task_id: "task-2".into(),
+                title: String::new(),
                 plan_id: "plan-b".into(),
                 phase: "implementer".into(),
                 outcome: None,

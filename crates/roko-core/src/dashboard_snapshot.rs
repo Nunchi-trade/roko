@@ -31,6 +31,8 @@ pub enum DashboardEvent {
     TaskStarted {
         plan_id: String,
         task_id: String,
+        #[serde(default)]
+        title: String,
         phase: String,
     },
     /// A task completed.
@@ -47,7 +49,12 @@ pub enum DashboardEvent {
         new_phase: String,
     },
     /// An agent was spawned.
-    AgentSpawned { agent_id: String, role: String },
+    AgentSpawned {
+        agent_id: String,
+        role: String,
+        #[serde(default)]
+        model: String,
+    },
     /// Incremental agent output.
     AgentOutput { agent_id: String, content: String },
     /// A gate check completed.
@@ -165,6 +172,9 @@ pub struct PlanState {
 pub struct TaskState {
     /// Task identifier.
     pub task_id: String,
+    /// Human-readable task title.
+    #[serde(default)]
+    pub title: String,
     /// Parent plan identifier.
     pub plan_id: String,
     /// Current phase name.
@@ -830,6 +840,7 @@ impl DashboardSnapshot {
             DashboardEvent::TaskStarted {
                 plan_id,
                 task_id,
+                title,
                 phase,
             } => {
                 self.stats.tasks_active += 1;
@@ -838,6 +849,7 @@ impl DashboardSnapshot {
                     key,
                     TaskState {
                         task_id: task_id.clone(),
+                        title: title.clone(),
                         plan_id: plan_id.clone(),
                         phase: phase.clone(),
                         outcome: None,
@@ -846,9 +858,10 @@ impl DashboardSnapshot {
                 if let Some(plan) = self.plans.get_mut(plan_id) {
                     plan.tasks_total += 1;
                 }
-                // Set current_task / current_plan on the matching agent by role.
+                // Set current_task / current_plan on the matching agent by plan_id prefix.
+                // Agent IDs are formatted as "{plan_id}:{task}" in orchestrate.rs.
                 for agent in self.agents.values_mut() {
-                    if agent.active && agent.role == *phase {
+                    if agent.active && agent.agent_id.starts_with(&format!("{plan_id}:")) {
                         agent.current_task = task_id.clone();
                         agent.current_plan = plan_id.clone();
                     }
@@ -889,7 +902,11 @@ impl DashboardSnapshot {
                     task.phase = new_phase.clone();
                 }
             }
-            DashboardEvent::AgentSpawned { agent_id, role } => {
+            DashboardEvent::AgentSpawned {
+                agent_id,
+                role,
+                model,
+            } => {
                 // Only increment the counter if this is a genuinely new agent,
                 // or if an existing agent is being re-activated after completion.
                 let entry = self.agents.entry(agent_id.clone());
@@ -903,6 +920,9 @@ impl DashboardSnapshot {
                         if !role.is_empty() {
                             agent.role.clone_from(role);
                         }
+                        if !model.is_empty() {
+                            agent.model.clone_from(model);
+                        }
                         // Preserve accumulated tokens/cost — don't reset.
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -912,7 +932,7 @@ impl DashboardSnapshot {
                             role: role.clone(),
                             active: true,
                             output_bytes: 0,
-                            model: String::new(),
+                            model: model.clone(),
                             input_tokens: 0,
                             output_tokens: 0,
                             cost_usd: 0.0,
@@ -1587,6 +1607,7 @@ fn bootstrap_plan_state(
             format!("{plan_id}/{task_id}"),
             TaskState {
                 task_id,
+                title: String::new(),
                 plan_id: plan_id.to_string(),
                 phase: String::from("completed"),
                 outcome: Some(String::from("success")),
@@ -1604,6 +1625,7 @@ fn bootstrap_plan_state(
             format!("{plan_id}/{task_id}"),
             TaskState {
                 task_id,
+                title: String::new(),
                 plan_id: plan_id.to_string(),
                 phase: String::from("completed"),
                 outcome: Some(String::from("failed")),
@@ -1619,6 +1641,7 @@ fn bootstrap_plan_state(
                     format!("{plan_id}/{task_id}"),
                     TaskState {
                         task_id: task_id.to_string(),
+                        title: String::new(),
                         plan_id: plan_id.to_string(),
                         phase: phase.clone(),
                         outcome: None,
@@ -1642,6 +1665,7 @@ fn bootstrap_plan_state(
                     format!("{plan_id}/{task_id}"),
                     TaskState {
                         task_id: task_id.to_string(),
+                        title: String::new(),
                         plan_id: plan_id.to_string(),
                         phase: String::from("completed"),
                         outcome: Some(if failed {
@@ -2464,6 +2488,7 @@ mod tests {
         snap.apply(&DashboardEvent::TaskStarted {
             plan_id: "p1".into(),
             task_id: "t1".into(),
+            title: "Test task".into(),
             phase: "compose".into(),
         });
         assert_eq!(snap.stats.tasks_active, 1);
@@ -2588,6 +2613,7 @@ mod tests {
         snap.apply(&DashboardEvent::AgentSpawned {
             agent_id: "a1".into(),
             role: "coder".into(),
+            model: String::new(),
         });
         snap.apply(&DashboardEvent::AgentOutput {
             agent_id: "a1".into(),

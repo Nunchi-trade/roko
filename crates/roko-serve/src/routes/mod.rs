@@ -40,8 +40,10 @@ mod ws;
 use std::sync::Arc;
 
 use super::state::AppState;
-use axum::Router;
+use axum::routing::get;
+use axum::{Json, Router};
 use roko_core::config::ServeAuthConfig;
+use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
@@ -117,10 +119,20 @@ pub fn build_router(
     };
 
     Router::new()
+        // Top-level liveness probe — no auth, no /api prefix.
+        .route("/health", get(top_level_health))
         .merge(webhooks::routes())
         .nest("/api", api)
         .merge(ws)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+/// `GET /health` — bare liveness probe for load balancers and external tools.
+///
+/// Returns `{"status": "ok"}` unconditionally. For richer telemetry use
+/// `GET /api/health`.
+async fn top_level_health() -> Json<Value> {
+    Json(json!({"status": "ok"}))
 }

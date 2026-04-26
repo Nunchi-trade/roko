@@ -743,6 +743,7 @@ impl AppState {
                     .label
                     .clone()
                     .unwrap_or_else(|| stored.agent_id.clone()),
+                model: String::new(),
             });
         stored
     }

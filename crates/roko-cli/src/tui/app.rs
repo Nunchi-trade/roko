@@ -2840,10 +2840,11 @@ impl App {
             if self.agent_stream_clients.contains_key(&agent_id) {
                 continue;
             }
-            self.agent_stream_clients.insert(
-                agent_id.clone(),
-                AgentStreamClient::connect(agent_id, &server_url, auth_token.clone()),
-            );
+            if let Some(client) =
+                AgentStreamClient::connect(&agent_id, &server_url, auth_token.clone())
+            {
+                self.agent_stream_clients.insert(agent_id, client);
+            }
         }
     }
 

@@ -223,7 +223,7 @@ const WATCHER_SIGNAL_TAIL: usize = 200;
 const MAX_CONDUCTOR_ACTIVITY_HISTORY: usize = 32;
 const CONDUCTOR_HEARTBEAT_TIMEOUT_MS: i64 = 180_000;
 const GHOST_TURN_SIGNAL_KIND: &str = "conductor.ghost_turn";
-const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 30;
+const SHUTDOWN_DRAIN_GRACE_SECS: u64 = 3;
 const PRE_AGENT_REMEDIATION_OUTPUT_TAIL: usize = 4000;
 
 /// Whether this domain requires git operations (worktrees, changed-files, commits).
@@ -3789,7 +3789,41 @@ impl PlanRunner {
             ));
         }
 
-        let plans = discover_plans(plans_dir).map_err(|e| anyhow!("plan discovery failed: {e}"))?;
+        // When the target directory IS a plan (has tasks.toml), rewrite
+        // `plans_dir` to its parent so that `plans_dir.join(base)` resolves
+        // correctly throughout the rest of this function.
+        //
+        // `discover_plans` scans for *.md files and would pick up enrichment
+        // artifacts (brief.md, research.md, etc.) as phantom plans.
+        let (plans_dir, plans) = if plans_dir.join("tasks.toml").exists() {
+            let plan_md = plans_dir.join("plan.md");
+            let md_path = if plan_md.exists() {
+                plan_md
+            } else {
+                plans_dir.to_path_buf()
+            };
+            let base = plans_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let parent = plans_dir.parent().unwrap_or(plans_dir);
+            (
+                parent,
+                vec![roko_orchestrator::plan_discovery::PlanInfo {
+                    base,
+                    num: String::new(),
+                    path: md_path,
+                    frontmatter: None,
+                }],
+            )
+        } else {
+            (
+                plans_dir.as_ref(),
+                discover_plans(plans_dir)
+                    .map_err(|e| anyhow!("plan discovery failed: {e}"))?,
+            )
+        };
 
         if plans.is_empty() {
             return Err(anyhow!("no plans found in {}", plans_dir.display()));
@@ -5187,8 +5221,15 @@ impl PlanRunner {
         if let Ok(new_phase) = self.executor.apply_event(plan_id, event) {
             let new_phase_label = Self::phase_label(new_phase.kind()).to_string();
             let exec_event = if old_phase == "queued" {
+                let title = self
+                    .task_trackers
+                    .get(plan_id)
+                    .and_then(|t| t.tasks_file.tasks.iter().find(|td| td.id == *task_id))
+                    .map(|td| td.title.clone())
+                    .unwrap_or_default();
                 crate::serve::events::ExecutionEvent::TaskStarted {
                     task_id: task_id.to_string(),
+                    title,
                     phase: new_phase_label,
                 }
             } else if status == "completed" {
@@ -5204,6 +5245,12 @@ impl PlanRunner {
                 }
             };
             self.emit_execution_event(plan_id, exec_event);
+
+            // Persist state after every phase transition so crash doesn't
+            // lose progress. save_state() uses atomic write-then-rename.
+            if let Err(e) = self.save_state() {
+                tracing::warn!("[orchestrate] failed to persist state after transition: {e}");
+            }
         }
     }
 
@@ -5291,6 +5338,11 @@ impl PlanRunner {
     }
 
     /// Force-kill all managed agent processes, then persist runtime artifacts.
+    ///
+    /// After killing tracked processes we also send `SIGTERM` to the entire
+    /// process group (`kill(0, SIGTERM)`) to catch grandchild processes that
+    /// were spawned by agents (e.g. the Claude CLI spawns its own
+    /// subprocesses).
     async fn force_shutdown(&mut self) {
         let killed = self.supervisor.kill_all().await;
         if !killed.is_empty() {
@@ -5299,6 +5351,23 @@ impl PlanRunner {
                 killed.len()
             );
         }
+
+        // Kill the entire process group to catch grandchild processes.
+        // We temporarily ignore SIGTERM for ourselves so we survive the
+        // group-wide signal and can finish cleanup (persist state, etc.).
+        #[cfg(unix)]
+        {
+            #[allow(unsafe_code)]
+            unsafe {
+                // Ignore SIGTERM for ourselves before sending to the group.
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                libc::kill(0, libc::SIGTERM);
+                // Restore default SIGTERM disposition after a short delay so
+                // a subsequent Ctrl-C / kill still works.
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            }
+        }
+
         self.shutdown().await;
     }
 
@@ -5306,6 +5375,13 @@ impl PlanRunner {
     async fn flush_logs(&self) -> Result<()> {
         sync_file_if_present(&self.workdir.join(".roko").join("engrams.jsonl"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("episodes.jsonl"))?;
+        sync_file_if_present(
+            &self
+                .workdir
+                .join(".roko")
+                .join("learn")
+                .join("efficiency.jsonl"),
+        )?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.log"))?;
         sync_file_if_present(&self.workdir.join(".roko").join("logs").join("daemon.err"))?;
         std::io::stdout().flush().context("flush stdout")?;
@@ -7639,6 +7715,7 @@ impl PlanRunner {
                 self.emit_server_event(crate::serve::events::ServerEvent::AgentSpawned {
                     agent_id: format!("{plan_id}:{task}"),
                     role: format!("{role:?}"),
+                    model: String::new(),
                 });
 
                 match (role, task.as_str()) {
@@ -8383,6 +8460,19 @@ impl PlanRunner {
         // Ensure tracker is loaded
         self.ensure_task_tracker(plan_id);
 
+        // Skip enrichment when the plan's [meta] says so (pre-authored plans).
+        if let Some(tracker) = self.task_trackers.get(plan_id) {
+            if tracker.tasks_file.meta.skip_enrichment {
+                tracing::info!(
+                    "[orchestrate] Enriching {plan_id}: skip_enrichment=true, transitioning directly to implementing"
+                );
+                let event = ExecutorEvent::EnrichmentDone;
+                self.log_transition(plan_id, &event);
+                self.apply_event_and_emit(plan_id, "enrich", &event, "transitioned");
+                return;
+            }
+        }
+
         let started = std::time::Instant::now();
         let pipeline_summary = match self.run_enrichment_pipeline(plan_id).await {
             Ok(summary) => Some(summary),
@@ -8485,6 +8575,10 @@ impl PlanRunner {
     /// unblocked. Single-task dispatch includes retry logic; parallel batches
     /// fail individual tasks without retries (the next tick re-evaluates).
     async fn handle_implementing(&mut self, plan_id: &str) {
+        // Ensure task tracker is loaded (may have been missed if enrichment
+        // was skipped or the plan was resumed from snapshot).
+        self.ensure_task_tracker(plan_id);
+
         // If no tracker, fall through to generic agent
         if !self.task_trackers.contains_key(plan_id) {
             self.handle_generic_agent(plan_id, AgentRole::Implementer, "next")
@@ -12109,6 +12203,7 @@ impl PlanRunner {
                 status: "ready".to_string(),
                 max_parallel: old_tasks.meta.max_parallel,
                 estimated_total_minutes: old_tasks.meta.estimated_total_minutes,
+                skip_enrichment: old_tasks.meta.skip_enrichment,
             },
             tasks: vec![regenerated_task.clone()],
         };
@@ -13589,12 +13684,21 @@ impl PlanRunner {
         if self.task_trackers.contains_key(plan_id) {
             return;
         }
-        let plan_dir = plans_dir(&self.workdir).join(plan_id);
-        let tasks_path = plan_dir.join("tasks.toml");
-        if tasks_path.exists() {
-            if let Ok(tf) = TasksFile::parse(&tasks_path) {
-                self.task_trackers
-                    .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
+        // Check both the resolved plans_dir (may be `plans/`) and the
+        // `.roko/plans/` fallback — the user may have placed the plan in
+        // either location.
+        let candidates = [
+            plans_dir(&self.workdir).join(plan_id),
+            self.workdir.join(".roko").join("plans").join(plan_id),
+        ];
+        for plan_dir in candidates {
+            let tasks_path = plan_dir.join("tasks.toml");
+            if tasks_path.exists() {
+                if let Ok(tf) = TasksFile::parse(&tasks_path) {
+                    self.task_trackers
+                        .insert(plan_id.to_string(), TaskTracker::new(tf, plan_dir));
+                }
+                return;
             }
         }
     }
@@ -13835,7 +13939,19 @@ impl PlanRunner {
             routing_budget_pressure(&self.config.budget, plan_spent, last_cost_usd);
 
         // ── Try to load structured task definition ──────────────────
-        let plan_dir = plans_dir(&self.workdir).join(plan_id);
+        let plan_dir = {
+            let primary = plans_dir(&self.workdir).join(plan_id);
+            if primary.join("tasks.toml").exists() {
+                primary
+            } else {
+                let fallback = self.workdir.join(".roko").join("plans").join(plan_id);
+                if fallback.join("tasks.toml").exists() {
+                    fallback
+                } else {
+                    primary
+                }
+            }
+        };
         let tasks_toml = plan_dir.join("tasks.toml");
         let tasks_file = if tasks_toml.exists() {
             crate::task_parser::TasksFile::parse(&tasks_toml).ok()
@@ -13947,9 +14063,14 @@ impl PlanRunner {
             );
             selected_model = forced_model;
         } else if task_def.is_none() {
-            if let Some((role_model, reason)) =
-                apply_role_routing_override(&roko_config, role.label(), &model_providers, &[])
-            {
+            let fallback_candidates: Vec<String> =
+                roko_config.effective_models().keys().cloned().collect();
+            if let Some((role_model, reason)) = apply_role_routing_override(
+                &roko_config,
+                role.label(),
+                &model_providers,
+                &fallback_candidates,
+            ) {
                 selected_model = role_model;
                 routing_reason = reason;
                 routing_stage = "static".to_string();
@@ -13982,18 +14103,29 @@ impl PlanRunner {
                 .await
                 .unwrap_or(false);
             let agent_id = format!("{role:?}");
-            let all_model_slugs = cascade_router
-                .linucb()
-                .arm_stats()
-                .into_iter()
-                .map(|arm| arm.slug)
-                .collect::<Vec<_>>();
+            let effective_models = roko_config.effective_models();
+            // Merge configured models with observed models so candidates
+            // always include every model the user explicitly set up, even
+            // when no LinUCB observations exist yet.
+            let all_model_slugs = {
+                let mut slugs: Vec<String> = cascade_router
+                    .linucb()
+                    .arm_stats()
+                    .into_iter()
+                    .map(|arm| arm.slug)
+                    .collect();
+                for key in effective_models.keys() {
+                    if !slugs.iter().any(|s| s == key) {
+                        slugs.push(key.clone());
+                    }
+                }
+                slugs
+            };
             let healthy_models =
                 self.learning
                     .healthy_model_slugs(&all_model_slugs, |model_slug| {
                         provider_id_for_routing_model(&roko_config, &model_providers, model_slug)
                     });
-            let effective_models = roko_config.effective_models();
             let task_requirements = task_requirements_for_routing(
                 Some(td),
                 role,
@@ -15711,6 +15843,52 @@ impl PlanRunner {
                 )?;
                 return Err(err);
             }
+        }
+
+        // Re-emit AgentSpawned with model now that we know which model was used.
+        self.emit_server_event(crate::serve::events::ServerEvent::AgentSpawned {
+            agent_id: format!("{plan_id}:{task}"),
+            role: format!("{role:?}"),
+            model: selected_model.clone(),
+        });
+
+        // Publish agent output to the event bus so the TUI can display it.
+        let output_text = result
+            .output
+            .body
+            .as_text()
+            .unwrap_or_default()
+            .to_string();
+        if !output_text.is_empty() {
+            self.emit_server_event(crate::serve::events::ServerEvent::AgentOutput {
+                agent_id: format!("{plan_id}:{task}"),
+                run_id: None,
+                content: output_text,
+                done: true,
+                metadata: Some(serde_json::json!({
+                    "plan_id": plan_id,
+                    "task": task,
+                    "role": format!("{role:?}"),
+                    "model": &selected_model,
+                    "input_tokens": result.usage.input_tokens,
+                    "output_tokens": result.usage.output_tokens,
+                    "cost_usd": f64::from(result.usage.cost_usd),
+                })),
+            });
+        }
+
+        // Emit token/cost EfficiencyEvents so the TUI can display real counters.
+        for (metric, value) in [
+            ("input_tokens", f64::from(result.usage.input_tokens)),
+            ("output_tokens", f64::from(result.usage.output_tokens)),
+            ("cost_usd", f64::from(result.usage.cost_usd)),
+        ] {
+            self.publish_dashboard_event(roko_core::DashboardEvent::EfficiencyEvent {
+                plan_id: plan_id.to_string(),
+                task_id: task.to_string(),
+                metric: metric.to_string(),
+                value,
+            });
         }
 
         Ok(DispatchOutcome {
@@ -17956,9 +18134,14 @@ fn server_event_to_dashboard(
             plan_id: plan_id.clone(),
             success: *success,
         }),
-        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+        ServerEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         ServerEvent::AgentOutput {
             agent_id, content, ..
@@ -17981,13 +18164,16 @@ fn server_event_to_dashboard(
         ServerEvent::Execution { plan_id, event } => {
             use crate::serve::events::ExecutionEvent;
             match event {
-                ExecutionEvent::TaskStarted { task_id, phase } => {
-                    Some(DashboardEvent::TaskStarted {
-                        plan_id: plan_id.clone(),
-                        task_id: task_id.clone(),
-                        phase: phase.clone(),
-                    })
-                }
+                ExecutionEvent::TaskStarted {
+                    task_id,
+                    title,
+                    phase,
+                } => Some(DashboardEvent::TaskStarted {
+                    plan_id: plan_id.clone(),
+                    task_id: task_id.clone(),
+                    title: title.clone(),
+                    phase: phase.clone(),
+                }),
                 ExecutionEvent::TaskCompleted { task_id, outcome } => {
                     Some(DashboardEvent::TaskCompleted {
                         plan_id: plan_id.clone(),
@@ -18067,7 +18253,11 @@ fn execution_event_summary(
 ) -> (String, String, String) {
     use crate::serve::events::ExecutionEvent;
     match event {
-        ExecutionEvent::TaskStarted { task_id, phase } => (
+        ExecutionEvent::TaskStarted {
+            task_id,
+            title: _,
+            phase,
+        } => (
             "task_started".to_string(),
             task_id.clone(),
             format!("Task started: phase={phase}"),

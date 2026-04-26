@@ -2686,6 +2686,14 @@ impl CascadeRouter {
             );
         }
 
+        // Fall back to the first configured model slug rather than a
+        // hardcoded model name so the router respects user configuration.
+        let default_slug = self
+            .model_slugs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
         // For research tasks, prefer Perplexity Sonar when available.
         let slug = if ctx.task_category == TaskCategory::Research {
             self.model_slugs
@@ -2697,14 +2705,14 @@ impl CascadeRouter {
                         .lock()
                         .get(&ctx.role)
                         .cloned()
-                        .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
+                        .unwrap_or_else(|| default_slug.clone())
                 })
         } else {
             self.role_table
                 .lock()
                 .get(&ctx.role)
                 .cloned()
-                .unwrap_or_else(|| "claude-sonnet-4-5".to_string())
+                .unwrap_or(default_slug)
         };
         let tier = slug_to_tier(&slug);
 

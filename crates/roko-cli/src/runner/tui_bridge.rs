@@ -57,6 +57,7 @@ impl TuiBridge {
         self.sender.publish(DashboardEvent::AgentSpawned {
             agent_id: agent_id.to_string(),
             role: role.to_string(),
+            model: String::new(),
         });
     }
 

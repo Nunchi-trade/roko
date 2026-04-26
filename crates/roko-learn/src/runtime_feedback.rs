@@ -707,6 +707,7 @@ impl LearningRuntime {
             .open(&self.paths.efficiency_jsonl)
             .await?;
         f.write_all(line.as_bytes()).await?;
+        f.flush().await?;
         self.record_latency_from_efficiency_event(event)?;
         self.record_section_effectiveness_from_efficiency_event(event)?;
         Ok(())

@@ -603,6 +603,7 @@ async fn stable_projection_frames_include_version_and_explicit_missing_state() {
         .publish(roko_core::DashboardEvent::TaskStarted {
             plan_id: "plan-1".into(),
             task_id: "work-a".into(),
+            title: String::new(),
             phase: "dispatch".into(),
         });
     state
@@ -746,6 +747,7 @@ async fn bridge_converts_multiple_event_types() {
     sender.publish(roko_core::DashboardEvent::TaskStarted {
         plan_id: "plan-bridge".to_string(),
         task_id: "task-1".to_string(),
+        title: String::new(),
         phase: "implementing".to_string(),
     });
     let ev: serde_json::Value =

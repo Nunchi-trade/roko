@@ -18,6 +18,9 @@ pub enum ExecutionEvent {
     TaskStarted {
         /// Task identifier.
         task_id: String,
+        /// Human-readable task title.
+        #[serde(default)]
+        title: String,
         /// Phase the task is starting in.
         phase: String,
     },
@@ -89,7 +92,12 @@ pub enum ServerEvent {
     PlanCompleted { plan_id: String, success: bool },
 
     /// An agent process was spawned.
-    AgentSpawned { agent_id: String, role: String },
+    AgentSpawned {
+        agent_id: String,
+        role: String,
+        #[serde(default)]
+        model: String,
+    },
 
     /// Incremental agent output (streamed, sanitized for consumers).
     AgentOutput {

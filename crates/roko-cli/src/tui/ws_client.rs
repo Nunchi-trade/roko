@@ -48,26 +48,31 @@ pub struct AgentStreamClient {
 
 impl AgentStreamClient {
     /// Connect to the global `roko-serve` event bus and filter for one agent.
-    #[must_use]
+    ///
+    /// Returns `None` when called from a thread without a tokio runtime (e.g.
+    /// the plan-approval TUI thread).
     pub fn connect(
         agent_id: impl Into<String>,
         serve_base_url: &str,
         auth_token: Option<String>,
-    ) -> Self {
+    ) -> Option<Self> {
+        let handle = tokio::runtime::Handle::try_current().ok()?;
         let agent_id = agent_id.into();
         let endpoint = event_bus_endpoint(serve_base_url);
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let task = tokio::spawn(run_event_bus(agent_id, endpoint, auth_token, tx));
-        Self { rx, task }
+        let task = handle.spawn(run_event_bus(agent_id, endpoint, auth_token, tx));
+        Some(Self { rx, task })
     }
 
     /// Connect directly to a websocket endpoint.
-    #[must_use]
-    pub fn connect_direct(endpoint: impl Into<String>) -> Self {
+    ///
+    /// Returns `None` when called from a thread without a tokio runtime.
+    pub fn connect_direct(endpoint: impl Into<String>) -> Option<Self> {
+        let handle = tokio::runtime::Handle::try_current().ok()?;
         let endpoint = endpoint.into();
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let task = tokio::spawn(run_direct(endpoint, tx));
-        Self { rx, task }
+        let task = handle.spawn(run_direct(endpoint, tx));
+        Some(Self { rx, task })
     }
 
     /// Poll one ready chunk without blocking the UI thread.
@@ -386,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn receives_text_then_done_in_order() {
         let (endpoint, server) = spawn_mock_server().await;
-        let mut client = AgentStreamClient::connect_direct(endpoint);
+        let mut client = AgentStreamClient::connect_direct(endpoint).unwrap();
 
         let mut observed = Vec::new();
         let deadline = Duration::from_secs(5);
@@ -455,7 +460,8 @@ mod tests {
             axum::serve(listener, app).await.expect("serve");
         });
 
-        let mut client = AgentStreamClient::connect("agent-1", &format!("http://{addr}"), None);
+        let mut client =
+            AgentStreamClient::connect("agent-1", &format!("http://{addr}"), None).unwrap();
         let mut observed = Vec::new();
         let result = timeout(Duration::from_secs(5), async {
             while observed.len() < 3 {

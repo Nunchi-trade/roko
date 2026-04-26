@@ -164,11 +164,13 @@ pub async fn run_once(workdir: &Path, config: &Config, prompt_text: &str) -> Res
     event_hub.publish(DashboardEvent::TaskStarted {
         plan_id: run_plan_id.clone(),
         task_id: prompt_text.chars().take(60).collect::<String>(),
+        title: String::new(),
         phase: "implementing".into(),
     });
     event_hub.publish(DashboardEvent::AgentSpawned {
         agent_id: config.agent.command.clone(),
         role: config.prompt.role.clone(),
+        model: String::new(),
     });
     if let Ok(text) = final_output_sig.body.as_text() {
         let preview: String = text.chars().take(200).collect();

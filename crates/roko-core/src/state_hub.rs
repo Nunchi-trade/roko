@@ -403,6 +403,7 @@ mod tests {
         sender.publish(DashboardEvent::AgentSpawned {
             agent_id: "a1".into(),
             role: "coder".into(),
+            model: String::new(),
         });
 
         let snap = hub.current_snapshot();
@@ -439,6 +440,7 @@ mod tests {
             DashboardEvent::TaskStarted {
                 plan_id: "p1".into(),
                 task_id: "t1".into(),
+                title: String::new(),
                 phase: "compose".into(),
             },
         ]);
@@ -502,6 +504,7 @@ mod tests {
         hub.publish(DashboardEvent::AgentSpawned {
             agent_id: "a1".into(),
             role: "coder".into(),
+            model: String::new(),
         });
         hub.publish(DashboardEvent::PlanStarted {
             plan_id: "p1".into(),
@@ -533,6 +536,7 @@ mod tests {
         sender.publish(DashboardEvent::AgentSpawned {
             agent_id: "s1".into(),
             role: "auditor".into(),
+            model: String::new(),
         });
 
         let content = std::fs::read_to_string(&log_path).expect("read event log");

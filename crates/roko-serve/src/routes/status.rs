@@ -49,6 +49,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/truth_map", get(truth_map_handler))
         .route("/retention", get(retention_handler))
         .route("/parity", get(parity_handler))
+        .route("/statehub/snapshot", get(statehub_snapshot))
 }
 
 /// `GET /api/health` — liveness check with live telemetry.
@@ -1891,6 +1892,17 @@ async fn retention_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
 async fn parity_handler() -> Json<Value> {
     let matrix = crate::parity::build_parity_matrix();
     Json(serde_json::to_value(&matrix).unwrap_or_default())
+}
+
+// ── StateHub snapshot ───────────────────────────────────────────────
+
+/// `GET /api/statehub/snapshot` — current materialized `DashboardSnapshot`.
+///
+/// External tools (TUI in a separate process, monitoring scripts) use this to
+/// query the live plan/agent state without subscribing to WebSocket events.
+async fn statehub_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let snapshot = state.state_hub.current_snapshot();
+    Json(serde_json::to_value(&snapshot).unwrap_or_default())
 }
 
 #[cfg(test)]

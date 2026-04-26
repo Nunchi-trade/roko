@@ -505,13 +505,17 @@ fn build_app_state(
 /// - **efficiency**: `.roko/learn/efficiency.jsonl` — per-turn metrics (`Derived` kind)
 /// - **knowledge**: neuro knowledge store entries (`Composite` kind)
 fn seed_default_registries(state: &AppState) {
+    // Use block_in_place so blocking_write doesn't panic inside a tokio runtime.
+    // This is safe because build_app_state is called once at startup.
+    tokio::task::block_in_place(|| seed_default_registries_inner(state));
+}
+
+fn seed_default_registries_inner(state: &AppState) {
     let now = chrono::Utc::now();
     let layout = &state.layout;
 
     // ── Connectors ────────────────────────────────────────────────────
-    let connectors = state.connectors.blocking_write();
-    // We need a mutable reference but blocking_write returns a guard.
-    let mut connectors = connectors;
+    let mut connectors = state.connectors.blocking_write();
 
     let roko_root = layout.root().to_string_lossy().to_string();
     connectors.register(ConnectorInfo {
@@ -747,9 +751,14 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             plan_id: plan_id.clone(),
             success: *success,
         }),
-        ServerEvent::AgentSpawned { agent_id, role } => Some(DashboardEvent::AgentSpawned {
+        ServerEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         ServerEvent::AgentOutput {
             agent_id, content, ..
@@ -770,9 +779,14 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
             passed: *passed,
         }),
         ServerEvent::Execution { plan_id, event } => match event {
-            ExecutionEvent::TaskStarted { task_id, phase } => Some(DashboardEvent::TaskStarted {
+            ExecutionEvent::TaskStarted {
+                task_id,
+                title,
+                phase,
+            } => Some(DashboardEvent::TaskStarted {
                 plan_id: plan_id.clone(),
                 task_id: task_id.clone(),
+                title: title.clone(),
                 phase: phase.clone(),
             }),
             ExecutionEvent::TaskCompleted { task_id, outcome } => {
@@ -856,6 +870,7 @@ fn server_event_to_dashboard(event: &ServerEvent) -> Option<roko_core::Dashboard
         ServerEvent::AgentStarted { agent_id, .. } => Some(DashboardEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: String::new(),
+            model: String::new(),
         }),
         ServerEvent::AgentStopped { agent_id, .. } => Some(DashboardEvent::AgentCompleted {
             agent_id: agent_id.clone(),
@@ -904,11 +919,13 @@ fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<Server
         DashboardEvent::TaskStarted {
             plan_id,
             task_id,
+            title,
             phase,
         } => Some(ServerEvent::Execution {
             plan_id: plan_id.clone(),
             event: ExecutionEvent::TaskStarted {
                 task_id: task_id.clone(),
+                title: title.clone(),
                 phase: phase.clone(),
             },
         }),
@@ -936,9 +953,14 @@ fn dashboard_event_to_server(event: &roko_core::DashboardEvent) -> Option<Server
                 new_phase: new_phase.clone(),
             },
         }),
-        DashboardEvent::AgentSpawned { agent_id, role } => Some(ServerEvent::AgentSpawned {
+        DashboardEvent::AgentSpawned {
+            agent_id,
+            role,
+            model,
+        } => Some(ServerEvent::AgentSpawned {
             agent_id: agent_id.clone(),
             role: role.clone(),
+            model: model.clone(),
         }),
         DashboardEvent::AgentOutput { agent_id, content } => Some(ServerEvent::AgentOutput {
             agent_id: agent_id.clone(),

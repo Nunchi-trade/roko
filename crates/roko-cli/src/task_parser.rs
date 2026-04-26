@@ -33,6 +33,11 @@ pub struct TaskMeta {
     pub max_parallel: u32,
     #[serde(default)]
     pub estimated_total_minutes: u32,
+    /// When `true`, skip the enrichment pipeline and transition directly to
+    /// implementing.  Useful for pre-authored plans where tasks.toml already
+    /// contains complete definitions.
+    #[serde(default)]
+    pub skip_enrichment: bool,
 }
 
 fn default_max_parallel() -> u32 {
@@ -1516,6 +1521,7 @@ depends_on = []
                 status: "ready".into(),
                 max_parallel: 1,
                 estimated_total_minutes: 0,
+                skip_enrichment: false,
             },
             tasks: Vec::new(),
         };
