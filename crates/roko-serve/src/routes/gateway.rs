@@ -6,12 +6,14 @@
 //! accounting, and event publishing.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use validator::Validate;
@@ -24,7 +26,7 @@ use roko_learn::model_router::RoutingContext;
 use crate::error::ApiError;
 use crate::events::ServerEvent;
 use crate::extract::{RequestPayload, ValidJson, validate_with_validator};
-use crate::state::{AppState, OperationHandle, OperationStatus};
+use crate::state::{AppState, BatchProgress, OperationHandle, OperationStatus};
 
 /// Register inference gateway routes.
 pub fn routes() -> Router<Arc<AppState>> {
@@ -234,13 +236,13 @@ async fn inference_complete(
     let config = state.load_roko_config();
 
     // -----------------------------------------------------------------------
-    // Model selection
+    // Model selection (D1: uses cached CascadeRouter)
     // -----------------------------------------------------------------------
     let model_slug = if let Some(ref requested) = body.model {
         let resolved = resolve_model(&config, requested);
         resolved.slug
     } else {
-        select_model_via_router(&state)
+        select_model_via_router(&state).await
     };
 
     // -----------------------------------------------------------------------
@@ -272,6 +274,10 @@ async fn inference_complete(
 
     // Compute cost from model profile pricing when available.
     let cost_usd = compute_cost(&config, &model_slug, input_tokens, output_tokens);
+
+    // B1: accumulate per-model token + cost counters for gateway_stats.
+    let counters = state.gateway_counters_for(&model_slug).await;
+    counters.record(input_tokens, output_tokens, cost_usd);
 
     let agent_label = body.agent_id.as_deref().unwrap_or("gateway").to_owned();
 
@@ -337,26 +343,50 @@ async fn gateway_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStatsR
         );
     }
 
-    // Build per-model stats from provider-level data. This is a coarse
-    // projection since the health tracker is keyed by provider, not model.
-    // A future iteration should track per-model counters natively.
+    // Build per-model stats from provider-level requests + accumulated
+    // gateway token/cost counters (B1).
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
+    let counter_map = state.gateway_model_counters.read().await;
     let mut model_stats: HashMap<String, ModelStats> = HashMap::new();
+    let mut total_cost_usd: f64 = 0.0;
 
     for (key, profile) in &effective_models {
         let provider_status = health_snapshot
             .iter()
             .find(|s| s.provider == profile.provider);
 
+        let (tokens_in, tokens_out, cost) = if let Some(c) = counter_map.get(key) {
+            (
+                c.tokens_in.load(Ordering::Relaxed),
+                c.tokens_out.load(Ordering::Relaxed),
+                c.cost_usd(),
+            )
+        } else {
+            (0, 0, 0.0)
+        };
+
+        total_cost_usd += cost;
+
         if let Some(status) = provider_status {
             model_stats.insert(
                 key.clone(),
                 ModelStats {
                     requests: status.total_attempts,
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    cost_usd: 0.0,
+                    tokens_in,
+                    tokens_out,
+                    cost_usd: cost,
+                },
+            );
+        } else if tokens_in > 0 || tokens_out > 0 {
+            // Model has recorded traffic but no provider health entry yet.
+            model_stats.insert(
+                key.clone(),
+                ModelStats {
+                    requests: 0,
+                    tokens_in,
+                    tokens_out,
+                    cost_usd: cost,
                 },
             );
         }
@@ -375,7 +405,7 @@ async fn gateway_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStatsR
         total_requests,
         cache_hits,
         cache_hit_rate,
-        total_cost_usd: 0.0,
+        total_cost_usd,
         models: model_stats,
         providers: Value::Object(providers_json),
     })
@@ -413,12 +443,18 @@ async fn gateway_models(State(state): State<Arc<AppState>>) -> Json<Vec<GatewayM
     Json(models)
 }
 
+/// Maximum number of batch items dispatched concurrently (B2).
+const BATCH_CONCURRENCY: usize = 8;
+
 /// `POST /api/inference/batch/submit` — submit a batch of inference requests
 /// for background processing.
 ///
-/// Each request in the batch is dispatched sequentially through the runtime.
-/// The batch is tracked as a generic operation and results can be polled via
-/// `GET /api/inference/batch/{id}`.
+/// Batch items are dispatched **in parallel** (up to [`BATCH_CONCURRENCY`]
+/// concurrent requests) through the runtime (B2). An [`AtomicUsize`] counter
+/// in [`BatchProgress`] is incremented after each item completes so the status
+/// endpoint can report incremental progress (B3).
+///
+/// Results can be polled via `GET /api/inference/batch/{id}`.
 async fn batch_submit(
     State(state): State<Arc<AppState>>,
     ValidJson(body): ValidJson<BatchSubmitRequest>,
@@ -426,65 +462,97 @@ async fn batch_submit(
     let batch_id = uuid::Uuid::new_v4().to_string();
     let count = body.requests.len() as u32;
 
+    // B3: create a shared progress counter visible to the status endpoint.
+    let progress = Arc::new(BatchProgress {
+        completed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        total: body.requests.len(),
+    });
+    state
+        .batch_progress
+        .write()
+        .await
+        .insert(batch_id.clone(), Arc::clone(&progress));
+
     let state_for_task = Arc::clone(&state);
     let batch_id_for_task = batch_id.clone();
     let requests = body.requests;
 
     let handle = tokio::spawn(async move {
         let config = state_for_task.load_roko_config();
-        let mut results: Vec<BatchResultItem> = Vec::with_capacity(requests.len());
 
-        for item in &requests {
-            let model_slug = if let Some(ref requested) = item.model {
-                let resolved = resolve_model(&config, requested);
-                resolved.slug
-            } else {
-                select_model_via_router(&state_for_task)
-            };
+        // B2: process batch items concurrently with a bounded stream.
+        let results: Vec<BatchResultItem> = stream::iter(requests)
+            .map(|item| {
+                let state_ref = Arc::clone(&state_for_task);
+                let config_ref = Arc::clone(&config);
+                let progress_ref = Arc::clone(&progress);
+                async move {
+                    let model_slug = if let Some(ref requested) = item.model {
+                        let resolved = resolve_model(&config_ref, requested);
+                        resolved.slug
+                    } else {
+                        select_model_via_router(&state_ref).await
+                    };
 
-            let prompt = format_messages_as_prompt(&item.messages);
+                    let prompt = format_messages_as_prompt(&item.messages);
 
-            match state_for_task
-                .runtime
-                .run_once(state_for_task.workdir.as_path(), &prompt)
-                .await
-            {
-                Ok(result) => {
-                    state_for_task.provider_health.record_success(&model_slug);
-                    let content = result.output_text.unwrap_or_default();
-                    let input_tokens = estimate_tokens(&prompt);
-                    let output_tokens = estimate_tokens(&content);
-                    let cost_usd = compute_cost(&config, &model_slug, input_tokens, output_tokens);
+                    let result_item = match state_ref
+                        .runtime
+                        .run_once(state_ref.workdir.as_path(), &prompt)
+                        .await
+                    {
+                        Ok(result) => {
+                            state_ref.provider_health.record_success(&model_slug);
+                            let content = result.output_text.unwrap_or_default();
+                            let input_tokens = estimate_tokens(&prompt);
+                            let output_tokens = estimate_tokens(&content);
+                            let cost_usd =
+                                compute_cost(&config_ref, &model_slug, input_tokens, output_tokens);
 
-                    results.push(BatchResultItem {
-                        custom_id: item.custom_id.clone(),
-                        success: true,
-                        response: Some(CompletionResponse {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            model: model_slug,
-                            content,
-                            usage: TokenUsage {
-                                input_tokens,
-                                output_tokens,
-                                cache_read_tokens: 0,
-                            },
-                            stop_reason: "end_turn".to_string(),
-                            cost_usd,
-                        }),
-                        error: None,
-                    });
+                            // B1: accumulate per-model counters.
+                            let counters = state_ref.gateway_counters_for(&model_slug).await;
+                            counters.record(input_tokens, output_tokens, cost_usd);
+
+                            BatchResultItem {
+                                custom_id: item.custom_id.clone(),
+                                success: true,
+                                response: Some(CompletionResponse {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    model: model_slug,
+                                    content,
+                                    usage: TokenUsage {
+                                        input_tokens,
+                                        output_tokens,
+                                        cache_read_tokens: 0,
+                                    },
+                                    stop_reason: "end_turn".to_string(),
+                                    cost_usd,
+                                }),
+                                error: None,
+                            }
+                        }
+                        Err(err) => {
+                            state_ref.provider_health.record_failure(&model_slug);
+                            BatchResultItem {
+                                custom_id: item.custom_id.clone(),
+                                success: false,
+                                response: None,
+                                error: Some(err.to_string()),
+                            }
+                        }
+                    };
+
+                    // B3: increment progress counter after each item.
+                    progress_ref
+                        .completed
+                        .fetch_add(1, Ordering::Relaxed);
+
+                    result_item
                 }
-                Err(err) => {
-                    state_for_task.provider_health.record_failure(&model_slug);
-                    results.push(BatchResultItem {
-                        custom_id: item.custom_id.clone(),
-                        success: false,
-                        response: None,
-                        error: Some(err.to_string()),
-                    });
-                }
-            }
-        }
+            })
+            .buffer_unordered(BATCH_CONCURRENCY)
+            .collect()
+            .await;
 
         // Serialize results and store them in the operation handle.
         let results_json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
@@ -498,6 +566,13 @@ async fn batch_submit(
                 result: Some(results_json),
             };
         }
+
+        // Clean up progress entry now that the batch is done.
+        state_for_task
+            .batch_progress
+            .write()
+            .await
+            .remove(&batch_id_for_task);
     });
 
     let op = OperationHandle {
@@ -536,13 +611,25 @@ async fn batch_status(
         .ok_or_else(|| ApiError::not_found(format!("batch {batch_id} not found")))?;
 
     match &op.status {
-        OperationStatus::Running => Ok(Json(BatchStatusResponse {
-            batch_id,
-            status: "processing".to_string(),
-            completed: 0,
-            total: 0,
-            results: None,
-        })),
+        OperationStatus::Running => {
+            // B3: read incremental progress from the shared counter.
+            let progress = state.batch_progress.read().await;
+            let (completed, total) = if let Some(bp) = progress.get(&batch_id) {
+                (
+                    bp.completed.load(Ordering::Relaxed) as u32,
+                    bp.total as u32,
+                )
+            } else {
+                (0, 0)
+            };
+            Ok(Json(BatchStatusResponse {
+                batch_id,
+                status: "processing".to_string(),
+                completed,
+                total,
+                results: None,
+            }))
+        }
         OperationStatus::Completed { result } => {
             let results: Vec<BatchResultItem> = result
                 .as_deref()
@@ -595,8 +682,12 @@ fn format_messages_as_prompt(messages: &[ChatMessage]) -> String {
     parts.join("\n\n")
 }
 
-/// Select the optimal model via the CascadeRouter.
-fn select_model_via_router(state: &AppState) -> String {
+/// Select the optimal model via the CascadeRouter (D1: cached in AppState).
+///
+/// On first call the router is loaded from disk and cached. Subsequent
+/// requests read the cached instance through an `RwLock`, avoiding
+/// per-request file I/O.
+async fn select_model_via_router(state: &AppState) -> String {
     let config = state.load_roko_config();
     let effective_models = config.effective_models();
     let mut model_slugs: Vec<String> = effective_models
@@ -610,9 +701,35 @@ fn select_model_via_router(state: &AppState) -> String {
         return config.agent.default_model.clone();
     }
 
-    let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
-    let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
-    let routing_ctx = RoutingContext {
+    // Fast path: router already cached.
+    {
+        let guard = state.cascade_router.read().await;
+        if let Some(ref router) = *guard {
+            let routing_ctx = build_default_routing_ctx();
+            let explanation = router.explain_routing(&routing_ctx, &model_slugs);
+            return explanation.selected_model;
+        }
+    }
+
+    // Slow path: load from disk once, cache for subsequent requests.
+    {
+        let mut guard = state.cascade_router.write().await;
+        // Double-check after acquiring write lock.
+        if guard.is_none() {
+            let cascade_path = state.workdir.join(".roko/learn/cascade-router.json");
+            let router = CascadeRouter::load_or_new(&cascade_path, model_slugs.clone());
+            *guard = Some(router);
+        }
+        let router = guard.as_ref().expect("just initialised");
+        let routing_ctx = build_default_routing_ctx();
+        let explanation = router.explain_routing(&routing_ctx, &model_slugs);
+        explanation.selected_model
+    }
+}
+
+/// Build the default `RoutingContext` used by the gateway for model selection.
+fn build_default_routing_ctx() -> RoutingContext {
+    RoutingContext {
         task_category: TaskCategory::Implementation,
         complexity: TaskComplexityBand::Standard,
         iteration: 1,
@@ -629,10 +746,7 @@ fn select_model_via_router(state: &AppState) -> String {
         previous_model: None,
         plan_context_tokens: None,
         tier_thresholds: None,
-    };
-
-    let explanation = router.explain_routing(&routing_ctx, &model_slugs);
-    explanation.selected_model
+    }
 }
 
 /// Rough token count estimate: ~4 characters per token for English text.
