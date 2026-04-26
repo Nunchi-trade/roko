@@ -2387,6 +2387,7 @@ impl CascadeRouter {
             total_observations: self.linucb.total_observations(),
             stage_transitions,
         };
+        // TODO: migrate remaining atomic write sites to roko_fs::atomic_write_json
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if let Some(parent) = path.parent() {

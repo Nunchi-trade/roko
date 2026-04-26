@@ -6106,6 +6106,7 @@ dependencies = [
  "roko-agent",
  "roko-core",
  "roko-daimon",
+ "roko-fs",
  "roko-primitives",
  "serde",
  "serde_json",

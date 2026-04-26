@@ -14,6 +14,7 @@ workspace = true
 roko-core = { path = "../roko-core" }
 roko-agent = { path = "../roko-agent" }
 roko-daimon = { path = "../roko-daimon" }
+roko-fs = { path = "../roko-fs" }
 roko-primitives = { path = "../roko-primitives" }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

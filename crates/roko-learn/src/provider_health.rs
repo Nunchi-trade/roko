@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+// TODO: migrate remaining atomic write sites to roko_fs::atomic_write_json
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -403,30 +403,7 @@ fn save_snapshot(
     path: &Path,
     snapshot: &ProviderHealthRegistrySnapshot,
 ) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(snapshot)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp_path = unique_tmp_path(path);
-    std::fs::write(&tmp_path, json)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
-}
-
-fn unique_tmp_path(path: &Path) -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("provider-health.json");
-    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
+    roko_fs::atomic_write_json(path, snapshot)
 }
 
 fn new_provider_health(provider_id: &str) -> ProviderHealth {

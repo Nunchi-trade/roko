@@ -9,9 +9,10 @@
 //! The store is a single JSON file. Writes use atomic tmp-rename to avoid
 //! corruption on crash.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,10 +43,10 @@ pub struct ErrorPattern {
     /// ISO 8601 timestamp of the most recent occurrence.
     pub last_seen_at: String,
     /// Plan IDs that have hit this error.
-    pub plan_ids: Vec<String>,
+    pub plan_ids: BTreeSet<String>,
     /// Task IDs that have hit this error.
     #[serde(default)]
-    pub task_ids: Vec<String>,
+    pub task_ids: BTreeSet<String>,
     /// Whether this pattern has been resolved.
     #[serde(default)]
     pub resolved: bool,
@@ -227,6 +228,10 @@ pub struct FailurePatternSummaryItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPatternStore {
     patterns: Vec<ErrorPattern>,
+    /// Derived index mapping pattern keys to their position in `patterns`.
+    /// Rebuilt on load; not serialized.
+    #[serde(skip)]
+    key_index: HashMap<String, usize>,
 }
 
 impl ErrorPatternStore {
@@ -242,6 +247,7 @@ impl ErrorPatternStore {
         serde_json::from_slice::<Self>(&bytes)
             .map(|mut store| {
                 store.repair_loaded_patterns();
+                store.rebuild_key_index();
                 store
             })
             .unwrap_or_else(|_| Self::empty())
@@ -256,16 +262,9 @@ impl ErrorPatternStore {
     ///
     /// Returns the underlying [`std::io::Error`] if the parent directory
     /// cannot be created, serialization fails, or the filesystem write fails.
-    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = unique_tmp_path(path);
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+    pub fn save(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.gc(Duration::from_secs(90 * 24 * 3600), 10_000);
+        roko_fs::atomic_write_json(path, self)
     }
 
     /// Upsert an error pattern by digest.
@@ -310,12 +309,13 @@ impl ErrorPatternStore {
             };
         }
 
-        if let Some(existing) = self.patterns.iter_mut().find(|p| p.key == key) {
+        if let Some(&idx) = self.key_index.get(&key) {
+            let existing = &mut self.patterns[idx];
             existing.occurrences = existing.occurrences.saturating_add(1);
             existing.last_seen_at = now;
-            push_unique(&mut existing.plan_ids, observation.plan_id);
+            existing.plan_ids.insert(observation.plan_id);
             if let Some(task_id) = observation.task_id {
-                push_unique(&mut existing.task_ids, task_id);
+                existing.task_ids.insert(task_id);
             }
             if existing.gate.is_none() && !observation.gate.trim().is_empty() {
                 existing.gate = Some(observation.gate);
@@ -332,6 +332,8 @@ impl ErrorPatternStore {
             };
         }
 
+        let idx = self.patterns.len();
+        self.key_index.insert(key.clone(), idx);
         self.patterns.push(ErrorPattern {
             key,
             digest: truncate_chars(&observation.digest, 200),
@@ -340,7 +342,7 @@ impl ErrorPatternStore {
             occurrences: 1,
             first_seen_at: now.clone(),
             last_seen_at: now,
-            plan_ids: vec![observation.plan_id],
+            plan_ids: [observation.plan_id].into_iter().collect(),
             task_ids: observation.task_id.into_iter().collect(),
             resolved: false,
             resolution: None,
@@ -446,6 +448,7 @@ impl ErrorPatternStore {
     fn empty() -> Self {
         Self {
             patterns: Vec::new(),
+            key_index: HashMap::new(),
         }
     }
 
@@ -457,18 +460,71 @@ impl ErrorPatternStore {
             pattern.digest = truncate_chars(&pattern.digest, 200);
         }
     }
+
+    /// Rebuild the `key_index` from the current `patterns` vec.
+    fn rebuild_key_index(&mut self) {
+        self.key_index.clear();
+        self.key_index.reserve(self.patterns.len());
+        for (idx, pattern) in self.patterns.iter().enumerate() {
+            self.key_index.insert(pattern.key.clone(), idx);
+        }
+    }
+
+    /// Evict stale or excess patterns to bound store growth.
+    ///
+    /// 1. Removes patterns whose `last_seen_at` is older than `max_age`.
+    /// 2. If the store still exceeds `max_patterns`, removes the oldest
+    ///    *resolved* patterns first (by `last_seen_at`), then the oldest
+    ///    unresolved patterns until the limit is satisfied.
+    /// 3. Rebuilds the `key_index` after any removals.
+    pub fn gc(&mut self, max_age: Duration, max_patterns: usize) {
+        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(90));
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let before = self.patterns.len();
+        self.patterns.retain(|p| p.last_seen_at >= cutoff_str);
+
+        if self.patterns.len() > max_patterns {
+            // Sort indices by eviction priority: resolved first, then oldest last_seen_at.
+            let mut indices: Vec<usize> = (0..self.patterns.len()).collect();
+            indices.sort_by(|&a, &b| {
+                let pa = &self.patterns[a];
+                let pb = &self.patterns[b];
+                // Resolved patterns are evicted before unresolved ones.
+                pb.resolved
+                    .cmp(&pa.resolved)
+                    .then_with(|| pa.last_seen_at.cmp(&pb.last_seen_at))
+            });
+            // Mark the first (len - max_patterns) indices for removal.
+            let to_remove = self.patterns.len() - max_patterns;
+            let mut remove_set: Vec<bool> = vec![false; self.patterns.len()];
+            for &idx in indices.iter().take(to_remove) {
+                remove_set[idx] = true;
+            }
+            let mut i = 0;
+            self.patterns.retain(|_| {
+                let keep = !remove_set[i];
+                i += 1;
+                keep
+            });
+        }
+
+        if self.patterns.len() != before {
+            self.rebuild_key_index();
+        }
+    }
 }
 
 impl ErrorPattern {
     fn relevance_score(&self, query: FailurePatternQuery<'_>) -> usize {
         let mut score = 0usize;
         if let Some(task_id) = query.task_id
-            && self.task_ids.iter().any(|seen| seen == task_id)
+            && self.task_ids.contains(task_id)
         {
             score += 8;
         }
         if let Some(plan_id) = query.plan_id
-            && self.plan_ids.iter().any(|seen| seen == plan_id)
+            && self.plan_ids.contains(plan_id)
         {
             score += 4;
         }
@@ -492,12 +548,6 @@ impl FailurePatternQuery<'_> {
             && self.task_id.is_none()
             && self.gate.is_none()
             && self.classification.is_none()
-    }
-}
-
-fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.contains(&value) {
-        values.push(value);
     }
 }
 
@@ -606,21 +656,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// Generate a unique temporary file path next to `path` for atomic writes.
-fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("error-patterns.json");
-    parent.join(format!(".{stem}.tmp-{stamp}-{seq}"))
-}
+// NOTE: The `unique_tmp_path` helper that lived here has been replaced by
+// `roko_fs::atomic_write_json`.
+// TODO: migrate remaining atomic write sites to roko_fs::atomic_write_json
 
 #[cfg(test)]
 mod tests {
@@ -652,7 +690,10 @@ mod tests {
         assert_eq!(store.len(), 1);
         let pattern = &store.patterns[0];
         assert_eq!(pattern.occurrences, 3);
-        assert_eq!(pattern.plan_ids, vec!["plan-1", "plan-2"]);
+        assert_eq!(
+            pattern.plan_ids,
+            BTreeSet::from(["plan-1".to_string(), "plan-2".to_string()])
+        );
         assert_eq!(
             pattern.suggestion.as_deref(),
             Some("did you mean `std::io`?")
@@ -884,8 +925,14 @@ mod tests {
         assert!(store.observe_gate_failure(different_file).inserted);
 
         assert_eq!(store.len(), 2);
-        assert_eq!(store.patterns[0].plan_ids, vec!["plan-a", "plan-b"]);
-        assert_eq!(store.patterns[0].task_ids, vec!["task-a", "task-b"]);
+        assert_eq!(
+            store.patterns[0].plan_ids,
+            BTreeSet::from(["plan-a".to_string(), "plan-b".to_string()])
+        );
+        assert_eq!(
+            store.patterns[0].task_ids,
+            BTreeSet::from(["task-a".to_string(), "task-b".to_string()])
+        );
     }
 
     #[test]

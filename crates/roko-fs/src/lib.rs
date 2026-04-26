@@ -28,6 +28,8 @@
 )]
 
 pub mod archive;
+/// Shared atomic-write helpers (write-tmp-rename pattern).
+pub mod atomic;
 pub mod bandit;
 /// Archive-backed [`ColdSubstrate`](roko_core::ColdSubstrate) for aged-out engrams.
 pub mod cold_substrate;
@@ -42,6 +44,7 @@ pub mod tool_metrics_sink;
 pub mod trace_sink;
 
 pub use archive::{ArchiveEntry, ArchiveKind, ArchiveStats, Archiver};
+pub use atomic::{atomic_write_bytes, atomic_write_json};
 pub use bandit::{ArmSnapshot, BanditStore};
 pub use cold_substrate::{ArchiveColdSubstrate, SubstrateMigrator};
 pub use file_substrate::FileSubstrate;
