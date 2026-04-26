@@ -1048,6 +1048,9 @@ Examples:
         /// Parse and display the plan without executing. Shows tasks, dependencies, and estimates.
         #[arg(long)]
         dry_run: bool,
+        /// Use the v2 streaming runner instead of the legacy orchestrate.rs path.
+        #[arg(long)]
+        v2: bool,
     },
     /// Generate implementation plans from a prompt, file, or PRD.
     Generate {
@@ -5718,10 +5721,16 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             approval,
             max_retries,
             dry_run,
+            v2,
         } => {
             // ── Dry-run mode: parse plans + show summary without executing ──
             if dry_run {
                 return cmd_plan_dry_run(&plans_dir, cli).await;
+            }
+
+            // ── Runner v2: streaming event-driven path ──
+            if v2 {
+                return cmd_plan_run_v2(&plans_dir, workdir, approval, max_retries, cli).await;
             }
 
             let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
@@ -6100,6 +6109,132 @@ async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
 // -----------------------------------------------------------------------
 
 /// Parse and display a plan directory without executing anything.
+async fn cmd_plan_run_v2(
+    plans_dir: &Path,
+    workdir: Option<PathBuf>,
+    approval: bool,
+    max_retries: Option<u32>,
+    cli: &Cli,
+) -> Result<i32> {
+    use roko_cli::runner;
+
+    let wd = workdir.unwrap_or_else(|| resolve_workdir(cli));
+    let config_file = load_layered(&wd)?.config;
+    let state_hub = roko_core::shared_state_hub();
+
+    let plans = runner::load_plans(plans_dir)?;
+
+    // Build RunConfig from CLI + config file.
+    let model = config_file
+        .agent
+        .model
+        .as_deref()
+        .unwrap_or("claude-sonnet-4-6")
+        .to_string();
+    // Derive gate config from the GateConfig list.
+    let has_clippy = config_file.gates.iter().any(|g| matches!(g, roko_cli::GateConfig::Clippy { .. }));
+    let has_tests = config_file.gates.iter().any(|g| matches!(g, roko_cli::GateConfig::Test { .. }));
+    let max_gate_rung = if has_tests { 2 } else if has_clippy { 1 } else { 0 };
+
+    let run_config = runner::RunConfig {
+        workdir: wd.clone(),
+        plan_dir: plans_dir.to_path_buf(),
+        model,
+        timeout_secs: config_file.agent.timeout_ms / 1000,
+        max_retries: max_retries
+            .unwrap_or(config_file.executor.max_auto_fix_iterations),
+        approval,
+        dangerously_skip_permissions: true,
+        mcp_config: config_file.agent.mcp_config.clone(),
+        resume_session: cli.resume.clone(),
+        claude_program: PathBuf::from(&config_file.agent.command),
+        max_gate_rung,
+        max_plan_usd: config_file.budget.max_plan_usd,
+        max_turn_usd: config_file.budget.max_task_usd,
+        clippy_enabled: has_clippy,
+        skip_tests: !has_tests,
+        ..Default::default()
+    };
+
+    // Signal handler for Ctrl+C.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::warn!("Ctrl+C received — cancelling runner");
+        cancel_clone.cancel();
+    });
+
+    // Optional TUI for approval mode.
+    if approval {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            anyhow::bail!("approval mode requires an interactive terminal");
+        }
+        let state_hub_for_tui = state_hub.clone();
+        let wd_for_tui = wd.clone();
+        std::thread::Builder::new()
+            .name("roko-v2-approval-tui".to_string())
+            .spawn(move || {
+                let app = roko_cli::tui::App::new_connected_with_page(
+                    &wd_for_tui,
+                    None,
+                    &state_hub_for_tui,
+                );
+                if let Err(err) = app.run() {
+                    tracing::error!(error = %err, "approval TUI exited with error");
+                }
+            })
+            .context("spawn approval TUI thread")?;
+    }
+
+    let report = runner::run(plans, &run_config, &state_hub, cancel).await?;
+
+    let snap_path = wd.join(".roko").join("state").join("executor.json");
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "succeeded": report.all_succeeded(),
+                "total_agent_calls": report.total_agent_calls,
+                "total_cost_usd": report.total_cost_usd,
+                "total_tokens_in": report.total_tokens_in,
+                "total_tokens_out": report.total_tokens_out,
+                "tasks_completed": report.tasks_completed,
+                "tasks_failed": report.tasks_failed,
+                "duration_secs": report.duration.as_secs(),
+                "plans": report.plans.iter().map(|p| serde_json::json!({
+                    "plan_id": p.plan_id,
+                    "completed": p.completed,
+                    "tasks_total": p.tasks_total,
+                    "tasks_completed": p.tasks_completed,
+                    "tasks_failed": p.tasks_failed,
+                })).collect::<Vec<_>>(),
+            }))
+            .unwrap_or_default()
+        );
+    } else if !cli.quiet {
+        println!("Runner v2 complete:");
+        for p in &report.plans {
+            let status = if p.completed { "ok" } else { "FAIL" };
+            println!(
+                "  [{status}] {} — {}/{} tasks",
+                p.plan_id, p.tasks_completed, p.tasks_total
+            );
+        }
+        println!(
+            "\nTotal: {} agent calls | ${:.4} | {}s | {}",
+            report.total_agent_calls,
+            report.total_cost_usd,
+            report.duration.as_secs(),
+            if report.all_succeeded() { "SUCCESS" } else { "FAILED" }
+        );
+        println!("Snapshot saved to {}", snap_path.display());
+    }
+
+    Ok(if report.all_succeeded() { EXIT_SUCCESS } else { EXIT_FAILURE })
+}
+
 async fn cmd_plan_dry_run(plans_dir: &Path, cli: &Cli) -> Result<i32> {
     let plans = roko_orchestrator::discover_plans(plans_dir)
         .map_err(|e| anyhow!("plan discovery failed: {e}"))?;
