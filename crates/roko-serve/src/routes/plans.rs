@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/plans", get(list_plans).post(create_plan))
         .route("/plans/{id}", get(get_plan))
+        .route("/plans/{id}/tasks", get(plan_tasks))
         .route("/plans/{id}/execute", post(execute_plan))
         .route("/plans/{id}/status", get(plan_status))
         .route("/plans/{id}/pause", post(pause_plan))
@@ -78,6 +79,33 @@ async fn get_plan(
 ) -> Result<Json<Value>, ApiError> {
     let plan = find_plan(&state.workdir, &id).await?;
     Ok(Json(plan_to_json(&plan)))
+}
+
+/// `GET /api/plans/:id/tasks` — return the task list for a specific plan.
+async fn plan_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let plan = find_plan(&state.workdir, &id).await?;
+    let tasks: Vec<Value> = plan
+        .tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "description": t.description,
+                "depends_on": t.depends_on,
+                "files": t.files,
+                "completed": t.completed,
+                "status": task_status(t),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "plan_id": plan.id,
+        "task_count": tasks.len(),
+        "tasks": tasks,
+    })))
 }
 
 #[derive(Deserialize, Validate)]
@@ -692,9 +720,6 @@ async fn list_reviews(
     let snapshot = state.state_hub.current_snapshot();
     let plan_gates: Vec<_> = snapshot.gates.iter().filter(|g| g.plan_id == id).collect();
 
-    // Load persisted review decisions so we reflect prior approvals/rejections.
-    let persisted = load_reviews(&state.workdir, &id).await;
-
     let mut reviews = Vec::new();
 
     for task in &plan.tasks {
@@ -720,34 +745,19 @@ async fn list_reviews(
             (String::new(), Vec::new())
         };
 
-        // Determine review status: persisted decision takes precedence.
-        let (status, review_decision, review_comment) =
-            if let Some(review) = persisted.get(&task.id) {
-                let status = match review.decision.as_str() {
-                    "approved" => "approved",
-                    "rejected" => "needs_rework",
-                    "skipped" => "skipped",
-                    _ => "pending_review",
-                };
-                (
-                    status,
-                    Some(review.decision.as_str()),
-                    Some(review.comment.as_str()),
-                )
-            } else if branch.is_some() && !files_changed.is_empty() {
-                ("pending_review", None, None)
-            } else if task.completed {
-                ("completed", None, None)
-            } else {
-                ("pending", None, None)
-            };
+        // Determine review status.
+        let status = if branch.is_some() && !files_changed.is_empty() {
+            "pending_review"
+        } else if task.completed {
+            "completed"
+        } else {
+            "pending"
+        };
 
         reviews.push(json!({
             "task_id": task.id,
             "description": task.description,
             "status": status,
-            "review_decision": review_decision,
-            "review_comment": review_comment,
             "branch": branch,
             "diff_summary": diff_summary,
             "gate_results": task_gates,
@@ -984,58 +994,30 @@ struct DiffFile {
     patch: String,
 }
 
-/// Parse `git diff --numstat`, `git diff --name-status`, and `git diff` into
-/// structured per-file entries.
+/// Parse `git diff --numstat` + `git diff` into structured per-file entries.
 async fn parse_git_diff(
     workdir: &std::path::Path,
     branch: &str,
 ) -> Result<Vec<DiffFile>, ApiError> {
-    let diff_range = format!("main...{branch}");
-
-    // Run numstat, name-status, and full diff in parallel.
-    let numstat_fut = tokio::process::Command::new("git")
-        .args(["diff", "--numstat", &diff_range])
+    // Get numstat for additions/deletions counts.
+    let numstat = tokio::process::Command::new("git")
+        .args(["diff", "--numstat", &format!("main...{branch}")])
         .current_dir(workdir)
-        .output();
-
-    let name_status_fut = tokio::process::Command::new("git")
-        .args(["diff", "--name-status", &diff_range])
-        .current_dir(workdir)
-        .output();
-
-    let full_diff_fut = tokio::process::Command::new("git")
-        .args(["diff", &diff_range])
-        .current_dir(workdir)
-        .output();
-
-    let (numstat, name_status, full_diff) =
-        tokio::try_join!(numstat_fut, name_status_fut, full_diff_fut)
-            .map_err(|e| ApiError::internal(format!("git diff: {e}")))?;
+        .output()
+        .await
+        .map_err(|e| ApiError::internal(format!("git diff --numstat: {e}")))?;
 
     let numstat_str = String::from_utf8_lossy(&numstat.stdout);
-    let name_status_str = String::from_utf8_lossy(&name_status.stdout);
-    let full_diff_str = String::from_utf8_lossy(&full_diff.stdout);
 
-    // Build path -> git status letter map from `--name-status` output.
-    // Format: "M\tpath" or "A\tpath" or "D\tpath" or "R100\told\tnew".
-    let mut status_map: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-    for line in name_status_str.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let letter = parts[0].trim();
-        // For renames (R100), use the destination path.
-        let path = if parts.len() >= 3 { parts[2] } else { parts[1] };
-        let status = match letter.chars().next() {
-            Some('A') => "added",
-            Some('D') => "deleted",
-            Some('R') => "renamed",
-            Some('C') => "copied",
-            _ => "modified",
-        };
-        status_map.insert(path.to_string(), status);
-    }
+    // Get the full diff for patches.
+    let full_diff = tokio::process::Command::new("git")
+        .args(["diff", &format!("main...{branch}")])
+        .current_dir(workdir)
+        .output()
+        .await
+        .map_err(|e| ApiError::internal(format!("git diff: {e}")))?;
+
+    let full_diff_str = String::from_utf8_lossy(&full_diff.stdout);
 
     // Parse per-file patches from the full diff.
     let mut file_patches: std::collections::HashMap<String, String> =
@@ -1070,17 +1052,13 @@ async fn parse_git_diff(
         let deletions = parts[1].parse::<u32>().unwrap_or(0);
         let path = parts[2].to_string();
 
-        // Prefer the accurate status from `--name-status`; fall back to heuristic.
-        let status = status_map
-            .get(&path)
-            .copied()
-            .unwrap_or(if additions > 0 && deletions == 0 {
-                "added"
-            } else if additions == 0 && deletions > 0 {
-                "deleted"
-            } else {
-                "modified"
-            });
+        let status = if additions > 0 && deletions == 0 {
+            "added"
+        } else if additions == 0 && deletions > 0 {
+            "deleted"
+        } else {
+            "modified"
+        };
 
         let patch = file_patches.get(&path).cloned().unwrap_or_default();
 
@@ -1111,64 +1089,6 @@ async fn merge_branch(workdir: &std::path::Path, branch: &str) -> bool {
         .await;
 
     matches!(output, Ok(o) if o.status.success())
-}
-
-/// A persisted review decision loaded from `reviews.jsonl`.
-struct PersistedReview {
-    decision: String,
-    comment: String,
-    timestamp: String,
-}
-
-/// Load the most recent review decision per task from `.roko/state/reviews.jsonl`.
-///
-/// Returns a map of `task_id -> PersistedReview` for the given plan. When a task
-/// has multiple entries the last one wins (append-only log semantics).
-async fn load_reviews(
-    workdir: &std::path::Path,
-    plan_id: &str,
-) -> std::collections::HashMap<String, PersistedReview> {
-    let reviews_path = workdir.join(".roko").join("state").join("reviews.jsonl");
-    let contents = match tokio::fs::read_to_string(&reviews_path).await {
-        Ok(c) => c,
-        Err(_) => return std::collections::HashMap::new(),
-    };
-
-    let mut map = std::collections::HashMap::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            if v.get("plan_id").and_then(|v| v.as_str()) != Some(plan_id) {
-                continue;
-            }
-            if let Some(task_id) = v.get("task_id").and_then(|v| v.as_str()) {
-                map.insert(
-                    task_id.to_string(),
-                    PersistedReview {
-                        decision: v
-                            .get("decision")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        comment: v
-                            .get("comment")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        timestamp: v
-                            .get("timestamp")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    },
-                );
-            }
-        }
-    }
-    map
 }
 
 /// Record a review decision to `.roko/state/reviews.jsonl`.
@@ -1729,132 +1649,5 @@ mod tests {
 
         assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         drop(dir);
-    }
-
-    #[tokio::test]
-    async fn load_reviews_returns_empty_when_no_file() {
-        let (dir, _state) = test_state();
-        let reviews = load_reviews(dir.path(), "plan-1").await;
-        assert!(reviews.is_empty());
-    }
-
-    #[tokio::test]
-    async fn load_reviews_returns_latest_decision_per_task() {
-        let (dir, _state) = test_state();
-        let state_dir = dir.path().join(".roko").join("state");
-        tokio::fs::create_dir_all(&state_dir).await.unwrap();
-
-        let lines = [
-            r#"{"plan_id":"p1","task_id":"t1","decision":"rejected","comment":"bad","timestamp":"2025-01-01T00:00:00Z"}"#,
-            r#"{"plan_id":"p1","task_id":"t1","decision":"approved","comment":"fixed","timestamp":"2025-01-02T00:00:00Z"}"#,
-            r#"{"plan_id":"p1","task_id":"t2","decision":"skipped","comment":"not needed","timestamp":"2025-01-01T00:00:00Z"}"#,
-            r#"{"plan_id":"other","task_id":"t3","decision":"approved","comment":"","timestamp":"2025-01-01T00:00:00Z"}"#,
-        ];
-        let content = lines.join("\n") + "\n";
-        tokio::fs::write(state_dir.join("reviews.jsonl"), content)
-            .await
-            .unwrap();
-
-        let reviews = load_reviews(dir.path(), "p1").await;
-        assert_eq!(reviews.len(), 2);
-        // t1 should have the latest decision (approved), not the first (rejected).
-        assert_eq!(reviews["t1"].decision, "approved");
-        assert_eq!(reviews["t1"].comment, "fixed");
-        // t2 should be skipped.
-        assert_eq!(reviews["t2"].decision, "skipped");
-        // t3 belongs to a different plan and should not appear.
-        assert!(!reviews.contains_key("t3"));
-    }
-
-    #[tokio::test]
-    async fn list_reviews_incorporates_persisted_decisions() {
-        let (dir, state) = test_state();
-
-        // Create a plan file.
-        let plans_dir = state.workdir.join(".roko").join("plans");
-        tokio::fs::create_dir_all(&plans_dir).await.unwrap();
-        let plan_json = serde_json::json!({
-            "id": "test-plan",
-            "title": "Test Plan",
-            "description": "A test plan",
-            "tasks": [
-                {"id": "t1", "description": "Task 1"},
-                {"id": "t2", "description": "Task 2"},
-            ]
-        });
-        tokio::fs::write(
-            plans_dir.join("test-plan.json"),
-            serde_json::to_string_pretty(&plan_json).unwrap(),
-        )
-        .await
-        .unwrap();
-
-        // Record a review decision.
-        record_review(dir.path(), "test-plan", "t1", "approved", "looks good").await;
-
-        let resp = list_reviews(State(state), Path("test-plan".into()))
-            .await
-            .expect("list_reviews should succeed");
-
-        let body = resp.0;
-        let reviews = body["reviews"].as_array().expect("reviews array");
-        assert_eq!(reviews.len(), 2);
-
-        // t1 was approved.
-        assert_eq!(reviews[0]["task_id"], "t1");
-        assert_eq!(reviews[0]["status"], "approved");
-        assert_eq!(reviews[0]["review_decision"], "approved");
-        assert_eq!(reviews[0]["review_comment"], "looks good");
-
-        // t2 has no review.
-        assert_eq!(reviews[1]["task_id"], "t2");
-        assert_eq!(reviews[1]["status"], "pending");
-        assert!(reviews[1]["review_decision"].is_null());
-    }
-
-    #[tokio::test]
-    async fn submit_review_records_decision() {
-        let (dir, state) = test_state();
-
-        // Create a plan file.
-        let plans_dir = state.workdir.join(".roko").join("plans");
-        tokio::fs::create_dir_all(&plans_dir).await.unwrap();
-        let plan_json = serde_json::json!({
-            "id": "rp",
-            "title": "Review Plan",
-            "description": "",
-            "tasks": [{"id": "task-a", "description": "A"}]
-        });
-        tokio::fs::write(
-            plans_dir.join("rp.json"),
-            serde_json::to_string(&plan_json).unwrap(),
-        )
-        .await
-        .unwrap();
-
-        let body = ReviewDecision {
-            decision: "reject".into(),
-            comment: "needs work".into(),
-        };
-        let resp = submit_review(
-            State(Arc::clone(&state)),
-            Path(("rp".into(), "task-a".into())),
-            ValidJson(body),
-        )
-        .await
-        .expect("submit should succeed");
-
-        assert_eq!(resp.0["status"], "needs_rework");
-
-        // Verify the decision was persisted.
-        let reviews = load_reviews(dir.path(), "rp").await;
-        assert_eq!(reviews["task-a"].decision, "rejected");
-        assert_eq!(reviews["task-a"].comment, "needs work");
-    }
-
-    #[tokio::test]
-    async fn validate_decision_rejects_invalid_values() {
-        let err = validate_decision("invalid").unwrap_err();
-        assert_eq!(err.code, "invalid_decision");
     }
 }

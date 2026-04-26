@@ -20,1057 +20,59 @@
 //! The cascade wraps a [`LinUCBRouter`] and an additional
 //! [`parking_lot::Mutex`] for confidence-stage statistics.
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use parking_lot::Mutex;
-use roko_agent::provider::ProviderError;
-use roko_agent::{AgentResult, gemini::GeminiMetadata};
+use roko_agent::AgentResult;
 use roko_core::OperatingFrequency;
 use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
-use roko_core::task::{TaskCategory, TaskComplexityBand};
-use roko_core::{BehavioralState, DaimonPolicy, Temperament};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use roko_core::task::TaskCategory;
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::active_inference::{BeliefState, select_tier as select_tier_with_belief};
+// Re-export public types from cascade submodules so that
+// `crate::cascade_router::CascadeRouter` etc. still works for downstream crates.
+pub use crate::cascade::helpers::slug_family;
+pub use crate::cascade::types::{
+    CascadeCandidateScore, CascadeModel, CascadeObservationStats, CascadeRouteExplanation,
+    CascadeRoutingCandidate, CascadeRoutingExplanation, CascadeSelection, CascadeStage,
+    GeminiContextTier, GeminiObservation, KnowledgeHint, KnowledgeRoutingAdvice,
+    PerplexityObservation, RoutingBias, ShadowModelRunner, StageTransition,
+};
+
+use crate::cascade::helpers::{
+    apply_cache_affinity, behavioral_state_tier_shift, conductor_load_tier_shift,
+    context_overflow_fallback_for_model, cost_pressure_factor, default_latency_sla,
+    default_role_model_table, estimate_total_cost_usd, fallback_chain_for_model,
+    infer_shadow_routing_context, is_free_tier_gemini_model, low_confidence_tier_bonus,
+    model_tier_rank, pareto_adjusted_alpha, pareto_cost_proxy,
+    pareto_latency_proxy, parse_agent_role, pick_available_static_slug, pick_tier_extreme,
+    routing_tier_bias_factor, select_with_hysteresis, shadow_quality_score, slug_to_tier,
+    slugs_match, stage_for_observations, target_tier_rank, temperament_exploration_multiplier,
+    temperament_tier_shift, thinking_filtered_candidates, thinking_preference,
+    ProviderHealthSnapshotKey, ThinkingPreference,
+};
+use crate::cascade::persistence::{
+    CascadeSnapshot, PersistedModelStats, detect_version_changes, migrated_confidence_stats,
+    remap_role_table_entry,
+};
+use crate::cascade::types::{
+    GeminiObservationTotals, ModelStats, ParetoFrontierState, PerplexityObservationTotals,
+    StageTracking, HIGH_CFACTOR_THRESHOLD, LOW_AFFECT_CONFIDENCE_THRESHOLD,
+    LOW_CFACTOR_THRESHOLD, OVERRIDE_LEARNING_RATE, PARETO_RECOMPUTE_INTERVAL,
+};
 use crate::cfactor::{AgentDispatchBias, CFactor};
-use crate::costs_db::CostTable;
 use crate::latency::LatencyTracker;
 use crate::model_experiment::ModelExperimentStore;
 use crate::model_router::{
-    COLD_START_THRESHOLD, CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext,
-    compute_routing_reward_v2,
+    CandidateArmScore, LinUCBRouter, RoutingContext, compute_routing_reward_v2, CONTEXT_DIM,
 };
 use crate::pareto::{ModelObservation, compute_pareto_frontier};
 use crate::provider_health::ProviderHealthRegistry;
 use crate::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionMeta, RoutingLogger};
-
-/// Async runner used by free-tier Gemini shadow evaluation.
-#[async_trait]
-pub trait ShadowModelRunner: Send + Sync {
-    /// Run `prompt` against `model_slug` and return the resulting agent output.
-    async fn run_shadow(&self, prompt: &str, model_slug: &str) -> AgentResult;
-}
-
-// ─── CascadeStage ───────────────────────────────────────────────────────────
-
-/// Which routing stage is currently active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CascadeStage {
-    /// Stage 1: hardcoded role -> model table (< 50 observations).
-    Static,
-    /// Stage 2: empirical pass rates with confidence interval (50-200 observations).
-    Confidence,
-    /// Stage 3: full `LinUCB` contextual bandit (> 200 observations).
-    Ucb,
-}
-
-impl CascadeStage {
-    /// Human-readable label.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Static => "static",
-            Self::Confidence => "confidence",
-            Self::Ucb => "ucb",
-        }
-    }
-}
-
-impl std::fmt::Display for CascadeStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Recorded transition between cascade maturity stages.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageTransition {
-    /// Previous active stage.
-    pub from: CascadeStage,
-    /// Newly activated stage.
-    pub to: CascadeStage,
-    /// Observation count when the transition occurred.
-    pub observations: u64,
-    /// Timestamp when the transition was recorded.
-    pub timestamp: DateTime<Utc>,
-}
-
-// ─── CascadeModel ───────────────────────────────────────────────────────────
-
-/// Routing recommendation from the cascade.
-#[derive(Debug, Clone)]
-pub struct CascadeModel {
-    /// Primary model to use.
-    pub primary: ModelSpec,
-    /// Ordered fallback models to try after general failures.
-    pub fallback_chain: Vec<ModelSpec>,
-    /// Larger-context model to try when the primary overflows context.
-    pub context_overflow_fallback: Option<ModelSpec>,
-    /// Latency SLA in milliseconds.
-    pub latency_sla_ms: u64,
-    /// Which cascade stage produced this recommendation.
-    pub stage: CascadeStage,
-}
-
-impl CascadeModel {
-    /// Return the model to use for the given attempt number.
-    ///
-    /// Attempt 0 is the primary model. Subsequent attempts walk the fallback
-    /// chain in order until it is exhausted.
-    #[must_use]
-    pub fn model_for_attempt(&self, attempt: usize) -> Option<&ModelSpec> {
-        match attempt {
-            0 => Some(&self.primary),
-            _ => self.fallback_chain.get(attempt - 1),
-        }
-    }
-
-    /// Return the best fallback to use for a provider-specific failure.
-    #[must_use]
-    pub fn fallback_for_error(&self, error: &ProviderError) -> Option<&ModelSpec> {
-        match error {
-            ProviderError::ContextOverflow => self.context_overflow_fallback.as_ref(),
-            ProviderError::RateLimit { .. } => self
-                .fallback_chain
-                .iter()
-                .find(|model| model.backend != self.primary.backend)
-                .or_else(|| self.fallback_chain.first()),
-            _ => self.fallback_chain.first(),
-        }
-    }
-}
-
-/// Selection result for raw-context routing.
-#[derive(Debug, Clone)]
-pub struct CascadeSelection {
-    /// Model chosen by the router.
-    pub model: ModelSpec,
-    /// Total observations accumulated by the router when this selection was made.
-    pub observations: u64,
-    /// Which cascade stage produced the recommendation.
-    pub stage: CascadeStage,
-}
-
-/// Debug score for one model candidate within the cascade.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CascadeCandidateScore {
-    /// Model slug this score belongs to.
-    pub slug: String,
-    /// Stage-specific score used for comparison.
-    pub score: f64,
-    /// Whether this candidate was selected.
-    pub selected: bool,
-    /// Whether this candidate is on the current Pareto frontier.
-    pub on_pareto_frontier: bool,
-    /// LinUCB mean-reward estimate, when UCB routing is active.
-    pub exploitation: Option<f64>,
-    /// LinUCB exploration bonus, when UCB routing is active.
-    pub exploration: Option<f64>,
-}
-
-/// Explainability snapshot for one routing decision.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CascadeRouteExplanation {
-    /// Which cascade stage handled this routing decision.
-    pub stage: CascadeStage,
-    /// Total observations recorded when the explanation was generated.
-    pub observations: u64,
-    /// Current LinUCB alpha, when the UCB stage is active.
-    pub alpha: Option<f64>,
-    /// Selected model slug.
-    pub selected_slug: String,
-    /// Candidate scores in descending order.
-    pub candidates: Vec<CascadeCandidateScore>,
-    /// Current Pareto frontier snapshot used by the cascade.
-    pub pareto_frontier: Vec<String>,
-    /// Knowledge store advice applied during this routing decision.
-    /// `None` when the knowledge store was not consulted.
-    pub knowledge_advice: Option<KnowledgeRoutingAdvice>,
-}
-
-/// Explainable routing output for one cascade decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CascadeRoutingExplanation {
-    /// Which cascade stage produced the decision.
-    pub stage: CascadeStage,
-    /// Primary model selected by the router.
-    pub selected_model: String,
-    /// Fallback model, when one exists for the selected tier.
-    pub fallback_model: Option<String>,
-    /// Latency SLA associated with the selected tier.
-    pub latency_sla_ms: u64,
-    /// Candidate-level scoring details.
-    pub candidates: Vec<CascadeRoutingCandidate>,
-}
-
-/// Score and status for one routing candidate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CascadeRoutingCandidate {
-    /// Candidate model slug.
-    pub model: String,
-    /// Stage-specific numeric score.
-    pub score: f64,
-    /// Whether this candidate was selected.
-    pub selected: bool,
-    /// Whether cache affinity applies for this candidate.
-    pub cache_affinity: bool,
-    /// Whether the candidate is on the Pareto frontier, when known.
-    pub pareto_optimal: Option<bool>,
-}
-
-/// Bias signal emitted by the conductor and applied at routing time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoutingBias {
-    /// Model slugs to deprioritize.
-    pub deprioritize: Vec<String>,
-    /// Prefer cheaper tiers when live load or budget pressure is high.
-    pub prefer_cheaper: bool,
-    /// Human-readable explanation for debugging and logging.
-    pub reason: String,
-}
-
-// ─── Knowledge-informed routing hints ───────────────────────────────────────
-
-/// A pre-computed hint from the durable knowledge store about a model's
-/// historical performance on a particular task category.
-///
-/// Orchestrate.rs queries the neuro `KnowledgeStore` and builds these hints
-/// before passing them to the cascade router. This keeps roko-learn free of
-/// a roko-neuro dependency while letting the router incorporate knowledge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct KnowledgeHint {
-    /// Model slug this hint applies to.
-    pub model_slug: String,
-    /// Confidence-weighted score from matching knowledge entries.
-    /// Positive values indicate past success; negative values indicate
-    /// past failures or anti-knowledge.
-    pub score: f64,
-    /// Number of knowledge entries that contributed to this hint.
-    pub supporting_entries: u32,
-    /// Brief human-readable reason (e.g. "2 insights: strong on research tasks").
-    pub reason: String,
-}
-
-/// Aggregate result of consulting the knowledge store for routing hints.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct KnowledgeRoutingAdvice {
-    /// Per-model hints derived from the knowledge store.
-    pub hints: Vec<KnowledgeHint>,
-    /// Whether any hints were found at all (false means the store was
-    /// empty or the query returned no relevant entries).
-    pub has_signal: bool,
-}
-
-impl KnowledgeRoutingAdvice {
-    /// Look up the hint for a specific model slug.
-    #[must_use]
-    pub fn hint_for(&self, model_slug: &str) -> Option<&KnowledgeHint> {
-        self.hints
-            .iter()
-            .find(|h| slugs_match(&h.model_slug, model_slug))
-    }
-
-    /// Return the score adjustment for a model, or 0.0 if no hint exists.
-    #[must_use]
-    pub fn score_for(&self, model_slug: &str) -> f64 {
-        self.hint_for(model_slug).map_or(0.0, |h| h.score)
-    }
-}
-
-// ─── Confidence-stage stats ─────────────────────────────────────────────────
-
-/// Threshold for transitioning from Confidence to UCB stage.
-const CONFIDENCE_TO_UCB_THRESHOLD: u64 = 200;
-/// Affect confidence below which the router biases toward stronger models.
-const LOW_AFFECT_CONFIDENCE_THRESHOLD: f64 = 0.3;
-/// C-Factor above which the router biases toward cheaper models.
-const HIGH_CFACTOR_THRESHOLD: f64 = 0.8;
-/// C-Factor below which the router biases toward stronger models.
-const LOW_CFACTOR_THRESHOLD: f64 = 0.4;
-/// Cold-start bonus for reusing the previous model.
-const CACHE_AFFINITY_BONUS: f64 = 0.15;
-/// Minimum score improvement required before switching away from the incumbent.
-const HYSTERESIS_THRESHOLD: f64 = 0.10;
-/// Recompute the Pareto frontier after every 50 observations.
-const PARETO_RECOMPUTE_INTERVAL: u64 = 50;
-/// Dampening factor for force_backend override learning (UX34).
-///
-/// Override observations use half the normal reward weight because a
-/// user-selected model succeeding may reflect domain knowledge about the task
-/// rather than intrinsic model capability. Over many observations the signal
-/// still accumulates, but a single override cannot dominate the bandit.
-const OVERRIDE_LEARNING_RATE: f64 = 0.5;
-
-/// Per-model observation record for the confidence stage.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ModelStats {
-    /// Number of trials (selections) for this model.
-    trials: u64,
-    /// Number of successes (gate passes).
-    successes: u64,
-    /// Total citations observed across Perplexity responses.
-    total_citations: u64,
-    /// Total Perplexity search latency observed in milliseconds.
-    total_search_latency_ms: u64,
-    /// Total observed cost in USD (token cost + per-request fee).
-    total_cost_usd: f64,
-    /// Number of Perplexity requests contributing metadata.
-    perplexity_requests: u64,
-    /// Total Gemini thinking tokens observed across responses.
-    total_gemini_thinking_tokens: u64,
-    /// Total Gemini cached tokens observed across responses.
-    total_gemini_cached_tokens: u64,
-    /// Total Gemini grounding queries executed across responses.
-    total_gemini_grounding_queries: u64,
-    /// Number of successful Gemini code-execution outcomes.
-    gemini_code_execution_successes: u64,
-    /// Number of failed Gemini code-execution outcomes.
-    gemini_code_execution_failures: u64,
-    /// Number of Gemini responses routed in the ≤200K context pricing tier.
-    gemini_context_window_le_200k_requests: u64,
-    /// Number of Gemini responses routed in the >200K context pricing tier.
-    gemini_context_window_gt_200k_requests: u64,
-    /// Number of Gemini requests contributing observation metadata.
-    gemini_requests: u64,
-}
-
-impl ModelStats {
-    /// Empirical pass rate.
-    #[allow(clippy::cast_precision_loss)]
-    fn pass_rate(&self) -> f64 {
-        if self.trials == 0 {
-            0.0
-        } else {
-            self.successes as f64 / self.trials as f64
-        }
-    }
-
-    /// Width of the 95% Wilson confidence interval (approximate).
-    ///
-    /// Uses a normal approximation: `1.96 * sqrt(p * (1-p) / n)`.
-    /// Returns `f64::INFINITY` for zero trials.
-    #[allow(clippy::cast_precision_loss)]
-    fn confidence_width(&self) -> f64 {
-        if self.trials == 0 {
-            return f64::INFINITY;
-        }
-        let p = self.pass_rate();
-        let n = self.trials as f64;
-        1.96 * (p * (1.0 - p) / n).sqrt()
-    }
-
-    /// Upper confidence bound on the pass rate.
-    fn upper_bound(&self) -> f64 {
-        (self.pass_rate() + self.confidence_width()).min(1.0)
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_citations_per_response(&self) -> f64 {
-        if self.perplexity_requests == 0 {
-            0.0
-        } else {
-            self.total_citations as f64 / self.perplexity_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_search_latency_ms(&self) -> f64 {
-        if self.perplexity_requests == 0 {
-            0.0
-        } else {
-            self.total_search_latency_ms as f64 / self.perplexity_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_cost_usd(&self) -> f64 {
-        if self.perplexity_requests == 0 {
-            0.0
-        } else {
-            self.total_cost_usd / self.perplexity_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn cost_per_success(&self) -> Option<f64> {
-        if self.successes == 0 {
-            None
-        } else {
-            Some(self.total_cost_usd / self.successes as f64)
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_gemini_thinking_tokens_per_response(&self) -> f64 {
-        if self.gemini_requests == 0 {
-            0.0
-        } else {
-            self.total_gemini_thinking_tokens as f64 / self.gemini_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_gemini_cached_tokens_per_response(&self) -> f64 {
-        if self.gemini_requests == 0 {
-            0.0
-        } else {
-            self.total_gemini_cached_tokens as f64 / self.gemini_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn avg_gemini_grounding_queries_per_response(&self) -> f64 {
-        if self.gemini_requests == 0 {
-            0.0
-        } else {
-            self.total_gemini_grounding_queries as f64 / self.gemini_requests as f64
-        }
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn gemini_code_execution_success_rate(&self) -> f64 {
-        let attempts = self.gemini_code_execution_successes + self.gemini_code_execution_failures;
-        if attempts == 0 {
-            0.0
-        } else {
-            self.gemini_code_execution_successes as f64 / attempts as f64
-        }
-    }
-}
-
-/// Per-request Perplexity metadata captured by the cascade learning loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PerplexityObservation {
-    /// Number of citations returned with the response.
-    pub citation_count: u64,
-    /// Search-side latency in milliseconds.
-    pub search_latency_ms: u64,
-    /// Input tokens billed for the request.
-    pub input_tokens: u64,
-    /// Output tokens billed for the request.
-    pub output_tokens: u64,
-}
-
-/// Gemini pricing tier used for a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GeminiContextTier {
-    /// Request stayed within Gemini's ≤200K pricing tier.
-    UpTo200k,
-    /// Request crossed into Gemini's >200K pricing tier.
-    Over200k,
-}
-
-impl GeminiContextTier {
-    /// Infer the pricing tier from the billed prompt tokens.
-    #[must_use]
-    pub const fn for_input_tokens(input_tokens: u64) -> Self {
-        if input_tokens > 200_000 {
-            Self::Over200k
-        } else {
-            Self::UpTo200k
-        }
-    }
-}
-
-/// Per-request Gemini metadata captured by the cascade learning loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GeminiObservation {
-    /// Prompt tokens billed for the request.
-    pub input_tokens: u64,
-    /// Output tokens billed for the request.
-    pub output_tokens: u64,
-    /// Thinking tokens consumed by the model, if reported.
-    pub thinking_tokens: Option<u64>,
-    /// Cached prompt tokens read by the request, if any.
-    pub cached_tokens: Option<u64>,
-    /// Number of grounding queries executed through Google Search.
-    pub grounding_query_count: u64,
-    /// Count of successful code-execution results returned by Gemini.
-    pub code_execution_success_count: u64,
-    /// Count of failed code-execution results returned by Gemini.
-    pub code_execution_failure_count: u64,
-    /// Gemini input-context pricing tier.
-    pub context_tier: GeminiContextTier,
-}
-
-impl GeminiObservation {
-    /// Build a router observation from Gemini adapter metadata.
-    #[must_use]
-    pub fn from_metadata(metadata: &GeminiMetadata, input_tokens: u64, output_tokens: u64) -> Self {
-        let (code_execution_success_count, code_execution_failure_count) = metadata
-            .code_execution_results
-            .iter()
-            .fold((0_u64, 0_u64), |(successes, failures), result| {
-                if result.outcome.eq_ignore_ascii_case("OUTCOME_OK") {
-                    (successes + 1, failures)
-                } else {
-                    (successes, failures + 1)
-                }
-            });
-
-        Self {
-            input_tokens,
-            output_tokens,
-            thinking_tokens: metadata.thinking_tokens,
-            cached_tokens: metadata.cached_tokens,
-            grounding_query_count: metadata
-                .grounding_metadata
-                .as_ref()
-                .and_then(|grounding| grounding.web_search_queries.as_ref())
-                .map_or(0, |queries| queries.len() as u64),
-            code_execution_success_count,
-            code_execution_failure_count,
-            context_tier: GeminiContextTier::for_input_tokens(input_tokens),
-        }
-    }
-}
-
-/// Public snapshot of the richer per-model observation state.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CascadeObservationStats {
-    /// Number of trials recorded for the model.
-    pub trials: u64,
-    /// Number of successful trials.
-    pub successes: u64,
-    /// Total citations observed across Perplexity responses.
-    pub total_citations: u64,
-    /// Average citations per Perplexity response.
-    pub avg_citations_per_response: f64,
-    /// Total Perplexity search latency in milliseconds.
-    pub total_search_latency_ms: u64,
-    /// Average Perplexity search latency in milliseconds.
-    pub avg_search_latency_ms: f64,
-    /// Total observed cost in USD, including request fee.
-    pub total_cost_usd: f64,
-    /// Average observed cost in USD, including request fee.
-    pub avg_cost_usd: f64,
-    /// Number of Perplexity requests contributing observation metadata.
-    pub perplexity_requests: u64,
-    /// Total Gemini thinking tokens observed across responses.
-    pub total_gemini_thinking_tokens: u64,
-    /// Average Gemini thinking tokens per response.
-    pub avg_gemini_thinking_tokens_per_response: f64,
-    /// Total Gemini cached tokens observed across responses.
-    pub total_gemini_cached_tokens: u64,
-    /// Average Gemini cached tokens per response.
-    pub avg_gemini_cached_tokens_per_response: f64,
-    /// Total Gemini grounding queries executed across responses.
-    pub total_gemini_grounding_queries: u64,
-    /// Average Gemini grounding queries per response.
-    pub avg_gemini_grounding_queries_per_response: f64,
-    /// Number of successful Gemini code-execution outcomes.
-    pub gemini_code_execution_successes: u64,
-    /// Number of failed Gemini code-execution outcomes.
-    pub gemini_code_execution_failures: u64,
-    /// Success rate across Gemini code-execution outcomes.
-    pub gemini_code_execution_success_rate: f64,
-    /// Number of Gemini requests contributing observation metadata.
-    pub gemini_requests: u64,
-    /// Gemini requests routed in the ≤200K context tier.
-    pub gemini_context_window_le_200k_requests: u64,
-    /// Gemini requests routed in the >200K context tier.
-    pub gemini_context_window_gt_200k_requests: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PerplexityObservationTotals {
-    citation_count: u64,
-    search_latency_ms: u64,
-    total_cost_usd: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct GeminiObservationTotals {
-    thinking_tokens: u64,
-    cached_tokens: u64,
-    grounding_query_count: u64,
-    code_execution_success_count: u64,
-    code_execution_failure_count: u64,
-    context_tier: GeminiContextTier,
-}
-
-// ─── Static role -> model table ─────────────────────────────────────────────
-
-/// Build the default static role-to-model mapping.
-///
-/// Fast-tier roles prefer Gemini Flash-Lite, Standard-tier roles prefer
-/// Gemini Flash, and Premium-tier roles prefer Opus with Gemini Pro Preview
-/// as the premium fallback.
-fn default_role_model_table(model_slugs: &[String]) -> HashMap<AgentRole, String> {
-    let mut table = HashMap::new();
-
-    // Research role → Perplexity Sonar when available, standard-tier fallback.
-    table.insert(
-        AgentRole::Researcher,
-        pick_static_slug(
-            model_slugs,
-            &[
-                "sonar-pro",
-                "sonar",
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "kimi-k2.5",
-                "claude-sonnet-4-6",
-                "claude-sonnet-4-5",
-            ],
-        ),
-    );
-
-    let all_roles: Vec<AgentRole> = std::iter::once(AgentRole::Conductor)
-        .chain(AgentRole::ALL_AGENTS.iter().copied())
-        .collect();
-    for role in all_roles {
-        if table.contains_key(&role) {
-            continue;
-        }
-        let slug = match role.model_tier() {
-            ModelTier::Fast => {
-                pick_static_slug(model_slugs, &["gemini-2.5-flash-lite", "claude-haiku-3-5"])
-            }
-            ModelTier::Premium => pick_static_slug(
-                model_slugs,
-                &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"],
-            ),
-            // Standard and forward-compat
-            _ => pick_static_slug(
-                model_slugs,
-                &[
-                    "gemini-2.5-flash",
-                    "gemini-2.5-pro",
-                    "kimi-k2.5",
-                    "kimi-k2-thinking",
-                    "claude-sonnet-4-6",
-                    "claude-sonnet-4-5",
-                ],
-            ),
-        };
-        table.insert(role, slug);
-    }
-    table
-}
-
-fn pick_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
-    for candidate in candidates {
-        if let Some(slug) = model_slugs
-            .iter()
-            .find(|slug| slugs_match(slug, candidate))
-            .cloned()
-        {
-            return slug;
-        }
-    }
-    candidates[0].to_string()
-}
-
-fn pick_available_static_slug(model_slugs: &[String], candidates: &[&str]) -> String {
-    for candidate in candidates {
-        if let Some(slug) = model_slugs
-            .iter()
-            .find(|slug| slugs_match(slug, candidate))
-            .cloned()
-        {
-            return slug;
-        }
-    }
-
-    model_slugs
-        .first()
-        .cloned()
-        .unwrap_or_else(|| candidates[0].to_string())
-}
-
-/// Default latency SLA for a model tier (milliseconds).
-const fn default_latency_sla(tier: ModelTier) -> u64 {
-    match tier {
-        ModelTier::Fast => 10_000,
-        ModelTier::Premium => 120_000,
-        // Standard and forward-compat
-        _ => 30_000,
-    }
-}
-
-/// Map a model slug to an approximate tier for SLA purposes.
-fn slug_to_tier(slug: &str) -> ModelTier {
-    if slug.contains("gemini-2.5-flash-lite")
-        || slug.contains("gemini-3.1-flash-lite-preview")
-        || slug.contains("haiku")
-    {
-        ModelTier::Fast
-    } else if slug.contains("gemini-3.1-pro-preview")
-        || slug.contains("opus")
-        || slug.contains("premium")
-    {
-        ModelTier::Premium
-    } else {
-        ModelTier::Standard
-    }
-}
-
-/// Build the ordered fallback chain for a routed primary model.
-fn fallback_chain_for_model(model_slugs: &[String], primary_slug: &str) -> Vec<ModelSpec> {
-    let primary_tier = slug_to_tier(primary_slug);
-
-    if matches!(primary_tier, ModelTier::Fast) {
-        return Vec::new();
-    }
-
-    let mut grouped = [Vec::new(), Vec::new(), Vec::new()];
-
-    for slug in model_slugs {
-        if slugs_match(slug, primary_slug) {
-            continue;
-        }
-
-        let bucket = match primary_tier {
-            ModelTier::Standard => match slug_to_tier(slug) {
-                ModelTier::Fast => 0,
-                ModelTier::Standard => 1,
-                ModelTier::Premium => 2,
-                _ => 1,
-            },
-            ModelTier::Premium => match slug_to_tier(slug) {
-                ModelTier::Standard => 0,
-                ModelTier::Fast => 1,
-                ModelTier::Premium => 2,
-                _ => 0,
-            },
-            _ => 0,
-        };
-
-        grouped[bucket].push(ModelSpec::from_slug(slug));
-    }
-
-    grouped.into_iter().flatten().collect()
-}
-
-/// Find a stronger model to use when the selected model overflows context.
-fn context_overflow_fallback_for_model(
-    model_slugs: &[String],
-    primary_slug: &str,
-) -> Option<ModelSpec> {
-    let primary_rank = model_tier_rank(slug_to_tier(primary_slug));
-
-    model_slugs
-        .iter()
-        .find(|slug| model_tier_rank(slug_to_tier(slug)) > primary_rank)
-        .map(ModelSpec::from_slug)
-}
-
-fn low_confidence_tier_bonus(tier: ModelTier) -> f64 {
-    match tier {
-        ModelTier::Premium => 0.15,
-        ModelTier::Standard => 0.05,
-        ModelTier::Fast => 0.0,
-        _ => 0.05,
-    }
-}
-
-fn routing_tier_bias_factor(tier: ModelTier) -> f64 {
-    match tier {
-        ModelTier::Fast => 1.10,
-        ModelTier::Standard => 1.0,
-        ModelTier::Premium => 0.85,
-        _ => 1.0,
-    }
-}
-
-fn cost_pressure_factor(tier: ModelTier) -> f64 {
-    match tier {
-        ModelTier::Fast => 1.20,
-        ModelTier::Standard => 0.90,
-        ModelTier::Premium => 0.0,
-        _ => 0.90,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ProviderHealthSnapshotKey {
-    state_rank: u8,
-    consecutive_failures: u32,
-    total_failures: u64,
-    last_failure_at: i64,
-}
-
-impl From<&crate::provider_health::ProviderHealth> for ProviderHealthSnapshotKey {
-    fn from(health: &crate::provider_health::ProviderHealth) -> Self {
-        let state_rank = match health.state {
-            crate::provider_health::CircuitState::Closed => 0,
-            crate::provider_health::CircuitState::HalfOpen => 1,
-            crate::provider_health::CircuitState::Open => 2,
-        };
-        Self {
-            state_rank,
-            consecutive_failures: health.consecutive_failures,
-            total_failures: health.total_failures,
-            last_failure_at: health.last_failure_at.unwrap_or(i64::MIN),
-        }
-    }
-}
-
-fn behavioral_state_tier_shift(ctx: &RoutingContext) -> i8 {
-    // When affect-adjusted tier thresholds are available, derive the shift
-    // from prediction error (`1.0 - affect_confidence`) against the per-state
-    // ceilings.  High prediction error (above t1_ceiling) pushes toward
-    // Premium (+1); low error (within t0_ceiling) pulls toward Fast (-1).
-    if let Some(thresholds) = &ctx.tier_thresholds {
-        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
-        return if prediction_error > thresholds.t1_ceiling {
-            1 // exceed Standard ceiling → escalate to Premium
-        } else if prediction_error <= thresholds.t0_ceiling {
-            -1 // within Fast ceiling → save cost
-        } else {
-            0 // within Standard band → no shift
-        };
-    }
-
-    // Fallback: hardcoded per-state shift when no thresholds are supplied.
-    match ctx.daimon_policy.behavioral_state {
-        BehavioralState::Struggling => 1,
-        BehavioralState::Coasting | BehavioralState::Resting | BehavioralState::Focused => -1,
-        BehavioralState::Exploring => {
-            if matches!(ctx.complexity, TaskComplexityBand::Complex)
-                || matches!(ctx.task_category, TaskCategory::Research)
-                || ctx.has_prior_failure
-            {
-                1
-            } else {
-                0
-            }
-        }
-        BehavioralState::Engaged => 0,
-    }
-}
-
-fn conductor_load_tier_shift(ctx: &RoutingContext) -> i8 {
-    let load = ctx.conductor_load.clamp(0.0, 1.0);
-    if load >= 0.9 {
-        -2
-    } else if load >= 0.65 {
-        -1
-    } else {
-        0
-    }
-}
-
-fn temperament_tier_shift(ctx: &RoutingContext) -> i8 {
-    ctx.temperament
-        .map(Temperament::routing_tier_shift)
-        .unwrap_or(0)
-}
-
-fn temperament_exploration_multiplier(ctx: &RoutingContext) -> f64 {
-    ctx.temperament
-        .map(Temperament::exploration_multiplier)
-        .unwrap_or(1.0)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThinkingPreference {
-    Neutral,
-    PreferThinking,
-    PreferNonThinking,
-}
-
-fn thinking_preference(ctx: &RoutingContext) -> ThinkingPreference {
-    let Some(level) = ctx.thinking_level.as_deref() else {
-        return ThinkingPreference::Neutral;
-    };
-
-    let level = level.trim().to_ascii_lowercase();
-    match level.as_str() {
-        "high" | "max" if ctx.complexity == TaskComplexityBand::Complex => {
-            ThinkingPreference::PreferThinking
-        }
-        "minimal" | "none" | "disabled" | "off" | "false" => ThinkingPreference::PreferNonThinking,
-        _ => ThinkingPreference::Neutral,
-    }
-}
-
-fn model_supports_thinking(slug: &str) -> bool {
-    let slug = slug.to_ascii_lowercase();
-    if slug.contains("gemini-2.5-flash-lite")
-        || slug.starts_with("sonar")
-        || slug.starts_with("perplexity/")
-    {
-        return false;
-    }
-
-    slug.contains("gemini-2.5-flash")
-        || slug.contains("gemini-2.5-pro")
-        || slug.contains("gemini-3")
-        || slug.starts_with("kimi-k2")
-        || slug.starts_with("glm")
-        || slug.contains("gpt-5")
-        || slug.starts_with("o1")
-        || slug.starts_with("o3")
-        || slug.starts_with("o4")
-        || slug.contains("thinking")
-        || slug.contains("reasoning")
-}
-
-fn thinking_filtered_candidates(candidates: &[String], ctx: &RoutingContext) -> Vec<String> {
-    let wants_thinking = match thinking_preference(ctx) {
-        ThinkingPreference::PreferThinking => Some(true),
-        ThinkingPreference::PreferNonThinking => Some(false),
-        ThinkingPreference::Neutral => None,
-    };
-    let Some(wants_thinking) = wants_thinking else {
-        return candidates.to_vec();
-    };
-
-    let filtered: Vec<String> = candidates
-        .iter()
-        .filter(|slug| model_supports_thinking(slug) == wants_thinking)
-        .cloned()
-        .collect();
-    if filtered.is_empty() {
-        candidates.to_vec()
-    } else {
-        filtered
-    }
-}
-
-fn pick_tier_extreme(candidates: &[String], prefer_strongest: bool) -> Option<String> {
-    let mut iter = candidates.iter();
-    let first = iter.next()?.clone();
-    let mut best = first;
-    let mut best_rank = model_tier_rank(slug_to_tier(&best));
-
-    for slug in iter {
-        let rank = model_tier_rank(slug_to_tier(slug));
-        let better = if prefer_strongest {
-            rank > best_rank
-        } else {
-            rank < best_rank
-        };
-        if better {
-            best = slug.clone();
-            best_rank = rank;
-        }
-    }
-
-    Some(best)
-}
-
-fn apply_cache_affinity(scores: &mut [(String, f64)], previous_model: Option<&str>) {
-    if let Some(prev) = previous_model {
-        for (slug, score) in scores.iter_mut() {
-            if slug == prev {
-                *score += CACHE_AFFINITY_BONUS;
-            }
-        }
-    }
-}
-
-fn select_with_hysteresis(candidates: &[(String, f64)], previous_model: Option<&str>) -> String {
-    let best = candidates
-        .iter()
-        .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
-        .expect("CascadeRouter: score-based routing requires at least one candidate");
-
-    if let Some(previous_model) = previous_model
-        && let Some(previous_score) = candidates
-            .iter()
-            .find(|(slug, _)| slug == previous_model)
-            .map(|(_, score)| *score)
-        && best.0 != previous_model
-        && best.1 - previous_score < HYSTERESIS_THRESHOLD
-    {
-        return previous_model.to_string();
-    }
-
-    best.0.clone()
-}
-
-fn model_tier_rank(tier: ModelTier) -> u8 {
-    match tier {
-        ModelTier::Premium => 2,
-        ModelTier::Standard => 1,
-        ModelTier::Fast => 0,
-        _ => 1,
-    }
-}
-
-fn target_tier_rank(current_rank: u8, shift: i8) -> u8 {
-    if shift.is_negative() {
-        current_rank.saturating_sub(shift.unsigned_abs())
-    } else {
-        current_rank.saturating_add(shift as u8).min(2)
-    }
-}
-
-fn slugs_match(lhs: &str, rhs: &str) -> bool {
-    lhs == rhs || slug_family(lhs).is_some_and(|family| slug_family(rhs) == Some(family))
-}
-
-fn parse_agent_role(raw: &str) -> Option<AgentRole> {
-    if let Ok(role) = serde_json::from_str::<AgentRole>(&format!("\"{raw}\"")) {
-        return Some(role);
-    }
-
-    std::iter::once(AgentRole::Conductor)
-        .chain(AgentRole::ALL_AGENTS.iter().copied())
-        .find(|role| raw == role.label() || raw == format!("{role:?}"))
-}
-
-/// Classify a model slug into a known model family.
-///
-/// This is the canonical family classifier used by both `cascade_router` and
-/// `model_router` for slug matching, Pareto cost proxies, and static routing.
-pub fn slug_family(slug: &str) -> Option<&'static str> {
-    if slug.starts_with("kimi-k2") {
-        Some("kimi-k2")
-    } else if slug.contains("gemini-3.1-pro-preview") {
-        Some("gemini-3.1-pro-preview")
-    } else if slug.contains("gemini-3.1-flash-lite-preview") {
-        Some("gemini-3.1-flash-lite-preview")
-    } else if slug.contains("gemini-3-flash-preview") {
-        Some("gemini-3-flash-preview")
-    } else if slug.contains("gemini-2.5-pro") {
-        Some("gemini-2.5-pro")
-    } else if slug.contains("gemini-2.5-flash-lite") {
-        Some("gemini-2.5-flash-lite")
-    } else if slug.contains("gemini-2.5-flash") {
-        Some("gemini-2.5-flash")
-    } else if slug.contains("haiku") {
-        Some("haiku")
-    } else if slug.contains("sonnet") {
-        Some("sonnet")
-    } else if slug.contains("opus") {
-        Some("opus")
-    } else if slug.contains("glm") {
-        Some("glm")
-    } else if slug.starts_with("gpt-") {
-        Some("gpt")
-    } else if slug.starts_with("o1") {
-        Some("o1")
-    } else if slug.starts_with("o3") {
-        Some("o3")
-    } else if slug.starts_with("deepseek") {
-        Some("deepseek")
-    } else if slug.starts_with("gemini") {
-        Some("gemini")
-    } else {
-        None
-    }
-}
-
-fn default_cost_table() -> &'static CostTable {
-    static COST_TABLE: OnceLock<CostTable> = OnceLock::new();
-    COST_TABLE.get_or_init(CostTable::default)
-}
-
-fn estimate_total_cost_usd(model_slug: &str, input_tokens: u64, output_tokens: u64) -> f64 {
-    default_cost_table()
-        .lookup(model_slug)
-        .map(|pricing| pricing.estimate_total(input_tokens, output_tokens))
-        .unwrap_or(0.0)
-}
 
 // ─── CascadeRouter ──────────────────────────────────────────────────────────
 
@@ -1092,19 +94,6 @@ pub struct CascadeRouter {
     stage_tracking: Mutex<StageTracking>,
     /// Optional free-tier Gemini runner used for shadow evaluation.
     free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
-}
-
-/// Cached Pareto frontier state.
-#[derive(Debug, Clone, Default)]
-struct ParetoFrontierState {
-    frontier: Vec<String>,
-    bucket: u64,
-}
-
-#[derive(Debug, Clone)]
-struct StageTracking {
-    current: CascadeStage,
-    transitions: Vec<StageTransition>,
 }
 
 impl CascadeRouter {
@@ -1243,11 +232,6 @@ impl CascadeRouter {
     }
 
     /// Select a model for a given operating frequency.
-    ///
-    /// - `Gamma` returns `None` because reactive work is pure logic and should
-    ///   not dispatch an LLM turn.
-    /// - `Theta` uses the existing cascade router selection.
-    /// - `Delta` always uses the strongest available model in the router.
     #[must_use]
     pub fn select_for_frequency(
         &self,
@@ -1268,8 +252,6 @@ impl CascadeRouter {
     }
 
     /// Select a model for a given operating frequency from a candidate subset.
-    ///
-    /// When `candidates` is empty, the full router arm set is used.
     #[must_use]
     pub fn select_for_frequency_among(
         &self,
@@ -1312,13 +294,6 @@ impl CascadeRouter {
     }
 
     /// Return the strongest model currently available to the router.
-    ///
-    /// Preference order is premium > standard > fast. Within the same tier,
-    /// the first slug wins so the choice stays stable.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the router was constructed without any configured model slugs.
     #[must_use]
     pub fn strongest_model(&self) -> ModelSpec {
         let mut best_slug = self
@@ -1340,13 +315,6 @@ impl CascadeRouter {
     }
 
     /// Return the cheapest model currently available to the router.
-    ///
-    /// Preference order is fast < standard < premium. Within the same tier,
-    /// the first slug wins so the choice stays stable.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the router was constructed without any configured model slugs.
     #[must_use]
     pub fn cheapest_model(&self) -> ModelSpec {
         let mut best_slug = self
@@ -1515,10 +483,6 @@ impl CascadeRouter {
     }
 
     /// Route a context through the cascade and append a routing decision log.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the routing decision cannot be persisted.
     pub fn route_logged(
         &self,
         ctx: &RoutingContext,
@@ -1532,8 +496,7 @@ impl CascadeRouter {
         Ok((selected, record))
     }
 
-    /// Route a context through the cascade, overriding selection when a model
-    /// experiment is active for the current role and task category.
+    /// Route a context, overriding selection when a model experiment is active.
     pub fn route_with_experiments(
         &self,
         ctx: &RoutingContext,
@@ -1553,11 +516,7 @@ impl CascadeRouter {
         self.route(ctx)
     }
 
-    /// Route a context through the cascade, excluding models whose provider
-    /// is currently unavailable.
-    ///
-    /// Unknown providers are treated as available so unannotated models keep
-    /// participating in routing.
+    /// Route a context, excluding models whose provider is currently unavailable.
     pub fn route_with_health(
         &self,
         ctx: &RoutingContext,
@@ -1588,9 +547,6 @@ impl CascadeRouter {
     }
 
     /// Remove candidates whose provider is currently unhealthy.
-    ///
-    /// If every candidate is unhealthy, the least-unhealthy candidate is
-    /// retained so callers never receive an empty set.
     #[must_use]
     pub fn filter_unhealthy(
         &self,
@@ -1663,9 +619,6 @@ impl CascadeRouter {
     }
 
     /// Apply cost pressure to scored candidates.
-    ///
-    /// When `spike` is `true`, premium-tier models are heavily down-weighted
-    /// and fast models are nudged upward.
     pub fn apply_cost_pressure(&self, candidates: &mut [(String, f64)], spike: bool) {
         if !spike {
             return;
@@ -1676,14 +629,8 @@ impl CascadeRouter {
         }
     }
 
-    /// Route a context through the cascade, applying conductor routing bias
-    /// directly without going through the orchestrator (INT-09).
-    ///
-    /// Callers should convert the conductor's `RoutingBias` into this crate's
-    /// [`RoutingBias`] before calling. The bias filters deprioritized models
-    /// from the candidate set and biases remaining scores.
+    /// Route a context, applying conductor routing bias directly.
     pub fn route_with_bias(&self, ctx: &RoutingContext, bias: &RoutingBias) -> CascadeModel {
-        // Filter out deprioritized candidates.
         let candidates: Vec<String> = self
             .model_slugs
             .iter()
@@ -1692,7 +639,6 @@ impl CascadeRouter {
             .collect();
 
         if candidates.is_empty() {
-            // Fall back to unfiltered routing if everything was deprioritized.
             return self.route(ctx);
         }
 
@@ -1700,13 +646,6 @@ impl CascadeRouter {
     }
 
     /// Load static routing overrides from a JSON map of role labels to model slugs.
-    ///
-    /// Returns the number of overrides applied.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the override file cannot be read or if its
-    /// contents are not valid JSON.
     pub fn load_static_overrides(&self, path: &Path) -> std::io::Result<usize> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
@@ -1778,8 +717,7 @@ impl CascadeRouter {
         }
     }
 
-    /// Route a context through the cascade over a candidate subset,
-    /// optionally biasing by C-Factor.
+    /// Route a context through the cascade over a candidate subset.
     pub fn route_with_cfactor_among(
         &self,
         ctx: &RoutingContext,
@@ -1869,9 +807,6 @@ impl CascadeRouter {
     }
 
     /// Record an observation enriched with Perplexity search metadata.
-    ///
-    /// The request cost is estimated from the existing [`CostTable`] using the
-    /// model's token pricing plus any configured per-request fee.
     pub fn record_perplexity_observation(
         &self,
         ctx: &RoutingContext,
@@ -1937,15 +872,6 @@ impl CascadeRouter {
     }
 
     /// Record a binary outcome for `model_slug` without a full routing context.
-    ///
-    /// This is used by event-driven feedback paths that only know which model
-    /// produced the episode, not the original routing features.
-    ///
-    /// Only updates confidence-stage statistics (trials/successes), NOT the
-    /// `LinUCB` bandit. A zero-vector context would produce a rank-0 outer
-    /// product (`0 * 0^T = 0`), teaching `LinUCB` nothing while still
-    /// incrementing the observation counter and causing premature stage
-    /// transitions.
     pub fn record_outcome(&self, model_slug: &str, success: bool) -> bool {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return false;
@@ -1964,19 +890,7 @@ impl CascadeRouter {
         true
     }
 
-    /// Record the outcome of a manually-forced backend override (UX34).
-    ///
-    /// When a user or config forces a specific model via `force_backend`, this
-    /// method feeds the result back into the cascade so it learns which models
-    /// work well for which task categories.
-    ///
-    /// Unlike [`record_outcome`], this method accepts a [`RoutingContext`] so
-    /// the LinUCB bandit receives a proper feature vector. The reward is
-    /// dampened by [`OVERRIDE_LEARNING_RATE`] (0.5x) because override success
-    /// may reflect user knowledge rather than intrinsic model capability. This
-    /// prevents a single user preference from dominating the bandit's learned
-    /// weights while still allowing the signal to accumulate over many
-    /// observations.
+    /// Record a force_backend override outcome for learning (UX34).
     pub fn record_override_outcome(
         &self,
         model_slug: &str,
@@ -1986,30 +900,13 @@ impl CascadeRouter {
         let Some(model_idx) = self.model_index_for_slug(model_slug) else {
             return false;
         };
-
-        // Dampen the reward: overrides are biased by user preference, so we
-        // apply a smaller update than organic (router-chosen) selections.
         let raw_reward = if success { 1.0 } else { 0.0 };
         let dampened_reward = raw_reward * OVERRIDE_LEARNING_RATE;
-
-        self.observe_internal(
-            &ctx.to_features(),
-            model_idx,
-            dampened_reward,
-            success,
-            None,
-            None,
-        );
+        self.observe_internal(&ctx.to_features(), model_idx, dampened_reward, success, None, None);
         true
     }
 
     /// Run a shadow evaluation against a free-tier Gemini model.
-    ///
-    /// The shadow result never affects the primary task outcome. When the
-    /// shadow response is judged good enough relative to the primary result,
-    /// the router records a successful zero-cost observation for `free_model`.
-    /// Callers are expected to schedule this work in parallel with the main
-    /// request lifecycle.
     pub async fn shadow_evaluate(
         &mut self,
         prompt: &str,
@@ -2058,9 +955,6 @@ impl CascadeRouter {
     }
 
     /// Record a successful observation from a raw 18-dim context vector.
-    ///
-    /// This is the success-path entry point used by orchestration when the
-    /// caller already has the model index in the router's arm list.
     pub fn observe(&self, context_vec: Vec<f64>, model_idx: usize, reward: f64) {
         self.observe_internal(&context_vec, model_idx, reward, true, None, None);
     }
@@ -2181,9 +1075,6 @@ impl CascadeRouter {
     }
 
     /// Explain the current routing decision for `ctx`.
-    ///
-    /// If `candidates` is provided, scoring is restricted to that subset,
-    /// matching the behavior of provider-health filtering.
     pub fn explain_route(
         &self,
         ctx: &RoutingContext,
@@ -2326,21 +1217,6 @@ impl CascadeRouter {
     }
 
     /// Apply knowledge-informed routing advice to a routing explanation.
-    ///
-    /// This method takes pre-computed [`KnowledgeHint`]s (built by the caller
-    /// from the neuro `KnowledgeStore`) and folds them into the explanation's
-    /// candidate scores. The advice is also stored in the explanation for
-    /// observability.
-    ///
-    /// Score adjustment per candidate:
-    /// - Models with a positive knowledge hint get a confidence boost
-    ///   proportional to `hint.score` (capped at +0.20).
-    /// - Models with a negative hint (anti-knowledge) get a penalty
-    ///   proportional to `hint.score` (capped at -0.20).
-    /// - Models with no hint are unaffected.
-    ///
-    /// After adjusting scores the candidate list is re-sorted and the
-    /// `selected_slug` is updated if the top candidate changed.
     pub fn apply_knowledge_advice(
         &self,
         explanation: &mut CascadeRouteExplanation,
@@ -2350,23 +1226,15 @@ impl CascadeRouter {
             explanation.knowledge_advice = Some(advice);
             return;
         }
-
-        // Apply score adjustments to candidates.
         for candidate in &mut explanation.candidates {
             if let Some(hint) = advice.hint_for(&candidate.slug) {
                 let adjustment = hint.score.clamp(-0.20, 0.20);
                 candidate.score += adjustment;
             }
         }
-
-        // Re-sort candidates by adjusted score.
         explanation.candidates.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.slug.cmp(&b.slug))
+            b.score.total_cmp(&a.score).then_with(|| a.slug.cmp(&b.slug))
         });
-
-        // Update selected_slug if the top candidate changed.
         if let Some(new_top) = explanation.candidates.first() {
             if !slugs_match(&new_top.slug, &explanation.selected_slug) {
                 tracing::info!(
@@ -2375,25 +1243,16 @@ impl CascadeRouter {
                     "knowledge advice changed routing selection"
                 );
             }
-            // Mark the new top as selected, unmark the old.
             let new_top_slug = new_top.slug.clone();
             for c in &mut explanation.candidates {
                 c.selected = slugs_match(&c.slug, &new_top_slug);
             }
             explanation.selected_slug = new_top_slug;
         }
-
         explanation.knowledge_advice = Some(advice);
     }
 
     /// Append a routing decision log entry for a selected model.
-    ///
-    /// When `explanation` is absent, the selected model is recorded as the sole
-    /// candidate so callers can still emit a complete decision log.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the routing decision cannot be persisted.
     pub fn append_routing_log(
         &self,
         log: &RoutingLogger,
@@ -2502,16 +1361,6 @@ impl CascadeRouter {
     }
 
     /// Save confidence stats, model slugs, and total observation count to a JSON file.
-    ///
-    /// `LinUCB` arm weights are not persisted (they re-learn from new observations).
-    /// Confidence stats represent the accumulated pass-rate history needed for
-    /// stage-2 routing, and the total observation count determines which cascade
-    /// stage is active after reload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot cannot be serialized or if any
-    /// filesystem operation needed to write the snapshot fails.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         let stage_transitions = self.stage_tracking.lock().transitions.clone();
         let snapshot = CascadeSnapshot {
@@ -2548,7 +1397,6 @@ impl CascadeRouter {
             total_observations: self.linucb.total_observations(),
             stage_transitions,
         };
-        // TODO: migrate remaining atomic write sites to roko_fs::atomic_write_json
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if let Some(parent) = path.parent() {
@@ -2561,16 +1409,6 @@ impl CascadeRouter {
     }
 
     /// Load a cascade router from a persisted JSON file, or create a new one.
-    ///
-    /// If the file exists and parses correctly, the confidence stats are restored
-    /// for the current `model_slugs`. When a model slug changes version between
-    /// runs (for example `glm-5` -> `glm-5.1`), half of the old confidence stats
-    /// are seeded into the new slug. If the file doesn't exist or fails to parse,
-    /// a fresh router is created with the given `model_slugs`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `model_slugs` is empty and no persisted state exists.
     pub fn load_or_new(path: &Path, model_slugs: Vec<String>) -> Self {
         let snapshot = std::fs::read_to_string(path)
             .ok()
@@ -2625,9 +1463,6 @@ impl CascadeRouter {
                 }
                 drop(stats);
 
-                // Restore total observation count so the cascade stage is correct.
-                // If the snapshot predates the `total_observations` field (default 0),
-                // recompute from the sum of per-model trials.
                 let total = if total_observations > 0 {
                     total_observations
                 } else {
@@ -2650,6 +1485,20 @@ impl CascadeRouter {
             }
             None => Self::new(model_slugs),
         }
+    }
+
+    // ── Test-visible accessors for Pareto frontier ──────────────────
+
+    /// Return the current Pareto frontier bucket (for tests).
+    #[cfg(test)]
+    pub(crate) fn pareto_frontier_bucket(&self) -> u64 {
+        self.pareto_frontier.lock().bucket
+    }
+
+    /// Return the current Pareto frontier slugs (for tests).
+    #[cfg(test)]
+    pub(crate) fn pareto_frontier_slugs(&self) -> Vec<String> {
+        self.pareto_frontier.lock().frontier.clone()
     }
 
     // ── Internal routing per stage ──────────────────────────────────────
@@ -2686,15 +1535,7 @@ impl CascadeRouter {
             );
         }
 
-        // Fall back to the first configured model slug rather than a
-        // hardcoded model name so the router respects user configuration.
-        let default_slug = self
-            .model_slugs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
-
-        // For research tasks, prefer Perplexity Sonar when available.
+        let default_slug = self.model_slugs.first().cloned().unwrap_or_else(|| "claude-sonnet-4-5".to_string());
         let slug = if ctx.task_category == TaskCategory::Research {
             self.model_slugs
                 .iter()
@@ -2916,7 +1757,6 @@ impl CascadeRouter {
         self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
     }
 
-    /// Apply a C-Factor-based bias to a selected model.
     fn bias_model_for_cfactor(
         &self,
         model: ModelSpec,
@@ -2975,8 +1815,6 @@ impl CascadeRouter {
     fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
         let stats = self.confidence_stats.lock();
 
-        // Use tier-threshold-derived confidence boundary when available,
-        // falling back to the fixed LOW_AFFECT_CONFIDENCE_THRESHOLD.
         let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
         let low_confidence = ctx
             .tier_thresholds
@@ -3129,7 +1967,6 @@ impl CascadeRouter {
                                 pareto_latency_proxy(slug)
                             },
                             reliability: if model_stats.trials > 0 {
-                                // Non-error responses: successes + tolerable failures (not errors).
                                 model_stats.pass_rate().max(0.5)
                             } else {
                                 0.5
@@ -3155,17 +1992,6 @@ impl CascadeRouter {
     }
 
     /// Feed prediction residuals back into the router after task completion.
-    ///
-    /// This implements the TA-15 feedback loop: after a prediction is resolved,
-    /// the residual (predicted - actual) is used to update the routing model.
-    ///
-    /// - `model_slug`: the model that was routed to
-    /// - `predicted_success`: the predicted success probability at routing time
-    /// - `actual_success`: whether the task actually passed gates
-    /// - `residual`: `predicted_success - actual_outcome` (positive = overconfident)
-    ///
-    /// The method updates both the confidence-stage statistics and the LinUCB
-    /// bandit so that future routing decisions incorporate the prediction error.
     pub fn feedback(
         &self,
         model_slug: &str,
@@ -3177,15 +2003,10 @@ impl CascadeRouter {
             return;
         };
 
-        // Compute a reward modulated by prediction accuracy.
-        // A perfectly calibrated prediction (residual near 0) gets a bonus;
-        // a miscalibrated prediction (large |residual|) gets a penalty.
         let calibration_bonus = 1.0 - residual.abs().min(1.0);
         let base_reward = if actual_success { 1.0 } else { 0.0 };
         let adjusted_reward = (base_reward * 0.7 + calibration_bonus * 0.3).clamp(0.0, 1.0);
 
-        // Use observe_internal which updates both confidence stats and LinUCB
-        // in a single pass (avoids double-counting).
         let context_vec = vec![0.0; CONTEXT_DIM];
         self.observe_internal(
             &context_vec,
@@ -3196,14 +2017,10 @@ impl CascadeRouter {
             None,
         );
 
-        // Check for stage transition after accumulating new evidence.
         self.check_stage_transition();
     }
 
     /// Feed prediction residuals from a calibration tracker summary.
-    ///
-    /// Convenience method that extracts the relevant fields from a prediction
-    /// record and calls `feedback()`.
     pub fn feedback_from_prediction(
         &self,
         model_slug: &str,
@@ -3213,1985 +2030,5 @@ impl CascadeRouter {
         let actual_value = if actual_success { 1.0 } else { 0.0 };
         let residual = predicted_success - actual_value;
         self.feedback(model_slug, predicted_success, actual_success, residual);
-    }
-}
-
-fn pareto_adjusted_alpha(base_alpha: f64, slug: &str, frontier: &[String]) -> f64 {
-    if frontier.iter().any(|frontier_slug| frontier_slug == slug) {
-        base_alpha
-    } else {
-        base_alpha * 0.1
-    }
-}
-
-fn pareto_cost_proxy(slug: &str) -> f64 {
-    match slug_family(slug) {
-        Some("gemini-3.1-flash-lite-preview") => 0.9,
-        Some("gemini-3-flash-preview") => 1.5,
-        Some("haiku") => 1.0,
-        Some("sonnet") => 3.0,
-        Some("opus") => 9.0,
-        Some("kimi-k2") => 2.5,
-        _ => match slug_to_tier(slug) {
-            ModelTier::Fast => 1.0,
-            ModelTier::Premium => 9.0,
-            _ => 3.0,
-        },
-    }
-}
-
-fn pareto_latency_proxy(slug: &str) -> f64 {
-    default_latency_sla(slug_to_tier(slug)) as f64
-}
-
-fn is_free_tier_gemini_model(slug: &str) -> bool {
-    let slug = slug.to_ascii_lowercase();
-    slug.contains("gemini-2.5-flash")
-        || slug.contains("gemini-2.5-flash-lite")
-        || slug.contains("gemini-3-flash-preview")
-        || slug.contains("gemini-3.1-flash-lite-preview")
-}
-
-fn infer_shadow_routing_context(prompt: &str, primary_result: &AgentResult) -> RoutingContext {
-    let lower = prompt.to_ascii_lowercase();
-    let task_category = infer_task_category(&lower);
-    let complexity = infer_task_complexity(prompt, &lower);
-    let role = infer_shadow_role(task_category, complexity, &lower);
-
-    RoutingContext {
-        task_category,
-        complexity,
-        iteration: 0,
-        role,
-        crate_familiarity: 0.5,
-        has_prior_failure: !primary_result.success,
-        conductor_load: 0.0,
-        active_agents: 0,
-        ready_queue_depth: 0,
-        max_queue_wait_hours: 0.0,
-        // Shadow evaluation should compare alternate models against a neutral
-        // routing baseline. Reusing the primary outcome's affective state here
-        // would leak live dispatch bias into offline evaluation.
-        daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
-        thinking_level: None,
-        temperament: None,
-        previous_model: primary_result.output.tag("model").map(str::to_string),
-        plan_context_tokens: Some((prompt.len() as u64).div_ceil(4)),
-        tier_thresholds: None,
-    }
-}
-
-fn infer_task_category(lower_prompt: &str) -> TaskCategory {
-    if contains_any(
-        lower_prompt,
-        &["research", "investigate", "why", "citation", "source"],
-    ) {
-        TaskCategory::Research
-    } else if contains_any(
-        lower_prompt,
-        &["test", "verify", "assert", "failing", "regression"],
-    ) {
-        TaskCategory::Verification
-    } else if contains_any(
-        lower_prompt,
-        &["integrate", "integration", "wire up", "hook up", "connect"],
-    ) {
-        TaskCategory::Integration
-    } else if contains_any(lower_prompt, &["refactor", "cleanup", "rename", "extract"]) {
-        TaskCategory::Refactor
-    } else if contains_any(lower_prompt, &["doc", "readme", "documentation", "explain"]) {
-        TaskCategory::Docs
-    } else if contains_any(lower_prompt, &["ci", "cargo", "build", "deploy", "infra"]) {
-        TaskCategory::Infra
-    } else {
-        TaskCategory::Implementation
-    }
-}
-
-fn infer_task_complexity(prompt: &str, lower_prompt: &str) -> TaskComplexityBand {
-    let word_count = prompt.split_whitespace().count();
-
-    if contains_any(
-        lower_prompt,
-        &[
-            "architecture",
-            "cross-crate",
-            "multi-crate",
-            "end-to-end",
-            "system design",
-            "migration",
-        ],
-    ) || word_count > 250
-    {
-        TaskComplexityBand::Complex
-    } else if contains_any(
-        lower_prompt,
-        &[
-            "typo",
-            "format",
-            "lint",
-            "rename",
-            "small fix",
-            "single file",
-        ],
-    ) || word_count < 40
-    {
-        TaskComplexityBand::Fast
-    } else {
-        TaskComplexityBand::Standard
-    }
-}
-
-fn infer_shadow_role(
-    task_category: TaskCategory,
-    complexity: TaskComplexityBand,
-    lower_prompt: &str,
-) -> AgentRole {
-    match task_category {
-        TaskCategory::Research => AgentRole::Researcher,
-        TaskCategory::Docs => AgentRole::Scribe,
-        TaskCategory::Refactor => AgentRole::Refactorer,
-        TaskCategory::Integration => AgentRole::IntegrationTester,
-        TaskCategory::Verification => AgentRole::Auditor,
-        _ if complexity == TaskComplexityBand::Complex
-            || contains_any(lower_prompt, &["architecture", "design"]) =>
-        {
-            AgentRole::Architect
-        }
-        _ => AgentRole::Implementer,
-    }
-}
-
-fn shadow_quality_score(
-    prompt: &str,
-    primary_result: &AgentResult,
-    shadow_result: &AgentResult,
-) -> f64 {
-    if !shadow_result.success {
-        return 0.0;
-    }
-
-    let Some(shadow_text) = result_text(shadow_result) else {
-        return 0.0;
-    };
-
-    let prompt_requires_code = prompt_expects_code(prompt);
-    let shadow_has_code = output_contains_code(shadow_text);
-
-    let Some(primary_text) = result_text(primary_result) else {
-        let structure_score = if shadow_text.split_whitespace().count() >= 8 {
-            1.0_f64
-        } else {
-            0.5_f64
-        };
-        let code_score = if prompt_requires_code && !shadow_has_code {
-            0.0_f64
-        } else {
-            1.0_f64
-        };
-        return structure_score.mul_add(0.3, code_score * 0.7);
-    };
-
-    let primary_words = primary_text.split_whitespace().count().max(1);
-    let shadow_words = shadow_text.split_whitespace().count();
-    let length_score = (shadow_words as f64 / primary_words as f64).min(1.0);
-
-    let primary_has_code = output_contains_code(primary_text);
-    let code_score = if prompt_requires_code || primary_has_code {
-        if shadow_has_code { 1.0_f64 } else { 0.0_f64 }
-    } else {
-        1.0_f64
-    };
-
-    let primary_lines = primary_text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
-    let shadow_lines = shadow_text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
-    let structure_score = if primary_lines <= 1 {
-        1.0_f64
-    } else {
-        (shadow_lines as f64 / primary_lines as f64).min(1.0)
-    };
-
-    length_score.mul_add(0.6, code_score.mul_add(0.25, structure_score * 0.15))
-}
-
-fn result_text(result: &AgentResult) -> Option<&str> {
-    result
-        .output
-        .body
-        .as_text()
-        .ok()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-}
-
-fn prompt_expects_code(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    contains_any(
-        &lower,
-        &[
-            "code", "rust", "function", "impl", "struct", "test", "fix", "patch", "refactor",
-        ],
-    )
-}
-
-fn output_contains_code(text: &str) -> bool {
-    text.contains("```")
-        || text.contains("fn ")
-        || text.contains("impl ")
-        || text.contains("struct ")
-        || text.contains("enum ")
-        || text.contains("let ")
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-/// Determine the cascade stage from observation count.
-const fn stage_for_observations(obs: u64) -> CascadeStage {
-    if obs < COLD_START_THRESHOLD {
-        CascadeStage::Static
-    } else if obs < CONFIDENCE_TO_UCB_THRESHOLD {
-        CascadeStage::Confidence
-    } else {
-        CascadeStage::Ucb
-    }
-}
-
-// ─── Persistence ────────────────────────────────────────────────────────────
-
-/// Persisted snapshot of cascade router state.
-#[derive(Serialize, Deserialize)]
-struct CascadeSnapshot {
-    model_slugs: Vec<String>,
-    #[serde(default)]
-    role_table: HashMap<AgentRole, String>,
-    confidence_stats: HashMap<String, PersistedModelStats>,
-    /// Total observations across all models (used to restore cascade stage).
-    ///
-    /// Defaults to 0 for backward compatibility with snapshots written before
-    /// this field was added; in that case `load_or_new` recomputes the total
-    /// from the sum of per-model trials.
-    #[serde(default)]
-    total_observations: u64,
-    #[serde(default)]
-    stage_transitions: Vec<StageTransition>,
-}
-
-/// Serializable form of per-model confidence stats.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-struct PersistedModelStats {
-    trials: u64,
-    successes: u64,
-    #[serde(default)]
-    total_citations: u64,
-    #[serde(default)]
-    total_search_latency_ms: u64,
-    #[serde(default)]
-    total_cost_usd: f64,
-    #[serde(default)]
-    perplexity_requests: u64,
-    #[serde(default)]
-    total_gemini_thinking_tokens: u64,
-    #[serde(default)]
-    total_gemini_cached_tokens: u64,
-    #[serde(default)]
-    total_gemini_grounding_queries: u64,
-    #[serde(default)]
-    gemini_code_execution_successes: u64,
-    #[serde(default)]
-    gemini_code_execution_failures: u64,
-    #[serde(default)]
-    gemini_context_window_le_200k_requests: u64,
-    #[serde(default)]
-    gemini_context_window_gt_200k_requests: u64,
-    #[serde(default)]
-    gemini_requests: u64,
-}
-
-impl PersistedModelStats {
-    fn weighted_half(self) -> Self {
-        Self {
-            trials: self.trials / 2,
-            successes: self.successes / 2,
-            ..self
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VersionChange {
-    Added(String),
-    Removed(String),
-    Upgraded { old: String, new: String },
-}
-
-fn detect_version_changes(
-    persisted_slugs: &[String],
-    current_slugs: &[String],
-) -> Vec<VersionChange> {
-    let mut changes = Vec::new();
-    let persisted_set: HashSet<&str> = persisted_slugs.iter().map(String::as_str).collect();
-    let current_set: HashSet<&str> = current_slugs.iter().map(String::as_str).collect();
-
-    for slug in current_slugs {
-        if !persisted_set.contains(slug.as_str()) {
-            let prefix = slug
-                .rsplit_once('-')
-                .map_or(slug.as_str(), |(prefix, _)| prefix);
-            if let Some(old) = persisted_slugs
-                .iter()
-                .find(|candidate| candidate.starts_with(prefix))
-            {
-                changes.push(VersionChange::Upgraded {
-                    old: old.clone(),
-                    new: slug.clone(),
-                });
-            } else {
-                changes.push(VersionChange::Added(slug.clone()));
-            }
-        }
-    }
-
-    for slug in persisted_slugs {
-        if !current_set.contains(slug.as_str()) {
-            changes.push(VersionChange::Removed(slug.clone()));
-        }
-    }
-
-    changes
-}
-
-fn migrated_confidence_stats(
-    persisted_stats: &HashMap<String, PersistedModelStats>,
-    changes: &[VersionChange],
-    active_slugs: &[String],
-) -> HashMap<String, PersistedModelStats> {
-    let active_set: HashSet<&str> = active_slugs.iter().map(String::as_str).collect();
-    let mut migrated = persisted_stats
-        .iter()
-        .filter(|(slug, _)| active_set.contains(slug.as_str()))
-        .map(|(slug, stats)| (slug.clone(), *stats))
-        .collect::<HashMap<_, _>>();
-
-    for change in changes {
-        if let VersionChange::Upgraded { old, new } = change {
-            let Some(old_stats) = persisted_stats.get(old) else {
-                continue;
-            };
-            let transferred = old_stats.weighted_half();
-            if transferred.trials == 0 && transferred.successes == 0 {
-                continue;
-            }
-
-            let entry = migrated
-                .entry(new.clone())
-                .or_insert(PersistedModelStats::default());
-            entry.trials += transferred.trials;
-            entry.successes += transferred.successes;
-        }
-    }
-
-    migrated
-}
-
-fn remap_role_table_entry(slug: String, changes: &[VersionChange]) -> String {
-    for change in changes {
-        if let VersionChange::Upgraded { old, new } = change {
-            if slug == *old {
-                return new.clone();
-            }
-        }
-    }
-
-    slug
-}
-
-// ─── Tests ────────────────────────────────────────��─────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model_experiment::{ModelExperiment, ModelExperimentStore, ModelVariant};
-    use crate::prompt_experiment::ExperimentStatus;
-    use crate::provider_health::{ErrorClass, ProviderHealthRegistry};
-    use crate::routing_log::{RoutingDecisionMeta, RoutingLogger};
-    use async_trait::async_trait;
-    use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
-    use roko_core::task::{TaskCategory, TaskComplexityBand};
-    use roko_core::{Body, Engram, Kind};
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use tempfile::tempdir;
-
-    fn test_slugs() -> Vec<String> {
-        vec![
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-            "claude-opus-4".to_string(),
-        ]
-    }
-
-    fn default_ctx() -> RoutingContext {
-        RoutingContext {
-            task_category: TaskCategory::Implementation,
-            complexity: TaskComplexityBand::Standard,
-            iteration: 0,
-            role: AgentRole::Implementer,
-            crate_familiarity: 0.5,
-            has_prior_failure: false,
-            conductor_load: 0.0,
-            active_agents: 0,
-            ready_queue_depth: 0,
-            max_queue_wait_hours: 0.0,
-            daimon_policy: DaimonPolicy::new(0.5, BehavioralState::Engaged),
-            thinking_level: None,
-            temperament: None,
-            previous_model: None,
-            plan_context_tokens: None,
-            tier_thresholds: None,
-        }
-    }
-
-    struct StubShadowRunner {
-        result: AgentResult,
-    }
-
-    #[async_trait]
-    impl ShadowModelRunner for StubShadowRunner {
-        async fn run_shadow(&self, _prompt: &str, _model_slug: &str) -> AgentResult {
-            self.result.clone()
-        }
-    }
-
-    fn agent_result(text: &str, success: bool, model: &str, wall_ms: u64) -> AgentResult {
-        let output = Engram::builder(Kind::AgentOutput)
-            .body(Body::text(text))
-            .tag("model", model)
-            .build();
-
-        let usage = roko_agent::Usage {
-            wall_ms,
-            ..Default::default()
-        };
-
-        if success {
-            AgentResult::ok(output).with_usage(usage)
-        } else {
-            AgentResult::fail(output).with_usage(usage)
-        }
-    }
-
-    // ── Test 1: starts in Static stage ──────────────────────────────────
-
-    #[test]
-    fn starts_in_static_stage() {
-        let cascade = CascadeRouter::new(test_slugs());
-        assert_eq!(cascade.current_stage(), CascadeStage::Static);
-    }
-
-    // ── Test 2: static stage uses role table ────────────────────────────
-
-    #[test]
-    fn static_stage_uses_role_table() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let result = cascade.route(&ctx);
-
-        // Implementer has Standard tier -> sonnet
-        assert_eq!(result.stage, CascadeStage::Static);
-        assert_eq!(result.primary.slug, "claude-sonnet-4-5");
-    }
-
-    // ── Test 3: static stage gives correct fallback ─────────────────────
-
-    #[test]
-    fn static_stage_fallback_chain_for_standard() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let result = cascade.route(&ctx);
-
-        assert_eq!(result.fallback_chain.len(), 2);
-        assert_eq!(result.fallback_chain[0].slug, "claude-haiku-3-5");
-        assert_eq!(result.fallback_chain[1].slug, "claude-opus-4");
-        assert_eq!(
-            result.context_overflow_fallback.as_ref().unwrap().slug,
-            "claude-opus-4"
-        );
-    }
-
-    #[test]
-    fn append_routing_log_records_candidates() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let explanation = cascade.explain_route(&ctx, None);
-        let tmp = TempDir::new().expect("tempdir");
-        let path = tmp.path().join("routing.jsonl");
-        let logger = RoutingLogger::open_creating(&path)
-            .expect("logger")
-            .with_model_providers(HashMap::from([
-                ("claude-haiku-3-5".to_string(), "anthropic".to_string()),
-                ("claude-sonnet-4-5".to_string(), "anthropic".to_string()),
-                ("claude-opus-4".to_string(), "anthropic".to_string()),
-            ]));
-        let meta = RoutingDecisionMeta {
-            trace_id: "trace-123".to_string(),
-            task_id: "task-2m14".to_string(),
-            requested_model: "claude-sonnet-4-5".to_string(),
-            role: "implementer".to_string(),
-            task_complexity: "standard".to_string(),
-            task_category: "implementation".to_string(),
-            routing_stage: explanation.stage.label().to_string(),
-            routing_reason: "role_default".to_string(),
-        };
-
-        let record = cascade
-            .append_routing_log(&logger, &meta, "claude-sonnet-4-5", Some(&explanation))
-            .expect("append routing log");
-
-        assert_eq!(record.selected_model, "claude-sonnet-4-5");
-        assert!(!record.candidates.is_empty());
-        let stored = std::fs::read_to_string(&path).expect("read log");
-        let entry: serde_json::Value = serde_json::from_str(stored.trim()).expect("parse json");
-        assert_eq!(entry["task_id"], "task-2m14");
-    }
-
-    #[test]
-    fn experiment_override_for_active_model_experiment() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        let mut store = ModelExperimentStore::default();
-        store.register(ModelExperiment {
-            experiment_id: "impl-model-ab".into(),
-            description: "Override implementer implementation routing".into(),
-            role: Some("implementer".into()),
-            task_category: Some("implementation".into()),
-            variants: vec![ModelVariant {
-                id: "override".into(),
-                model_key: "override-model".into(),
-                slug: "override-model-slug".into(),
-                provider: "test-provider".into(),
-            }],
-            stats: HashMap::new(),
-            status: ExperimentStatus::Running,
-            winner_id: None,
-            min_trials_per_variant: 1,
-            min_effect_size: 0.05,
-            created_at: "2026-04-11T00:00:00Z".into(),
-        });
-
-        let routed = cascade.route_with_experiments(&ctx, &store);
-
-        assert_eq!(routed.primary.slug, "override-model-slug");
-        assert!(routed.fallback_chain.is_empty());
-        assert_eq!(routed.context_overflow_fallback, None);
-        assert_eq!(routed.latency_sla_ms, 30_000);
-        assert_eq!(routed.stage, CascadeStage::Static);
-    }
-
-    // ── Test 4: fast tier has no fallback ────────────────────────────────
-
-    #[test]
-    fn fast_tier_no_fallback() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Conductor; // Fast tier
-
-        let result = cascade.route(&ctx);
-        assert!(result.fallback_chain.is_empty());
-    }
-
-    // ── Test 5: transitions to Confidence at 50 observations ────────────
-
-    #[test]
-    fn transitions_to_confidence_stage() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        // Feed 50 observations to cross the threshold.
-        for _ in 0..50 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
-        let result = cascade.route(&ctx);
-        assert_eq!(result.stage, CascadeStage::Confidence);
-    }
-
-    // ── Test 6: transitions to UCB at 200 observations ──────────────────
-
-    #[test]
-    fn transitions_to_ucb_stage() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        // Feed 200 observations.
-        for _ in 0..200 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
-        let result = cascade.route(&ctx);
-        assert_eq!(result.stage, CascadeStage::Ucb);
-    }
-
-    #[test]
-    fn stage_transition_logging() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let before = Utc::now();
-
-        for _ in 0..50 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        }
-
-        let transitions = cascade.stage_transitions();
-        assert_eq!(transitions.len(), 1);
-        assert_eq!(
-            transitions[0],
-            StageTransition {
-                from: CascadeStage::Static,
-                to: CascadeStage::Confidence,
-                observations: 50,
-                timestamp: transitions[0].timestamp,
-            }
-        );
-        assert!(transitions[0].timestamp >= before);
-
-        for _ in 0..150 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        }
-
-        let transitions = cascade.stage_transitions();
-        assert_eq!(transitions.len(), 2);
-        assert_eq!(
-            transitions[1],
-            StageTransition {
-                from: CascadeStage::Confidence,
-                to: CascadeStage::Ucb,
-                observations: 200,
-                timestamp: transitions[1].timestamp,
-            }
-        );
-        assert!(transitions[1].timestamp >= transitions[0].timestamp);
-
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("cascade-router.json");
-        cascade.save(&path).unwrap();
-
-        let reloaded = CascadeRouter::load_or_new(&path, test_slugs());
-        assert_eq!(reloaded.current_stage(), CascadeStage::Ucb);
-        assert_eq!(reloaded.stage_transitions(), transitions);
-    }
-
-    // ── Test 7: confidence stage prefers high-success model ─────────────
-
-    #[test]
-    fn confidence_stage_prefers_high_success_model() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        // Build up observations: sonnet mostly succeeds, haiku mostly fails.
-        for i in 0..80 {
-            if i < 25 {
-                cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
-            } else if i < 50 {
-                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
-            } else if i < 65 {
-                cascade.record_observation(&ctx, "claude-haiku-3-5", 0.2, false);
-            } else {
-                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
-            }
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
-
-        let result = cascade.route(&ctx);
-        // Sonnet should have higher upper bound than haiku
-        // (sonnet: 25/25 = 100%, haiku: 0/40 = 0%)
-        assert_eq!(
-            result.primary.slug, "claude-sonnet-4-5",
-            "confidence stage should prefer the high-pass-rate model"
-        );
-    }
-
-    // ── Test 7b: low affect confidence biases toward stronger model ──────
-
-    #[test]
-    fn low_affect_confidence_prefers_opus_over_sonnet() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-
-        for _ in 0..30 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.9, true);
-        }
-        for _ in 0..15 {
-            cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
-        }
-        for _ in 0..5 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
-        }
-        for _ in 0..5 {
-            cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
-
-        ctx.daimon_policy.affect_confidence = 0.2;
-        let low_confidence = cascade.route(&ctx);
-        assert_eq!(
-            low_confidence.primary.slug, "claude-opus-4",
-            "low affect confidence should bias toward the stronger premium model"
-        );
-
-        ctx.daimon_policy.affect_confidence = 0.9;
-        let high_confidence = cascade.route(&ctx);
-        // High confidence allows routing to cheaper models
-        assert!(
-            ["claude-haiku-3-5", "claude-sonnet-4-5"]
-                .contains(&high_confidence.primary.slug.as_str()),
-            "high confidence should allow cheaper model, got: {}",
-            high_confidence.primary.slug
-        );
-    }
-
-    #[test]
-    fn behavioral_state_biases_static_routing() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-
-        ctx.daimon_policy.behavioral_state = BehavioralState::Struggling;
-        let struggling = cascade.route(&ctx);
-        assert_eq!(struggling.primary.slug, "claude-opus-4");
-
-        ctx.daimon_policy.behavioral_state = BehavioralState::Coasting;
-        let coasting = cascade.route(&ctx);
-        assert_eq!(coasting.primary.slug, "claude-haiku-3-5");
-    }
-
-    #[test]
-    fn conductor_load_biases_static_routing_toward_cheaper_models() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-
-        ctx.conductor_load = 0.75;
-        ctx.active_agents = 4;
-        ctx.ready_queue_depth = 3;
-
-        let routed = cascade.route(&ctx);
-        assert_eq!(routed.primary.slug, "claude-haiku-3-5");
-    }
-
-    #[test]
-    fn critical_conductor_load_can_drop_two_tiers() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Architect;
-        ctx.conductor_load = 0.95;
-        ctx.active_agents = 6;
-        ctx.ready_queue_depth = 5;
-        ctx.max_queue_wait_hours = 2.0;
-
-        let routed = cascade.route(&ctx);
-        assert_eq!(routed.primary.slug, "claude-haiku-3-5");
-    }
-
-    #[test]
-    fn cache_affinity_bonus() {
-        let cascade = CascadeRouter::new(vec![
-            "claude-sonnet-4-5".to_string(),
-            "claude-sonnet-4-6".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-
-        for _ in 0..80 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        }
-        for _ in 0..10 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.2, false);
-        }
-        for _ in 0..82 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-6", 0.8, true);
-        }
-        for _ in 0..8 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-6", 0.2, false);
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
-
-        let no_affinity = cascade.route(&ctx);
-        assert_eq!(no_affinity.primary.slug, "claude-sonnet-4-6");
-
-        ctx.previous_model = Some("claude-sonnet-4-5".to_string());
-        let with_affinity = cascade.route(&ctx);
-        assert_eq!(with_affinity.primary.slug, "claude-sonnet-4-5");
-    }
-
-    #[test]
-    fn routing_hysteresis_keeps_incumbent_below_threshold() {
-        let candidates = vec![
-            ("claude-sonnet-4-5".to_string(), 0.82),
-            ("claude-sonnet-4-6".to_string(), 0.91),
-        ];
-
-        assert_eq!(
-            select_with_hysteresis(&candidates, Some("claude-sonnet-4-5")),
-            "claude-sonnet-4-5"
-        );
-    }
-
-    #[test]
-    fn routing_hysteresis_switches_at_threshold() {
-        let candidates = vec![
-            ("claude-sonnet-4-5".to_string(), 0.82),
-            ("claude-sonnet-4-6".to_string(), 0.92),
-        ];
-
-        assert_eq!(
-            select_with_hysteresis(&candidates, Some("claude-sonnet-4-5")),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    // ── Test 7c: health-aware routing skips unhealthy providers ─────────
-
-    #[test]
-    fn cascade_health_aware_excludes_unhealthy_provider_models() {
-        let cascade = CascadeRouter::new(vec![
-            "claude-sonnet-4-5".to_string(),
-            "claude-opus-4".to_string(),
-        ]);
-        let ctx = default_ctx();
-
-        // Push the router into UCB so the candidate-aware LinUCB path is exercised.
-        for _ in 0..200 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 1.0, true);
-        }
-        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
-        assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-5");
-
-        let health = ProviderHealthRegistry::new();
-        for _ in 0..3 {
-            health.record_failure("anthropic", ErrorClass::ServerError);
-        }
-
-        let mut model_providers = HashMap::new();
-        model_providers.insert("claude-sonnet-4-5".to_string(), "anthropic".to_string());
-        model_providers.insert("claude-opus-4".to_string(), "openai".to_string());
-
-        let routed = cascade.route_with_health(&ctx, &health, &model_providers);
-        assert_eq!(
-            routed.primary.slug, "claude-opus-4",
-            "unhealthy providers should be excluded from cascade selection"
-        );
-    }
-
-    // ── Test 8: stage labels are correct ────────────────────────────────
-
-    #[test]
-    fn stage_labels() {
-        assert_eq!(CascadeStage::Static.label(), "static");
-        assert_eq!(CascadeStage::Confidence.label(), "confidence");
-        assert_eq!(CascadeStage::Ucb.label(), "ucb");
-    }
-
-    // ── Test 9: frequency routing follows the frequency policy ─────────
-
-    #[test]
-    fn frequency_routing_uses_expected_policy() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        assert_eq!(
-            cascade.select_for_frequency(OperatingFrequency::Gamma, Some(&ctx), None, None),
-            None
-        );
-
-        let theta = cascade
-            .select_for_frequency(OperatingFrequency::Theta, Some(&ctx), None, None)
-            .expect("theta should route");
-        assert_eq!(theta.slug, "claude-sonnet-4-5");
-
-        let delta = cascade
-            .select_for_frequency(OperatingFrequency::Delta, Some(&ctx), None, None)
-            .expect("delta should route");
-        assert_eq!(delta.slug, "claude-opus-4");
-    }
-
-    #[test]
-    fn high_cfactor_prefers_cheapest_model() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let cfactor = CFactor {
-            overall: 0.9,
-            ..CFactor::default()
-        };
-
-        let selected = cascade
-            .select_for_frequency(
-                OperatingFrequency::Theta,
-                Some(&ctx),
-                Some(&cfactor),
-                Some("Implementer"),
-            )
-            .expect("theta should route");
-
-        assert_eq!(selected.slug, "claude-haiku-3-5");
-    }
-
-    #[test]
-    fn low_cfactor_prefers_strongest_model() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-        let cfactor = CFactor {
-            overall: 0.2,
-            ..CFactor::default()
-        };
-
-        let selected = cascade
-            .select_for_frequency(
-                OperatingFrequency::Theta,
-                Some(&ctx),
-                Some(&cfactor),
-                Some("Implementer"),
-            )
-            .expect("theta should route");
-
-        assert_eq!(selected.slug, "claude-opus-4");
-    }
-
-    #[test]
-    fn strongest_model_falls_back_to_best_available_slug() {
-        let cascade = CascadeRouter::new(vec![
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-
-        assert_eq!(cascade.strongest_model().slug, "claude-sonnet-4-5");
-    }
-
-    // ── Test 11: observation count is consistent ────────────────────────
-
-    #[test]
-    fn observation_count_tracks_correctly() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        assert_eq!(cascade.total_observations(), 0);
-
-        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        cascade.record_observation(&ctx, "claude-haiku-3-5", 0.3, false);
-        cascade.record_observation(&ctx, "claude-opus-4", 0.9, true);
-
-        assert_eq!(cascade.total_observations(), 3);
-    }
-
-    // ── Test 12: confidence snapshot tracks trials ──────────────────────
-
-    #[test]
-    fn confidence_snapshot_accurate() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.8, true);
-        cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.5, false);
-        cascade.record_observation(&ctx, "claude-haiku-3-5", 0.9, true);
-
-        let snap = cascade.confidence_snapshot();
-        assert_eq!(snap.get("claude-sonnet-4-5"), Some(&(2, 1)));
-        assert_eq!(snap.get("claude-haiku-3-5"), Some(&(1, 1)));
-    }
-
-    // ── Test 11: latency SLA varies by tier ─────────────────────────────
-
-    #[test]
-    fn latency_sla_by_tier() {
-        let cascade = CascadeRouter::new(test_slugs());
-
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Conductor; // Fast
-        let fast = cascade.route(&ctx);
-
-        ctx.role = AgentRole::Implementer; // Standard
-        let standard = cascade.route(&ctx);
-
-        ctx.role = AgentRole::Architect; // Premium
-        let premium = cascade.route(&ctx);
-
-        assert!(fast.latency_sla_ms < standard.latency_sla_ms);
-        assert!(standard.latency_sla_ms < premium.latency_sla_ms);
-    }
-
-    // ── Test 12: stage_for_observations boundaries ──────────────────────
-
-    #[test]
-    fn stage_boundaries() {
-        assert_eq!(stage_for_observations(0), CascadeStage::Static);
-        assert_eq!(stage_for_observations(49), CascadeStage::Static);
-        assert_eq!(stage_for_observations(50), CascadeStage::Confidence);
-        assert_eq!(stage_for_observations(199), CascadeStage::Confidence);
-        assert_eq!(stage_for_observations(200), CascadeStage::Ucb);
-        assert_eq!(stage_for_observations(1000), CascadeStage::Ucb);
-    }
-
-    // ── Test 13: model_stats pass_rate computation ──────────────────────
-
-    #[test]
-    fn model_stats_pass_rate() {
-        let mut s = ModelStats::default();
-        assert!((s.pass_rate() - 0.0).abs() < f64::EPSILON);
-
-        s.trials = 10;
-        s.successes = 7;
-        assert!((s.pass_rate() - 0.7).abs() < f64::EPSILON);
-    }
-
-    // ── Test 14: confidence width shrinks with more data ────────────────
-
-    #[test]
-    fn confidence_width_shrinks() {
-        let s10 = ModelStats {
-            trials: 10,
-            successes: 7,
-            ..ModelStats::default()
-        };
-        let s100 = ModelStats {
-            trials: 100,
-            successes: 70,
-            ..ModelStats::default()
-        };
-        let s1000 = ModelStats {
-            trials: 1000,
-            successes: 700,
-            ..ModelStats::default()
-        };
-
-        assert!(s10.confidence_width() > s100.confidence_width());
-        assert!(s100.confidence_width() > s1000.confidence_width());
-    }
-
-    // ── Test 15: premium role uses opus in static stage ─────────────────
-
-    #[test]
-    fn premium_role_gets_opus() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Architect; // Premium tier
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "claude-opus-4");
-        assert_eq!(result.fallback_chain[0].slug, "claude-sonnet-4-5");
-        assert_eq!(result.fallback_chain[1].slug, "claude-haiku-3-5");
-        assert_eq!(result.context_overflow_fallback, None);
-    }
-
-    #[test]
-    fn fallback_chain_tries_each_model_in_order() {
-        let cascade = CascadeModel {
-            primary: ModelSpec::from_slug("primary-model"),
-            fallback_chain: vec![
-                ModelSpec::from_slug("fallback-1"),
-                ModelSpec::from_slug("fallback-2"),
-                ModelSpec::from_slug("fallback-3"),
-            ],
-            context_overflow_fallback: Some(ModelSpec::from_slug("larger-context")),
-            latency_sla_ms: 30_000,
-            stage: CascadeStage::Static,
-        };
-
-        assert_eq!(cascade.model_for_attempt(0).unwrap().slug, "primary-model");
-        assert_eq!(cascade.model_for_attempt(1).unwrap().slug, "fallback-1");
-        assert_eq!(cascade.model_for_attempt(2).unwrap().slug, "fallback-2");
-        assert_eq!(cascade.model_for_attempt(3).unwrap().slug, "fallback-3");
-        assert!(cascade.model_for_attempt(4).is_none());
-    }
-
-    #[test]
-    fn error_specific_fallback_routes_by_error_type() {
-        let cascade = CascadeModel {
-            primary: ModelSpec::from_slug("gpt-5"),
-            fallback_chain: vec![
-                ModelSpec::from_slug("glm-5.1"),
-                ModelSpec::from_slug("claude-sonnet-4-5"),
-                ModelSpec::from_slug("ollama/llama3"),
-            ],
-            context_overflow_fallback: Some(ModelSpec::from_slug("claude-opus-4")),
-            latency_sla_ms: 30_000,
-            stage: CascadeStage::Static,
-        };
-
-        assert_eq!(
-            cascade
-                .fallback_for_error(&ProviderError::ContextOverflow)
-                .unwrap()
-                .slug,
-            "claude-opus-4"
-        );
-        assert_eq!(
-            cascade
-                .fallback_for_error(&ProviderError::RateLimit {
-                    retry_after_ms: Some(1_000),
-                })
-                .unwrap()
-                .slug,
-            "claude-sonnet-4-5"
-        );
-        assert_eq!(
-            cascade
-                .fallback_for_error(&ProviderError::ServerError(503))
-                .unwrap()
-                .slug,
-            "glm-5.1"
-        );
-    }
-
-    // ── Test 16: display impl for CascadeStage ──────────────────────────
-
-    #[test]
-    fn cascade_stage_display() {
-        assert_eq!(format!("{}", CascadeStage::Static), "static");
-        assert_eq!(format!("{}", CascadeStage::Ucb), "ucb");
-    }
-
-    // ── Test 17: custom role table ──────────────────────────────────────
-
-    #[test]
-    fn custom_role_table() {
-        let mut table = HashMap::new();
-        table.insert(AgentRole::Implementer, "gpt-5".to_string());
-
-        let cascade = CascadeRouter::new(test_slugs()).with_role_table(table);
-        let ctx = default_ctx();
-        let result = cascade.route(&ctx);
-
-        assert_eq!(result.primary.slug, "gpt-5");
-    }
-
-    #[test]
-    fn version_change_detection_detects_glm_upgrade() {
-        let changes = detect_version_changes(&["glm-5".to_string()], &["glm-5.1".to_string()]);
-
-        assert!(changes.contains(&VersionChange::Upgraded {
-            old: "glm-5".to_string(),
-            new: "glm-5.1".to_string(),
-        }));
-    }
-
-    #[test]
-    fn version_change_detection_transfers_weighted_stats_on_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cascade-router.json");
-        let snapshot = CascadeSnapshot {
-            model_slugs: vec!["glm-5".to_string()],
-            confidence_stats: HashMap::from([(
-                "glm-5".to_string(),
-                PersistedModelStats {
-                    trials: 10,
-                    successes: 6,
-                    ..Default::default()
-                },
-            )]),
-            total_observations: 10,
-            role_table: HashMap::new(),
-            stage_transitions: vec![],
-        };
-        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
-
-        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
-        let stats = loaded.confidence_snapshot();
-
-        assert_eq!(stats.get("glm-5.1"), Some(&(5, 3)));
-        assert!(!stats.contains_key("glm-5"));
-        assert_eq!(loaded.total_observations(), 10);
-    }
-
-    #[test]
-    fn version_change_detection_remaps_role_table_upgrade() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cascade-router.json");
-        let snapshot = CascadeSnapshot {
-            model_slugs: vec!["glm-5".to_string()],
-            confidence_stats: HashMap::new(),
-            total_observations: 0,
-            role_table: HashMap::from([(AgentRole::Implementer, "glm-5".to_string())]),
-            stage_transitions: vec![],
-        };
-        std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
-
-        let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
-        let routed = loaded.route(&default_ctx());
-
-        assert_eq!(routed.primary.slug, "glm-5.1");
-    }
-
-    #[test]
-    fn cascade_router_kimi_selects_kimi_in_static_stage() {
-        let cascade = CascadeRouter::new(vec!["kimi-k2.5".to_string()]);
-        let ctx = default_ctx();
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.stage, CascadeStage::Static);
-        assert_eq!(result.primary.slug, "kimi-k2.5");
-    }
-
-    #[test]
-    fn cascade_gemini_routes_configured_fast_standard_and_premium_models() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-flash-lite".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gemini-3.1-pro-preview".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-
-        ctx.role = AgentRole::Conductor;
-        let fast = cascade.route(&ctx);
-        assert_eq!(fast.primary.slug, "gemini-2.5-flash-lite");
-        assert!(fast.fallback_chain.is_empty());
-
-        ctx.role = AgentRole::Implementer;
-        let standard = cascade.route(&ctx);
-        assert_eq!(standard.primary.slug, "gemini-2.5-flash");
-        assert_eq!(
-            standard
-                .fallback_chain
-                .first()
-                .expect("standard fallback")
-                .slug,
-            "gemini-2.5-flash-lite"
-        );
-
-        ctx.role = AgentRole::Architect;
-        let premium = cascade.route(&ctx);
-        assert_eq!(premium.primary.slug, "gemini-3.1-pro-preview");
-        assert_eq!(
-            premium
-                .fallback_chain
-                .first()
-                .expect("premium fallback")
-                .slug,
-            "gemini-2.5-flash"
-        );
-    }
-
-    #[test]
-    fn cascade_gemini_prefers_opus_for_premium_when_available() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-flash-lite".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-            "gemini-3.1-pro-preview".to_string(),
-            "claude-opus-4".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Architect;
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "claude-opus-4");
-    }
-
-    #[test]
-    fn cascade_gemini_matches_openrouter_slug_families() {
-        let cascade = CascadeRouter::new(vec![
-            "google/gemini-2.5-flash-lite".to_string(),
-            "google/gemini-2.5-flash".to_string(),
-            "google/gemini-3.1-pro-preview".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-
-        ctx.role = AgentRole::Conductor;
-        assert_eq!(
-            cascade.route(&ctx).primary.slug,
-            "google/gemini-2.5-flash-lite"
-        );
-
-        ctx.role = AgentRole::Implementer;
-        assert_eq!(cascade.route(&ctx).primary.slug, "google/gemini-2.5-flash");
-
-        ctx.role = AgentRole::Architect;
-        assert_eq!(
-            cascade.route(&ctx).primary.slug,
-            "google/gemini-3.1-pro-preview"
-        );
-    }
-
-    #[test]
-    fn routing_context_thinking_high_prefers_thinking_models() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-flash-lite".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-        ctx.complexity = TaskComplexityBand::Complex;
-        ctx.thinking_level = Some("high".to_string());
-
-        let result = cascade.route(&ctx);
-        assert_ne!(result.primary.slug, "gemini-2.5-flash-lite");
-        assert!(model_supports_thinking(&result.primary.slug));
-    }
-
-    #[test]
-    fn routing_context_thinking_minimal_prefers_non_thinking_models() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-flash-lite".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-        ctx.thinking_level = Some("minimal".to_string());
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "gemini-2.5-flash-lite");
-    }
-
-    #[test]
-    fn conservative_temperament_biases_static_routing_toward_stronger_tiers() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx().with_temperament(Temperament::Conservative);
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "claude-opus-4");
-    }
-
-    #[test]
-    fn aggressive_temperament_biases_static_routing_toward_cheaper_tiers() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx().with_temperament(Temperament::Aggressive);
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "claude-haiku-3-5");
-    }
-
-    #[tokio::test]
-    async fn shadow_evaluate_records_observation_for_passing_free_model() {
-        let primary = agent_result(
-            "```rust\nfn answer() -> u32 { 42 }\n```",
-            true,
-            "gemini-2.5-pro",
-            900,
-        );
-        let shadow = agent_result(
-            "```rust\nfn answer() -> u32 { 42 }\n```",
-            true,
-            "gemini-2.5-flash-lite",
-            120,
-        );
-        let mut cascade = CascadeRouter::new(vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash-lite".to_string(),
-        ])
-        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner { result: shadow }));
-
-        cascade
-            .shadow_evaluate(
-                "Implement a Rust function that returns 42 and include code.",
-                &primary,
-                "gemini-2.5-flash-lite",
-            )
-            .await;
-
-        let stats = cascade.observation_snapshot();
-        let flash_lite = stats
-            .get("gemini-2.5-flash-lite")
-            .expect("flash-lite stats");
-
-        assert_eq!(flash_lite.trials, 1);
-        assert_eq!(flash_lite.successes, 1);
-        assert_eq!(cascade.total_observations(), 1);
-    }
-
-    #[tokio::test]
-    async fn shadow_evaluate_records_failed_observation_when_shadow_output_is_weaker() {
-        let primary = agent_result(
-            "```rust\nfn answer() -> u32 { 42 }\n```\nAdd a unit test.",
-            true,
-            "gemini-2.5-pro",
-            900,
-        );
-        let weak_shadow = agent_result("done", true, "gemini-2.5-flash-lite", 120);
-        let mut cascade = CascadeRouter::new(vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash-lite".to_string(),
-        ])
-        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner {
-            result: weak_shadow,
-        }));
-
-        cascade
-            .shadow_evaluate(
-                "Implement a Rust function and add tests for it.",
-                &primary,
-                "gemini-2.5-flash-lite",
-            )
-            .await;
-
-        let stats = cascade.observation_snapshot();
-        let flash_lite = stats
-            .get("gemini-2.5-flash-lite")
-            .expect("flash-lite stats");
-
-        assert_eq!(flash_lite.trials, 1);
-        assert_eq!(flash_lite.successes, 0);
-    }
-
-    #[tokio::test]
-    async fn shadow_evaluate_shifts_router_toward_free_model() {
-        let prompt = "Implement a Rust function that parses a config string into a struct.";
-        let primary = agent_result(
-            "```rust\nstruct Config { enabled: bool }\nfn parse_config(input: &str) -> Config { Config { enabled: input == \"on\" } }\n```",
-            true,
-            "gemini-2.5-pro",
-            900,
-        );
-        let shadow = agent_result(
-            "```rust\nstruct Config { enabled: bool }\nfn parse_config(input: &str) -> Config { Config { enabled: input.trim() == \"on\" } }\n```",
-            true,
-            "gemini-2.5-flash-lite",
-            110,
-        );
-        let ctx = infer_shadow_routing_context(prompt, &primary);
-        let mut route_ctx = ctx.clone();
-        route_ctx.previous_model = None;
-        let mut cascade = CascadeRouter::new(vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash-lite".to_string(),
-        ])
-        .with_free_tier_shadow_runner(Arc::new(StubShadowRunner { result: shadow }));
-
-        for _ in 0..34 {
-            cascade.record_observation(&ctx, "gemini-2.5-pro", 0.9, true);
-        }
-        for _ in 0..6 {
-            cascade.record_observation(&ctx, "gemini-2.5-pro", 0.0, false);
-        }
-        for _ in 0..5 {
-            cascade.record_observation(&ctx, "gemini-2.5-flash-lite", 0.8, true);
-        }
-        for _ in 0..5 {
-            cascade.record_observation(&ctx, "gemini-2.5-flash-lite", 0.0, false);
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Confidence);
-        assert_eq!(cascade.route(&route_ctx).primary.slug, "gemini-2.5-pro");
-
-        for _ in 0..40 {
-            cascade
-                .shadow_evaluate(prompt, &primary, "gemini-2.5-flash-lite")
-                .await;
-        }
-
-        let stats = cascade.observation_snapshot();
-        let flash_lite = stats
-            .get("gemini-2.5-flash-lite")
-            .expect("flash-lite stats");
-        assert_eq!(flash_lite.trials, 50);
-        assert_eq!(flash_lite.successes, 45);
-        assert_eq!(
-            cascade.route(&route_ctx).primary.slug,
-            "gemini-2.5-flash-lite"
-        );
-    }
-
-    #[test]
-    fn shadow_routing_context_keeps_affect_bias_neutral() {
-        let prompt = "Refactor a parser and add regression tests.";
-        let primary = agent_result("done", false, "claude-sonnet-4-5", 800);
-        let ctx = infer_shadow_routing_context(prompt, &primary);
-
-        assert_eq!(ctx.daimon_policy.behavioral_state, BehavioralState::Engaged);
-        assert!((ctx.daimon_policy.affect_confidence - 0.5).abs() < f64::EPSILON);
-        assert!(ctx.has_prior_failure);
-    }
-
-    #[test]
-    fn gemini_observations_include_quality_and_cost_signals() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-pro".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-        let ctx = default_ctx();
-
-        assert!(cascade.record_gemini_observation(
-            &ctx,
-            "gemini-2.5-pro",
-            0.92,
-            true,
-            GeminiObservation {
-                input_tokens: 250_000,
-                output_tokens: 1_024,
-                thinking_tokens: Some(64),
-                cached_tokens: Some(512),
-                grounding_query_count: 3,
-                code_execution_success_count: 2,
-                code_execution_failure_count: 1,
-                context_tier: GeminiContextTier::Over200k,
-            },
-        ));
-
-        let stats = cascade.observation_snapshot();
-        let gemini = stats.get("gemini-2.5-pro").expect("gemini stats");
-
-        assert_eq!(gemini.trials, 1);
-        assert_eq!(gemini.successes, 1);
-        assert_eq!(gemini.gemini_requests, 1);
-        assert_eq!(gemini.total_gemini_thinking_tokens, 64);
-        assert!((gemini.avg_gemini_thinking_tokens_per_response - 64.0).abs() < 1e-9);
-        assert_eq!(gemini.total_gemini_cached_tokens, 512);
-        assert!((gemini.avg_gemini_cached_tokens_per_response - 512.0).abs() < 1e-9);
-        assert_eq!(gemini.total_gemini_grounding_queries, 3);
-        assert!((gemini.avg_gemini_grounding_queries_per_response - 3.0).abs() < 1e-9);
-        assert_eq!(gemini.gemini_code_execution_successes, 2);
-        assert_eq!(gemini.gemini_code_execution_failures, 1);
-        assert!((gemini.gemini_code_execution_success_rate - (2.0 / 3.0)).abs() < 1e-9);
-        assert_eq!(gemini.gemini_context_window_le_200k_requests, 0);
-        assert_eq!(gemini.gemini_context_window_gt_200k_requests, 1);
-    }
-
-    #[test]
-    fn gemini_observations_from_metadata_extract_router_signals() {
-        let metadata = GeminiMetadata {
-            grounding_metadata: Some(GroundingMetadata {
-                web_search_queries: Some(vec![
-                    "Rust cargo metadata".to_string(),
-                    "Rust cargo workspace".to_string(),
-                ]),
-                grounding_chunks: None,
-                grounding_supports: None,
-                search_entry_point: None,
-            }),
-            code_execution_results: vec![
-                CodeExecutionResultPart {
-                    outcome: "OUTCOME_OK".to_string(),
-                    output: "passed".to_string(),
-                },
-                CodeExecutionResultPart {
-                    outcome: "OUTCOME_ERROR".to_string(),
-                    output: "failed".to_string(),
-                },
-            ],
-            thinking_tokens: Some(11),
-            cached_tokens: Some(80),
-            safety_ratings: Vec::new(),
-        };
-
-        let observation = GeminiObservation::from_metadata(&metadata, 240_000, 512);
-
-        assert_eq!(observation.thinking_tokens, Some(11));
-        assert_eq!(observation.cached_tokens, Some(80));
-        assert_eq!(observation.grounding_query_count, 2);
-        assert_eq!(observation.code_execution_success_count, 1);
-        assert_eq!(observation.code_execution_failure_count, 1);
-        assert_eq!(observation.context_tier, GeminiContextTier::Over200k);
-    }
-
-    #[test]
-    fn gemini_observations_persist_across_save_and_load() {
-        let cascade = CascadeRouter::new(vec![
-            "gemini-2.5-flash".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-        let ctx = default_ctx();
-
-        assert!(cascade.record_gemini_observation(
-            &ctx,
-            "gemini-2.5-flash",
-            0.8,
-            true,
-            GeminiObservation {
-                input_tokens: 120_000,
-                output_tokens: 600,
-                thinking_tokens: Some(21),
-                cached_tokens: Some(144),
-                grounding_query_count: 1,
-                code_execution_success_count: 1,
-                code_execution_failure_count: 0,
-                context_tier: GeminiContextTier::UpTo200k,
-            },
-        ));
-        assert!(cascade.record_gemini_observation(
-            &ctx,
-            "gemini-2.5-flash",
-            0.0,
-            false,
-            GeminiObservation {
-                input_tokens: 260_000,
-                output_tokens: 700,
-                thinking_tokens: Some(34),
-                cached_tokens: Some(32),
-                grounding_query_count: 4,
-                code_execution_success_count: 0,
-                code_execution_failure_count: 2,
-                context_tier: GeminiContextTier::Over200k,
-            },
-        ));
-
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("cascade-router.json");
-        cascade.save(&path).expect("save cascade router");
-
-        let reloaded = CascadeRouter::load_or_new(
-            &path,
-            vec![
-                "gemini-2.5-flash".to_string(),
-                "claude-sonnet-4-5".to_string(),
-            ],
-        );
-        let stats = reloaded.observation_snapshot();
-        let gemini = stats.get("gemini-2.5-flash").expect("gemini stats");
-
-        assert_eq!(gemini.gemini_requests, 2);
-        assert_eq!(gemini.total_gemini_thinking_tokens, 55);
-        assert_eq!(gemini.total_gemini_cached_tokens, 176);
-        assert_eq!(gemini.total_gemini_grounding_queries, 5);
-        assert_eq!(gemini.gemini_code_execution_successes, 1);
-        assert_eq!(gemini.gemini_code_execution_failures, 2);
-        assert!((gemini.gemini_code_execution_success_rate - (1.0 / 3.0)).abs() < 1e-9);
-        assert_eq!(gemini.gemini_context_window_le_200k_requests, 1);
-        assert_eq!(gemini.gemini_context_window_gt_200k_requests, 1);
-    }
-
-    // ── Test 18: UCB stage uses linucb selection ────────────────────────
-
-    #[test]
-    fn ucb_stage_uses_trained_linucb() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        // Train haiku as the best arm with many observations.
-        for _ in 0..250 {
-            cascade.record_observation(&ctx, "claude-haiku-3-5", 1.0, true);
-            // Give some data to other arms too so LinUCB has seen them.
-            if cascade.total_observations() % 10 == 0 {
-                cascade.record_observation(&ctx, "claude-sonnet-4-5", 0.1, false);
-                cascade.record_observation(&ctx, "claude-opus-4", 0.1, false);
-            }
-        }
-
-        assert_eq!(cascade.current_stage(), CascadeStage::Ucb);
-        let result = cascade.route(&ctx);
-        // LinUCB should prefer the highly-rewarded arm
-        assert_eq!(result.primary.slug, "claude-haiku-3-5");
-    }
-
-    #[test]
-    fn record_outcome_updates_model_statistics() {
-        let cascade = CascadeRouter::new(test_slugs());
-
-        assert!(cascade.record_outcome("claude-sonnet-4-5", true));
-        // record_outcome only updates confidence stats, NOT the LinUCB
-        // bandit, so the LinUCB observation counter stays at 0.
-        assert_eq!(cascade.total_observations(), 0);
-
-        let stats = cascade.confidence_snapshot();
-        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
-    }
-
-    #[test]
-    fn record_override_outcome_updates_stats_and_linucb_with_dampened_reward() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let ctx = default_ctx();
-
-        // A successful override should update BOTH confidence stats AND LinUCB
-        // (unlike record_outcome which only touches confidence stats).
-        assert!(cascade.record_override_outcome("claude-sonnet-4-5", &ctx, true));
-
-        // LinUCB should have received an observation (observation counter > 0).
-        assert_eq!(cascade.total_observations(), 1);
-
-        // Confidence stats should reflect the success.
-        let stats = cascade.confidence_snapshot();
-        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(1, 1)));
-
-        // A failed override also feeds into LinUCB.
-        assert!(cascade.record_override_outcome("claude-sonnet-4-5", &ctx, false));
-        assert_eq!(cascade.total_observations(), 2);
-        let stats = cascade.confidence_snapshot();
-        assert_eq!(stats.get("claude-sonnet-4-5"), Some(&(2, 1)));
-
-        // Unknown model slug returns false.
-        assert!(!cascade.record_override_outcome("nonexistent-model", &ctx, true));
-    }
-
-    #[test]
-    fn perplexity_observations_include_citations_latency_and_total_cost() {
-        let cascade = CascadeRouter::new(vec![
-            "sonar-pro".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Researcher;
-        ctx.task_category = TaskCategory::Research;
-
-        assert!(cascade.record_perplexity_observation(
-            &ctx,
-            "sonar-pro",
-            0.95,
-            true,
-            PerplexityObservation {
-                citation_count: 6,
-                search_latency_ms: 1_200,
-                input_tokens: 1_000,
-                output_tokens: 500,
-            },
-        ));
-
-        let stats = cascade.observation_snapshot();
-        let sonar = stats.get("sonar-pro").expect("sonar-pro stats");
-
-        assert_eq!(sonar.trials, 1);
-        assert_eq!(sonar.successes, 1);
-        assert_eq!(sonar.total_citations, 6);
-        assert!((sonar.avg_citations_per_response - 6.0).abs() < 1e-9);
-        assert_eq!(sonar.total_search_latency_ms, 1_200);
-        assert!((sonar.avg_search_latency_ms - 1_200.0).abs() < 1e-9);
-        assert_eq!(sonar.perplexity_requests, 1);
-        assert!((sonar.total_cost_usd - 0.0245).abs() < 1e-9);
-        assert!((sonar.avg_cost_usd - 0.0245).abs() < 1e-9);
-    }
-
-    #[test]
-    fn perplexity_observations_persist_across_save_and_load() {
-        let cascade =
-            CascadeRouter::new(vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()]);
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Researcher;
-        ctx.task_category = TaskCategory::Research;
-
-        assert!(cascade.record_perplexity_observation(
-            &ctx,
-            "sonar",
-            0.9,
-            true,
-            PerplexityObservation {
-                citation_count: 3,
-                search_latency_ms: 900,
-                input_tokens: 2_000,
-                output_tokens: 1_000,
-            },
-        ));
-
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("cascade-router.json");
-        cascade.save(&path).expect("save cascade router");
-
-        let reloaded = CascadeRouter::load_or_new(
-            &path,
-            vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()],
-        );
-        let stats = reloaded.observation_snapshot();
-        let sonar = stats.get("sonar").expect("sonar stats");
-
-        assert_eq!(sonar.total_citations, 3);
-        assert_eq!(sonar.total_search_latency_ms, 900);
-        assert_eq!(sonar.perplexity_requests, 1);
-        assert!((sonar.total_cost_usd - 0.008).abs() < 1e-9);
-    }
-
-    // ── cascade_perplexity: Researcher routes to sonar-pro ───────────────
-
-    #[test]
-    fn cascade_perplexity_researcher_routes_to_sonar_pro() {
-        let slugs = vec![
-            "sonar-pro".to_string(),
-            "sonar".to_string(),
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ];
-        let cascade = CascadeRouter::new(slugs);
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Researcher;
-        ctx.task_category = TaskCategory::Research;
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.stage, CascadeStage::Static);
-        assert_eq!(result.primary.slug, "sonar-pro");
-    }
-
-    #[test]
-    fn cascade_perplexity_research_category_biases_any_role() {
-        let slugs = vec![
-            "sonar-pro".to_string(),
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ];
-        let cascade = CascadeRouter::new(slugs);
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Implementer;
-        ctx.task_category = TaskCategory::Research;
-
-        let result = cascade.route(&ctx);
-        assert_eq!(result.primary.slug, "sonar-pro");
-    }
-
-    #[test]
-    fn cascade_perplexity_falls_back_to_standard_when_no_sonar() {
-        let cascade = CascadeRouter::new(test_slugs()); // no sonar in test_slugs
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Researcher;
-        ctx.task_category = TaskCategory::Research;
-
-        let result = cascade.route(&ctx);
-        // No sonar available → standard tier fallback
-        assert_ne!(result.primary.slug, "sonar-pro");
-        assert_ne!(result.primary.slug, "sonar");
-    }
-
-    #[test]
-    fn pareto_pruning_reduces_alpha_for_dominated_models() {
-        let frontier = vec!["claude-sonnet-4-5".to_string()];
-        let base_alpha = 0.8;
-
-        assert!(
-            (pareto_adjusted_alpha(base_alpha, "claude-sonnet-4-5", &frontier) - base_alpha).abs()
-                < f64::EPSILON
-        );
-        assert!(
-            (pareto_adjusted_alpha(base_alpha, "claude-haiku-3-5", &frontier) - base_alpha * 0.1)
-                .abs()
-                < f64::EPSILON
-        );
-    }
-
-    #[test]
-    fn pareto_frontier_refreshes_every_50_observations() {
-        let cascade = CascadeRouter::new(vec![
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-        let ctx = default_ctx();
-
-        for _ in 0..50 {
-            cascade.record_observation(&ctx, "claude-sonnet-4-5", 1.0, true);
-        }
-
-        assert_eq!(cascade.pareto_frontier.lock().bucket, 1);
-        let frontier = cascade.pareto_frontier.lock().frontier.clone();
-        assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
-        assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
-
-        for _ in 0..50 {
-            cascade.record_observation(&ctx, "claude-haiku-3-5", 0.0, false);
-        }
-
-        assert_eq!(cascade.pareto_frontier.lock().bucket, 2);
-        let frontier = cascade.pareto_frontier.lock().frontier.clone();
-        assert!(frontier.contains(&"claude-sonnet-4-5".to_string()));
-        // Haiku remains on the frontier despite 0% pass rate because it has
-        // a latency advantage (Fast tier = 10s vs Standard tier = 30s),
-        // meaning sonnet does not dominate on all four objectives.
-        assert!(frontier.contains(&"claude-haiku-3-5".to_string()));
-    }
-
-    #[test]
-    fn filter_unhealthy_retains_least_unhealthy_candidate() {
-        let cascade = CascadeRouter::new(vec![
-            "claude-haiku-3-5".to_string(),
-            "claude-sonnet-4-5".to_string(),
-        ]);
-        let health = ProviderHealthRegistry::new();
-        for _ in 0..3 {
-            health.record_failure("bad-a", ErrorClass::Timeout);
-        }
-        for _ in 0..5 {
-            health.record_failure("bad-b", ErrorClass::Timeout);
-        }
-        let mut providers = HashMap::new();
-        providers.insert("claude-haiku-3-5".to_string(), "bad-a".to_string());
-        providers.insert("claude-sonnet-4-5".to_string(), "bad-b".to_string());
-
-        let filtered = cascade.filter_unhealthy(
-            &["claude-haiku-3-5".into(), "claude-sonnet-4-5".into()],
-            &health,
-            &providers,
-        );
-        assert_eq!(filtered, vec!["claude-haiku-3-5".to_string()]);
-    }
-
-    #[test]
-    fn apply_cost_pressure_prefers_cheaper_models() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let mut scores = vec![
-            ("claude-opus-4".to_string(), 1.0),
-            ("claude-sonnet-4-5".to_string(), 1.0),
-            ("claude-haiku-3-5".to_string(), 1.0),
-        ];
-
-        cascade.apply_cost_pressure(&mut scores, true);
-
-        assert!((scores[0].1 - 0.0).abs() < 1e-9);
-        assert!((scores[1].1 - 0.9).abs() < 1e-9);
-        assert!((scores[2].1 - 1.2).abs() < 1e-9);
-    }
-
-    #[test]
-    fn load_static_overrides_updates_role_defaults() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("static-overrides.json");
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "implementer": "claude-sonnet-4-6"
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let cascade = CascadeRouter::new(test_slugs());
-        let applied = cascade.load_static_overrides(&path).unwrap();
-        assert_eq!(applied, 1);
-
-        let mut ctx = default_ctx();
-        ctx.role = AgentRole::Implementer;
-        assert_eq!(cascade.route(&ctx).primary.slug, "claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn feedback_updates_confidence_stats() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let initial_obs = cascade.total_observations();
-
-        cascade.feedback("claude-sonnet-4-5", 0.8, true, -0.2);
-        cascade.feedback("claude-sonnet-4-5", 0.8, false, 0.8);
-
-        // Confidence stats should be updated.
-        let stats = cascade.confidence_stats.lock();
-        let model_stats = stats.get("claude-sonnet-4-5").unwrap();
-        assert_eq!(model_stats.trials, 2);
-        assert_eq!(model_stats.successes, 1);
-    }
-
-    #[test]
-    fn feedback_from_prediction_computes_residual() {
-        let cascade = CascadeRouter::new(test_slugs());
-
-        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, true);
-        cascade.feedback_from_prediction("claude-haiku-3-5", 0.9, false);
-
-        let stats = cascade.confidence_stats.lock();
-        let model_stats = stats.get("claude-haiku-3-5").unwrap();
-        assert_eq!(model_stats.trials, 2);
-        assert_eq!(model_stats.successes, 1);
-    }
-
-    #[test]
-    fn feedback_with_unknown_model_is_noop() {
-        let cascade = CascadeRouter::new(test_slugs());
-        let obs_before = cascade.total_observations();
-
-        // Should not panic, just silently skip.
-        cascade.feedback("unknown-model-xyz", 0.5, true, -0.5);
-
-        // No observations should have been recorded in confidence stats.
-        let stats = cascade.confidence_stats.lock();
-        assert!(!stats.contains_key("unknown-model-xyz"));
     }
 }

@@ -77,13 +77,9 @@
 pub mod active_inference;
 /// Adaptive Design of AI Systems autocatalytic optimization (LEARN-08).
 pub mod adas;
-/// HDC-based adversarial signal detection with attack prototype library (TA-10).
-pub mod adversarial;
 /// Efficiency trend aggregation helpers for JSONL telemetry.
 pub mod aggregate;
 pub mod anomaly;
-/// Research-oriented bandit shells used to match the learning docs.
-pub mod bandit_research;
 pub mod bandits;
 pub mod baseline;
 /// Bayesian confidence updating using Beta-Binomial conjugate model (AS-07).
@@ -92,16 +88,13 @@ pub mod bayesian_confidence;
 pub mod budget;
 /// Bus-backed calibration policy for predict-publish-correct loop (LEARN-09).
 pub mod calibration_policy;
+/// Extracted submodules for cascade router types, helpers, and persistence.
+pub mod cascade;
 pub mod cascade_router;
-/// Causal microstructure discovery: Granger causality, PC algorithm,
-/// and formal causal DAG construction from time series data (TA-08).
-pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
 pub mod context_pack_cache;
-/// Conservative contextual bandits for routing, prompt/context, bidder, and reviewer decisions.
-pub mod contextual_bandit;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;
@@ -125,8 +118,6 @@ pub mod hdc_clustering;
 pub mod hdc_fingerprint;
 /// Heuristic, worldview, and research-provenance shells for learning parity.
 pub mod heuristics;
-/// Kalman filter for online signal smoothing in oracle predictions (P2-10).
-pub mod kalman;
 /// Rolling latency EMAs and percentiles for routing feedback.
 pub mod latency;
 pub mod local_reward;
@@ -151,9 +142,6 @@ pub mod regression;
 pub mod reinforce_kind;
 /// Research-to-runtime pipeline: Paper -> Claim -> Trial -> Ledger (LEARN-11).
 pub mod research_pipeline;
-/// Evolutionary resonant pattern organisms with Lotka-Volterra dynamics,
-/// Price equation tracking, and HDC genomes (TA-09).
-pub mod resonant_patterns;
 /// Lookahead and calibration shells around the shipped cascade router.
 pub mod routing_extras;
 /// Append-only routing-decision audit log for explainability and dashboards.
@@ -162,11 +150,6 @@ pub mod runtime_feedback;
 pub mod section_effect;
 /// Prompt/context section outcome telemetry for future adaptive policy.
 pub mod section_outcome;
-/// Shapley-value attribution for fair credit distribution among agents (P1-08).
-pub mod shapley;
-/// Evolutionary signal population dynamics: replicator dynamics, Hebbian
-/// learning, and Fisher variance monitoring (TA-07).
-pub mod signal_metabolism;
 pub mod skill_library;
 pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
