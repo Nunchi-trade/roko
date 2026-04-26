@@ -38,4 +38,4 @@ pub use layout::{LayoutVersion, RokoLayout};
 pub use metrics::MetricsLog;
 pub use pointer::PointerStore;
 pub use tool_audit::ToolAuditLog;
-pub use trace_sink::JsonlTraceSink;
+pub use trace_sink::{default_trace_sink, JsonlTraceSink};

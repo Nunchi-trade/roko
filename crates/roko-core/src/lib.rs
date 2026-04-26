@@ -96,13 +96,13 @@ pub use task::{
 // collision with phase::FailureKind (for PlanPhase failures); reach it via
 // `roko_core::tool::FailureKind`.
 pub use tool::{
-    compute_reward, galileo_tsq, profile_for_model, ArmEntry, Artifact, AuditSink, BanditKey,
-    CancelSource, CancelToken, EpsilonGreedyBandit, FailureTrace, FormatBandit,
-    KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink, ProfileBandit, RewardConfig,
-    ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError, ToolFormat,
-    ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome, ToolPermission, ToolRegistry,
-    ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace, ToolTraceEvent, TraceBuilder, TraceId,
-    TraceSink, TraceStep, VecToolRegistry,
+    classify_tool_error, compute_reward, galileo_tsq, profile_for_model, ArmEntry, Artifact,
+    AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit, FailureTrace,
+    FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink, ProfileBandit,
+    RewardConfig, ToolCall, ToolCategory, ToolConcurrency, ToolContext, ToolDef, ToolError,
+    ToolFormat, ToolFormatProfile, ToolHandler, ToolMetrics, ToolOutcome, ToolPermission,
+    ToolRegistry, ToolRelevanceScorer, ToolResult, ToolSchema, ToolTrace, ToolTraceEvent,
+    TraceBuilder, TraceId, TraceSink, TraceStep, VecToolRegistry,
 };
 pub use traits::{Composer, Gate, Policy, Router, Scorer, Substrate};
 pub use verdict::{Outcome, Selection, TestCount, Verdict};
