@@ -8,6 +8,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    bridge_events::handle_session_prompt,
     config::AcpConfig,
     session::SessionManager,
     transport::{StdioTransport, TransportError},
@@ -15,9 +16,8 @@ use crate::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
         ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcMessage,
         JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
-        PromptCapabilities, SESSION_NOT_FOUND, SESSION_BUSY, SessionCancelParams,
-        SessionLoadParams, SessionNewParams, SessionPromptParams,
-        SessionPromptResult, SessionSetModeParams, StopReason,
+        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams,
+        SessionLoadParams, SessionNewParams, SessionPromptParams, SessionSetModeParams,
     },
 };
 
@@ -144,18 +144,15 @@ async fn handle_request(
                 Ok(session) => session,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            if session.is_busy() {
-                return send_error_response(transport, id, session_busy_error(&params.session_id))
-                    .await;
-            }
-
-            session.begin_prompt();
-            let result = SessionPromptResult {
-                session_id: session.session_id.clone(),
-                stop_reason: StopReason::EndTurn,
-                usage: None,
+            let result = match handle_session_prompt(transport, session, params).await {
+                Ok(result) => result,
+                Err(error) => {
+                    if let Some(rpc_error) = error.rpc_error() {
+                        return send_error_response(transport, id, rpc_error).await;
+                    }
+                    return Err(error).context("failed to handle ACP session prompt");
+                }
             };
-            session.finish_prompt();
             send_success(transport, id, result).await
         }
         "session/config/update" => {
@@ -275,13 +272,6 @@ fn session_not_found_error(session_id: &str) -> (i32, String) {
     json_rpc_error(
         SESSION_NOT_FOUND,
         format!("session '{session_id}' was not found"),
-    )
-}
-
-fn session_busy_error(session_id: &str) -> (i32, String) {
-    json_rpc_error(
-        SESSION_BUSY,
-        format!("session '{session_id}' already has an active prompt"),
     )
 }
 
