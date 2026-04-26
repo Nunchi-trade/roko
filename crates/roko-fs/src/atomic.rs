@@ -70,10 +70,7 @@ pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> io::Result<()> {
 /// `learn/router.json` becomes `learn/router.json.tmp` and
 /// `rules.toml` becomes `rules.toml.tmp`.
 fn tmp_path_for(target: &Path) -> std::path::PathBuf {
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("dat");
+    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("dat");
     target.with_extension(format!("{ext}.tmp"))
 }
 

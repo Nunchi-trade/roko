@@ -507,6 +507,51 @@ Examples:
     /// Show current authentication status.
     Whoami,
 
+    // ── Vision loop ────────────────────────────────────────────────
+    /// Iterative UI improvement: screenshot → vision model → code gen → HMR.
+    #[command(
+        name = "vision-loop",
+        after_help = "\
+Examples:
+  roko vision-loop src/App.tsx --goal \"Clean SaaS landing\" --url http://localhost:5173
+  roko vision-loop src/pages/Home.vue --goal \"Dark mode\" --url http://localhost:3000 --max-iter 5
+  roko vision-loop index.html --goal \"Responsive hero\" --url http://localhost:8080 --model claude-opus"
+    )]
+    VisionLoop {
+        /// Source file to iterate on (e.g. src/pages/Home.tsx).
+        target_file: PathBuf,
+        /// What the UI should look/feel like.
+        #[arg(long)]
+        goal: String,
+        /// URL to screenshot (e.g. http://localhost:5173).
+        #[arg(long)]
+        url: String,
+        /// Maximum iterations (default: 10).
+        #[arg(long, default_value_t = 10)]
+        max_iter: u32,
+        /// Score threshold (1-10) for early stopping (default: 9.0).
+        #[arg(long, default_value_t = 9.0)]
+        target_score: f64,
+        /// Consecutive target hits before stopping (default: 2).
+        #[arg(long, default_value_t = 2)]
+        consecutive_target: u32,
+        /// Score drop from peak that triggers rollback (default: 3.0).
+        #[arg(long, default_value_t = 3.0)]
+        regression_threshold: f64,
+        /// Vision model key from roko.toml (auto-detected if omitted).
+        #[arg(long)]
+        model: Option<String>,
+        /// Viewport width in pixels (default: 1280).
+        #[arg(long, default_value_t = 1280)]
+        viewport_width: u32,
+        /// Viewport height in pixels (default: 720).
+        #[arg(long, default_value_t = 720)]
+        viewport_height: u32,
+        /// Milliseconds to wait after writing (HMR settle time, default: 2000).
+        #[arg(long, default_value_t = 2000)]
+        wait_ms: u64,
+    },
+
     // ── Utilities ───────────────────────────────────────────────────
     /// Walk the lineage DAG rooted at a signal hash and print it.
     Replay {
@@ -1958,6 +2003,43 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                 unsafe { std::env::set_var("ROKO_REDUCED_MOTION", "1") };
             }
             cmd_dashboard(cli, workdir, page, list_pages, text, None).await
+        }
+
+        // ── Vision loop ───────────────────────────────────────────
+        Command::VisionLoop {
+            target_file,
+            goal,
+            url,
+            max_iter,
+            target_score,
+            consecutive_target,
+            regression_threshold,
+            model,
+            viewport_width,
+            viewport_height,
+            wait_ms,
+        } => {
+            let config = roko_cli::vision_loop::VisionLoopConfig {
+                target_file,
+                goal,
+                url,
+                max_iterations: max_iter,
+                target_score,
+                consecutive_target,
+                regression_threshold,
+                model_key: model,
+                viewport_width,
+                viewport_height,
+                wait_ms,
+            };
+            let result = roko_cli::vision_loop::cmd_vision_loop(config).await?;
+            println!("Vision loop complete: {}", result.stop_reason);
+            println!(
+                "  iterations: {}, best score: {:.1} (iteration {})",
+                result.iterations_completed, result.best_score, result.best_iteration
+            );
+            println!("  run ID: {}", result.run_id);
+            Ok(EXIT_SUCCESS)
         }
 
         // ── Utilities ───────────────────────────────────────────────

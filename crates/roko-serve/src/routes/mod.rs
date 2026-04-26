@@ -33,6 +33,7 @@ mod status;
 mod subscriptions;
 mod team;
 mod templates;
+mod vision_loop;
 mod webhooks;
 mod ws;
 
@@ -82,6 +83,7 @@ pub fn build_router(
         .merge(feeds::routes())
         .merge(auth::routes())
         .merge(secrets::routes())
+        .merge(vision_loop::routes())
         .merge(team::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
