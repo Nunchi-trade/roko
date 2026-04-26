@@ -134,177 +134,63 @@ Memory overhead per chain instance: MIDAS-R ~128KB, DDSketch ~2KB, Count-Min Ske
 
 ---
 
-## L2/L3 Deployment Architecture
+## Deployment Architecture
 
-### Preferred Deployment: Arbitrum Orbit L3
+Nunchi is a **sovereign EVM L1** — a fork of reth/revm with Simplex consensus and custom native precompiles registered at genesis. There is no settlement dependency on Arbitrum, Ethereum, or any parent chain.
 
-Rather than running as a sovereign L1, Nunchi's preferred deployment model is as an **Arbitrum Orbit L3 chain** settling to Arbitrum One (L2), which itself settles to Ethereum L1. This provides three layers of security inheritance:
+### Execution Layer
 
-```
-┌─────────────────────────┐
-│     Ethereum L1          │  Security: ~$60B staked ETH
-│     (Settlement)         │  Finality: ~15 min (6 blocks)
-├─────────────────────────┤
-│     Arbitrum One (L2)    │  Security: Nitro fraud proofs + BoLD
-│     (DA + Settlement)    │  Finality: 7 days (optimistic), minutes (ZK)
-├─────────────────────────┤
-│     Nunchi Chain (L3)     │  Custom: HDC precompile, agent registries
-│     (Execution)          │  Block time: 50ms, NUNCHI gas token
-└─────────────────────────┘
-```
-
-#### Orbit Configuration for Nunchi
+Nunchi forks the reth execution client (Rust Ethereum) and the revm interpreter. Custom precompiles (HDC similarity search at 0xA01, Agent Registry at 0xA02) are registered in the genesis configuration and execute as native Rust code — no WASM layer, no Stylus, no op-geth modifications required.
 
 ```rust
-/// Orbit chain configuration for Nunchi
-pub struct NunchiOrbitConfig {
-    /// Chain name
-    pub chain_name: String,  // "Nunchi"
+/// Nunchi genesis precompile registration
+pub struct NunchiPrecompiles {
+    /// HDC similarity search precompile
+    /// Registered at 0xA01; implements hdc_similarity, hdc_topk, hdc_bind, hdc_bundle
+    pub hdc: HdcPrecompile,
 
-    /// Gas token: NUNCHI (not ETH)
-    pub gas_token: Address,  // NUNCHI ERC-20 address on parent chain
-
-    /// Block time target
-    pub block_time_ms: u64,  // 50
-
-    /// Data availability mode
-    pub da_mode: DaMode,  // AnyTrust for lower cost, Rollup for max security
-
-    /// Stylus enabled for HDC precompiles
-    pub stylus_enabled: bool,  // true
-
-    /// Custom precompile addresses
-    pub precompiles: Vec<PrecompileConfig>,
-
-    /// Sequencer mode
-    pub sequencer: SequencerMode,
-}
-
-pub enum DaMode {
-    /// Full rollup: all data on Arbitrum One (L2) → Ethereum L1
-    /// Maximum security, higher cost
-    Rollup,
-    /// AnyTrust: data availability committee (DAC) + L1 fallback
-    /// Lower cost, trust the DAC (N-of-M honest assumption)
-    AnyTrust { committee_size: usize, threshold: usize },
-    /// Celestia: post data to Celestia DA layer via Blobstream
-    /// Modular DA, separate security assumption
-    Celestia { namespace: [u8; 32] },
-}
-
-pub enum SequencerMode {
-    /// Single sequencer (development, early production)
-    Centralized { sequencer_address: Address },
-    /// Shared sequencer (Espresso, Astria) for cross-chain atomic inclusion
-    Shared { sequencer_url: String },
-    /// Decentralized sequencer set (full decentralization)
-    Decentralized { validator_set: Vec<Address>, consensus: ConsensusType },
+    /// Agent registry precompile
+    /// Registered at 0xA02; implements ERC-8004 identity operations natively
+    pub agent_registry: AgentRegistryPrecompile,
 }
 ```
 
-#### Why Orbit Over OP Stack?
+Native precompiles execute at the lowest possible cost: no VM context switches, no serialization overhead, direct access to SIMD POPCNT instructions. The top-K similarity search over 100K index entries costs approximately 400 gas.
 
-| Property | Arbitrum Orbit | OP Stack |
-|---|---|---|
-| **Stylus (WASM contracts)** | Native support | Not available |
-| **Custom gas token** | Supported | Supported |
-| **Fraud proofs** | WASM-based (Nitro), permissionless (BoLD) | MIPS-based (Cannon), permissionless |
-| **ZK path** | In development | OP Succinct (Succinct Labs) |
-| **Custom precompiles** | Via Stylus (Rust → WASM) | Requires op-geth fork |
-| **DA flexibility** | Rollup, AnyTrust, Celestia | Rollup, Celestia, EigenDA |
+### Consensus: Simplex
 
-The decisive factor is **Stylus**: Nunchi's HDC precompile requires high-performance bitwise operations that are 10-100x cheaper in WASM than in EVM bytecode. Stylus provides this natively on Orbit chains. The OP Stack would require forking op-geth to add custom precompiles — a higher maintenance burden.
+Nunchi uses **Simplex consensus** (Chan & Pass, IACR 2023/463) — a BFT protocol designed for high-throughput permissioned validator sets. Simplex achieves safety and liveness under standard BFT assumptions (fewer than 1/3 Byzantine validators) with a single-phase commit path that enables consistent sub-100ms block times.
 
-### Consensus Evolution Roadmap
+The 50ms block time target is achieved by co-locating validators in the same data center region. This is the same operational model used by Hyperliquid for their L1: tight geographic co-location eliminates network round-trip latency as the bottleneck, making the consensus protocol's single-phase path reliably fast.
 
-Nunchi's consensus evolves through three phases:
+### Consensus Roadmap
 
-**Phase 1 — Centralized Sequencer (Launch)**:
-A single Nunchi-operated sequencer produces blocks. This is the standard model for new Orbit chains and all major L2s at launch. The sequencer cannot steal funds (fraud proofs protect users) but can censor transactions and extract MEV.
+Nunchi's validator set evolves through three phases:
 
-**Phase 2 — Shared Sequencer (12-18 months post-launch)**:
-Integrate with a shared sequencing layer (Espresso Sequencer or Astria). Shared sequencing provides:
-- Cross-chain atomic inclusion (agents on Nunchi and Base can have transactions included atomically)
-- Censorship resistance (no single party controls ordering)
-- MEV redistribution (MEV extracted from Nunchi flows back to validators/stakers)
+**Phase 1 — Co-located Tokyo validators (Launch)**:
+A small set of Nunchi-operated validators co-located in Tokyo data centers produce blocks at 50ms intervals. Co-location eliminates propagation latency, making Simplex's single-phase commit path reliable. This is not a centralized sequencer — multiple validators participate in consensus — but the set is intentionally small and geographically concentrated for performance.
 
-**Phase 3 — Decentralized Sequencer Set (24+ months)**:
-Nunchi-specific validator set using CometBFT-style consensus adapted for the Orbit framework. Validators are high-tier ERC-8004 identity holders (Protocol and Sovereign) who stake NUNCHI as collateral. This provides full decentralization while maintaining 50ms block times.
+**Phase 2 — Expanding validator set (12-24 months)**:
+Admit additional validators beyond Tokyo, accepting slightly higher latency (100-200ms) in exchange for broader geographic distribution and reduced operational concentration. Simplex's BFT safety guarantees hold as long as fewer than 1/3 of validators are Byzantine, regardless of their locations.
 
-### EigenLayer AVS Integration
-
-Nunchi can optionally leverage EigenLayer's Actively Validated Services (AVS) framework for specific validation tasks that benefit from Ethereum's restaked security:
-
-```rust
-/// EigenLayer AVS configuration for Nunchi validation tasks
-pub struct NunchiAvsConfig {
-    /// AVS tasks that Nunchi delegates to EigenLayer operators
-    pub tasks: Vec<AvsTask>,
-
-    /// Minimum restaked ETH required per operator
-    pub min_operator_stake: U256,  // default: 32 ETH
-
-    /// Slashing conditions
-    pub slashing: SlashingConfig,
-}
-
-pub enum AvsTask {
-    /// Validate HDC similarity search results
-    /// Operators re-compute top-K and verify against submitted results
-    HdcSearchValidation {
-        challenge_window_blocks: u64,  // 100 blocks (~40s)
-        slash_amount_bps: u16,         // 1000 (10% of operator stake)
-    },
-
-    /// Validate knowledge entry quality scores
-    /// Operators independently score entries and compare
-    KnowledgeQualityValidation {
-        min_validators: u8,  // 3
-        consensus_threshold: f64,  // 0.67 (2/3 agreement)
-    },
-
-    /// Validate clearing certificate KKT conditions
-    /// Operators verify the QP solution is optimal
-    ClearingCertificateValidation {
-        verification_timeout_blocks: u64,  // 50 blocks (~20s)
-    },
-}
-```
-
-EigenLayer AVS is particularly relevant for Nunchi because it allows Nunchi to borrow Ethereum's >$7B restaked security for critical validation tasks without requiring Nunchi-native staking to reach the same security level. As of April 2025, EigenLayer supports 39 live AVSs and has rebranded AVS from "Actively Validated Services" to "Autonomous Verifiable Services" — explicitly embracing agentic systems.
+**Phase 3 — Fully decentralized (24+ months)**:
+Open validator admission to high-tier ERC-8004 identity holders (Protocol and Sovereign tiers) who stake NUNCHI as collateral. Block times stabilize around network propagation latency rather than physical co-location. Full decentralization with the same Simplex consensus protocol — no consensus layer change required.
 
 ### Alternative: Cosmos SDK Appchain with IBC
 
-If the Nunchi community decides that full sovereignty (own validator set, own consensus, no L1 dependency) outweighs Ethereum security inheritance, a Cosmos SDK appchain is the secondary option:
+If the Nunchi community decides that IBC-native interoperability with the Cosmos ecosystem outweighs the EVM composability advantages of a sovereign EVM L1, a Cosmos SDK appchain is the secondary option:
 
-**Advantages over Orbit**:
-- Full sovereignty: no dependency on Arbitrum or Ethereum
-- IBC native: instant interop with 200+ Cosmos chains
-- Custom modules in Go (vs. Solidity/Rust smart contracts)
-- CometBFT deterministic finality (~6s, tunable)
+**Advantages over sovereign EVM L1**:
+- IBC native: instant interop with 200+ Cosmos chains without external bridge infrastructure
+- Custom modules in Go with native CometBFT deterministic finality (~6s, tunable)
+- Cosmos Hub Interchain Security available for bootstrapping validator security
 
 **Disadvantages**:
-- Must bootstrap own validator set (or use Interchain Security from Cosmos Hub)
-- No Stylus — HDC precompile would be a native Go module (fast, but Go vs. Rust)
-- Less DeFi composability with Ethereum ecosystem
-- Smaller auditing/tooling ecosystem
+- HDC precompile would be a native Go Cosmos SDK keeper module rather than a native reth precompile
+- Less DeFi composability with the Ethereum ecosystem (no ERC-20 bridging without IBC-Solidity)
+- Smaller auditing and tooling ecosystem than EVM
 
-```rust
-/// Cosmos SDK module interface for HDC operations (Go)
-/// Would be implemented as a native Cosmos SDK keeper
-pub struct HdcModuleConfig {
-    /// Module name in the Cosmos SDK app
-    pub module_name: String,  // "nunchi_hdc"
-
-    /// Maximum vectors in on-chain index
-    pub max_index_size: u64,  // 1_000_000
-
-    /// Query gas cost per vector comparison
-    pub gas_per_comparison: u64,  // 10 (Cosmos gas, not EVM gas)
-}
-```
-
-The Orbit L3 approach is preferred for Nunchi's initial deployment due to Ethereum security inheritance and Stylus support. The Cosmos path remains viable for a future where agent coordination spans beyond the EVM ecosystem.
+The sovereign EVM L1 approach is preferred for Nunchi's initial deployment because native reth precompiles provide the lowest possible HDC gas costs and the EVM ecosystem provides the broadest DeFi composability. The Cosmos path remains viable if agent coordination requirements shift toward Cosmos-native chains.
 
 ---
 

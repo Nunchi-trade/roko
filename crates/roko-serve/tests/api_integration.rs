@@ -39,6 +39,7 @@ impl CliRuntime for TestRuntime {
         Ok(RunResult {
             success: true,
             output_text: Some("test runtime output".to_string()),
+            usage: None,
         })
     }
 

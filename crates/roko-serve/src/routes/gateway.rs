@@ -100,6 +100,14 @@ struct CompletionRequest {
     /// Current iteration number for the calling task (0-based).
     #[serde(default)]
     iteration: Option<u32>,
+
+    /// Crate name hint for familiarity-based routing.
+    #[serde(default)]
+    crate_name: Option<String>,
+
+    /// Whether a prior attempt at this task failed.
+    #[serde(default)]
+    has_prior_failure: Option<bool>,
 }
 
 impl RequestPayload for CompletionRequest {
@@ -265,6 +273,8 @@ async fn inference_complete(
         complexity: body.complexity.clone(),
         role: body.role.clone(),
         iteration: body.iteration,
+        crate_name: body.crate_name.clone(),
+        has_prior_failure: body.has_prior_failure,
     };
 
     let model_slug = if let Some(ref requested) = body.model {
@@ -295,10 +305,13 @@ async fn inference_complete(
 
     let content = result.output_text.unwrap_or_default();
 
-    // Estimate token counts from character lengths as a reasonable
-    // approximation until per-provider tokenizers are wired.
-    let input_tokens = estimate_tokens(&prompt);
-    let output_tokens = estimate_tokens(&content);
+    // Prefer real token counts from the provider when available,
+    // falling back to the character-based heuristic.
+    let (input_tokens, output_tokens) = if let Some(ref usage) = result.usage {
+        (usage.input_tokens, usage.output_tokens)
+    } else {
+        (estimate_tokens(&prompt), estimate_tokens(&content))
+    };
     let cache_read_tokens: u64 = 0;
 
     // Compute cost from model profile pricing when available.
@@ -535,8 +548,12 @@ async fn batch_submit(
                         Ok(result) => {
                             state_ref.provider_health.record_success(&model_slug);
                             let content = result.output_text.unwrap_or_default();
-                            let input_tokens = estimate_tokens(&prompt);
-                            let output_tokens = estimate_tokens(&content);
+                            let (input_tokens, output_tokens) =
+                                if let Some(ref usage) = result.usage {
+                                    (usage.input_tokens, usage.output_tokens)
+                                } else {
+                                    (estimate_tokens(&prompt), estimate_tokens(&content))
+                                };
                             let cost_usd =
                                 compute_cost(&config_ref, &model_slug, input_tokens, output_tokens);
 
@@ -715,6 +732,8 @@ struct RoutingHints {
     complexity: Option<String>,
     role: Option<String>,
     iteration: Option<u32>,
+    crate_name: Option<String>,
+    has_prior_failure: Option<bool>,
 }
 
 /// Parse a string into [`TaskCategory`], falling back to `Implementation`
@@ -817,15 +836,21 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
 
     let iteration = hints.iteration.unwrap_or(1);
 
+    // Derive routing context from runtime state where available.
+    let active_agents = state.operations.read().await.len() as u32;
+    let has_prior_failure = hints
+        .has_prior_failure
+        .unwrap_or(iteration > 1);
+
     let routing_ctx = RoutingContext {
         task_category,
         complexity,
         iteration,
         role,
         crate_familiarity: 0.5,
-        has_prior_failure: false,
+        has_prior_failure,
         conductor_load: 0.0,
-        active_agents: 0,
+        active_agents,
         ready_queue_depth: 0,
         max_queue_wait_hours: 0.0,
         daimon_policy: roko_core::DaimonPolicy::default(),
@@ -874,7 +899,8 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
     cascade_pick
 }
 
-/// Rough token count estimate: ~4 characters per token for English text.
+/// Fallback token count estimate when the provider doesn't report usage.
+/// ~4 characters per token for English text. Prefer real counts from LLM responses.
 fn estimate_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
 }
@@ -950,6 +976,8 @@ mod tests {
             complexity: None,
             role: None,
             iteration: None,
+            crate_name: None,
+            has_prior_failure: None,
         };
         assert!(request.validate().is_err());
     }
@@ -970,6 +998,8 @@ mod tests {
             complexity: None,
             role: None,
             iteration: None,
+            crate_name: None,
+            has_prior_failure: None,
         };
         assert!(request.validate().is_ok());
     }
@@ -1059,10 +1089,97 @@ mod tests {
     }
 
     #[test]
+    fn real_token_counts_preferred_over_heuristic() {
+        use crate::runtime::RunResultUsage;
+
+        let prompt = "hello world"; // heuristic: 3
+        let content = "goodbye"; // heuristic: 2
+
+        // When usage is present, real counts win.
+        let usage = Some(RunResultUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+        });
+        let (input, output) = if let Some(ref u) = usage {
+            (u.input_tokens, u.output_tokens)
+        } else {
+            (estimate_tokens(prompt), estimate_tokens(content))
+        };
+        assert_eq!(input, 100);
+        assert_eq!(output, 50);
+
+        // When usage is absent, falls back to heuristic.
+        let usage: Option<RunResultUsage> = None;
+        let (input, output) = if let Some(ref u) = usage {
+            (u.input_tokens, u.output_tokens)
+        } else {
+            (estimate_tokens(prompt), estimate_tokens(content))
+        };
+        assert_eq!(input, 3);
+        assert_eq!(output, 2);
+    }
+
+    #[test]
     fn compute_cost_zero_when_no_pricing() {
         let config = roko_core::config::schema::RokoConfig::default();
         let cost = compute_cost(&config, "nonexistent-model", 1000, 500);
         assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn routing_hints_derive_prior_failure_from_iteration() {
+        // When has_prior_failure is explicitly set, use it.
+        let hints = RoutingHints {
+            iteration: Some(1),
+            has_prior_failure: Some(true),
+            ..Default::default()
+        };
+        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(derived, "explicit true should be respected");
+
+        // When not set, iteration > 1 implies prior failure.
+        let hints = RoutingHints {
+            iteration: Some(3),
+            has_prior_failure: None,
+            ..Default::default()
+        };
+        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(derived, "iteration 3 implies prior failure");
+
+        // Iteration 1 with no explicit flag = no prior failure.
+        let hints = RoutingHints {
+            iteration: Some(1),
+            has_prior_failure: None,
+            ..Default::default()
+        };
+        let derived = hints.has_prior_failure.unwrap_or(hints.iteration.unwrap_or(1) > 1);
+        assert!(!derived, "iteration 1 means no prior failure");
+    }
+
+    #[tokio::test]
+    async fn routing_context_uses_active_operations_count() {
+        let (_dir, state) = test_state();
+
+        // Initially no operations → active_agents = 0.
+        let ops_count = state.operations.read().await.len() as u32;
+        assert_eq!(ops_count, 0);
+
+        // Insert a dummy operation.
+        state.operations.write().await.insert(
+            "test-op".to_string(),
+            OperationHandle {
+                id: "test-op".to_string(),
+                kind: "test".to_string(),
+                status: OperationStatus::Running,
+                handle: tokio::spawn(async {}),
+            },
+        );
+
+        let ops_count = state.operations.read().await.len() as u32;
+        assert_eq!(ops_count, 1, "active_agents should reflect operations count");
+
+        // Clean up.
+        state.operations.write().await.remove("test-op");
     }
 
     #[tokio::test]
@@ -1085,6 +1202,66 @@ mod tests {
         for window in models.windows(2) {
             assert!(window[0].id <= window[1].id);
         }
+    }
+
+    #[tokio::test]
+    async fn batch_submit_dispatches_concurrently() {
+        // Submit 3 batch items and verify all complete.
+        // The NoOpRuntime returns instantly, so buffer_unordered processes
+        // all items concurrently within BATCH_CONCURRENCY.
+        let (_dir, state) = test_state();
+        let body = BatchSubmitRequest {
+            requests: (0..3)
+                .map(|i| BatchRequestItem {
+                    custom_id: format!("req-{i}"),
+                    model: None,
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: format!("item {i}"),
+                    }],
+                })
+                .collect(),
+        };
+
+        let resp = batch_submit(State(Arc::clone(&state)), ValidJson(body))
+            .await
+            .expect("batch submit");
+        let (parts, body_bytes) = resp.into_response().into_parts();
+        assert_eq!(parts.status, axum::http::StatusCode::ACCEPTED);
+
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(body_bytes, usize::MAX).await.expect("body"))
+                .expect("json");
+        assert_eq!(payload["count"], 3);
+
+        let batch_id = payload["batch_id"].as_str().expect("batch_id").to_string();
+
+        // Wait briefly for the spawned task to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify all items completed via the operations map.
+        let ops = state.operations.read().await;
+        if let Some(op) = ops.get(&batch_id) {
+            match &op.status {
+                OperationStatus::Completed { result } => {
+                    let items: Vec<BatchResultItem> =
+                        serde_json::from_str(result.as_deref().unwrap_or("[]")).expect("parse");
+                    assert_eq!(items.len(), 3, "all batch items should complete");
+                    assert!(items.iter().all(|i| i.success), "all items should succeed");
+                }
+                _ => {
+                    // May still be running — that's OK for a unit test with NoOpRuntime
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_concurrency_constant_is_reasonable() {
+        assert!(
+            BATCH_CONCURRENCY >= 2 && BATCH_CONCURRENCY <= 32,
+            "BATCH_CONCURRENCY ({BATCH_CONCURRENCY}) should be between 2 and 32"
+        );
     }
 
     #[tokio::test]

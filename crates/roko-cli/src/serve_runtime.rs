@@ -47,6 +47,7 @@ impl CliRuntime for RokoCliRuntime {
         Ok(RunResult {
             success: report.overall_success(),
             output_text: report.output_text,
+            usage: None,
         })
     }
 

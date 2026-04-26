@@ -159,13 +159,13 @@ The choice of EVM as the execution environment for Nunchi was deliberate, with f
 
 Move's linear type system (resources cannot be copied or dropped — enforced at the bytecode verifier level) is theoretically superior for representing agent state. An agent's capabilities, credentials, and memory map naturally to resources that cannot be accidentally duplicated. Sui's object-centric model with DAG-based execution achieves sub-second finality for owned-object transactions without full consensus, and its explicit parallelism model is ideal for non-conflicting agent actions.
 
-**Why rejected**: The Move ecosystem is 1/100th the size of EVM by developer tooling, auditor availability, and DeFi liquidity. Cross-chain bridge support is limited. The decision to build on EVM preserves access to the largest smart contract ecosystem — Foundry, OpenZeppelin, the entire Solidity auditing industry — while Arbitrum Stylus (see below) closes most of Move's safety advantages by enabling Rust contracts on EVM chains.
+**Why rejected**: The Move ecosystem is 1/100th the size of EVM by developer tooling, auditor availability, and DeFi liquidity. Cross-chain bridge support is limited. The decision to build on EVM preserves access to the largest smart contract ecosystem — Foundry, OpenZeppelin, the entire Solidity auditing industry — while native Rust precompiles in the reth-fork execution client close most of Move's safety advantages without leaving the EVM tooling ecosystem.
 
 #### CosmWasm (Cosmos SDK)
 
 Cosmos SDK appchains with CosmWasm offer full sovereignty (own validator set), IBC-native interoperability across 200+ chains, and Rust-based smart contracts with an actor model that eliminates re-entrancy by design. CometBFT consensus provides deterministic ~6s finality.
 
-**Why rejected**: Empirical evidence shows EVM consistently winning even within the Cosmos ecosystem — Sei's CosmWasm usage dropped below 20% after adding an EVM layer; Injective followed similar patterns. The Cosmos security model requires bootstrapping your own validator set (or using Interchain Security from the Cosmos Hub), while EVM L2/L3 rollups inherit Ethereum's $60B+ security budget. IBC interoperability is valuable but secondary to EVM composability for the Nunchi use case.
+**Why rejected**: Empirical evidence shows EVM consistently winning even within the Cosmos ecosystem — Sei's CosmWasm usage dropped below 20% after adding an EVM layer; Injective followed similar patterns. The Cosmos security model requires bootstrapping your own validator set (or using Interchain Security from the Cosmos Hub) — the same bootstrapping challenge that Nunchi faces as a sovereign EVM L1, but without access to the EVM tooling and DeFi ecosystem. IBC interoperability is valuable but secondary to EVM composability for the Nunchi use case.
 
 #### Solana VM (SVM)
 
@@ -177,52 +177,49 @@ SVM offers the highest throughput of any production L1 (50,000+ TPS, 400ms block
 
 A purpose-built VM optimized for HDC operations and agent coordination could achieve maximum efficiency but would require building an entire compiler toolchain, debugger, and developer ecosystem from scratch.
 
-**Why rejected**: The cold-start problem. Building a VM ecosystem takes years and millions of dollars. EVM provides a ready-made foundation that can be extended with custom precompiles. The 80/20 analysis: EVM handles 80% of the workload well; custom precompiles (via Stylus or native) handle the 20% that needs specialization.
+**Why rejected**: The cold-start problem. Building a VM ecosystem takes years and millions of dollars. EVM provides a ready-made foundation that can be extended with native precompiles. The 80/20 analysis: EVM handles 80% of the workload well; custom precompiles handle the 20% that needs specialization.
 
-### The Winning Approach: EVM + Stylus Precompiles
+### The Winning Approach: Sovereign EVM L1 with Native Precompiles
 
-The Nunchi chain uses EVM as its base execution layer, extended with custom precompiles for HDC operations. Two implementation paths are viable:
+The Nunchi chain uses EVM as its base execution layer, extended with custom native precompiles for HDC operations. Nunchi is a sovereign L1 — a fork of reth/revm with Simplex consensus and precompiles registered at genesis.
 
-**Path A — Arbitrum Orbit + Stylus (preferred)**:
-Deploy Nunchi as an Arbitrum Orbit L3 chain with the Stylus WASM VM enabled. HDC operations are implemented as Stylus contracts in Rust, achieving 10-100x gas reduction over equivalent Solidity. Stylus contracts share state with Solidity contracts and are called via standard ABI — no special integration needed. This path inherits Arbitrum's fraud proof system (BoLD, permissionless as of 2025) and Ethereum's security.
+**Native Reth precompile (chosen approach)**:
+Fork reth and register HDC operations as native precompiles (like SHA-256 at 0x02), deployed at genesis addresses 0xA01 (HDC) and 0xA02 (Agent Registry). Native precompiles execute as Rust code directly in the execution client — no WASM layer, no context switch overhead. This provides the lowest possible gas costs (~16 gas for Hamming distance, ~400 gas for top-K=20 search) and requires maintaining a reth fork, which is the standard operating model for a sovereign EVM L1.
 
 ```rust
-// Stylus HDC precompile — compiles to WASM, runs at near-native speed
-#[external]
-fn hdc_similarity(a: Bytes, b: Bytes) -> Result<U256, Vec<u8>> {
-    // 160 native 64-bit XOR + POPCNT operations
-    // ~5-6 gas via Stylus (vs. ~2,220 gas in Solidity)
-    let a_words: &[u64; 160] = bytemuck::cast_ref(&a[..1280]);
-    let b_words: &[u64; 160] = bytemuck::cast_ref(&b[..1280]);
-    let matching = a_words.iter().zip(b_words.iter())
-        .map(|(x, y)| (x ^ y).count_ones())
-        .sum::<u32>();
-    let similarity = U256::from(10240 - matching) * U256::from(10).pow(U256::from(18))
-        / U256::from(10240);
-    Ok(similarity)
+// Native reth precompile registration at genesis
+// Registered in the Nunchi execution client (reth fork)
+pub fn register_nunchi_precompiles(spec: &mut GenesisConfig) {
+    // HDC similarity search — deployed at 0xA01
+    spec.add_precompile(
+        address!("0x0000000000000000000000000000000000000A01"),
+        Box::new(HdcPrecompile::new()),
+    );
+    // Agent registry — deployed at 0xA02
+    spec.add_precompile(
+        address!("0x0000000000000000000000000000000000000A02"),
+        Box::new(AgentRegistryPrecompile::new()),
+    );
 }
 ```
 
-**Path B — Native Reth fork (maximum performance)**:
-Fork Reth and add HDC as a native precompile (like SHA-256 at 0x02), deployed at genesis address 0xA01. This provides the absolute lowest gas costs (~16 gas for Hamming distance) but requires maintaining a custom execution client fork. Suitable if Nunchi runs its own validator set.
+**Performance comparison** (Nunchi uses the native precompile column):
 
-**Performance comparison**:
-
-| Operation | Solidity | Stylus (Rust/WASM) | Native Precompile |
+| Operation | Solidity | Stylus/WASM (alternative) | Native Precompile (chosen) |
 |---|---|---|---|
 | HDC XOR (1280 bytes) | ~120 gas | ~5-6 gas | ~5 gas |
 | Hamming distance | ~2,220 gas | ~16-20 gas | ~16 gas |
 | Top-K (N=1000, K=20) | Infeasible | ~16,000 gas | ~400 gas* |
 
-*Native precompile with index access; Stylus would need to iterate over on-chain storage.
+*Native precompile with direct index access; a WASM-based approach would incur additional per-comparison storage read overhead.
 
 ### Cross-Chain Interoperability Architecture
 
 Nunchi must interoperate with Ethereum mainnet (where DeFi liquidity lives), other L2s (where agents may operate), and potentially non-EVM chains. The interoperability stack uses a layered approach:
 
-#### Layer 1: Native Bridge (Orbit)
+#### Layer 1: Standard Cross-Chain Bridge
 
-If Nunchi is deployed as an Orbit L3, it inherits Arbitrum's canonical bridge to Ethereum L1. This bridge is secured by the Nitro fraud proof system with 7-day withdrawal windows (or faster via ZK validity proofs via OP Succinct-style replacements). Token transfers between Nunchi and Ethereum L1 are trustless — no external validator set required.
+As a sovereign L1, Nunchi does not inherit a canonical parent-chain bridge. Cross-chain transfers between Nunchi and Ethereum L1 (or other EVM chains) use standard bridge infrastructure: a light-client bridge that verifies Simplex consensus finality proofs on the destination chain, or a multisig bridge for the initial deployment phase. Token transfers are secured by the bridge's own validator set or light-client cryptography.
 
 #### Layer 2: Hyperlane ISM (Permissionless Cross-Chain)
 
@@ -280,7 +277,7 @@ pub struct CrossChainIntent {
 ### Academic Foundations (Chain Selection)
 
 - Azar, Y., Broder, A.Z., Karlin, A.R., and Upfal, E. (1999). "Balanced Allocations." *SIAM Journal on Computing*. — Theoretical foundations for load-balanced dispatch applicable to cross-chain routing.
-- Buterin, V. (2021). "Endgame." *vitalik.ca*. — The modular blockchain thesis: separate execution, DA, and settlement. Nunchi as an Orbit L3 follows this architecture.
+- Buterin, V. (2021). "Endgame." *vitalik.ca*. — The modular blockchain thesis: separate execution, DA, and settlement layers. Nunchi as a sovereign EVM L1 integrates all three layers directly rather than delegating settlement upward, trading inherited security for full sovereignty and minimal operational dependencies.
 - Zamyatin, A. et al. (2021). "SoK: Communication Across Distributed Ledgers." *Financial Cryptography*. — Taxonomy of cross-chain protocols (relay chains, hash time-locks, notary schemes). Nunchi's layered approach combines native bridge (relay) with ISM (notary) and intent (hash time-lock variant).
 
 ---

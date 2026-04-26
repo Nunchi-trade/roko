@@ -268,6 +268,7 @@ async fn record_run_failure(state: &AppState, run_id: &str, error_message: &str)
         handle.result = Some(RunResult {
             success: false,
             output_text: None,
+            usage: None,
         });
     }
 }

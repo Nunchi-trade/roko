@@ -249,103 +249,68 @@ At larger scales, the three-tier architecture bounds cost growth:
 - 1M entries: ~600 gas (Bloom filter rejects 99%+ → 10K to Tier 2)
 - 10M entries: ~800 gas (Bloom filter + approximate tier handle the scale)
 
-### Stylus Implementation Path
+### Native Precompile Implementation
 
-For Nunchi deployed as an Arbitrum Orbit L3, HDC operations can be implemented as **Stylus contracts** rather than native precompiles. Stylus compiles Rust to WASM and runs alongside the EVM with shared state and ABI-compatible cross-calls.
+Nunchi implements HDC operations as **native reth precompiles** registered at genesis. This is the standard mechanism for adding EVM precompiles to a custom execution client — the same pattern used by Ethereum's built-in precompiles (SHA-256 at 0x02, ECRECOVER at 0x01, BN256 curve operations at 0x06-0x08).
+
+Precompile registration in the Nunchi reth fork:
 
 ```rust
-// Stylus HDC contract — Rust compiled to WASM
-// Deployed as a regular contract, callable from Solidity
-use stylus_sdk::{prelude::*, alloy_primitives::*};
+use reth_primitives::address;
+use reth_revm::precompile::{Precompile, PrecompileResult, StandardPrecompileFn};
 
-sol_storage! {
-    #[entrypoint]
-    pub struct HdcPrecompile {
-        /// On-chain HDC index (vector hash → vector data)
-        mapping(bytes32 => bytes) vectors;
-        /// Number of indexed vectors
-        uint256 vector_count;
+/// HDC similarity precompile — registered at 0xA01 in genesis
+pub struct HdcPrecompile;
+
+impl Precompile for HdcPrecompile {
+    fn call(&self, input: &[u8], gas_limit: u64) -> PrecompileResult {
+        // Validate input: two 1280-byte vectors
+        if input.len() != 2560 {
+            return Err(PrecompileError::Other("invalid input length".into()));
+        }
+        let gas_used = 50u64; // ~160 POPCNT operations
+        if gas_limit < gas_used {
+            return Err(PrecompileError::OutOfGas);
+        }
+
+        let a_words = bytemuck::cast_slice::<u8, u64>(&input[..1280]);
+        let b_words = bytemuck::cast_slice::<u8, u64>(&input[1280..]);
+
+        // 160 XOR + POPCNT operations — uses SIMD on modern x86-64
+        let differing_bits: u32 = a_words.iter().zip(b_words.iter())
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum();
+
+        // Return similarity as PU18 fixed-point (18 decimal places)
+        let similarity = (10240u64 - differing_bits as u64) * 10u64.pow(18) / 10240;
+        let mut output = [0u8; 32];
+        output[24..].copy_from_slice(&similarity.to_be_bytes());
+
+        Ok(PrecompileOutput { gas_used, bytes: output.into() })
     }
 }
 
-#[external]
-impl HdcPrecompile {
-    /// Compute normalized Hamming similarity between two 10,240-bit vectors
-    /// Gas cost via Stylus: ~16-20 gas (vs. ~2,220 in Solidity)
-    pub fn similarity(&self, a: Bytes, b: Bytes) -> Result<U256, Vec<u8>> {
-        if a.len() != 1280 || b.len() != 1280 {
-            return Err(b"invalid vector length".to_vec());
-        }
-        let matching_bits = hamming_distance_raw(&a, &b);
-        // Return as PU18 fixed-point: similarity × 10^18
-        let sim = U256::from(10240 - matching_bits)
-            * U256::from(10).pow(U256::from(18))
-            / U256::from(10240);
-        Ok(sim)
-    }
-
-    /// XOR binding of two vectors
-    /// Gas cost via Stylus: ~5-6 gas
-    pub fn bind(&self, a: Bytes, b: Bytes) -> Result<Bytes, Vec<u8>> {
-        if a.len() != 1280 || b.len() != 1280 {
-            return Err(b"invalid vector length".to_vec());
-        }
-        let mut result = vec![0u8; 1280];
-        for i in 0..1280 {
-            result[i] = a[i] ^ b[i];
-        }
-        Ok(Bytes::from(result))
-    }
-
-    /// Majority-vote bundle of N vectors
-    /// Gas cost via Stylus: ~30 + 5N gas
-    pub fn bundle(&self, vectors: Vec<Bytes>) -> Result<Bytes, Vec<u8>> {
-        let n = vectors.len();
-        let threshold = n / 2;
-        let mut counts = vec![0u32; 10240];
-        for v in &vectors {
-            for bit_idx in 0..10240 {
-                let byte_idx = bit_idx / 8;
-                let bit_pos = bit_idx % 8;
-                if v[byte_idx] & (1 << bit_pos) != 0 {
-                    counts[bit_idx] += 1;
-                }
-            }
-        }
-        let mut result = vec![0u8; 1280];
-        for bit_idx in 0..10240 {
-            if counts[bit_idx] > threshold as u32 {
-                let byte_idx = bit_idx / 8;
-                let bit_pos = bit_idx % 8;
-                result[byte_idx] |= 1 << bit_pos;
-            }
-        }
-        Ok(Bytes::from(result))
-    }
-}
-
-/// Inner Hamming distance — pure bitwise, no allocations
-fn hamming_distance_raw(a: &[u8], b: &[u8]) -> u32 {
-    // Process as 64-bit words for maximum WASM performance
-    let a_words = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const u64, 160) };
-    let b_words = unsafe { std::slice::from_raw_parts(b.as_ptr() as *const u64, 160) };
-    a_words.iter().zip(b_words.iter())
-        .map(|(x, y)| (x ^ y).count_ones())
-        .sum()
+/// Genesis configuration registering all Nunchi precompiles
+pub fn nunchi_precompile_set() -> PrecompileSet {
+    let mut set = PrecompileSet::default();
+    set.insert(
+        address!("0x0000000000000000000000000000000000000A01"),
+        Arc::new(HdcPrecompile),
+    );
+    set.insert(
+        address!("0x0000000000000000000000000000000000000A02"),
+        Arc::new(AgentRegistryPrecompile),
+    );
+    set
 }
 ```
 
-**Stylus performance data** (from OpenZeppelin benchmarks, September 2024):
-- Poseidon hash: 18x cheaper via Stylus than Solidity (11,887 gas vs. ~215,000 gas)
-- General compute: 10-100x cheaper
-- Memory-intensive operations: 100-500x cheaper
-- Bitwise operations (XOR, POPCNT): expected 20-50x cheaper than Solidity equivalents
-
-**Stylus constraints**:
-- Compressed WASM binary limit: 24 KB (HDC operations are algorithmically simple — fits easily)
-- No `std` library (use `wee_alloc` or `mini_alloc` for heap allocation)
-- Annual reactivation required (365 days or after Stylus upgrade)
-- Host I/O overhead: ~0.84 gas per VM context switch for storage reads
+**Native precompile properties**:
+- No VM context switch: executes directly in the reth execution thread, no WASM interpreter overhead
+- Direct SIMD access: the Rust compiler emits AVX-512 VPOPCNTQ instructions on capable hardware, processing 8 × 64-bit words per instruction
+- Shared EVM state: reads and writes EVM storage directly via the revm `Database` interface
+- Gas metering: charged before execution; `OutOfGas` returned immediately if insufficient
+- Standard ABI: callable from Solidity via `staticcall` to address 0xA01, identical to any other EVM precompile
 
 ---
 

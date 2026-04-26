@@ -1,6 +1,6 @@
 # Current Status and 6 Solidity Contracts
 
-> Summary of what is built, what is scaffolded, and what remains for Tier 6. Six planned Solidity contracts: Agent Registry (Identity), Reputation Registry, Marketplace (Spore), Escrow, NUNCHI Token, and Validation Registry. All are Tier 6 deferred — blocked by Tier 5 completion.
+> Summary of what is built, what is scaffolded, and what remains for Tier 6. Six planned Solidity contracts: Agent Registry (Identity), Reputation Registry, Marketplace (ERC-8183), Escrow, NUNCHI Token, and Validation Registry. All are Tier 6 deferred — blocked by Tier 5 completion.
 
 
 > **Implementation**: Built
@@ -99,7 +99,7 @@ All Tier 6 items are deferred. The implementation plan (12b-chain-layer.md) cont
 
 **Spec**: See [14-reputation-system-7-domain.md](./14-reputation-system-7-domain.md), [06-erc-8004-registries.md](./06-erc-8004-registries.md)
 
-### 3. Marketplace (Spore)
+### 3. Marketplace (ERC-8183)
 
 **Address**: Deployed by governance
 
@@ -178,7 +178,7 @@ All Tier 6 items are deferred. The implementation plan (12b-chain-layer.md) cont
        ▼                                ▼
 ┌──────────────┐    feedback    ┌──────────────┐
 │  Marketplace │───────────────→│  Reputation  │
-│  (Spore)     │                │  Registry    │
+│  (ERC-8183)  │                │  Registry    │
 │              │                │  (0xA200)    │
 └──────┬───────┘                └──────────────┘
        │

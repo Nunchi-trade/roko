@@ -47,6 +47,7 @@ impl CliRuntime for RecordingRuntime {
         Ok(RunResult {
             success: true,
             output_text: None,
+            usage: None,
         })
     }
 

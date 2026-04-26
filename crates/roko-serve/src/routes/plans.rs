@@ -480,6 +480,7 @@ async fn plan_chat(
             Ok(RunResult {
                 success,
                 output_text,
+                ..
             }) => {
                 // Try to parse mutations from the LLM output and apply them.
                 if let Some(ref text) = output_text {
@@ -1475,6 +1476,7 @@ mod tests {
             Ok(RunResult {
                 success: self.success,
                 output_text: None,
+                usage: None,
             })
         }
 

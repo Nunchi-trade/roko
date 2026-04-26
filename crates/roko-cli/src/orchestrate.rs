@@ -4082,6 +4082,11 @@ impl PlanRunner {
             chain_wallet,
             code_index_cache: None,
             custody_logger: custody_logger_for(workdir),
+            // TODO(M-future): Load extensions from `config.agent.extensions` and
+            // per-role overrides into the chain. Currently the chain is empty
+            // because no extension loader/factory exists yet — all dispatch
+            // hooks (pre/post_inference, on_gate, on_error) are already wired
+            // and will fire once extensions are registered here.
             extension_chain: ExtensionChain::new(),
         })
     }
@@ -18981,6 +18986,7 @@ mod tests {
             Ok(roko_serve::runtime::RunResult {
                 success: true,
                 output_text: None,
+                usage: None,
             })
         }
 

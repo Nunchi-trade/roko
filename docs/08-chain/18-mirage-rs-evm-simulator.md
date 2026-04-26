@@ -255,7 +255,7 @@ mirage-rs uses revm (the same EVM used by Reth, Foundry/Anvil, and major L2 chai
 | **Gas price dynamics** | Fixed basefee | EIP-1559 basefee fluctuates per block. Simulations at a fixed basefee will diverge if blocks fill unexpectedly. | Set `basefee` to 110% of current mainnet basefee as safety margin. |
 | **Private mempool (~40-60% of Ethereum block space)** | Invisible | Transactions routed through Flashbots, MEV-Boost, and private builders are invisible to simulation. | Accept that simulation is a lower bound on state competition. |
 | **EVM implementation divergences** | Minor | OpDiffer (arXiv:2504.12034, 2025) found 26 bugs across 9 EVM implementations affecting ~7.21% of deployed contracts. revm may produce different results than go-ethereum for edge-case bytecodes. | Run differential tests against go-ethereum for critical contracts. |
-| **Nunchi HDC precompile (in Stylus mode)** | Emulated locally | mirage-rs emulates HDC operations using `roko-primitives`; production uses Stylus WASM. Results are numerically identical but gas costs may differ slightly. | Calibrate gas estimates against Stylus benchmarks on testnet. |
+| **Nunchi HDC precompile** | Emulated locally | mirage-rs emulates HDC operations using `roko-primitives`; production uses native precompiles registered at genesis. Results are numerically identical but gas costs may differ slightly. | Calibrate gas estimates against native precompile benchmarks on testnet. |
 
 ### Simulation Confidence Score
 

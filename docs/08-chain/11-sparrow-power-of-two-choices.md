@@ -35,7 +35,7 @@ The power of two choices reduces this to O(log log N). For 1,000 agents, the mos
 1. Job arrives for RandomVRF assignment
 
 2. Sparrow selects 2 agents from the eligible pool:
-   a. Filter by capability bitmask (same as Spore eligibility)
+   a. Filter by capability bitmask (same as ERC-8183 job market eligibility)
    b. Filter by minimum reputation threshold
    c. From the eligible set, select 2 agents using VRF-derived randomness
 
@@ -106,7 +106,7 @@ Load factors are self-reported via heartbeat messages on the EventBus. An agent 
 
 ## Comparison with Full Auction
 
-| Property | Sparrow (Power of Two) | Spore Auction |
+| Property | Sparrow (Power of Two) | ERC-8183 job market Auction |
 |---|---|---|
 | **Communication cost** | O(1) per job (probe 2 agents) | O(B) per job (B bidders) |
 | **Latency** | 1-2 blocks (400-800ms) | Auction window (10-100 blocks) |
@@ -145,11 +145,11 @@ If both probed agents are overloaded (load_factor > 0.9):
 ```
 1. Probe 2 more agents (total: 4 probes)
 2. If all 4 overloaded: queue the job with exponential backoff
-3. After 3 failed probe rounds: escalate to full Spore auction
+3. After 3 failed probe rounds: escalate to full ERC-8183 job market auction
 4. If no eligible agents available: return job to poster with budget refund
 ```
 
-The escalation path ensures jobs are not lost. If the network is at capacity, the job transitions from the fast Sparrow path to the slower but more thorough Spore auction path.
+The escalation path ensures jobs are not lost. If the network is at capacity, the job transitions from the fast Sparrow path to the slower but more thorough ERC-8183 job market auction path.
 
 ---
 
@@ -164,7 +164,7 @@ The escalation path ensures jobs are not lost. If the network is at capacity, th
 - Sparrow dispatch implementation (§C8)
 - VRF-based agent selection (§C9)
 - Load probing protocol (§C10)
-- Fallback escalation to Spore auction (§C11)
+- Fallback escalation to ERC-8183 job market auction (§C11)
 - Integration with EventBus heartbeat for load reporting (§C12)
 
 ---
