@@ -44,7 +44,8 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    any::{Any, TypeId},
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -318,10 +319,51 @@ impl<E: Clone + Send + Sync + 'static> BusSender<E> {
 }
 
 static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
+    OnceLock::new();
 
 /// Returns the process-local shared runtime event bus for `RokoEvent`.
 pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+}
+
+/// Global event bus for workflow runtime events.
+///
+/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
+/// subscribe to receive them.
+pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
+where
+    RuntimeEvent: Clone + Send + Sync + 'static,
+{
+    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut buses = buses.lock();
+    let type_id = TypeId::of::<RuntimeEvent>();
+
+    if let Some(bus) = buses.get(&type_id) {
+        return bus
+            .downcast_ref::<EventBus<RuntimeEvent>>()
+            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
+    }
+
+    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
+    // dependency direction matches the architecture reference. In this checkout,
+    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
+    // import `roko_core::RuntimeEvent` without a crate cycle.
+    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
+    buses.insert(type_id, bus);
+    bus
+}
+
+/// Emit a RuntimeEvent to the global runtime bus.
+/// Convenience wrapper around `runtime_event_bus().emit(event)`.
+pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
+where
+    RuntimeEvent: Clone + Send + Sync + 'static,
+{
+    let bus = runtime_event_bus::<RuntimeEvent>();
+    let seq = bus.total_emitted();
+    bus.emit(event);
+    seq
 }
 
 #[allow(clippy::cast_possible_truncation)]
