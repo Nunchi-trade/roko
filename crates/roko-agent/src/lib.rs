@@ -62,6 +62,7 @@ pub mod lifecycle;
 pub mod mcp;
 pub mod metamorphosis;
 pub mod mock;
+pub mod model_call_service;
 pub mod multi_pool;
 pub mod nl_to_format;
 pub mod ollama;
@@ -111,6 +112,7 @@ pub use introspection::{AgentIdentity, Intervention, MetacognitiveMonitor, Turn}
 pub use lifecycle::*;
 pub use metamorphosis::{MorphError, MorphableAgent, RoleProfile};
 pub use mock::MockAgent;
+pub use model_call_service::ModelCallService;
 pub use multi_pool::{KillReport, MultiAgentPool, WarmEntry};
 pub use ollama::agent::{OllamaAgent, OllamaLlmBackend};
 pub use openai_compat_backend::OpenAiCompatLlmBackend;
