@@ -121,6 +121,8 @@ pub mod error_pattern_store;
 pub mod event_subscriber;
 /// Unified learning events emitted by routing, evaluation, and runtime feedback.
 pub mod events;
+/// Concrete feedback sink for workflow learning telemetry.
+pub mod feedback_service;
 /// Forensic replay API for debugging failed tasks (GATE-07).
 pub mod forensic_replay;
 pub mod hdc_clustering;
@@ -164,3 +166,5 @@ pub mod skill_library;
 pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
 pub mod verdict_scorer;
+
+pub use feedback_service::FeedbackService;
