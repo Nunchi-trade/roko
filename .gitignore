@@ -88,6 +88,8 @@ demo/.runtime/
 /tmp/mori-diffs/archive/2026-04-26-verified/*
 !/tmp/mori-diffs/archive/2026-04-26-verified/README.md
 
+!/tmp/runners/
+!/tmp/runners/**
 
 # Temporary / work-in-progress (will be refined later) ----------------------
 CLAUDE.md
