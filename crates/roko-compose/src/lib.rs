@@ -33,6 +33,7 @@ pub mod enrichment;
 pub mod foraging;
 pub mod gate_feedback;
 pub mod prompt;
+pub mod prompt_assembly_service;
 pub mod prompt_hints;
 pub mod role_prompts;
 pub mod scorer;
@@ -81,6 +82,7 @@ pub use prompt::{
     ExcludedSectionMeta, IncludedSectionMeta, Placement, PromptBuild, PromptComposer,
     PromptSection, SectionPriority, estimate_tokens,
 };
+pub use prompt_assembly_service::PromptAssemblyService;
 pub use prompt_hints::prompt_hints_for;
 pub use role_prompts::{
     BuiltinRolePolicy, DEFAULT_CONVENTIONS_SUFFIX, MANIFEST_BACKED_CORE_ROLES, RolePromptSource,
