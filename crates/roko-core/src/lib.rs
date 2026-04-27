@@ -80,6 +80,7 @@ pub mod extension;
 pub mod feed;
 /// Forensic replay engine for causal decision reconstruction (SAFE-12).
 pub mod forensic;
+pub mod foundation;
 pub mod hash;
 /// Heartbeat protocol types for health monitoring.
 pub mod heartbeat;
@@ -162,6 +163,11 @@ pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
 pub use forensic::{
     ForensicReplay, ForensicReplayLogger, GateVerdictRecord, PolicyDecisionRecord, PolicyOutcome,
     ReconstructionStep, RouterAlternative, RouterDecisionRecord, ScoredReference, StepStatus,
+};
+pub use foundation::{
+    ChatMessage as FoundationChatMessage, Effect, EffectExecutor, EffectOutcome, EventConsumer,
+    FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict, MessageRole,
+    ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec, TokenUsage,
 };
 pub use hash::ContentHash;
 pub use heartbeat::{
