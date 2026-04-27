@@ -15,6 +15,15 @@ use tokio::process::Command;
 use crate::auth_detect::AuthMethod;
 use crate::chat::extract_clean_text;
 
+/// A single tool execution output captured from Claude CLI stream-json.
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    /// Tool name (e.g. "Read", "Bash", "Edit"), if available.
+    pub tool_name: Option<String>,
+    /// The tool's output content (file contents, bash stdout, etc.).
+    pub content: String,
+}
+
 /// Result of dispatching a prompt to an LLM backend.
 #[derive(Debug, Clone)]
 pub struct DispatchResult {
@@ -26,6 +35,10 @@ pub struct DispatchResult {
     pub input_tokens: u64,
     /// Approximate output tokens.
     pub output_tokens: u64,
+    /// Tool execution outputs captured from the agent's tool calls.
+    pub tool_outputs: Vec<ToolOutput>,
+    /// Session ID for conversation resume (from Claude CLI Result event).
+    pub session_id: Option<String>,
 }
 
 /// Dispatch a prompt using the detected auth method.
@@ -71,6 +84,8 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
     let mut model = String::from("claude");
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
+    let mut tool_outputs = Vec::new();
+    let mut session_id: Option<String> = None;
 
     while let Some(line) = lines.next_line().await.context("read claude stdout")? {
         let trimmed = line.trim();
@@ -79,24 +94,70 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
         }
         // Try to extract metadata from stream-json events
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            // Model from assistant event
-            if let Some(m) = event
-                .pointer("/message/model")
-                .or_else(|| event.get("model"))
-                .and_then(serde_json::Value::as_str)
-            {
-                model = m.to_string();
-            }
-            // Token usage from assistant event
-            if let Some(usage) = event
-                .pointer("/message/usage")
-                .or_else(|| event.get("usage"))
-            {
-                if let Some(n) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                    input_tokens = n;
+            let event_type = event.get("type").and_then(serde_json::Value::as_str);
+
+            match event_type {
+                Some("tool") => {
+                    // Tool event: carries the output of Bash/Read/Edit/etc tool calls.
+                    // Extract from "content" or "output" field (Claude uses both).
+                    let content = event
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .or_else(|| event.get("output").and_then(|o| o.as_str()));
+                    if let Some(content) = content.filter(|s| !s.is_empty()) {
+                        // Truncate very large outputs (like mori's 4KB limit)
+                        let truncated = if content.len() > 4096 {
+                            let mut end = 4096;
+                            while !content.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("{}...[truncated]", &content[..end])
+                        } else {
+                            content.to_string()
+                        };
+                        let tool_name = event.get("tool").and_then(|t| t.as_str()).map(String::from);
+                        tool_outputs.push(ToolOutput {
+                            tool_name,
+                            content: truncated,
+                        });
+                    }
                 }
-                if let Some(n) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                    output_tokens = n;
+                Some("result") => {
+                    // Result event: carries session_id, cost, error flag.
+                    if let Some(sid) = event.get("session_id").and_then(serde_json::Value::as_str) {
+                        session_id = Some(sid.to_string());
+                    }
+                    // Usage from result event (often the final/accurate count)
+                    if let Some(usage) = event.get("usage") {
+                        if let Some(n) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                            input_tokens = n;
+                        }
+                        if let Some(n) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                            output_tokens = n;
+                        }
+                    }
+                }
+                _ => {
+                    // Model from assistant event
+                    if let Some(m) = event
+                        .pointer("/message/model")
+                        .or_else(|| event.get("model"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        model = m.to_string();
+                    }
+                    // Token usage from assistant event
+                    if let Some(usage) = event
+                        .pointer("/message/usage")
+                        .or_else(|| event.get("usage"))
+                    {
+                        if let Some(n) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                            input_tokens = n;
+                        }
+                        if let Some(n) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                            output_tokens = n;
+                        }
+                    }
                 }
             }
         }
@@ -133,6 +194,8 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
         model,
         input_tokens,
         output_tokens,
+        tool_outputs,
+        session_id,
     })
 }
 
@@ -186,6 +249,8 @@ async fn dispatch_anthropic_api(api_key: &str, model: Option<&str>, prompt: &str
         model: data.model,
         input_tokens: data.usage.input_tokens,
         output_tokens: data.usage.output_tokens,
+        tool_outputs: Vec::new(),
+        session_id: None,
     })
 }
 
@@ -264,6 +329,8 @@ async fn dispatch_openai_compat(
         model,
         input_tokens,
         output_tokens,
+        tool_outputs: Vec::new(),
+        session_id: None,
     })
 }
 
@@ -306,6 +373,8 @@ mod tests {
             model: "test".into(),
             input_tokens: 10,
             output_tokens: 5,
+            tool_outputs: Vec::new(),
+            session_id: None,
         };
         assert_eq!(r.text, "hello");
         assert_eq!(r.model, "test");

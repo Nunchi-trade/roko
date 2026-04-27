@@ -2636,6 +2636,13 @@ pub fn merge_global_providers(config: &mut roko_core::config::schema::RokoConfig
     for (name, model) in global.models {
         config.models.entry(name).or_insert(model);
     }
+    // Merge agent defaults when the project config doesn't set them.
+    if config.agent.default_model.is_empty() && !global.agent.default_model.is_empty() {
+        config.agent.default_model = global.agent.default_model;
+    }
+    if config.agent.default_backend.is_empty() && !global.agent.default_backend.is_empty() {
+        config.agent.default_backend = global.agent.default_backend;
+    }
 }
 
 /// Walk up from `start` looking for `roko.toml`. Returns the first hit.

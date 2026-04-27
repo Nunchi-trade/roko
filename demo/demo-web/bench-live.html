@@ -165,7 +165,7 @@ body::before {
   background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
   min-height: 200px;
 }
-.viz-canvas-wrap canvas { width: 100%; height: 100%; }
+.viz-canvas-wrap canvas { display: block; width: 100%; height: 100%; }
 
 .cost-timeline {
   background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
@@ -263,46 +263,46 @@ body::before {
 
 <!-- Header -->
 <header class="header">
-  <span class="logo">&#9670; roko</span>
+  <a href="demo.html" class="logo" style="text-decoration:none">&#9670; roko</a>
   <span class="title">Live Benchmark Monitor</span>
   <div class="status">
     <div class="status-dot"></div>
-    <span>running &middot; swe-lite / cascade</span>
+    <span>connecting&hellip;</span>
   </div>
-  <span class="elapsed" id="elapsed">02:34</span>
+  <span class="elapsed" id="elapsed">00:00</span>
 </header>
 
 <!-- Top metrics -->
 <div class="metrics-row">
   <div class="metric-block">
-    <div class="mb-value pass" id="live-pass">37/50</div>
+    <div class="mb-value pass" id="live-pass">0/0</div>
     <div class="mb-label">Passed</div>
-    <div class="mb-bar"><div class="mb-bar-fill pass" style="width:74%"></div></div>
+    <div class="mb-bar"><div class="mb-bar-fill pass" style="width:0%"></div></div>
   </div>
   <div class="metrics-divider"></div>
   <div class="metric-block">
-    <div class="mb-value cost" id="live-cost">$4.82</div>
+    <div class="mb-value cost" id="live-cost">$0.00</div>
     <div class="mb-label">Cost so far</div>
-    <div class="mb-bar"><div class="mb-bar-fill cost" style="width:48%"></div></div>
+    <div class="mb-bar"><div class="mb-bar-fill cost" style="width:0%"></div></div>
   </div>
   <div class="metrics-divider"></div>
   <div class="metric-block">
-    <div class="mb-value perf" id="live-cfactor">0.82</div>
+    <div class="mb-value perf" id="live-cfactor">—</div>
     <div class="mb-label">C-Factor (live)</div>
   </div>
   <div class="metrics-divider"></div>
   <div class="metric-block">
-    <div class="mb-value time" id="live-avg">18.4s</div>
+    <div class="mb-value time" id="live-avg">—</div>
     <div class="mb-label">Avg per task</div>
   </div>
   <div class="metrics-divider"></div>
   <div class="metric-block">
-    <div class="mb-value" id="live-model" style="font-size:0.9rem;color:var(--rose-bright)">sonnet-4.6</div>
+    <div class="mb-value" id="live-model" style="font-size:0.9rem;color:var(--rose-bright)">—</div>
     <div class="mb-label">Current model</div>
   </div>
   <div class="metrics-divider"></div>
   <div class="metric-block">
-    <div class="mb-value" id="live-progress" style="font-size:0.9rem">42/50</div>
+    <div class="mb-value" id="live-progress" style="font-size:0.9rem">0/0</div>
     <div class="mb-label">Tasks completed</div>
   </div>
 </div>
@@ -341,44 +341,274 @@ body::before {
   <div class="bb-item"><span>Batch:</span> <span class="bb-value">50</span></div>
   <div class="bb-item"><span>Learning:</span> <span class="bb-value" style="color:var(--sage)">enabled</span></div>
   <span class="bb-spacer"></span>
-  <div class="bb-item"><span>Budget:</span> <span class="bb-value cost">$4.82 / $10.00</span></div>
-  <a href="bench.html">&#8592; Back to Lab</a>
+  <div class="bb-item"><span>Budget:</span> <span class="bb-value cost">$0.00 / $10.00</span></div>
+  <a href="bench.html">&#8592; Bench Lab</a>
+  <a href="explorer.html">Explorer</a>
+  <a href="demo.html">Demo</a>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
 <script>
-// ── Simulation state ──────────────────────────────────────
-const TOTAL_TASKS = 50;
+// ── State ─────────────────────────────────────────────────
 let tasks = [];
-let feedItems = [];
-let costHistory = [];
-let elapsed = 154; // seconds
-let totalCost = 4.82;
-let passed = 37;
-let failed = 5;
-let completed = 42;
+let costHistory = [];  // per-task costs (last 20)
+let costPoints = [];   // cumulative cost curve
+let elapsed = 0;
+let totalCost = 0;
+let passed = 0;
+let failed = 0;
+let completed = 0;
+let totalTasks = 0;
+let timerInterval = null;
+let pollInterval = null;
+let useRealData = false;  // flips to true when API responds with data
+let currentModel = '—';
+let budget = 10.00;
 
-const TASK_NAMES = [
+// ── API helpers ───────────────────────────────────────────
+const API = '';  // same origin
+
+async function apiFetch(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// ── Load real data from API ───────────────────────────────
+async function loadRealData() {
+  const [eff, episodes, health, router, cfactor] = await Promise.all([
+    apiFetch('/api/learn/efficiency'),
+    apiFetch('/api/episodes'),
+    apiFetch('/api/health'),
+    apiFetch('/api/learn/cascade-router'),
+    apiFetch('/api/c-factor/trend'),
+  ]);
+
+  // If we got efficiency data with tasks, use real data
+  if (eff && eff.tasks && eff.tasks.length > 0) {
+    useRealData = true;
+    tasks = [];
+    costHistory = [];
+    costPoints = [];
+    totalCost = 0;
+    passed = 0;
+    failed = 0;
+    completed = 0;
+
+    // Build task list from efficiency data
+    const effTasks = eff.tasks.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+    totalTasks = effTasks.length;
+
+    let cum = 0;
+    for (const t of effTasks) {
+      const cost = t.cost_usd || 0;
+      cum += cost;
+      tasks.push({ state: 'pass', cost: cost.toFixed(3), name: t.task_id || t.plan_id || '—' });
+      costHistory.push(cost);
+      costPoints.push(cum);
+      totalCost += cost;
+      completed++;
+      passed++;
+    }
+    // Keep last 20 for bar chart
+    if (costHistory.length > 20) costHistory = costHistory.slice(-20);
+
+    // Overlay episode data for pass/fail if available
+    if (episodes && Array.isArray(episodes)) {
+      const failIds = new Set();
+      for (const ep of episodes) {
+        if (ep.gate_verdict === 'fail' || ep.success === false) {
+          failIds.add(ep.task_id || ep.plan_id);
+        }
+      }
+      for (const t of tasks) {
+        if (failIds.has(t.name)) {
+          t.state = 'fail';
+          passed--;
+          failed++;
+        }
+      }
+    }
+
+    // Model from router
+    if (router && router.models) {
+      const models = Object.entries(router.models);
+      if (models.length > 0) {
+        models.sort((a, b) => (b[1].weight || 0) - (a[1].weight || 0));
+        currentModel = models[0][0];
+      }
+    }
+
+    // C-factor
+    if (cfactor && cfactor.buckets && cfactor.buckets.length > 0) {
+      const last = cfactor.buckets[cfactor.buckets.length - 1];
+      document.getElementById('live-cfactor').textContent = (last.value || 0).toFixed(2);
+    }
+
+    // Health for active runs
+    if (health) {
+      const active = health.active_runs || 0;
+      if (active > 0) {
+        document.querySelector('.status span:last-child').textContent = `running · ${active} active`;
+        setStatusDot('running');
+      } else {
+        document.querySelector('.status span:last-child').textContent = 'idle · no active runs';
+        setStatusDot('idle');
+      }
+    }
+
+    // Feed from episodes
+    if (episodes && Array.isArray(episodes)) {
+      const recent = episodes.slice(0, 15);
+      for (const ep of recent.reverse()) {
+        const ok = ep.gate_verdict !== 'fail' && ep.success !== false;
+        const name = ep.task_id || ep.plan_id || 'task';
+        addFeedItem(
+          ok ? 'pass' : 'fail',
+          `${name} ${ok ? 'passed' : 'failed'}`,
+          ep.summary || (ok ? 'Gates passed' : 'Gate failure'),
+          [
+            ...(ep.cost_usd != null ? [{ type: 'cost', label: 'cost', value: `$${ep.cost_usd.toFixed(3)}` }] : []),
+            ...(ep.tokens != null ? [{ type: 'tokens', label: 'tokens', value: String(ep.tokens) }] : []),
+          ]
+        );
+      }
+    }
+
+    updateMetrics();
+    renderTaskGrid();
+    renderCostBars();
+    renderCostChart();
+    return;
+  }
+
+  // No real data — fall back to simulation
+  startSimulation();
+}
+
+// ── Simulation fallback ───────────────────────────────────
+function startSimulation() {
+  useRealData = false;
+  totalTasks = 50;
+  tasks = [];
+  costHistory = [];
+  costPoints = [];
+  totalCost = 0;
+  passed = 0;
+  failed = 0;
+  completed = 0;
+
+  // Initialize all as pending
+  for (let i = 0; i < totalTasks; i++) {
+    tasks.push({ state: 'pending', cost: '0.00', name: `task-${i + 1}` });
+  }
+
+  document.querySelector('.status span:last-child').textContent = 'simulated · no server data';
+  setStatusDot('sim');
+  addFeedItem('info', 'Simulation mode', 'No benchmark data from server. Showing simulated run. Start a real benchmark from <a href="bench.html" style="color:var(--rose-bright)">Bench Lab</a>.', []);
+
+  // Start first task
+  tasks[0].state = 'running';
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
+
+  // Simulate one task every 2s
+  pollInterval = setInterval(simulateStep, 2000);
+}
+
+const SIM_NAMES = [
   'django__django-11001', 'astropy__astropy-6938', 'matplotlib__matplotlib-23314',
   'sympy__sympy-13146', 'scikit-learn__scikit-learn-13497', 'requests__requests-3362',
   'flask__flask-4045', 'pandas__pandas-21587', 'pytest__pytest-5103',
   'sphinx__sphinx-8273', 'pylint__pylint-7277', 'black__black-3312',
 ];
 
-// Init tasks
-for (let i = 0; i < TOTAL_TASKS; i++) {
-  if (i < passed) tasks.push({ state: 'pass', cost: (Math.random() * 0.2 + 0.02).toFixed(3) });
-  else if (i < passed + failed) tasks.push({ state: 'fail', cost: (Math.random() * 0.15 + 0.01).toFixed(3) });
-  else if (i === completed) tasks.push({ state: 'running', cost: '0.00' });
-  else tasks.push({ state: 'pending', cost: '0.00' });
+function simulateStep() {
+  if (completed >= totalTasks) {
+    clearInterval(pollInterval);
+    setStatusDot('done');
+    document.querySelector('.status span:last-child').textContent = 'simulated · complete';
+    addFeedItem('info', 'Simulation complete', `${passed}/${totalTasks} passed. Total cost: $${totalCost.toFixed(2)}`, []);
+    return;
+  }
+
+  const ok = Math.random() > 0.25;
+  const cost = parseFloat((Math.random() * 0.18 + 0.03).toFixed(3));
+  tasks[completed].state = ok ? 'pass' : 'fail';
+  tasks[completed].cost = cost.toFixed(3);
+
+  if (ok) passed++; else failed++;
+  totalCost += cost;
+  costHistory.push(cost);
+  if (costHistory.length > 20) costHistory.shift();
+  costPoints.push(totalCost);
+  completed++;
+
+  if (completed < totalTasks) tasks[completed].state = 'running';
+
+  // Feed
+  const name = SIM_NAMES[completed % SIM_NAMES.length];
+  if (ok) {
+    addFeedItem('pass', `Task ${completed} passed`, `<code>${name}</code> — patch applied, tests passed.`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+      { type: 'tokens', label: 'tokens', value: `${Math.floor(Math.random() * 3000 + 800)}` },
+    ]);
+  } else {
+    addFeedItem('fail', `Task ${completed} failed`, `<code>${name}</code> — ${Math.random() > 0.5 ? 'tests failed' : 'patch did not apply'}.`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+    ]);
+  }
+  if (completed % 5 === 0) {
+    addFeedItem('learn', 'Knowledge updated', 'Cascade router weights adjusted from last 5 tasks.', []);
+  }
+  if (completed % 8 === 0) {
+    currentModel = Math.random() > 0.5 ? 'haiku-4.5' : 'sonnet-4.6';
+    addFeedItem('info', 'Model switch', `Switched to <code>${currentModel}</code> based on complexity estimate.`, []);
+  }
+
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
 }
 
-// Init cost history
-for (let i = 0; i < 20; i++) {
-  costHistory.push(Math.random() * 0.15 + 0.03);
+// ── Poll for live updates (real data mode) ────────────────
+async function pollLive() {
+  if (!useRealData) return;
+  const eff = await apiFetch('/api/learn/efficiency');
+  if (!eff || !eff.tasks) return;
+
+  const effTasks = eff.tasks.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+  if (effTasks.length <= completed) return; // no new tasks
+
+  // Process new tasks
+  const newTasks = effTasks.slice(completed);
+  for (const t of newTasks) {
+    const cost = t.cost_usd || 0;
+    totalCost += cost;
+    costHistory.push(cost);
+    costPoints.push(totalCost);
+    tasks.push({ state: 'pass', cost: cost.toFixed(3), name: t.task_id || '—' });
+    completed++;
+    passed++;
+    addFeedItem('pass', `${t.task_id || 'Task'} completed`, `Cost: $${cost.toFixed(3)}`, [
+      { type: 'cost', label: 'cost', value: `$${cost.toFixed(3)}` },
+      ...(t.tokens ? [{ type: 'tokens', label: 'tokens', value: String(t.tokens) }] : []),
+    ]);
+  }
+  if (costHistory.length > 20) costHistory = costHistory.slice(-20);
+  totalTasks = Math.max(totalTasks, completed);
+
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+  renderCostChart();
 }
 
-// ── Render task grid ──────────────────────────────────────
+// ── Render: task grid ─────────────────────────────────────
 function renderTaskGrid() {
   const grid = document.getElementById('task-grid');
   grid.innerHTML = tasks.map((t, i) => {
@@ -387,9 +617,10 @@ function renderTaskGrid() {
   }).join('');
 }
 
-// ── Render cost bars ──────────────────────────────────────
+// ── Render: cost bars (last 20) ───────────────────────────
 function renderCostBars() {
   const container = document.getElementById('cost-bars');
+  if (!container) return;
   const max = Math.max(...costHistory, 0.01);
   container.innerHTML = costHistory.map((v, i) => {
     const h = (v / max * 100).toFixed(0);
@@ -398,13 +629,144 @@ function renderCostBars() {
   }).join('');
 }
 
+// ── Render: Canvas 2D cost accumulation chart ─────────────
+function renderCostChart() {
+  const canvas = document.getElementById('viz-canvas');
+  if (!canvas) return;
+  const parent = canvas.parentElement;
+  const rect = parent.getBoundingClientRect();
+  const w = Math.floor(rect.width);
+  const h = Math.floor(rect.height);
+  if (w < 50 || h < 50) return;
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const pad = { top: 20, right: 20, bottom: 30, left: 50 };
+  const plotW = w - pad.left - pad.right;
+  const plotH = h - pad.top - pad.bottom;
+
+  // Grid lines + labels
+  ctx.strokeStyle = 'rgba(48, 40, 48, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.fillStyle = '#706070';
+  ctx.textAlign = 'right';
+
+  const maxCost = Math.max(...costPoints, 1);
+  const niceMax = Math.ceil(maxCost * 10) / 10; // round up to 0.1
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + plotH - (i / 4) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + plotW, y);
+    ctx.stroke();
+    ctx.fillText(`$${(niceMax * i / 4).toFixed(2)}`, pad.left - 6, y + 3);
+  }
+
+  // X axis
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#706070';
+  const maxT = Math.max(totalTasks, costPoints.length, 10);
+  for (let i = 0; i <= 4; i++) {
+    const x = pad.left + (i / 4) * plotW;
+    const label = Math.round(maxT * i / 4);
+    ctx.fillText(String(label), x, h - 8);
+  }
+
+  // Axis labels
+  ctx.fillStyle = '#504050';
+  ctx.font = '9px General Sans, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Tasks', pad.left + plotW / 2, h - 0);
+  ctx.save();
+  ctx.translate(10, pad.top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Cumulative Cost ($)', 0, 0);
+  ctx.restore();
+
+  if (costPoints.length < 1) {
+    // Empty state
+    ctx.fillStyle = '#504050';
+    ctx.font = '13px General Sans, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data\u2026', w / 2, h / 2);
+    return;
+  }
+
+  // Map data to pixel coords
+  const pts = costPoints.map((c, i) => ({
+    x: pad.left + (i / Math.max(maxT - 1, 1)) * plotW,
+    y: pad.top + plotH - (c / niceMax) * plotH,
+  }));
+
+  // Fill area under curve
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pad.top + plotH);
+  for (const p of pts) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(pts[pts.length - 1].x, pad.top + plotH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+  grad.addColorStop(0, 'rgba(200, 184, 144, 0.15)');
+  grad.addColorStop(1, 'rgba(200, 184, 144, 0.02)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.strokeStyle = '#C8B890';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Dots every 4th point
+  ctx.fillStyle = 'rgba(200, 184, 144, 0.6)';
+  for (let i = 0; i < pts.length; i += Math.max(1, Math.floor(pts.length / 12))) {
+    ctx.beginPath();
+    ctx.arc(pts[i].x, pts[i].y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Current point (last) — rose dot with glow
+  const last = pts[pts.length - 1];
+  ctx.shadowColor = 'rgba(204, 144, 168, 0.5)';
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = '#CC90A8';
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Ring around current
+  ctx.strokeStyle = 'rgba(204, 144, 168, 0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 8, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Value label at current point
+  ctx.fillStyle = '#C8B890';
+  ctx.font = '11px JetBrains Mono, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`$${costPoints[costPoints.length - 1].toFixed(2)}`, last.x + 12, last.y - 4);
+}
+
 // ── Feed ──────────────────────────────────────────────────
 function addFeedItem(type, title, body, metrics) {
   const list = document.getElementById('feed-list');
+  if (!list) return;
   const now = new Date();
   const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  const metricsHtml = metrics ? metrics.map(m =>
+  const metricsHtml = metrics && metrics.length ? metrics.map(m =>
     `<span class="fi-metric ${m.type}">${m.label}: ${m.value}</span>`
   ).join(' &middot; ') : '';
 
@@ -419,206 +781,58 @@ function addFeedItem(type, title, body, metrics) {
     ${metricsHtml ? `<div style="margin-top:4px">${metricsHtml}</div>` : ''}
   `;
   list.prepend(item);
-
-  // Keep max 50 items
   while (list.children.length > 50) list.lastChild.remove();
 }
 
-// ── Three.js cost accumulation chart ──────────────────────
-let vizRenderer, vizScene, vizCamera, costLine, costPoints = [];
-
-function initViz() {
-  const canvas = document.getElementById('viz-canvas');
-  if (!canvas || !window.THREE) return;
-
-  const parent = canvas.parentElement;
-  const w = parent.clientWidth || 400;
-  const h = parent.clientHeight || 200;
-
-  vizRenderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-  vizRenderer.setSize(w, h);
-  vizRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-  vizScene = new THREE.Scene();
-  vizCamera = new THREE.OrthographicCamera(-w/2, w/2, h/2, -h/2, 0.1, 100);
-  vizCamera.position.z = 10;
-
-  // Generate initial data points
-  let cumCost = 0;
-  for (let i = 0; i < completed; i++) {
-    cumCost += parseFloat(tasks[i].cost || 0) || (Math.random() * 0.12 + 0.02);
-    costPoints.push(cumCost);
-  }
-
-  // Axis
-  const axisColor = 0x302830;
-  vizScene.add(new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-w/2 + 30, -h/2 + 30, 0),
-      new THREE.Vector3(w/2 - 20, -h/2 + 30, 0)
-    ]),
-    new THREE.LineBasicMaterial({ color: axisColor })
-  ));
-  vizScene.add(new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-w/2 + 30, -h/2 + 30, 0),
-      new THREE.Vector3(-w/2 + 30, h/2 - 20, 0)
-    ]),
-    new THREE.LineBasicMaterial({ color: axisColor })
-  ));
-
-  // Grid lines
-  for (let i = 1; i <= 4; i++) {
-    const y = -h/2 + 30 + (i / 4) * (h - 50);
-    vizScene.add(new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-w/2 + 30, y, 0),
-        new THREE.Vector3(w/2 - 20, y, 0)
-      ]),
-      new THREE.LineBasicMaterial({ color: axisColor, transparent: true, opacity: 0.3 })
-    ));
-  }
-
-  renderCostLine(w, h);
-  vizRenderer.render(vizScene, vizCamera);
-}
-
-function renderCostLine(w, h) {
-  if (costLine) vizScene.remove(costLine);
-
-  if (costPoints.length < 2) return;
-  const maxCost = Math.max(...costPoints, 1);
-  const usableW = w - 50;
-  const usableH = h - 50;
-
-  const points = costPoints.map((c, i) => new THREE.Vector3(
-    -w/2 + 30 + (i / (TOTAL_TASKS - 1)) * usableW,
-    -h/2 + 30 + (c / maxCost) * usableH,
-    0
-  ));
-
-  const geo = new THREE.BufferGeometry().setFromPoints(points);
-  costLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xC8B890, linewidth: 2 }));
-  vizScene.add(costLine);
-
-  // Current point indicator
-  const lastPt = points[points.length - 1];
-  const dot = new THREE.Mesh(
-    new THREE.CircleGeometry(4, 16),
-    new THREE.MeshBasicMaterial({ color: 0xCC90A8 })
-  );
-  dot.position.copy(lastPt);
-  vizScene.add(dot);
-
-  // Fill area under curve
-  const fillPoints = [...points, new THREE.Vector3(lastPt.x, -h/2 + 30, 0), new THREE.Vector3(points[0].x, -h/2 + 30, 0)];
-  const shape = new THREE.Shape();
-  shape.moveTo(fillPoints[0].x, fillPoints[0].y);
-  for (let i = 1; i < fillPoints.length; i++) shape.lineTo(fillPoints[i].x, fillPoints[i].y);
-  shape.closePath();
-  const fillGeo = new THREE.ShapeGeometry(shape);
-  const fillMat = new THREE.MeshBasicMaterial({ color: 0xC8B890, transparent: true, opacity: 0.08 });
-  vizScene.add(new THREE.Mesh(fillGeo, fillMat));
-}
-
-// ── Simulation loop ───────────────────────────────────────
-function simulate() {
-  if (completed >= TOTAL_TASKS) return;
-
-  // Complete current task
-  const success = Math.random() > 0.25;
-  const cost = (Math.random() * 0.18 + 0.03).toFixed(3);
-  tasks[completed].state = success ? 'pass' : 'fail';
-  tasks[completed].cost = cost;
-
-  if (success) passed++;
-  else failed++;
-
-  totalCost += parseFloat(cost);
-  costHistory.push(parseFloat(cost));
-  if (costHistory.length > 20) costHistory.shift();
-  costPoints.push(totalCost);
-
-  completed++;
-
-  // Start next task
-  if (completed < TOTAL_TASKS) {
-    tasks[completed].state = 'running';
-  }
-
-  // Add feed item
-  const taskName = TASK_NAMES[completed % TASK_NAMES.length];
-  if (success) {
-    addFeedItem('pass', `Task ${completed} passed`, `<code>${taskName}</code> — patch applied, tests passed.`, [
-      { type: 'cost', label: 'cost', value: `$${cost}` },
-      { type: 'tokens', label: 'tokens', value: `${Math.floor(Math.random() * 3000 + 800)}` },
-    ]);
-  } else {
-    addFeedItem('fail', `Task ${completed} failed`, `<code>${taskName}</code> — ${Math.random() > 0.5 ? 'tests failed after patch' : 'patch did not apply cleanly'}.`, [
-      { type: 'cost', label: 'cost', value: `$${cost}` },
-    ]);
-  }
-
-  // Occasionally add learning events
-  if (completed % 5 === 0) {
-    addFeedItem('learn', 'Knowledge updated', `Pattern extracted from last 5 tasks. Cascade router weights updated.`, []);
-  }
-  if (completed % 8 === 0) {
-    addFeedItem('info', 'Model switch', `Cascade router switched to <code>${Math.random() > 0.5 ? 'haiku-4.5' : 'sonnet-4.6'}</code> based on task complexity estimate.`, []);
-  }
-
-  // Update UI
-  updateMetrics();
-  renderTaskGrid();
-  renderCostBars();
-
-  if (vizRenderer) {
-    const canvas = document.getElementById('viz-canvas');
-    const parent = canvas.parentElement;
-    renderCostLine(parent.clientWidth, parent.clientHeight);
-    vizRenderer.render(vizScene, vizCamera);
-  }
-}
-
+// ── Metrics ───────────────────────────────────────────────
 function updateMetrics() {
-  document.getElementById('live-pass').textContent = `${passed}/${TOTAL_TASKS}`;
+  const total = Math.max(totalTasks, completed, 1);
+  document.getElementById('live-pass').textContent = `${passed}/${total}`;
   document.getElementById('live-cost').textContent = `$${totalCost.toFixed(2)}`;
   document.getElementById('live-cfactor').textContent = (passed / Math.max(completed, 1) * 1.1).toFixed(2);
-  document.getElementById('live-avg').textContent = `${(elapsed / Math.max(completed, 1)).toFixed(1)}s`;
-  document.getElementById('live-progress').textContent = `${completed}/${TOTAL_TASKS}`;
+  document.getElementById('live-avg').textContent = completed > 0 ? `${(elapsed / completed).toFixed(1)}s` : '—';
+  document.getElementById('live-progress').textContent = `${completed}/${total}`;
+  document.getElementById('live-model').textContent = currentModel;
 
-  // Update progress bars
   const passBar = document.querySelector('.mb-bar-fill.pass');
-  if (passBar) passBar.style.width = `${passed / TOTAL_TASKS * 100}%`;
+  if (passBar) passBar.style.width = `${passed / total * 100}%`;
   const costBar = document.querySelector('.mb-bar-fill.cost');
-  if (costBar) costBar.style.width = `${Math.min(totalCost / 10 * 100, 100)}%`;
+  if (costBar) costBar.style.width = `${Math.min(totalCost / budget * 100, 100)}%`;
+
+  // Bottom bar budget
+  const budgetEl = document.querySelector('.bb-value.cost');
+  if (budgetEl) budgetEl.textContent = `$${totalCost.toFixed(2)} / $${budget.toFixed(2)}`;
+}
+
+// ── Status dot color ──────────────────────────────────────
+function setStatusDot(state) {
+  const dot = document.querySelector('.status-dot');
+  if (!dot) return;
+  if (state === 'running') { dot.style.background = 'var(--sage)'; dot.style.animationName = 'pulse'; }
+  else if (state === 'sim') { dot.style.background = 'var(--warn)'; dot.style.animationName = 'pulse'; }
+  else if (state === 'idle') { dot.style.background = 'var(--text-dim)'; dot.style.animationName = 'none'; }
+  else if (state === 'done') { dot.style.background = 'var(--sage-bright)'; dot.style.animationName = 'none'; }
 }
 
 // ── Elapsed timer ─────────────────────────────────────────
-setInterval(() => {
+timerInterval = setInterval(() => {
   elapsed++;
   const m = Math.floor(elapsed / 60);
   const s = elapsed % 60;
   document.getElementById('elapsed').textContent = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
 }, 1000);
 
+// ── Resize handler ────────────────────────────────────────
+window.addEventListener('resize', () => renderCostChart());
+
 // ── Init ──────────────────────────────────────────────────
-renderTaskGrid();
-renderCostBars();
-
-// Seed feed with initial items
-addFeedItem('info', 'Benchmark started', 'Suite: swe-lite, Strategy: cascade, Batch: 50, Model: auto', []);
-addFeedItem('learn', 'Knowledge loaded', '42 entries from neuro store injected into context', []);
-addFeedItem('pass', 'Task 42 passed', `<code>django__django-11001</code> — patch applied, tests passed.`, [
-  { type: 'cost', label: 'cost', value: '$0.087' },
-  { type: 'tokens', label: 'tokens', value: '2,341' },
-]);
-
-// Start simulation after a short delay
-setTimeout(() => {
-  initViz();
-  setInterval(simulate, 3000);
-}, 500);
+document.getElementById('elapsed').textContent = '00:00';
+loadRealData().then(() => {
+  // If real data, poll for updates every 5s
+  if (useRealData) {
+    pollInterval = setInterval(pollLive, 5000);
+  }
+});
 </script>
 </body>
 </html>

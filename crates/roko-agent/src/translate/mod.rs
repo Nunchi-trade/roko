@@ -169,17 +169,103 @@ impl BackendResponse {
             Self::StreamJson(events) => {
                 let mut buf = String::new();
                 for ev in events {
-                    if let Some(delta) = ev.pointer("/delta/text").and_then(|x| x.as_str()) {
-                        buf.push_str(delta);
-                    } else if let Some(text) =
-                        ev.pointer("/content_block/text").and_then(|x| x.as_str())
-                    {
-                        buf.push_str(text);
+                    let event_type = ev.get("type").and_then(|t| t.as_str());
+                    match event_type {
+                        // Tool events: include tool output in the response text
+                        // so the caller can see what tools actually did.
+                        Some("tool") => {
+                            let content = ev
+                                .get("content")
+                                .and_then(|c| c.as_str())
+                                .or_else(|| ev.get("output").and_then(|o| o.as_str()));
+                            if let Some(content) = content.filter(|s| !s.is_empty()) {
+                                let tool_name =
+                                    ev.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                                buf.push_str(&format!("\n[{tool_name}]\n"));
+                                // Truncate very large outputs
+                                if content.len() > 4096 {
+                                    let mut end = 4096;
+                                    while !content.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
+                                    buf.push_str(&content[..end]);
+                                    buf.push_str("...[truncated]\n");
+                                } else {
+                                    buf.push_str(content);
+                                    buf.push('\n');
+                                }
+                            }
+                        }
+                        // Assistant events: extract text content as before
+                        _ => {
+                            if let Some(delta) =
+                                ev.pointer("/delta/text").and_then(|x| x.as_str())
+                            {
+                                buf.push_str(delta);
+                            } else if let Some(text) =
+                                ev.pointer("/content_block/text").and_then(|x| x.as_str())
+                            {
+                                buf.push_str(text);
+                            }
+                        }
                     }
                 }
                 buf
             }
         }
+    }
+
+    /// Extract tool execution outputs from stream-json events.
+    ///
+    /// Returns a list of `(tool_name, content)` pairs. Only meaningful for
+    /// `StreamJson` responses from Claude CLI.
+    #[must_use]
+    pub fn extract_tool_outputs(&self) -> Vec<(Option<String>, String)> {
+        let Self::StreamJson(events) = self else {
+            return Vec::new();
+        };
+        let mut outputs = Vec::new();
+        for ev in events {
+            if ev.get("type").and_then(|t| t.as_str()) != Some("tool") {
+                continue;
+            }
+            let content = ev
+                .get("content")
+                .and_then(|c| c.as_str())
+                .or_else(|| ev.get("output").and_then(|o| o.as_str()));
+            if let Some(content) = content.filter(|s| !s.is_empty()) {
+                let tool_name = ev.get("tool").and_then(|t| t.as_str()).map(String::from);
+                // Truncate very large outputs
+                let truncated = if content.len() > 4096 {
+                    let mut end = 4096;
+                    while !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...[truncated]", &content[..end])
+                } else {
+                    content.to_string()
+                };
+                outputs.push((tool_name, truncated));
+            }
+        }
+        outputs
+    }
+
+    /// Extract session ID from a Claude CLI Result event.
+    #[must_use]
+    pub fn extract_session_id(&self) -> Option<String> {
+        let Self::StreamJson(events) = self else {
+            return None;
+        };
+        events.iter().rev().find_map(|ev| {
+            if ev.get("type").and_then(|t| t.as_str()) == Some("result") {
+                ev.get("session_id")
+                    .and_then(|s| s.as_str())
+                    .map(String::from)
+            } else {
+                None
+            }
+        })
     }
 
     /// Extract reasoning/thinking content from the response.
@@ -578,5 +664,84 @@ mod tests {
         assert_eq!(a, b);
         let c = TranslatorError::Malformed("y".into());
         assert_ne!(a, c);
+    }
+
+    // ── Tool output extraction tests ──────────────────────────────────
+
+    #[test]
+    fn stream_json_extract_text_includes_tool_output() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "assistant", "delta": {"text": "Let me read that."}}),
+            serde_json::json!({"type": "tool", "tool": "Read", "content": "fn main() {}"}),
+            serde_json::json!({"type": "assistant", "delta": {"text": " Done."}}),
+        ]);
+        let text = r.extract_text();
+        assert!(text.contains("Let me read that."));
+        assert!(text.contains("[Read]"));
+        assert!(text.contains("fn main() {}"));
+        assert!(text.contains(" Done."));
+    }
+
+    #[test]
+    fn stream_json_extract_tool_outputs_separate() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "tool", "tool": "Bash", "content": "hello world"}),
+            serde_json::json!({"type": "tool", "content": "orphan output"}),
+            serde_json::json!({"type": "assistant", "delta": {"text": "answer"}}),
+        ]);
+        let outputs = r.extract_tool_outputs();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].0.as_deref(), Some("Bash"));
+        assert_eq!(outputs[0].1, "hello world");
+        assert_eq!(outputs[1].0, None);
+        assert_eq!(outputs[1].1, "orphan output");
+    }
+
+    #[test]
+    fn stream_json_extract_tool_outputs_with_output_field() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "tool", "tool": "Edit", "output": "file modified"}),
+        ]);
+        let outputs = r.extract_tool_outputs();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].1, "file modified");
+    }
+
+    #[test]
+    fn stream_json_extract_tool_outputs_skips_empty() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "tool", "tool": "Bash", "content": ""}),
+            serde_json::json!({"type": "tool", "tool": "Read"}),
+        ]);
+        assert!(r.extract_tool_outputs().is_empty());
+    }
+
+    #[test]
+    fn stream_json_extract_session_id() {
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "assistant", "delta": {"text": "hi"}}),
+            serde_json::json!({"type": "result", "session_id": "abc-123", "is_error": false}),
+        ]);
+        assert_eq!(r.extract_session_id().as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn extract_session_id_none_for_non_stream() {
+        let r = BackendResponse::Text("hello".into());
+        assert_eq!(r.extract_session_id(), None);
+        let r2 = BackendResponse::Json(serde_json::json!({}));
+        assert_eq!(r2.extract_session_id(), None);
+    }
+
+    #[test]
+    fn stream_json_tool_output_truncates_large() {
+        let large = "x".repeat(5000);
+        let r = BackendResponse::StreamJson(vec![
+            serde_json::json!({"type": "tool", "tool": "Bash", "content": large}),
+        ]);
+        let outputs = r.extract_tool_outputs();
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].1.len() < 4200);
+        assert!(outputs[0].1.ends_with("...[truncated]"));
     }
 }

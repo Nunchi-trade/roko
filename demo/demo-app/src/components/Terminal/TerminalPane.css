@@ -1,0 +1,41 @@
+.terminal-pane {
+  background: #0e0c10;
+  border: 1px solid var(--glass-2-border);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.pane-header {
+  padding: 4px 12px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--glass-2-border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.pane-label {
+  color: var(--rose);
+  font-weight: 600;
+}
+.pane-status {
+  margin-left: auto;
+  font-size: 0.62rem;
+}
+.pane-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.pane-dot.connected { background: var(--sage); }
+.pane-dot.disconnected { background: var(--fail); }
+.pane-dot.connecting { background: var(--warn); animation: pulse 1.5s ease-in-out infinite; }
+
+.pane-body {
+  flex: 1;
+  padding: 4px;
+  min-height: 0;
+}

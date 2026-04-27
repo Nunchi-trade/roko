@@ -1,0 +1,29 @@
+.stat-card {
+  background: var(--glass-2-bg);
+  border: 1px solid var(--glass-2-border);
+  border-radius: 8px;
+  padding: 14px 18px;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.4rem;
+  font-weight: 600;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.stat-label {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.stat-sub {
+  font-size: 0.62rem;
+  color: var(--text-ghost);
+  margin-top: 2px;
+}
+.stat-rose .stat-value { color: var(--rose-bright); }
+.stat-bone .stat-value { color: var(--bone); }
+.stat-sage .stat-value { color: var(--sage-bright, var(--sage)); }
+.stat-fail .stat-value { color: var(--fail); }
+.stat-warn .stat-value { color: var(--warn); }

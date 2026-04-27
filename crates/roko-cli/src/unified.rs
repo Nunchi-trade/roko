@@ -94,6 +94,12 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
 
     let result = crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?;
 
+    // Show tool outputs before the response text
+    for tool_output in &result.tool_outputs {
+        let label = tool_output.tool_name.as_deref().unwrap_or("tool");
+        eprintln!("[{label}] {}", tool_output.content.lines().next().unwrap_or(""));
+    }
+
     println!("{}", result.text);
 
     if !quiet {

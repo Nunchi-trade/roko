@@ -461,6 +461,32 @@ pub fn extract_clean_text(raw: &str) -> String {
                         }
                     }
                 }
+                // Claude CLI tool event: carries output of tool calls (Bash, Read, etc.)
+                Some("tool") => {
+                    let content = obj
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            obj.get("output").and_then(serde_json::Value::as_str)
+                        });
+                    if let Some(content) = content.filter(|s| !s.is_empty()) {
+                        let tool_name = obj
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
+                        // Include tool output inline, truncated for sanity
+                        let truncated = if content.len() > 4096 {
+                            let mut end = 4096;
+                            while !content.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("[{tool_name}] {}...[truncated]", &content[..end])
+                        } else {
+                            format!("[{tool_name}] {content}")
+                        };
+                        parts.push(truncated);
+                    }
+                }
                 // Generic: look for top-level `result` or `content` string fields.
                 _ => {
                     if let Some(text) = obj

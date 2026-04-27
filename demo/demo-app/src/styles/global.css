@@ -1,0 +1,40 @@
+@import './fonts.css';
+@import './rosedust.css';
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 3px; }
+
+html, body, #root {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-sans);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Atmospheric overlay ─── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 1px,
+    rgba(0,0,0,0.05) 1px, rgba(0,0,0,0.05) 2px
+  );
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  opacity: 0.03;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+:focus-visible {
+  outline: 2px solid var(--rose);
+  outline-offset: 2px;
+}
+
+a { color: var(--rose-bright); text-decoration: none; }
+a:hover { opacity: 0.85; }

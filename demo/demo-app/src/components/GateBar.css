@@ -1,0 +1,17 @@
+.gate-bar {
+  display: flex;
+  gap: 16px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--glass-2-border);
+  font-size: 0.75rem;
+}
+.gate {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.gate-icon { font-weight: 700; }
+.gate-pass { color: var(--sage); }
+.gate-fail { color: var(--fail); }
+.gate-pending { color: var(--text-dim); }
+.gate-skip { color: var(--text-ghost); }

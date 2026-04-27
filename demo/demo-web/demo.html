@@ -116,6 +116,12 @@ body::after {
 }
 .topbar .tab.active .tab-num { background: var(--rose-dim); color: var(--rose-bright); }
 .topbar .spacer { flex: 1; }
+.topbar .page-links { display: flex; gap: 6px; margin-right: 12px; }
+.topbar .page-links a {
+  font-size: 0.6rem; color: var(--text-dim); text-decoration: none; padding: 3px 8px;
+  border-radius: 4px; border: 1px solid transparent; transition: all 200ms;
+}
+.topbar .page-links a:hover { color: var(--text); border-color: var(--glass-2-border); }
 .topbar .controls { display: flex; gap: 6px; align-items: center; }
 .topbar .speed {
   font-size: 0.62rem; color: var(--text-dim); padding: 3px 8px; border-radius: 4px;
@@ -604,6 +610,12 @@ body::after {
     <button class="tab" data-tab="mirage" role="tab"><span class="tab-num">7</span> Mirage</button>
   </div>
   <span class="spacer"></span>
+  <div class="page-links">
+    <a href="bench.html">Bench</a>
+    <a href="bench-live.html">Live</a>
+    <a href="explorer.html">Explorer</a>
+    <a href="builder.html">Builder</a>
+  </div>
   <div class="controls">
     <div class="model-selector">
       <button class="model-btn" id="model-btn" title="Select model">

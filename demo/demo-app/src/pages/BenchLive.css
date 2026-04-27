@@ -1,0 +1,138 @@
+.benchlive-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.benchlive-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 24px;
+  gap: 12px;
+  border-bottom: 1px solid var(--glass-2-border);
+  background: var(--raised);
+  flex-shrink: 0;
+}
+.benchlive-logo {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  color: var(--rose-bright);
+}
+.benchlive-title {
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--text);
+  font-weight: 500;
+}
+.benchlive-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.68rem;
+  margin-left: auto;
+  color: var(--sage);
+}
+.benchlive-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sage);
+  animation: pulse 2s ease-in-out infinite;
+}
+.benchlive-elapsed {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  background: var(--glass-2-bg);
+  border-radius: 4px;
+}
+
+.benchlive-metrics {
+  display: flex;
+  gap: 24px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--glass-2-border);
+  flex-shrink: 0;
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metric-val {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.metric-label {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.metric-sage { color: var(--sage); }
+.metric-bone { color: var(--bone); }
+.metric-rose { color: var(--rose-bright); }
+
+.benchlive-grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr 1fr;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.benchlive-grid > div {
+  padding: 16px;
+  overflow-y: auto;
+}
+.benchlive-grid h3 {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(28px, 1fr));
+  gap: 3px;
+}
+.task-cell {
+  aspect-ratio: 1;
+  border-radius: 4px;
+  transition: background 200ms;
+}
+.task-pending { background: var(--glass-2-bg); border: 1px solid var(--glass-2-border); }
+.task-running { background: var(--rose-deep); border: 1px solid var(--rose-dim); animation: pulse 1s infinite; }
+.task-pass { background: var(--sage); }
+.task-fail { background: var(--fail); }
+
+.benchlive-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.feed-item {
+  display: flex;
+  gap: 8px;
+  font-size: 0.68rem;
+  padding: 4px 0;
+  line-height: 1.4;
+}
+.feed-ts { color: var(--text-ghost); font-family: var(--font-mono); flex-shrink: 0; }
+.feed-text { flex: 1; }
+.feed-cost { color: var(--bone); font-family: var(--font-mono); }
+.feed-pass .feed-text { color: var(--sage); }
+.feed-fail .feed-text { color: var(--fail); }
+.feed-info .feed-text { color: var(--text); }
+.feed-learn .feed-text { color: var(--rose); }

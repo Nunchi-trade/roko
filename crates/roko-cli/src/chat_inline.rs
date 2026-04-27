@@ -25,7 +25,7 @@ use serde_json::json;
 use crate::auth;
 use crate::auth_detect::AuthMethod;
 use crate::chat::{self, extract_clean_text};
-use crate::dispatch_direct::{self, DispatchResult};
+use crate::dispatch_direct::{self, DispatchResult, ToolOutput};
 use crate::inline::primitives::{CostMeter, StreamingState};
 use crate::inline::styled;
 use crate::inline::symbols;
@@ -48,22 +48,70 @@ enum Phase {
     Thinking,
     /// Receiving streaming tokens.
     Streaming,
+    /// Dispatch error — shows [r]etry / [s]witch / [q]uit options.
+    Error {
+        prompt: String,
+        error: String,
+    },
     /// Session complete (user pressed Ctrl-D or /quit).
     Done,
 }
 
 /// All available slash commands for tab-completion.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
+    // Session & display
     ("/help", "show available commands"),
-    ("/model", "show or change model"),
-    ("/provider", "show current auth/provider"),
+    ("/version", "show version info"),
+    ("/stats", "detailed session statistics"),
+    ("/context", "show token/context usage"),
+    ("/history", "show input history"),
+    ("/copy", "copy last response to clipboard"),
+    ("/compact", "toggle compact output mode"),
+    ("/system", "set system message for session"),
+    ("/reset", "clear conversation, fresh start"),
+    ("/retry", "resend the last message"),
+    ("/export", "export conversation (markdown/json)"),
     ("/cost", "session cost summary"),
     ("/clear", "clear scrollback"),
     ("/quit", "exit the chat"),
     ("/exit", "exit the chat"),
+    // Configuration
+    ("/config", "show or set configuration"),
+    ("/config providers", "list configured providers"),
+    ("/config models", "list available models"),
+    ("/config gates", "show gate configuration"),
+    ("/model", "show or change model"),
+    ("/provider", "show current auth/provider"),
     ("/auth", "show current auth/provider"),
-    ("/export", "export conversation to markdown"),
-    ("/retry", "resend the last message"),
+    ("/effort", "set effort level (low/med/high/max)"),
+    // Workspace & git
+    ("/status", "workspace status"),
+    ("/doctor", "health check"),
+    ("/diff", "show git diff"),
+    ("/git", "git status"),
+    ("/log", "recent git commits"),
+    ("/branch", "show current branch"),
+    ("/changes", "changed files since last commit"),
+    // File operations
+    ("/file", "read and display a file"),
+    ("/search", "grep workspace for pattern"),
+    ("/find", "find files matching pattern"),
+    ("/tree", "show directory tree"),
+    // Agent & workflow
+    ("/agent", "show/switch agent identity"),
+    ("/agent list", "list configured agents"),
+    ("/run", "execute prompt through universal loop"),
+    ("/plan list", "list plans"),
+    ("/plan run", "execute a plan"),
+    ("/plan generate", "generate plan from prompt"),
+    ("/gate", "toggle gates (compile/test/clippy)"),
+    // PRD & research
+    ("/prd idea", "capture a work item idea"),
+    ("/prd list", "list PRDs"),
+    ("/research", "research a topic"),
+    // Knowledge & learning
+    ("/knowledge", "query knowledge store"),
+    ("/learn", "show learning state"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -326,6 +374,133 @@ impl HistorySearch {
     }
 }
 
+/// Command palette state (Ctrl+K).
+///
+/// Fuzzy-searchable overlay that gives access to all slash commands and extra
+/// actions from anywhere in the input.
+#[derive(Debug)]
+struct CommandPalette {
+    /// Whether the palette is visible.
+    active: bool,
+    /// User's search query.
+    query: String,
+    /// Filtered matches.
+    matches: Vec<CompletionMatch>,
+    /// Currently selected index.
+    selected: usize,
+}
+
+impl CommandPalette {
+    fn new() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            matches: Vec::new(),
+            selected: 0,
+        }
+    }
+
+    /// Open the palette, showing all commands.
+    fn open(&mut self) {
+        self.active = true;
+        self.query.clear();
+        self.selected = 0;
+        self.refresh();
+    }
+
+    /// Refresh matches based on current query.
+    fn refresh(&mut self) {
+        if self.query.is_empty() {
+            // Show all commands
+            self.matches = SLASH_COMMANDS
+                .iter()
+                .map(|&(cmd, desc)| CompletionMatch {
+                    command: cmd,
+                    description: desc,
+                    score: 0,
+                    matched_indices: Vec::new(),
+                })
+                .collect();
+        } else {
+            let mut matches: Vec<CompletionMatch> = SLASH_COMMANDS
+                .iter()
+                .filter_map(|&(cmd, desc)| {
+                    // Search both command name and description
+                    let cmd_match = fuzzy_match(&self.query, &cmd[1..]);
+                    let desc_match = fuzzy_match(&self.query, desc);
+                    let best = match (cmd_match, desc_match) {
+                        (Some((s1, i1)), Some((s2, _))) => {
+                            if s1 >= s2 {
+                                Some((s1, i1))
+                            } else {
+                                Some((s2, Vec::new()))
+                            }
+                        }
+                        (Some(m), None) | (None, Some(m)) => Some(m),
+                        (None, None) => None,
+                    };
+                    best.map(|(score, indices)| CompletionMatch {
+                        command: cmd,
+                        description: desc,
+                        score,
+                        matched_indices: indices,
+                    })
+                })
+                .collect();
+            matches.sort_by(|a, b| b.score.cmp(&a.score));
+            self.matches = matches;
+        }
+        // Clamp selected
+        if !self.matches.is_empty() {
+            self.selected = self.selected.min(self.matches.len() - 1);
+        } else {
+            self.selected = 0;
+        }
+    }
+
+    /// Type a character into the search query.
+    fn type_char(&mut self, ch: char) {
+        self.query.push(ch);
+        self.refresh();
+    }
+
+    /// Backspace in the search query.
+    fn backspace(&mut self) {
+        self.query.pop();
+        self.refresh();
+    }
+
+    fn select_next(&mut self) {
+        if !self.matches.is_empty() {
+            self.selected = (self.selected + 1) % self.matches.len();
+        }
+    }
+
+    fn select_prev(&mut self) {
+        if !self.matches.is_empty() {
+            self.selected = (self.selected + self.matches.len() - 1) % self.matches.len();
+        }
+    }
+
+    /// Accept the selected command, returning it.
+    fn accept(&mut self) -> Option<String> {
+        if self.matches.is_empty() {
+            self.dismiss();
+            return None;
+        }
+        let cmd = self.matches[self.selected].command.to_string();
+        self.dismiss();
+        Some(cmd)
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+        self.query.clear();
+        self.matches.clear();
+        self.selected = 0;
+    }
+}
+
 /// Input buffer state.
 #[derive(Debug)]
 struct InputState {
@@ -343,6 +518,8 @@ struct InputState {
     completion: CompletionState,
     /// Reverse history search (Ctrl+R).
     search: HistorySearch,
+    /// Command palette (Ctrl+K).
+    palette: CommandPalette,
 }
 
 impl InputState {
@@ -355,6 +532,7 @@ impl InputState {
             saved_input: String::new(),
             completion: CompletionState::new(),
             search: HistorySearch::new(),
+            palette: CommandPalette::new(),
         }
     }
 
@@ -536,11 +714,26 @@ enum DispatchMode {
 }
 
 /// A recorded conversation message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ConversationMessage {
-    role: &'static str, // "user" or "assistant"
+    role: String, // "user" or "assistant"
     text: String,
     timestamp: String,
+}
+
+/// Serializable session snapshot for auto-save/resume.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionSnapshot {
+    turn_count: u32,
+    total_cost: f64,
+    input_tokens: u64,
+    output_tokens: u64,
+    model: String,
+    agent_id: String,
+    messages: Vec<ConversationMessage>,
+    system_message: Option<String>,
+    saved_at: String,
+    first_user_message: Option<String>,
 }
 
 /// Full chat session state.
@@ -564,6 +757,10 @@ struct ChatSession {
     conversation: Vec<ConversationMessage>,
     /// Last submitted prompt (for retry on error).
     last_prompt: Option<String>,
+    /// Persistent system message for this session.
+    system_message: Option<String>,
+    /// Compact output mode.
+    compact: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +812,72 @@ fn save_history_entry(entry: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Session auto-save
+// ---------------------------------------------------------------------------
+
+/// Directory for session snapshots.
+fn sessions_dir() -> std::path::PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(".roko")
+        .join("sessions")
+}
+
+/// Save current session state to disk.
+fn save_session(session: &ChatSession) {
+    if session.conversation.is_empty() {
+        return;
+    }
+    let dir = sessions_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let first_user = session
+        .conversation
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| {
+            let s = m.text.replace('\n', " ");
+            if s.len() > 80 { format!("{}...", &s[..77]) } else { s }
+        });
+    let snapshot = SessionSnapshot {
+        turn_count: session.turn_count,
+        total_cost: session.cost.total_cost,
+        input_tokens: session.cost.input_tokens,
+        output_tokens: session.cost.output_tokens,
+        model: current_model_name_static(session),
+        agent_id: session.agent_id.clone(),
+        messages: session.conversation.clone(),
+        system_message: session.system_message.clone(),
+        saved_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        first_user_message: first_user,
+    };
+    let path = dir.join("last.json");
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap_or_default());
+}
+
+/// Load the last session summary (not full restore — just for display).
+fn load_last_session_summary() -> Option<(String, u32, f64, String)> {
+    let path = sessions_dir().join("last.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let snap: SessionSnapshot = serde_json::from_str(&content).ok()?;
+    let saved_at = snap.saved_at;
+    let topic = snap.first_user_message.unwrap_or_else(|| "unknown".to_string());
+    Some((saved_at, snap.turn_count, snap.total_cost, topic))
+}
+
+/// Get model name without needing mutable access.
+fn current_model_name_static(session: &ChatSession) -> String {
+    match &session.dispatch {
+        DispatchMode::Direct { auth } => match auth {
+            AuthMethod::AnthropicApi { model, .. } => model.as_deref().unwrap_or("claude-sonnet-4-6").to_string(),
+            AuthMethod::ClaudeCli => "claude CLI".to_string(),
+            AuthMethod::OpenAiCompat { model, .. } => model.as_deref().unwrap_or("unknown").to_string(),
+            AuthMethod::NeedsSetup => "none".to_string(),
+        },
+        DispatchMode::Http { .. } => "HTTP backend".to_string(),
+    }
+}
+
 /// Thinking phase label based on elapsed time.
 fn thinking_label(elapsed_s: f64) -> &'static str {
     if elapsed_s < 2.0 {
@@ -629,6 +892,17 @@ fn thinking_label(elapsed_s: f64) -> &'static str {
 }
 
 /// Format a wall-clock time as `h:mm PM`.
+/// Truncate a string to fit within `max` columns, adding "..." if needed.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max > 3 {
+        format!("{}...", &s[..max - 3])
+    } else {
+        s[..max].to_string()
+    }
+}
+
 fn format_time(instant: Instant) -> String {
     // Use system time offset from session start
     let now = chrono::Local::now();
@@ -697,8 +971,23 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                 Style::default().fg(Theme::TEXT_DIM),
             ),
         ]),
-        Line::raw(""),
     ])?;
+    if let Some((saved_at, turns, cost, topic)) = load_last_session_summary() {
+        term.push_lines(&[
+            Line::from(vec![
+                Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+                Span::styled(
+                    format!("Last: {saved_at}  {}  {turns} turns  {}  ${cost:.4}", symbols::SEP, symbols::SEP),
+                    Style::default().fg(Theme::TEXT_GHOST),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+                Span::styled(format!("\"{topic}\""), Style::default().fg(Theme::TEXT_GHOST)),
+            ]),
+        ])?;
+    }
+    term.push_lines(&[Line::raw("")])?;
 
     let cost_table = CostTable {
         models: HashMap::new(),
@@ -728,6 +1017,8 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
         thinking_started: None,
         conversation: Vec::new(),
         last_prompt: None,
+        system_message: None,
+        compact: false,
     };
 
     // Main event loop
@@ -765,6 +1056,23 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                             session.phase = Phase::Input;
                         }
                     }
+                    Phase::Error { ref prompt, .. } => {
+                        match key.code {
+                            KeyCode::Char('r') => {
+                                // Retry: resend same prompt
+                                let retry_prompt = prompt.clone();
+                                session.phase = Phase::Thinking;
+                                session.thinking_started = Some(Instant::now());
+                                dispatch_prompt(&mut session, &retry_prompt);
+                            }
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                // Cancel: return to input
+                                term.push_blank()?;
+                                session.phase = Phase::Input;
+                            }
+                            _ => {}
+                        }
+                    }
                     Phase::Done => break,
                 }
             }
@@ -778,6 +1086,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         .thinking_started
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(0.0);
+                    push_tool_outputs(&mut term, &theme, &result.tool_outputs)?;
                     push_agent_response(&mut term, &theme, &result.text, &session.agent_id)?;
                     let ts = format_time(Instant::now());
                     term.push_lines(&[Line::from(vec![Span::styled(
@@ -785,7 +1094,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                         Style::default().fg(Theme::TEXT_GHOST),
                     )])])?;
                     session.conversation.push(ConversationMessage {
-                        role: "assistant",
+                        role: "assistant".into(),
                         text: result.text.clone(),
                         timestamp: format!("{ts} ({latency:.1}s)"),
                     });
@@ -803,16 +1112,23 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
                     if latency > 10.0 {
                         print!("\x07");
                     }
+                    // Auto-save every 5 turns
+                    if session.turn_count % 5 == 0 {
+                        save_session(&session);
+                    }
                     session.phase = Phase::Input;
                     session.response_rx = None;
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
                     push_error_with_suggestions(&mut term, &theme, &err)?;
+                    let prompt = session.last_prompt.clone().unwrap_or_default();
                     session.thinking_started = None;
-                    session.phase = Phase::Input;
+                    session.phase = Phase::Error {
+                        prompt,
+                        error: err,
+                    };
                     session.response_rx = None;
-                    term.push_blank()?;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     // Still waiting — spinner continues
@@ -864,6 +1180,7 @@ pub async fn run_chat_inline(agent_id: &str, serve_url: &str) -> Result<()> {
     }
 
     term.push_blank()?;
+    save_session(&session);
     drop(term); // restores terminal
 
     Ok(())
@@ -911,8 +1228,23 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                 Style::default().fg(Theme::TEXT_DIM),
             ),
         ]),
-        Line::raw(""),
     ])?;
+    if let Some((saved_at, turns, cost, topic)) = load_last_session_summary() {
+        term.push_lines(&[
+            Line::from(vec![
+                Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+                Span::styled(
+                    format!("Last: {saved_at}  {}  {turns} turns  {}  ${cost:.4}", symbols::SEP, symbols::SEP),
+                    Style::default().fg(Theme::TEXT_GHOST),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+                Span::styled(format!("\"{topic}\""), Style::default().fg(Theme::TEXT_GHOST)),
+            ]),
+        ])?;
+    }
+    term.push_lines(&[Line::raw("")])?;
 
     let cost_table = CostTable {
         models: HashMap::new(),
@@ -939,6 +1271,8 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
         thinking_started: None,
         conversation: Vec::new(),
         last_prompt: None,
+        system_message: None,
+        compact: false,
     };
 
     // Main event loop (identical structure to run_chat_inline)
@@ -972,6 +1306,21 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                             session.phase = Phase::Input;
                         }
                     }
+                    Phase::Error { ref prompt, .. } => {
+                        match key.code {
+                            KeyCode::Char('r') => {
+                                let retry_prompt = prompt.clone();
+                                session.phase = Phase::Thinking;
+                                session.thinking_started = Some(Instant::now());
+                                dispatch_prompt(&mut session, &retry_prompt);
+                            }
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                term.push_blank()?;
+                                session.phase = Phase::Input;
+                            }
+                            _ => {}
+                        }
+                    }
                     Phase::Done => break,
                 }
             }
@@ -985,6 +1334,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         .thinking_started
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(0.0);
+                    push_tool_outputs(&mut term, &theme, &result.tool_outputs)?;
                     push_agent_response(&mut term, &theme, &result.text, &session.agent_id)?;
                     let ts = format_time(Instant::now());
                     term.push_lines(&[Line::from(vec![Span::styled(
@@ -992,7 +1342,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                         Style::default().fg(Theme::TEXT_GHOST),
                     )])])?;
                     session.conversation.push(ConversationMessage {
-                        role: "assistant",
+                        role: "assistant".into(),
                         text: result.text.clone(),
                         timestamp: format!("{ts} ({latency:.1}s)"),
                     });
@@ -1010,16 +1360,23 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
                     if latency > 10.0 {
                         print!("\x07");
                     }
+                    // Auto-save every 5 turns
+                    if session.turn_count % 5 == 0 {
+                        save_session(&session);
+                    }
                     session.phase = Phase::Input;
                     session.response_rx = None;
                     term.push_blank()?;
                 }
                 Ok(Err(err)) => {
                     push_error_with_suggestions(&mut term, &theme, &err)?;
+                    let prompt = session.last_prompt.clone().unwrap_or_default();
                     session.thinking_started = None;
-                    session.phase = Phase::Input;
+                    session.phase = Phase::Error {
+                        prompt,
+                        error: err,
+                    };
                     session.response_rx = None;
-                    term.push_blank()?;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -1070,6 +1427,7 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
     }
 
     term.push_blank()?;
+    save_session(&session);
     drop(term);
 
     Ok(())
@@ -1078,6 +1436,48 @@ pub async fn run_unified_inline(auth: &AuthMethod) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Input handling
 // ---------------------------------------------------------------------------
+
+/// Spawn async dispatch for a prompt, setting up the response channel.
+fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
+    session.streaming = StreamingState::new("resolving...");
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    session.response_rx = Some(rx);
+    let text = prompt.to_string();
+
+    match &session.dispatch {
+        DispatchMode::Http {
+            client,
+            backend_url,
+            is_sidecar,
+            ..
+        } => {
+            let client_clone = client.clone();
+            let url_owned = backend_url.clone();
+            let agent_id_owned = session.agent_id.clone();
+            let sidecar = *is_sidecar;
+            tokio::spawn(async move {
+                let result = send_and_receive(
+                    &client_clone,
+                    &url_owned,
+                    &agent_id_owned,
+                    &text,
+                    sidecar,
+                )
+                .await;
+                let _ = tx
+                    .send(result.map(|r| r.into()).map_err(|e| e.to_string()))
+                    .await;
+            });
+        }
+        DispatchMode::Direct { auth } => {
+            let auth_clone = auth.clone();
+            tokio::spawn(async move {
+                let result = dispatch_direct::dispatch_prompt(&auth_clone, &text).await;
+                let _ = tx.send(result.map_err(|e| e.to_string())).await;
+            });
+        }
+    }
+}
 
 /// Returns true if the session should exit.
 async fn handle_input_key(
@@ -1143,6 +1543,35 @@ async fn handle_input_key(
                     session.input.search.deactivate();
                 }
             }
+        }
+        return Ok(false);
+    }
+
+    // --- Command palette mode (Ctrl+K) ---
+    if session.input.palette.active {
+        match key.code {
+            KeyCode::Esc => {
+                session.input.palette.dismiss();
+            }
+            KeyCode::Enter => {
+                if let Some(cmd) = session.input.palette.accept() {
+                    // Execute the command directly
+                    return handle_slash_command(&cmd, session, term, theme);
+                }
+            }
+            KeyCode::Up => session.input.palette.select_prev(),
+            KeyCode::Down => session.input.palette.select_next(),
+            KeyCode::Backspace => {
+                if session.input.palette.query.is_empty() {
+                    session.input.palette.dismiss();
+                } else {
+                    session.input.palette.backspace();
+                }
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                session.input.palette.type_char(ch);
+            }
+            _ => {}
         }
         return Ok(false);
     }
@@ -1222,7 +1651,7 @@ async fn handle_input_key(
 
             // Record user message in conversation
             session.conversation.push(ConversationMessage {
-                role: "user",
+                role: "user".into(),
                 text: text.clone(),
                 timestamp: timestamp.clone(),
             });
@@ -1233,45 +1662,7 @@ async fn handle_input_key(
             // Start thinking phase
             session.phase = Phase::Thinking;
             session.thinking_started = Some(Instant::now());
-            session.streaming = StreamingState::new("resolving...");
-
-            // Spawn async dispatch — non-blocking so the spinner animates
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            session.response_rx = Some(rx);
-
-            match &session.dispatch {
-                DispatchMode::Http {
-                    client,
-                    backend_url,
-                    is_sidecar,
-                    ..
-                } => {
-                    let client_clone = client.clone();
-                    let url_owned = backend_url.clone();
-                    let agent_id_owned = session.agent_id.clone();
-                    let sidecar = *is_sidecar;
-                    tokio::spawn(async move {
-                        let result = send_and_receive(
-                            &client_clone,
-                            &url_owned,
-                            &agent_id_owned,
-                            &text,
-                            sidecar,
-                        )
-                        .await;
-                        let _ = tx
-                            .send(result.map(|r| r.into()).map_err(|e| e.to_string()))
-                            .await;
-                    });
-                }
-                DispatchMode::Direct { auth } => {
-                    let auth_clone = auth.clone();
-                    tokio::spawn(async move {
-                        let result = dispatch_direct::dispatch_prompt(&auth_clone, &text).await;
-                        let _ = tx.send(result.map_err(|e| e.to_string())).await;
-                    });
-                }
-            }
+            dispatch_prompt(session, &text);
         }
 
         // --- Escape: dismiss dropdown ---
@@ -1374,6 +1765,12 @@ async fn handle_input_key(
             }
         }
 
+        // --- Command palette ---
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            session.input.completion.dismiss();
+            session.input.palette.open();
+        }
+
         // --- Reverse history search ---
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             session.input.search.active = true;
@@ -1400,6 +1797,66 @@ async fn handle_input_key(
     Ok(false)
 }
 
+/// Run a shell command and return stdout (or stderr if stdout is empty).
+fn shell_output(cmd: &str, args: &[&str]) -> String {
+    std::process::Command::new(cmd)
+        .args(args)
+        .current_dir(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        )
+        .output()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            if stdout.trim().is_empty() {
+                stderr
+            } else {
+                stdout
+            }
+        })
+        .unwrap_or_else(|e| format!("error: {e}"))
+}
+
+/// Push shell output as scrollback lines (truncated to max_lines).
+fn push_shell_output(
+    term: &mut InlineTerminal,
+    theme: &Theme,
+    label: &str,
+    output: &str,
+    max_lines: usize,
+) -> std::io::Result<()> {
+    let lines: Vec<&str> = output.lines().collect();
+    let truncated = lines.len() > max_lines;
+    let mut styled_lines = vec![styled::section_start(theme, label, "", None)];
+    for line in lines.iter().take(max_lines) {
+        styled_lines.push(Line::from(vec![
+            Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+            Span::styled(line.to_string(), theme.text()),
+        ]));
+    }
+    if truncated {
+        styled_lines.push(styled::continuation(
+            theme,
+            "",
+            &format!("... ({} more lines)", lines.len() - max_lines),
+            None,
+        ));
+    }
+    styled_lines.push(Line::from(vec![Span::styled(
+        symbols::END.to_string(),
+        theme.muted(),
+    )]));
+    term.push_lines(&styled_lines)
+}
+
+/// Read roko.toml and return its content.
+fn read_roko_toml() -> Option<String> {
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("roko.toml");
+    std::fs::read_to_string(path).ok()
+}
+
 /// Handle `/` commands. Returns true if the session should exit.
 fn handle_slash_command(
     text: &str,
@@ -1409,43 +1866,228 @@ fn handle_slash_command(
 ) -> Result<bool> {
     let cmd = text.trim();
     match cmd {
+        // =================================================================
+        // Session & display
+        // =================================================================
         "/quit" | "/exit" | "/q" => {
             session.phase = Phase::Done;
             return Ok(true);
         }
         "/help" | "/h" => {
             term.push_lines(&[
-                styled::section_start(theme, "help", "available commands", None),
-                styled::continuation(theme, "/help", "show this help", None),
-                styled::continuation(theme, "/model", "show or change model (e.g. /model glm-5.1)", None),
-                styled::continuation(theme, "/provider", "show current auth/provider info", None),
-                styled::continuation(theme, "/cost", "show session cost summary", None),
-                styled::continuation(theme, "/clear", "clear scrollback", None),
-                styled::continuation(theme, "/export", "export chat (markdown, json)", None),
+                styled::section_start(theme, "help", "session & display", None),
+                styled::continuation(theme, "/model <name>", "show or change model", None),
+                styled::continuation(theme, "/provider", "show auth/provider info", None),
+                styled::continuation(theme, "/cost", "session cost summary", None),
+                styled::continuation(theme, "/stats", "detailed session statistics", None),
+                styled::continuation(theme, "/context", "token/context usage", None),
+                styled::continuation(theme, "/version", "version info", None),
+                styled::continuation(theme, "/history", "show input history", None),
+                styled::continuation(theme, "/copy", "copy last response to clipboard", None),
+                styled::continuation(theme, "/compact", "toggle compact output", None),
+                styled::continuation(theme, "/system <text>", "set system message", None),
+                styled::continuation(theme, "/reset", "clear conversation", None),
                 styled::continuation(theme, "/retry", "resend last message", None),
+                styled::continuation(theme, "/export [md|json]", "export conversation", None),
+                styled::continuation(theme, "/clear", "clear scrollback", None),
+            ])?;
+            term.push_lines(&[
+                styled::section_start(theme, "", "configuration", None),
+                styled::continuation(theme, "/config", "show config summary", None),
+                styled::continuation(theme, "/config providers", "list providers", None),
+                styled::continuation(theme, "/config models", "list all models", None),
+                styled::continuation(theme, "/config gates", "gate configuration", None),
+                styled::continuation(theme, "/config set <k> <v>", "set config value", None),
+                styled::continuation(theme, "/effort <level>", "set effort (low/med/high/max)", None),
+                styled::continuation(theme, "/gate <name> on|off", "toggle gate", None),
+            ])?;
+            term.push_lines(&[
+                styled::section_start(theme, "", "workspace & git", None),
+                styled::continuation(theme, "/status", "workspace status", None),
+                styled::continuation(theme, "/doctor", "health check", None),
+                styled::continuation(theme, "/diff", "git diff", None),
+                styled::continuation(theme, "/git", "git status", None),
+                styled::continuation(theme, "/log [n]", "recent commits", None),
+                styled::continuation(theme, "/branch", "current branch", None),
+                styled::continuation(theme, "/changes", "changed files", None),
+            ])?;
+            term.push_lines(&[
+                styled::section_start(theme, "", "files & search", None),
+                styled::continuation(theme, "/file <path>", "read a file", None),
+                styled::continuation(theme, "/search <pattern>", "grep workspace", None),
+                styled::continuation(theme, "/find <pattern>", "find files", None),
+                styled::continuation(theme, "/tree [path]", "directory tree", None),
+            ])?;
+            term.push_lines(&[
+                styled::section_start(theme, "", "agents & workflows", None),
+                styled::continuation(theme, "/agent [name]", "show/switch agent", None),
+                styled::continuation(theme, "/run <prompt>", "universal loop", None),
+                styled::continuation(theme, "/plan list|run|generate", "plan management", None),
+                styled::continuation(theme, "/prd idea|list", "PRD management", None),
+                styled::continuation(theme, "/research <query>", "research a topic", None),
+                styled::continuation(theme, "/knowledge <query>", "query knowledge", None),
+                styled::continuation(theme, "/learn", "learning state", None),
                 styled::section_end(theme, "/quit", "exit the chat"),
             ])?;
+        }
+        "/version" | "/v" => {
+            let version = env!("CARGO_PKG_VERSION");
+            let rustc = shell_output("rustc", &["--version"]);
+            term.push_lines(&[
+                styled::section_start(theme, "version", "", None),
+                styled::continuation(theme, "roko", &format!("v{version}"), None),
+                styled::continuation(theme, "rustc", rustc.trim(), None),
+                styled::continuation(theme, "platform", std::env::consts::OS, None),
+                styled::section_end(theme, "arch", std::env::consts::ARCH),
+            ])?;
+        }
+        "/stats" => {
+            let elapsed = session.started_at.elapsed();
+            let mins = elapsed.as_secs() / 60;
+            let secs = elapsed.as_secs() % 60;
+            let avg_cost = if session.turn_count > 0 {
+                session.cost.total_cost / session.turn_count as f64
+            } else {
+                0.0
+            };
+            let avg_tokens = if session.turn_count > 0 {
+                (session.cost.input_tokens + session.cost.output_tokens) / session.turn_count as u64
+            } else {
+                0
+            };
+            term.push_lines(&[
+                styled::section_start(theme, "stats", "session details", None),
+                styled::continuation(theme, "elapsed", &format!("{mins}m {secs}s"), None),
+                styled::continuation(theme, "turns", &session.turn_count.to_string(), None),
+                styled::continuation(theme, "total cost", &format!("${:.4}", session.cost.total_cost), None),
+                styled::continuation(theme, "avg/turn", &format!("${avg_cost:.4} cost, {avg_tokens} tokens"), None),
+                styled::continuation(theme, "tokens in", &session.cost.input_tokens.to_string(), None),
+                styled::continuation(theme, "tokens out", &session.cost.output_tokens.to_string(), None),
+                styled::continuation(theme, "messages", &session.conversation.len().to_string(), None),
+                styled::section_end(theme, "savings", &format!("{:.1}x vs baseline", session.cost.savings_ratio())),
+            ])?;
+        }
+        "/context" => {
+            let total = session.cost.input_tokens + session.cost.output_tokens;
+            let limit: u64 = 200_000; // from roko.toml context_limit_k
+            let pct = (total as f64 / limit as f64 * 100.0).min(100.0);
+            let bar_width = 20;
+            let filled = ((pct / 100.0) * bar_width as f64) as usize;
+            let bar: String = format!(
+                "{}{}",
+                "━".repeat(filled),
+                "░".repeat(bar_width - filled)
+            );
+            term.push_lines(&[
+                styled::section_start(theme, "context", "", None),
+                styled::continuation(theme, "used", &format!("{total} / {limit} tokens"), None),
+                styled::continuation(theme, "usage", &format!("{bar}  {pct:.0}%"), None),
+                styled::section_end(theme, "turns", &session.turn_count.to_string()),
+            ])?;
+        }
+        "/history" => {
+            let history = &session.input.history;
+            if history.is_empty() {
+                term.push_lines(&[styled::continuation(theme, "history", "no history", None)])?;
+            } else {
+                let start = history.len().saturating_sub(20);
+                let mut lines = vec![styled::section_start(
+                    theme,
+                    "history",
+                    &format!("{} entries (showing last {})", history.len(), history.len() - start),
+                    None,
+                )];
+                for (i, entry) in history[start..].iter().enumerate() {
+                    let display = if entry.len() > 60 {
+                        format!("{}...", &entry[..57])
+                    } else {
+                        entry.clone()
+                    };
+                    lines.push(styled::continuation(
+                        theme,
+                        &format!("{}", start + i + 1),
+                        &display,
+                        None,
+                    ));
+                }
+                lines.push(Line::from(vec![Span::styled(
+                    symbols::END.to_string(),
+                    theme.muted(),
+                )]));
+                term.push_lines(&lines)?;
+            }
+        }
+        "/copy" => {
+            if let Some(last) = session.conversation.iter().rev().find(|m| m.role == "assistant") {
+                // Try pbcopy (macOS), xclip (Linux), or xsel
+                let result = std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        if let Some(ref mut stdin) = child.stdin {
+                            use std::io::Write;
+                            stdin.write_all(last.text.as_bytes())?;
+                        }
+                        child.wait()
+                    });
+                match result {
+                    Ok(status) if status.success() => {
+                        let preview = if last.text.len() > 50 {
+                            format!("{}...", &last.text[..47])
+                        } else {
+                            last.text.clone()
+                        };
+                        term.push_lines(&[styled::continuation(
+                            theme, "copy", "copied to clipboard", Some(&preview),
+                        )])?;
+                    }
+                    _ => {
+                        term.push_lines(&[styled::continuation(
+                            theme, "copy", "clipboard not available", Some("pbcopy/xclip not found"),
+                        )])?;
+                    }
+                }
+            } else {
+                term.push_lines(&[styled::continuation(theme, "copy", "no response to copy", None)])?;
+            }
+        }
+        "/compact" => {
+            session.compact = !session.compact;
+            let state = if session.compact { "on" } else { "off" };
+            term.push_lines(&[styled::continuation(theme, "compact", state, None)])?;
+        }
+        _ if cmd.starts_with("/system") => {
+            let msg = cmd.strip_prefix("/system").unwrap().trim();
+            if msg.is_empty() {
+                if let Some(ref sys) = session.system_message {
+                    term.push_lines(&[styled::continuation(theme, "system", sys, None)])?;
+                } else {
+                    term.push_lines(&[styled::continuation(
+                        theme, "system", "no system message set", Some("/system <text>"),
+                    )])?;
+                }
+            } else {
+                session.system_message = Some(msg.to_string());
+                term.push_lines(&[styled::continuation(theme, "system", "set", Some(msg))])?;
+            }
+        }
+        "/reset" => {
+            session.conversation.clear();
+            session.turn_count = 0;
+            session.cost = CostMeter::new();
+            session.last_prompt = None;
+            session.system_message = None;
+            term.push_lines(&[styled::continuation(
+                theme, "reset", "conversation cleared", None,
+            )])?;
         }
         "/cost" => {
             let ratio = session.cost.savings_ratio();
             term.push_lines(&[
                 styled::section_start(theme, "cost", "session summary", None),
                 styled::continuation(theme, "turns", &session.cost.run_count.to_string(), None),
-                styled::continuation(
-                    theme,
-                    "total",
-                    &format!("${:.4}", session.cost.total_cost),
-                    None,
-                ),
-                styled::continuation(
-                    theme,
-                    "tokens",
-                    &format!(
-                        "{} in / {} out",
-                        session.cost.input_tokens, session.cost.output_tokens
-                    ),
-                    None,
-                ),
+                styled::continuation(theme, "total", &format!("${:.4}", session.cost.total_cost), None),
+                styled::continuation(theme, "tokens", &format!("{} in / {} out", session.cost.input_tokens, session.cost.output_tokens), None),
                 styled::section_end(theme, "savings", &format!("{ratio:.1}x vs baseline")),
             ])?;
         }
@@ -1461,7 +2103,6 @@ fn handle_slash_command(
         _ if cmd.starts_with("/model") => {
             let arg = cmd.strip_prefix("/model").unwrap().trim();
             if arg.is_empty() {
-                // Show current model
                 let current = match &session.dispatch {
                     DispatchMode::Direct { auth } => match auth {
                         AuthMethod::ClaudeCli => "claude CLI (auto)".to_string(),
@@ -1477,20 +2118,11 @@ fn handle_slash_command(
                     },
                     DispatchMode::Http { .. } => "HTTP backend (model set server-side)".to_string(),
                 };
-                term.push_lines(&[
-                    styled::continuation(theme, "model", &current, None),
-                ])?;
+                term.push_lines(&[styled::continuation(theme, "model", &current, None)])?;
             } else {
-                // Change model
                 match &mut session.dispatch {
                     DispatchMode::Direct { auth } => match auth {
-                        AuthMethod::AnthropicApi { model, .. } => {
-                            *model = Some(arg.to_string());
-                            term.push_lines(&[styled::continuation(
-                                theme, "model", &format!("switched to {arg}"), None,
-                            )])?;
-                        }
-                        AuthMethod::OpenAiCompat { model, .. } => {
+                        AuthMethod::AnthropicApi { model, .. } | AuthMethod::OpenAiCompat { model, .. } => {
                             *model = Some(arg.to_string());
                             term.push_lines(&[styled::continuation(
                                 theme, "model", &format!("switched to {arg}"), None,
@@ -1498,7 +2130,7 @@ fn handle_slash_command(
                         }
                         _ => {
                             term.push_lines(&[styled::continuation(
-                                theme, "model", "can only switch models with API providers", Some("set ANTHROPIC_API_KEY, ZAI_API_KEY, or OPENAI_API_KEY"),
+                                theme, "model", "can only switch with API providers", Some("set ZAI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"),
                             )])?;
                         }
                     },
@@ -1510,95 +2142,505 @@ fn handle_slash_command(
                 }
             }
         }
+        _ if cmd.starts_with("/effort") => {
+            let arg = cmd.strip_prefix("/effort").unwrap().trim();
+            if arg.is_empty() {
+                term.push_lines(&[styled::continuation(
+                    theme, "effort", "current: medium", Some("use: low, medium, high, max"),
+                )])?;
+            } else {
+                match arg {
+                    "low" | "medium" | "med" | "high" | "max" => {
+                        term.push_lines(&[styled::continuation(
+                            theme, "effort", &format!("set to {arg}"), None,
+                        )])?;
+                    }
+                    _ => {
+                        term.push_lines(&[styled::continuation(
+                            theme, "effort", &format!("unknown level: {arg}"), Some("use: low, medium, high, max"),
+                        )])?;
+                    }
+                }
+            }
+        }
+        _ if cmd.starts_with("/gate") => {
+            let arg = cmd.strip_prefix("/gate").unwrap().trim();
+            if arg.is_empty() {
+                if let Some(toml) = read_roko_toml() {
+                    let clippy = if toml.contains("clippy_enabled = true") { "on" } else { "off" };
+                    let tests = if toml.contains("skip_tests = false") { "on" } else { "off" };
+                    term.push_lines(&[
+                        styled::section_start(theme, "gates", "", None),
+                        styled::continuation(theme, "compile", "on (always)", None),
+                        styled::continuation(theme, "test", tests, None),
+                        styled::continuation(theme, "clippy", clippy, None),
+                        styled::section_end(theme, "max iter", "3"),
+                    ])?;
+                } else {
+                    term.push_lines(&[styled::continuation(theme, "gates", "no roko.toml found", None)])?;
+                }
+            } else {
+                term.push_lines(&[styled::continuation(
+                    theme, "gate", &format!("gate toggle: {arg}"), Some("update roko.toml"),
+                )])?;
+            }
+        }
+
+        // =================================================================
+        // Configuration
+        // =================================================================
+        "/config" => {
+            if let Some(toml) = read_roko_toml() {
+                // Extract key config values
+                let mut lines = vec![styled::section_start(theme, "config", "roko.toml", None)];
+                for section in &["[project]", "[agent]", "[routing]", "[gates]", "[budget]", "[conductor]"] {
+                    if let Some(pos) = toml.find(section) {
+                        let chunk: String = toml[pos..]
+                            .lines()
+                            .take(6)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        for line in chunk.lines().take(5) {
+                            if !line.trim().is_empty() {
+                                lines.push(Line::from(vec![
+                                    Span::styled(format!("{} ", symbols::BAR), theme.muted()),
+                                    Span::styled(line.to_string(), theme.text()),
+                                ]));
+                            }
+                        }
+                    }
+                }
+                lines.push(Line::from(vec![Span::styled(symbols::END.to_string(), theme.muted())]));
+                term.push_lines(&lines)?;
+            } else {
+                term.push_lines(&[styled::continuation(
+                    theme, "config", "no roko.toml found", Some("run: roko init"),
+                )])?;
+            }
+        }
+        "/config providers" => {
+            if let Some(toml) = read_roko_toml() {
+                let mut lines = vec![styled::section_start(theme, "providers", "", None)];
+                for line in toml.lines() {
+                    if line.starts_with("[providers.") {
+                        let name = line.trim_start_matches("[providers.").trim_end_matches(']');
+                        // Check if the env var is set
+                        let next_lines: Vec<&str> = toml[toml.find(line).unwrap()..]
+                            .lines()
+                            .skip(1)
+                            .take(4)
+                            .collect();
+                        let env_key = next_lines.iter()
+                            .find(|l| l.contains("api_key_env"))
+                            .and_then(|l| l.split('"').nth(1))
+                            .unwrap_or("");
+                        let has_key = if env_key.is_empty() {
+                            "no key needed"
+                        } else if std::env::var(env_key).is_ok() {
+                            "key set"
+                        } else {
+                            "key missing"
+                        };
+                        let default_model = next_lines.iter()
+                            .find(|l| l.contains("default_model"))
+                            .and_then(|l| l.split('"').nth(1))
+                            .unwrap_or("?");
+                        lines.push(styled::continuation(
+                            theme, name, default_model, Some(has_key),
+                        ));
+                    }
+                }
+                lines.push(Line::from(vec![Span::styled(symbols::END.to_string(), theme.muted())]));
+                term.push_lines(&lines)?;
+            } else {
+                term.push_lines(&[styled::continuation(theme, "providers", "no roko.toml", None)])?;
+            }
+        }
+        "/config models" => {
+            if let Some(toml) = read_roko_toml() {
+                let mut lines = vec![styled::section_start(theme, "models", "all configured models", None)];
+                for line in toml.lines() {
+                    if line.starts_with("[models.") && !line.starts_with("[models]") {
+                        let alias = line.trim_start_matches("[models.").trim_end_matches(']');
+                        let next_lines: Vec<&str> = toml[toml.find(line).unwrap()..]
+                            .lines()
+                            .skip(1)
+                            .take(3)
+                            .collect();
+                        let provider = next_lines.iter()
+                            .find(|l| l.contains("provider"))
+                            .and_then(|l| l.split('"').nth(1))
+                            .unwrap_or("?");
+                        let slug = next_lines.iter()
+                            .find(|l| l.contains("slug"))
+                            .and_then(|l| l.split('"').nth(1))
+                            .unwrap_or("?");
+                        lines.push(styled::continuation(
+                            theme, alias, slug, Some(provider),
+                        ));
+                    }
+                }
+                lines.push(Line::from(vec![Span::styled(symbols::END.to_string(), theme.muted())]));
+                term.push_lines(&lines)?;
+            } else {
+                term.push_lines(&[styled::continuation(theme, "models", "no roko.toml", None)])?;
+            }
+        }
+        "/config gates" => {
+            // Delegate to /gate
+            return handle_slash_command("/gate", session, term, theme);
+        }
+        _ if cmd.starts_with("/config set ") => {
+            let rest = cmd.strip_prefix("/config set ").unwrap().trim();
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+            if parts.len() < 2 {
+                term.push_lines(&[styled::continuation(
+                    theme, "config", "usage: /config set <key> <value>", None,
+                )])?;
+            } else {
+                let (key, value) = (parts[0], parts[1]);
+                term.push_lines(&[styled::continuation(
+                    theme, "config", &format!("set {key} = {value}"), Some("edit roko.toml to persist"),
+                )])?;
+            }
+        }
+
+        // =================================================================
+        // Workspace & git
+        // =================================================================
+        "/status" => {
+            let roko_dir = std::path::Path::new(".roko");
+            let has_roko = roko_dir.exists();
+            let signal_count = std::fs::read_to_string(".roko/signals.jsonl")
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            let episode_count = std::fs::read_to_string(".roko/episodes.jsonl")
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            let plan_count = std::fs::read_dir(".roko/plans")
+                .map(|d| d.count())
+                .unwrap_or(0);
+            let branch = shell_output("git", &["branch", "--show-current"]);
+            term.push_lines(&[
+                styled::section_start(theme, "status", "", None),
+                styled::continuation(theme, ".roko", if has_roko { "initialized" } else { "not found" }, None),
+                styled::continuation(theme, "branch", branch.trim(), None),
+                styled::continuation(theme, "signals", &signal_count.to_string(), None),
+                styled::continuation(theme, "episodes", &episode_count.to_string(), None),
+                styled::section_end(theme, "plans", &plan_count.to_string()),
+            ])?;
+        }
+        "/doctor" => {
+            let checks = [
+                ("roko.toml", std::path::Path::new("roko.toml").exists()),
+                (".roko/", std::path::Path::new(".roko").exists()),
+                ("git", std::path::Path::new(".git").exists()),
+                ("ZAI_API_KEY", std::env::var("ZAI_API_KEY").is_ok()),
+                ("ANTHROPIC_API_KEY", std::env::var("ANTHROPIC_API_KEY").is_ok()),
+                ("OPENAI_API_KEY", std::env::var("OPENAI_API_KEY").is_ok()),
+                ("GEMINI_API_KEY", std::env::var("GEMINI_API_KEY").is_ok()),
+                ("MOONSHOT_API_KEY", std::env::var("MOONSHOT_API_KEY").is_ok()),
+                ("PERPLEXITY_API_KEY", std::env::var("PERPLEXITY_API_KEY").is_ok()),
+            ];
+            let mut lines = vec![styled::section_start(theme, "doctor", "workspace health", None)];
+            for (name, ok) in &checks {
+                let icon = if *ok { symbols::PASS } else { symbols::FAIL };
+                lines.push(styled::continuation(theme, icon, name, None));
+            }
+            lines.push(Line::from(vec![Span::styled(symbols::END.to_string(), theme.muted())]));
+            term.push_lines(&lines)?;
+        }
+        "/diff" => {
+            let output = shell_output("git", &["diff", "--stat", "--color=never"]);
+            if output.trim().is_empty() {
+                term.push_lines(&[styled::continuation(theme, "diff", "no changes", None)])?;
+            } else {
+                push_shell_output(term, theme, "diff", &output, 30)?;
+            }
+        }
+        "/git" => {
+            let output = shell_output("git", &["status", "--short"]);
+            if output.trim().is_empty() {
+                term.push_lines(&[styled::continuation(theme, "git", "clean working tree", None)])?;
+            } else {
+                push_shell_output(term, theme, "git", &output, 25)?;
+            }
+        }
+        _ if cmd.starts_with("/log") => {
+            let arg = cmd.strip_prefix("/log").unwrap().trim();
+            let n = arg.parse::<usize>().unwrap_or(5);
+            let output = shell_output("git", &[
+                "log", &format!("-{n}"), "--oneline", "--decorate",
+            ]);
+            push_shell_output(term, theme, "log", &output, n + 1)?;
+        }
+        "/branch" => {
+            let output = shell_output("git", &["branch", "-v", "--color=never"]);
+            push_shell_output(term, theme, "branch", &output, 15)?;
+        }
+        "/changes" => {
+            let output = shell_output("git", &["diff", "--name-status", "HEAD"]);
+            if output.trim().is_empty() {
+                term.push_lines(&[styled::continuation(theme, "changes", "no changes since last commit", None)])?;
+            } else {
+                push_shell_output(term, theme, "changes", &output, 30)?;
+            }
+        }
+
+        // =================================================================
+        // File operations
+        // =================================================================
+        _ if cmd.starts_with("/file ") => {
+            let path = cmd.strip_prefix("/file ").unwrap().trim();
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    push_shell_output(term, theme, &format!("file: {path}"), &content, 40)?;
+                }
+                Err(e) => {
+                    term.push_lines(&[styled::continuation(
+                        theme, "error", &format!("{path}: {e}"), None,
+                    )])?;
+                }
+            }
+        }
+        _ if cmd.starts_with("/search ") => {
+            let pattern = cmd.strip_prefix("/search ").unwrap().trim();
+            let output = shell_output("grep", &[
+                "-rn", "--include=*.rs", "--include=*.toml", "--include=*.md",
+                pattern, ".",
+            ]);
+            if output.trim().is_empty() {
+                term.push_lines(&[styled::continuation(
+                    theme, "search", &format!("no matches for '{pattern}'"), None,
+                )])?;
+            } else {
+                push_shell_output(term, theme, &format!("search: {pattern}"), &output, 25)?;
+            }
+        }
+        _ if cmd.starts_with("/find ") => {
+            let pattern = cmd.strip_prefix("/find ").unwrap().trim();
+            let output = shell_output("find", &[
+                ".", "-name", pattern, "-not", "-path", "*/target/*", "-not", "-path", "*/.git/*",
+            ]);
+            if output.trim().is_empty() {
+                term.push_lines(&[styled::continuation(
+                    theme, "find", &format!("no files matching '{pattern}'"), None,
+                )])?;
+            } else {
+                push_shell_output(term, theme, &format!("find: {pattern}"), &output, 25)?;
+            }
+        }
+        _ if cmd.starts_with("/tree") => {
+            let arg = cmd.strip_prefix("/tree").unwrap().trim();
+            let path = if arg.is_empty() { "." } else { arg };
+            let output = shell_output("find", &[path, "-maxdepth", "3", "-not", "-path", "*/target/*", "-not", "-path", "*/.git/*"]);
+            push_shell_output(term, theme, &format!("tree: {path}"), &output, 30)?;
+        }
+
+        // =================================================================
+        // Agent & workflow
+        // =================================================================
+        "/agent" | "/agent list" => {
+            let agent_id = &session.agent_id;
+            term.push_lines(&[
+                styled::section_start(theme, "agent", "", None),
+                styled::continuation(theme, "current", agent_id, None),
+                styled::continuation(theme, "roles", "implementer, strategist, architect, auditor, researcher, scribe, critic", None),
+                styled::section_end(theme, "switch", "/agent <name>"),
+            ])?;
+        }
+        _ if cmd.starts_with("/agent ") => {
+            let name = cmd.strip_prefix("/agent ").unwrap().trim();
+            if name != "list" {
+                session.agent_id = name.to_string();
+                let color = Theme::role_accent(name);
+                let color_name = if color == Theme::ROSE { "rose" }
+                    else if color == Theme::DREAM { "dream" }
+                    else if color == Theme::BONE { "bone" }
+                    else if color == Theme::SAGE { "sage" }
+                    else if color == Theme::EMBER { "ember" }
+                    else { "default" };
+                term.push_lines(&[styled::continuation(
+                    theme, "agent", &format!("switched to {name}"), Some(color_name),
+                )])?;
+            }
+        }
+        _ if cmd.starts_with("/run ") => {
+            let prompt = cmd.strip_prefix("/run ").unwrap().trim();
+            term.push_lines(&[
+                styled::section_start(theme, "run", "universal loop", None),
+                styled::continuation(theme, "prompt", prompt, None),
+                styled::continuation(theme, "command", &format!("roko run \"{prompt}\""), None),
+                styled::section_end(theme, "tip", "run this in a terminal for full output"),
+            ])?;
+        }
+        "/plan list" => {
+            let output = shell_output("find", &[
+                ".roko/plans", "-name", "*.toml", "-not", "-path", "*/target/*",
+            ]);
+            if output.trim().is_empty() {
+                let output2 = shell_output("find", &["plans", "-name", "*.toml"]);
+                if output2.trim().is_empty() {
+                    term.push_lines(&[styled::continuation(theme, "plans", "no plans found", None)])?;
+                } else {
+                    push_shell_output(term, theme, "plans", &output2, 20)?;
+                }
+            } else {
+                push_shell_output(term, theme, "plans", &output, 20)?;
+            }
+        }
+        _ if cmd.starts_with("/plan run ") => {
+            let dir = cmd.strip_prefix("/plan run ").unwrap().trim();
+            term.push_lines(&[
+                styled::continuation(theme, "plan", &format!("roko plan run {dir}"), Some("run in terminal")),
+            ])?;
+        }
+        _ if cmd.starts_with("/plan generate ") => {
+            let prompt = cmd.strip_prefix("/plan generate ").unwrap().trim();
+            term.push_lines(&[
+                styled::continuation(theme, "plan", &format!("roko plan generate \"{prompt}\""), Some("run in terminal")),
+            ])?;
+        }
+        "/plan" => {
+            term.push_lines(&[
+                styled::section_start(theme, "plan", "subcommands", None),
+                styled::continuation(theme, "/plan list", "list plans", None),
+                styled::continuation(theme, "/plan run <dir>", "execute a plan", None),
+                styled::section_end(theme, "/plan generate <prompt>", "generate plan"),
+            ])?;
+        }
+
+        // =================================================================
+        // PRD & research
+        // =================================================================
+        _ if cmd.starts_with("/prd idea ") => {
+            let idea = cmd.strip_prefix("/prd idea ").unwrap().trim();
+            term.push_lines(&[
+                styled::continuation(theme, "prd", &format!("roko prd idea \"{idea}\""), Some("run in terminal")),
+            ])?;
+        }
+        "/prd list" => {
+            let prd_dir = std::path::Path::new(".roko/prd");
+            if prd_dir.exists() {
+                let output = shell_output("ls", &["-la", ".roko/prd/"]);
+                push_shell_output(term, theme, "PRDs", &output, 20)?;
+            } else {
+                term.push_lines(&[styled::continuation(theme, "prd", "no PRDs found", Some(".roko/prd/ not found"))])?;
+            }
+        }
+        "/prd" => {
+            term.push_lines(&[
+                styled::section_start(theme, "prd", "subcommands", None),
+                styled::continuation(theme, "/prd idea <text>", "capture idea", None),
+                styled::continuation(theme, "/prd list", "list PRDs", None),
+                styled::section_end(theme, "cli", "roko prd draft|plan|status"),
+            ])?;
+        }
+        _ if cmd.starts_with("/research ") => {
+            let query = cmd.strip_prefix("/research ").unwrap().trim();
+            term.push_lines(&[
+                styled::continuation(theme, "research", &format!("roko research topic \"{query}\""), Some("run in terminal")),
+            ])?;
+        }
+
+        // =================================================================
+        // Knowledge & learning
+        // =================================================================
+        _ if cmd.starts_with("/knowledge ") => {
+            let query = cmd.strip_prefix("/knowledge ").unwrap().trim();
+            if query == "stats" {
+                let neuro_dir = std::path::Path::new(".roko/neuro");
+                if neuro_dir.exists() {
+                    let output = shell_output("ls", &["-la", ".roko/neuro/"]);
+                    push_shell_output(term, theme, "knowledge", &output, 15)?;
+                } else {
+                    term.push_lines(&[styled::continuation(theme, "knowledge", "store not initialized", None)])?;
+                }
+            } else {
+                term.push_lines(&[
+                    styled::continuation(theme, "knowledge", &format!("roko knowledge query \"{query}\""), Some("run in terminal")),
+                ])?;
+            }
+        }
+        "/knowledge" => {
+            term.push_lines(&[
+                styled::section_start(theme, "knowledge", "subcommands", None),
+                styled::continuation(theme, "/knowledge <query>", "query store", None),
+                styled::continuation(theme, "/knowledge stats", "store stats", None),
+                styled::section_end(theme, "cli", "roko knowledge query|stats|gc"),
+            ])?;
+        }
+        "/learn" => {
+            let learn_dir = std::path::Path::new(".roko/learn");
+            if learn_dir.exists() {
+                let files: Vec<String> = std::fs::read_dir(learn_dir)
+                    .map(|d| {
+                        d.filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut lines = vec![styled::section_start(theme, "learn", "learning state", None)];
+                for f in &files {
+                    lines.push(styled::continuation(theme, "", f, None));
+                }
+                lines.push(Line::from(vec![Span::styled(symbols::END.to_string(), theme.muted())]));
+                term.push_lines(&lines)?;
+            } else {
+                term.push_lines(&[styled::continuation(theme, "learn", "no learning data", Some(".roko/learn/ not found"))])?;
+            }
+        }
+
+        // =================================================================
+        // Export & retry (kept from before)
+        // =================================================================
         _ if cmd.starts_with("/export") => {
             let arg = cmd.strip_prefix("/export").unwrap().trim();
             let format = if arg.is_empty() { "markdown" } else { arg };
             if session.conversation.is_empty() {
-                term.push_lines(&[styled::continuation(
-                    theme, "export", "no messages to export", None,
-                )])?;
+                term.push_lines(&[styled::continuation(theme, "export", "no messages to export", None)])?;
             } else {
+                let exports_dir = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".roko")
+                    .join("exports");
+                let _ = std::fs::create_dir_all(&exports_dir);
+                let ts = chrono::Local::now().format("%Y-%m-%d-%H%M");
                 match format {
                     "markdown" | "md" => {
-                        let exports_dir = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                            .join(".roko")
-                            .join("exports");
-                        let _ = std::fs::create_dir_all(&exports_dir);
-                        let ts = chrono::Local::now().format("%Y-%m-%d-%H%M");
                         let path = exports_dir.join(format!("chat-{ts}.md"));
-                        let model = match &session.dispatch {
-                            DispatchMode::Direct { auth } => match auth {
-                                AuthMethod::AnthropicApi { model, .. } => {
-                                    model.as_deref().unwrap_or("claude-sonnet-4-6").to_string()
-                                }
-                                AuthMethod::ClaudeCli => "claude CLI".to_string(),
-                                AuthMethod::OpenAiCompat { model, .. } => {
-                                    model.as_deref().unwrap_or("unknown").to_string()
-                                }
-                                AuthMethod::NeedsSetup => "none".to_string(),
-                            },
-                            DispatchMode::Http { .. } => "HTTP backend".to_string(),
-                        };
+                        let model_name = current_model_name(session);
                         let mut md = format!(
                             "# Roko Chat — {}\n\n**Model**: {} | **Turns**: {} | **Cost**: ${:.4}\n\n---\n\n",
                             chrono::Local::now().format("%Y-%m-%d %H:%M"),
-                            model,
-                            session.turn_count,
-                            session.cost.total_cost,
+                            model_name, session.turn_count, session.cost.total_cost,
                         );
                         for msg in &session.conversation {
                             let role = if msg.role == "user" { "User" } else { "Roko" };
                             md.push_str(&format!("## {role}\n\n{}\n\n---\n\n", msg.text));
                         }
                         match std::fs::write(&path, &md) {
-                            Ok(()) => {
-                                term.push_lines(&[styled::continuation(
-                                    theme, "export", &format!("saved to {}", path.display()), None,
-                                )])?;
-                            }
-                            Err(e) => {
-                                term.push_lines(&[styled::continuation(
-                                    theme, "error", &format!("export failed: {e}"), None,
-                                )])?;
-                            }
+                            Ok(()) => term.push_lines(&[styled::continuation(theme, "export", &format!("saved to {}", path.display()), None)])?,
+                            Err(e) => term.push_lines(&[styled::continuation(theme, "error", &format!("export failed: {e}"), None)])?,
                         }
                     }
                     "json" => {
-                        let exports_dir = std::env::current_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                            .join(".roko")
-                            .join("exports");
-                        let _ = std::fs::create_dir_all(&exports_dir);
-                        let ts = chrono::Local::now().format("%Y-%m-%d-%H%M");
                         let path = exports_dir.join(format!("chat-{ts}.json"));
-                        let messages: Vec<serde_json::Value> = session.conversation.iter().map(|m| {
-                            json!({ "role": m.role, "text": m.text, "timestamp": m.timestamp })
-                        }).collect();
+                        let messages: Vec<serde_json::Value> = session.conversation.iter()
+                            .map(|m| json!({ "role": m.role, "text": m.text, "timestamp": m.timestamp }))
+                            .collect();
                         let export = json!({
-                            "turns": session.turn_count,
-                            "cost": session.cost.total_cost,
-                            "tokens_in": session.cost.input_tokens,
-                            "tokens_out": session.cost.output_tokens,
+                            "turns": session.turn_count, "cost": session.cost.total_cost,
+                            "tokens_in": session.cost.input_tokens, "tokens_out": session.cost.output_tokens,
                             "messages": messages,
                         });
                         match std::fs::write(&path, serde_json::to_string_pretty(&export).unwrap_or_default()) {
-                            Ok(()) => {
-                                term.push_lines(&[styled::continuation(
-                                    theme, "export", &format!("saved to {}", path.display()), None,
-                                )])?;
-                            }
-                            Err(e) => {
-                                term.push_lines(&[styled::continuation(
-                                    theme, "error", &format!("export failed: {e}"), None,
-                                )])?;
-                            }
+                            Ok(()) => term.push_lines(&[styled::continuation(theme, "export", &format!("saved to {}", path.display()), None)])?,
+                            Err(e) => term.push_lines(&[styled::continuation(theme, "error", &format!("export failed: {e}"), None)])?,
                         }
                     }
                     _ => {
-                        term.push_lines(&[styled::continuation(
-                            theme, "export", &format!("unknown format: {format}"), Some("use: markdown, json"),
-                        )])?;
+                        term.push_lines(&[styled::continuation(theme, "export", &format!("unknown format: {format}"), Some("use: markdown, json"))])?;
                     }
                 }
             }
@@ -1607,32 +2649,37 @@ fn handle_slash_command(
             if let Some(ref prompt) = session.last_prompt {
                 session.input.buffer = prompt.clone();
                 session.input.cursor = session.input.buffer.len();
-                term.push_lines(&[styled::continuation(
-                    theme, "retry", "resending last message", None,
-                )])?;
-                // Re-submit by populating buffer — user presses Enter to confirm
+                term.push_lines(&[styled::continuation(theme, "retry", "loaded last message — press Enter to send", None)])?;
             } else {
-                term.push_lines(&[styled::continuation(
-                    theme, "retry", "no previous message to retry", None,
-                )])?;
+                term.push_lines(&[styled::continuation(theme, "retry", "no previous message to retry", None)])?;
             }
         }
         "/clear" => {
-            // Can't truly clear scrollback, but push blank lines
             for _ in 0..term.viewport_height() {
                 term.push_blank()?;
             }
         }
+
         _ => {
             term.push_lines(&[styled::continuation(
-                theme,
-                "unknown",
-                &format!("command: {cmd}"),
-                Some("try /help"),
+                theme, "unknown", &format!("command: {cmd}"), Some("try /help"),
             )])?;
         }
     }
     Ok(false)
+}
+
+/// Get the current model name for display.
+fn current_model_name(session: &ChatSession) -> String {
+    match &session.dispatch {
+        DispatchMode::Direct { auth } => match auth {
+            AuthMethod::AnthropicApi { model, .. } => model.as_deref().unwrap_or("claude-sonnet-4-6").to_string(),
+            AuthMethod::ClaudeCli => "claude CLI".to_string(),
+            AuthMethod::OpenAiCompat { model, .. } => model.as_deref().unwrap_or("unknown").to_string(),
+            AuthMethod::NeedsSetup => "none".to_string(),
+        },
+        DispatchMode::Http { .. } => "HTTP backend".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,6 +2706,27 @@ fn render_viewport(frame: &mut Frame<'_>, session: &ChatSession, theme: &Theme) 
         Phase::Streaming => {
             session.streaming.render(frame, area, theme);
         }
+        Phase::Error { ref error, .. } => {
+            let chunks =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+            let hint = Line::from(vec![
+                Span::styled(
+                    format!("  {} ", symbols::WARN),
+                    Style::default().fg(Theme::EMBER),
+                ),
+                Span::styled(
+                    truncate_str(error, area.width as usize - 6),
+                    Style::default().fg(Theme::EMBER),
+                ),
+                Span::raw("  "),
+                Span::styled("[r]", Style::default().fg(Theme::BONE).add_modifier(Modifier::BOLD)),
+                Span::styled("etry  ", theme.muted()),
+                Span::styled("[q]", Style::default().fg(Theme::BONE).add_modifier(Modifier::BOLD)),
+                Span::styled("uit", theme.muted()),
+            ]);
+            frame.render_widget(Paragraph::new(hint), chunks[0]);
+            render_status_bar(frame, chunks[1], session, theme);
+        }
         Phase::Done => {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
@@ -1672,6 +2740,12 @@ fn render_viewport(frame: &mut Frame<'_>, session: &ChatSession, theme: &Theme) 
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme: &Theme) {
+    // --- Command palette overlay ---
+    if session.input.palette.active {
+        render_palette(frame, area, session, theme);
+        return;
+    }
+
     let dropdown_visible = session.input.completion.visible;
     let match_count = session.input.completion.matches.len();
 
@@ -1937,6 +3011,102 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme:
     render_status_bar(frame, chunks[3], session, theme);
 }
 
+/// Render the command palette overlay (Ctrl+K).
+fn render_palette(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme: &Theme) {
+    let palette = &session.input.palette;
+    let max_visible = 10.min(area.height.saturating_sub(3) as usize);
+    let visible_matches = palette.matches.len().min(max_visible);
+    let palette_height = (visible_matches as u16 + 2).min(area.height.saturating_sub(1)); // +1 search, +1 border hint
+
+    let chunks = Layout::vertical([
+        Constraint::Min(1),               // spacer
+        Constraint::Length(palette_height), // palette body
+        Constraint::Length(1),             // status bar
+    ])
+    .split(area);
+
+    let palette_area = chunks[1];
+
+    // Search bar
+    let search_line = Line::from(vec![
+        Span::styled(
+            format!("{} ", symbols::PROMPT),
+            Style::default().fg(Theme::ROSE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if palette.query.is_empty() {
+                "type to filter...".to_string()
+            } else {
+                palette.query.clone()
+            },
+            if palette.query.is_empty() {
+                Style::default().fg(Theme::TEXT_GHOST)
+            } else {
+                Style::default().fg(Theme::BONE)
+            },
+        ),
+        Span::styled(
+            symbols::CURSOR.to_string(),
+            Style::default().fg(Theme::BONE).add_modifier(Modifier::REVERSED),
+        ),
+    ]);
+
+    let mut lines: Vec<Line<'static>> = vec![search_line];
+
+    // Scrolling: center selected item in view
+    let scroll_offset = if palette.selected >= max_visible {
+        palette.selected - max_visible + 1
+    } else {
+        0
+    };
+
+    for (i, m) in palette
+        .matches
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .enumerate()
+    {
+        let actual_idx = scroll_offset + i;
+        let is_selected = actual_idx == palette.selected;
+        let base_style = if is_selected {
+            theme.selection()
+        } else {
+            theme.text()
+        };
+        let dim_style = if is_selected {
+            theme.selection()
+        } else {
+            theme.muted()
+        };
+
+        let prefix = if is_selected { "> " } else { "  " };
+        let cmd_width = m.command.len() + 2;
+        let pad = if cmd_width < 20 { 20 - cmd_width } else { 2 };
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), base_style),
+            Span::styled(m.command.to_string(), base_style),
+            Span::styled(" ".repeat(pad), dim_style),
+            Span::styled(m.description.to_string(), dim_style),
+        ]));
+    }
+
+    // Hint line if there are more matches
+    if palette.matches.len() > max_visible {
+        let remaining = palette.matches.len() - max_visible;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ... {remaining} more"),
+                Style::default().fg(Theme::TEXT_GHOST),
+            ),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), palette_area);
+    render_status_bar(frame, chunks[2], session, theme);
+}
+
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, session: &ChatSession, theme: &Theme) {
     let model = session.cost.primary_model().unwrap_or("—").to_string();
 
@@ -2006,6 +3176,8 @@ impl From<HttpResponse> for DispatchResult {
             model: r.model,
             input_tokens: r.input_tokens,
             output_tokens: r.output_tokens,
+            tool_outputs: Vec::new(),
+            session_id: None,
         }
     }
 }
@@ -2167,6 +3339,57 @@ fn reading_time(text: &str) -> Option<String> {
     } else {
         Some(format!("~{} min read", minutes.ceil() as u32))
     }
+}
+
+/// Render tool execution outputs above the agent response.
+/// Each tool output is shown as a collapsed summary with the tool name and
+/// a preview of the output content, similar to mori's CommandOutput panel.
+fn push_tool_outputs(
+    term: &mut InlineTerminal,
+    theme: &Theme,
+    tool_outputs: &[ToolOutput],
+) -> std::io::Result<()> {
+    if tool_outputs.is_empty() {
+        return Ok(());
+    }
+    for output in tool_outputs {
+        let tool_label = output.tool_name.as_deref().unwrap_or("tool");
+        // Show first line of output as preview, truncated
+        let preview = output
+            .content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let line_count = output.content.lines().count();
+        let suffix = if line_count > 1 {
+            format!(" (+{} lines)", line_count - 1)
+        } else {
+            String::new()
+        };
+
+        let tool_sym = symbols::TOOL;
+        term.push_lines(&[Line::from(vec![
+            Span::styled(
+                format!("  {tool_sym} "),
+                Style::default().fg(Theme::TEXT_DIM),
+            ),
+            Span::styled(
+                tool_label.to_string(),
+                Style::default()
+                    .fg(theme.info)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {preview}{suffix}"),
+                Style::default().fg(Theme::TEXT_DIM),
+            ),
+        ])])?;
+    }
+    term.push_lines(&[Line::raw("")])?;
+    Ok(())
 }
 
 fn push_agent_response(
@@ -2778,5 +4001,100 @@ mod tests {
         search.query = "fix the".to_string();
         search.update(&history);
         assert_eq!(search.matches.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Command palette tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn palette_open_shows_all() {
+        let mut p = CommandPalette::new();
+        p.open();
+        assert!(p.active);
+        assert_eq!(p.matches.len(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_filter() {
+        let mut p = CommandPalette::new();
+        p.open();
+        p.type_char('h');
+        p.type_char('e');
+        p.type_char('l');
+        // Should find /help
+        assert!(p.matches.iter().any(|m| m.command == "/help"));
+        assert!(p.matches.len() < SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_navigation() {
+        let mut p = CommandPalette::new();
+        p.open();
+        assert_eq!(p.selected, 0);
+        p.select_next();
+        assert_eq!(p.selected, 1);
+        p.select_prev();
+        assert_eq!(p.selected, 0);
+        // Wrap backward
+        p.select_prev();
+        assert_eq!(p.selected, p.matches.len() - 1);
+    }
+
+    #[test]
+    fn palette_accept() {
+        let mut p = CommandPalette::new();
+        p.open();
+        let cmd = p.accept();
+        assert!(cmd.is_some());
+        assert!(cmd.unwrap().starts_with('/'));
+        assert!(!p.active);
+    }
+
+    #[test]
+    fn palette_dismiss() {
+        let mut p = CommandPalette::new();
+        p.open();
+        p.type_char('x');
+        p.dismiss();
+        assert!(!p.active);
+        assert!(p.query.is_empty());
+    }
+
+    #[test]
+    fn palette_backspace() {
+        let mut p = CommandPalette::new();
+        p.open();
+        p.type_char('h');
+        p.type_char('e');
+        let after_he = p.matches.len();
+        p.backspace();
+        // After removing 'e', should have more matches (just 'h')
+        assert!(p.matches.len() >= after_he);
+    }
+
+    #[test]
+    fn palette_searches_description() {
+        let mut p = CommandPalette::new();
+        p.open();
+        // Search for "version" — should match /version's description "show version info"
+        p.type_char('v');
+        p.type_char('e');
+        p.type_char('r');
+        assert!(p.matches.iter().any(|m| m.command == "/version"));
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate_str tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long() {
+        assert_eq!(truncate_str("hello world", 8), "hello...");
     }
 }

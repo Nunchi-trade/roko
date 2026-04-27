@@ -521,7 +521,15 @@ async fn dispatch_agent(
             .agent
             .model
             .clone()
-            .unwrap_or_else(|| "claude-opus-4-6".to_string());
+            .unwrap_or_else(|| {
+                // Prefer the routing config's default_model (from roko.toml or global config)
+                // over hardcoded Claude. This ensures ZAI_API_KEY / glm-5.1 setups work.
+                if !routing_config.agent.default_model.is_empty() {
+                    routing_config.agent.default_model.clone()
+                } else {
+                    "claude-sonnet-4-6".to_string()
+                }
+            });
         let synthesized_config = synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;
@@ -1100,8 +1108,16 @@ fn resolved_model(config: &Config) -> String {
     if let Some(model) = &config.agent.model {
         return model.clone();
     }
+    // Check routing config for configured default model before falling back to hardcoded.
+    if let Ok(mut rc) = roko_core::config::load_config(std::path::Path::new(".")) {
+        rc.apply_process_env();
+        crate::config::merge_global_providers(&mut rc);
+        if !rc.agent.default_model.is_empty() {
+            return rc.agent.default_model;
+        }
+    }
     if config.agent.command.eq_ignore_ascii_case("claude") {
-        "claude-opus-4-6".to_string()
+        "claude-sonnet-4-6".to_string()
     } else {
         "unknown-model".to_string()
     }

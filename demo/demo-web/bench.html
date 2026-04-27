@@ -437,6 +437,8 @@ select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
     <nav class="page-nav">
       <a href="demo.html">Demo</a>
       <a href="bench.html" class="active">Bench</a>
+      <a href="bench-live.html">Live Monitor</a>
+      <a href="explorer.html">Explorer</a>
       <a href="builder.html">Builder</a>
     </nav>
   </header>
@@ -589,6 +591,18 @@ select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
               <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
               <option value="gpt-4.1">GPT-4.1</option>
               <option value="o4-mini">o4-mini</option>
+            </optgroup>
+            <optgroup label="Z.AI / GLM">
+              <option value="glm-5.1">GLM 5.1</option>
+              <option value="glm-5v-turbo">GLM 5v Turbo</option>
+            </optgroup>
+            <optgroup label="Moonshot / Kimi">
+              <option value="kimi-k2.5">Kimi K2.5</option>
+              <option value="kimi-k2.6">Kimi K2.6</option>
+            </optgroup>
+            <optgroup label="Google">
+              <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+              <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
             </optgroup>
             <optgroup label="Local (Ollama)">
               <option value="gemma4:26b-moe-nothink">Gemma 4 26B MoE</option>
@@ -760,59 +774,47 @@ select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
         <h4><span class="icon">&#9679;</span> Episode Memory</h4>
         <div class="learning-metric">
           <span class="lm-label">Total episodes recorded</span>
-          <span class="lm-value">247</span>
+          <span class="lm-value" id="episode-total">--</span>
         </div>
         <div class="learning-metric">
           <span class="lm-label">Successful patterns</span>
-          <span class="lm-value up">183</span>
+          <span class="lm-value" id="episode-passed">--</span>
         </div>
         <div class="learning-metric">
           <span class="lm-label">Failure patterns</span>
-          <span class="lm-value down">64</span>
-        </div>
-        <div class="learning-metric">
-          <span class="lm-label">Knowledge entries created</span>
-          <span class="lm-value">42</span>
+          <span class="lm-value" id="episode-failed">--</span>
         </div>
       </div>
 
       <div class="learning-card">
         <h4><span class="icon">&#9670;</span> Cascade Router</h4>
         <div class="learning-metric">
-          <span class="lm-label">Model switches (learned)</span>
-          <span class="lm-value">18</span>
+          <span class="lm-label">Total observations</span>
+          <span class="lm-value" id="router-switches">--</span>
         </div>
         <div class="learning-metric">
-          <span class="lm-label">Cost saved vs. single-model</span>
-          <span class="lm-value up">34%</span>
+          <span class="lm-label">Models tracked</span>
+          <span class="lm-value" id="router-models">--</span>
         </div>
         <div class="learning-metric">
-          <span class="lm-label">Quality maintained</span>
-          <span class="lm-value up">98%</span>
-        </div>
-        <div class="learning-metric">
-          <span class="lm-label">Routing accuracy</span>
-          <span class="lm-value">0.91</span>
+          <span class="lm-label">Best model weight</span>
+          <span class="lm-value" id="router-quality">--</span>
         </div>
       </div>
 
       <div class="learning-card">
         <h4><span class="icon">&#9653;</span> Gate Adaptation</h4>
         <div class="learning-metric">
-          <span class="lm-label">Threshold adjustments</span>
-          <span class="lm-value">12</span>
+          <span class="lm-label">Tracked rungs</span>
+          <span class="lm-value" id="gate-rungs">--</span>
         </div>
         <div class="learning-metric">
-          <span class="lm-label">False positive reduction</span>
-          <span class="lm-value up">-23%</span>
+          <span class="lm-label">Average gate pass EMA</span>
+          <span class="lm-value" id="gate-ema">--</span>
         </div>
         <div class="learning-metric">
-          <span class="lm-label">Gate pass EMA</span>
-          <span class="lm-value">0.87</span>
-        </div>
-        <div class="learning-metric">
-          <span class="lm-label">Replans triggered</span>
-          <span class="lm-value neutral">7</span>
+          <span class="lm-label">Rungs auto-skipped</span>
+          <span class="lm-value" id="gate-skipped">--</span>
         </div>
       </div>
 
@@ -820,19 +822,11 @@ select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
         <h4><span class="icon">&#9733;</span> C-Factor Trend</h4>
         <div class="learning-metric">
           <span class="lm-label">Current C-factor</span>
-          <span class="lm-value up">0.84</span>
-        </div>
-        <div class="learning-metric">
-          <span class="lm-label">7-run moving average</span>
-          <span class="lm-value up">0.79</span>
+          <span class="lm-value" id="cf-current">--</span>
         </div>
         <div class="learning-metric">
           <span class="lm-label">Trend direction</span>
-          <span class="lm-value up">&#8593; improving</span>
-        </div>
-        <div class="learning-metric">
-          <span class="lm-label">Worst contributor</span>
-          <span class="lm-value down">test gate</span>
+          <span class="lm-value" id="cf-trend">--</span>
         </div>
       </div>
     </div>
@@ -1032,9 +1026,12 @@ select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
 <script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
 <script>
 // ── State ─────────────────────────────────────────────────
+const API = window.location.origin + '/api';
 let selectedSuite = 'smoke';
 let selectedStrategy = 'minimal';
-let benchRuns = [];
+let benchRuns = JSON.parse(localStorage.getItem('roko-bench-runs') || '[]');
+let activeRunId = null;
+let pollTimer = null;
 
 // ── Tab switching ─────────────────────────────────────────
 document.querySelectorAll('.view-tab').forEach(tab => {
@@ -1043,7 +1040,12 @@ document.querySelectorAll('.view-tab').forEach(tab => {
     document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     tab.setAttribute('aria-selected', 'true');
-    document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
+    const viewName = tab.dataset.view;
+    document.getElementById(`view-${viewName}`).classList.add('active');
+    // Load live data when switching to data tabs
+    if (viewName === 'results') loadResultsData();
+    if (viewName === 'learning') loadLearningData();
+    if (viewName === 'compare') loadCompareData();
   });
 });
 
@@ -1065,6 +1067,15 @@ function selectStrategy(el) {
   selectedStrategy = el.dataset.strategy;
 }
 
+// ── Fetch helper ──────────────────────────────────────────
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
 // ── Generate CLI command ──────────────────────────────────
 function buildCommand() {
   const model = document.getElementById('cfg-model').value;
@@ -1081,23 +1092,16 @@ function buildCommand() {
   if (learning === 'no') cmd += ` \\\n  --no-learning`;
   cmd += ` \\\n  --workdir ${workdir}`;
 
-  // Strategy affects the agent command
-  cmd += `\n\n# Strategy: ${selectedStrategy}`;
   switch (selectedStrategy) {
     case 'minimal':
-      cmd += `\n# Sends only problem statement — tests raw model ability`;
       break;
     case 'context':
-      cmd += `\n# Adds source file context from target repo`;
-      cmd += `\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode context'`;
+      cmd += ` \\\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode context'`;
       break;
     case 'neuro':
-      cmd += `\n# Adds source context + knowledge store queries`;
-      cmd += `\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode neuro --knowledge-workdir .'`;
+      cmd += ` \\\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode neuro --knowledge-workdir .'`;
       break;
     case 'cascade':
-      cmd += `\n# Full pipeline: neuro + cascade routing + gate replanning`;
-      cmd += `\n# The cascade router selects models per-task based on learned patterns`;
       break;
   }
 
@@ -1112,63 +1116,444 @@ function showCommand() {
   section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-// ── Start benchmark (simulated) ───────────────────────────
+// ── Start benchmark (real server call) ────────────────────
 async function startBenchmark() {
   const btn = document.getElementById('btn-run');
   btn.disabled = true;
-  btn.innerHTML = '<span class="status-dot running"></span> Running...';
+  btn.innerHTML = '<span class="status-dot running"></span> Submitting...';
 
-  // Simulate a benchmark run
-  await new Promise(r => setTimeout(r, 2000));
+  const prompt = buildCommand().split('\n')[0].replace(/\\\s*$/, '').trim();
+  const workdir = document.getElementById('cfg-workdir').value || '/tmp/roko-bench';
 
-  const passed = selectedSuite === 'smoke' ? 2 : Math.floor(Math.random() * 50) + 100;
-  const total = selectedSuite === 'smoke' ? 2 : 200;
-  const cost = selectedSuite === 'smoke' ? 0.00 : (Math.random() * 20 + 5).toFixed(2);
+  try {
+    const res = await fetch(API + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, workdir }),
+    });
 
-  benchRuns.push({
-    time: new Date(),
-    suite: selectedSuite,
-    model: document.getElementById('cfg-model').value,
-    strategy: selectedStrategy,
-    passed, total, cost
-  });
+    if (!res.ok) {
+      const errBody = await res.text();
+      throw new Error(`Server returned ${res.status}: ${errBody}`);
+    }
 
-  updateHeroStats();
+    const data = await res.json();
+    activeRunId = data.id;
+    btn.innerHTML = '<span class="status-dot running"></span> Running...';
 
-  btn.disabled = false;
-  btn.innerHTML = '<span>&#9654;</span> Run Benchmark';
+    // Record the run in local state
+    const runEntry = {
+      id: activeRunId,
+      time: new Date().toISOString(),
+      suite: selectedSuite,
+      model: document.getElementById('cfg-model').value,
+      strategy: selectedStrategy,
+      prompt,
+      status: 'running',
+      passed: 0,
+      total: 0,
+      cost: 0,
+    };
+    benchRuns.unshift(runEntry);
+    persistRuns();
+    renderRunLog();
 
-  // Switch to results view
-  document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
-  document.querySelector('[data-view="results"]').classList.add('active');
-  document.getElementById('view-results').classList.add('active');
+    // Show command preview
+    showCommand();
+
+    // Start polling for completion
+    pollRunStatus(activeRunId, runEntry);
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = '<span>&#9654;</span> Run Benchmark';
+    showError(`Failed to start benchmark: ${err.message}`);
+  }
 }
 
-function runControls() {
-  alert('This would run:\n\n1. Gold control (expected: 2/2)\n2. Empty control (expected: 0/2)\n\nVerifies the benchmark harness before real model runs.');
+async function pollRunStatus(runId, runEntry) {
+  const btn = document.getElementById('btn-run');
+  let elapsed = 0;
+
+  const poll = async () => {
+    try {
+      const data = await fetchJSON(API + `/run/${runId}/status`);
+      if (!data) return;
+
+      elapsed++;
+      btn.innerHTML = `<span class="status-dot running"></span> Running (${elapsed}s)...`;
+
+      if (data.status === 'completed' || data.status === 'failed' || data.finished) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        activeRunId = null;
+
+        // Update run entry
+        runEntry.status = data.status === 'failed' ? 'failed' : 'completed';
+        runEntry.success = data.success;
+        runEntry.output = data.output_text;
+        runEntry.error = data.error;
+
+        // Parse results from output if available
+        if (data.output_text) {
+          const passMatch = data.output_text.match(/(\d+)\/(\d+)\s*(passed|resolved)/i);
+          if (passMatch) {
+            runEntry.passed = parseInt(passMatch[1]);
+            runEntry.total = parseInt(passMatch[2]);
+          }
+          const costMatch = data.output_text.match(/\$?([\d.]+)\s*(?:total|cost)/i);
+          if (costMatch) runEntry.cost = parseFloat(costMatch[1]);
+        }
+
+        persistRuns();
+        renderRunLog();
+        updateHeroStats();
+
+        btn.disabled = false;
+        btn.innerHTML = '<span>&#9654;</span> Run Benchmark';
+
+        if (data.success) {
+          // Switch to results view and load fresh data
+          switchToView('results');
+          await loadResultsData();
+        } else {
+          showError(data.error || 'Benchmark run failed — check server logs.');
+        }
+
+        return;
+      }
+    } catch (err) {
+      console.error('Poll error:', err);
+    }
+  };
+
+  pollTimer = setInterval(poll, 1000);
+  poll(); // first check immediately
 }
 
-function updateHeroStats() {
-  const total = benchRuns.length;
-  const totalPassed = benchRuns.reduce((s, r) => s + r.passed, 0);
-  const totalTasks = benchRuns.reduce((s, r) => s + r.total, 0);
-  const totalCost = benchRuns.reduce((s, r) => s + parseFloat(r.cost), 0);
+// ── Run controls ──────────────────────────────────────────
+async function runControls() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Running controls...';
 
-  document.getElementById('hero-runs').textContent = total;
-  document.getElementById('hero-pass').textContent = totalTasks > 0 ? `${Math.round(totalPassed/totalTasks*100)}%` : '--';
-  document.getElementById('hero-cost').textContent = `$${totalCost.toFixed(2)}`;
-  document.getElementById('hero-learn').textContent = totalPassed * 2; // episodes ~ 2x tasks
+  try {
+    // Run gold control (should pass 2/2)
+    const goldRes = await fetch(API + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: 'roko bench swe --batch-size 2 --agent-mode gold --no-learning',
+        workdir: document.getElementById('cfg-workdir').value || '/tmp/roko-bench',
+      }),
+    });
+
+    if (!goldRes.ok) throw new Error(`Gold control failed: ${goldRes.status}`);
+    const goldData = await goldRes.json();
+
+    // Run empty control (should pass 0/2)
+    const emptyRes = await fetch(API + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: 'roko bench swe --batch-size 2 --agent-mode empty --no-learning',
+        workdir: document.getElementById('cfg-workdir').value || '/tmp/roko-bench',
+      }),
+    });
+
+    if (!emptyRes.ok) throw new Error(`Empty control failed: ${emptyRes.status}`);
+    const emptyData = await emptyRes.json();
+
+    benchRuns.unshift(
+      { id: goldData.id, time: new Date().toISOString(), suite: 'control-gold', model: 'gold', strategy: 'control', prompt: 'gold control', status: 'running', passed: 0, total: 2, cost: 0 },
+      { id: emptyData.id, time: new Date().toISOString(), suite: 'control-empty', model: 'empty', strategy: 'control', prompt: 'empty control', status: 'running', passed: 0, total: 2, cost: 0 },
+    );
+    persistRuns();
+    renderRunLog();
+
+    btn.textContent = 'Controls submitted — check run log';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = 'Run Controls First';
+    }, 3000);
+
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Run Controls First';
+    showError(`Controls failed: ${err.message}`);
+  }
+}
+
+// ── Load real data into Results view ──────────────────────
+async function loadResultsData() {
+  const [efficiency, episodes, cfactor] = await Promise.all([
+    fetchJSON(API + '/learn/efficiency'),
+    fetchJSON(API + '/episodes'),
+    fetchJSON(API + '/c-factor/trend'),
+  ]);
+
+  // Update result cards
+  if (efficiency) {
+    const tasks = efficiency.tasks || [];
+    const passedTasks = tasks.filter(t => t.cost_usd > 0).length; // tasks that ran
+    const totalTasks = tasks.length;
+
+    document.getElementById('res-pass-rate').textContent = totalTasks > 0
+      ? `${Math.round(passedTasks / totalTasks * 100)}%` : '--';
+    document.querySelector('#res-pass-rate + .rc-sub').textContent =
+      `${passedTasks}/${totalTasks} tasks completed`;
+
+    document.getElementById('res-total-cost').textContent = `$${efficiency.total_cost.toFixed(2)}`;
+    document.querySelector('#res-total-cost + .rc-sub').textContent =
+      `$${efficiency.cost_per_task.toFixed(4)} per task average`;
+  }
+
+  // C-factor from trend
+  if (cfactor && Array.isArray(cfactor) && cfactor.length > 0) {
+    const latest = cfactor.filter(b => b.samples > 0).pop();
+    if (latest) {
+      document.getElementById('res-cfactor').textContent = latest.avg_overall?.toFixed(2) || latest.overall?.toFixed(2) || '--';
+    }
+  }
+
+  // Task bar chart from efficiency data
+  if (efficiency && efficiency.tasks && efficiency.tasks.length > 0) {
+    renderTaskBarChart(efficiency.tasks);
+    renderCostBarChart(efficiency.tasks);
+  }
+
+  // Update run log from local persisted state
+  renderRunLog();
+}
+
+function renderTaskBarChart(tasks) {
+  const chart = document.getElementById('task-bar-chart');
+  const maxTasks = Math.min(tasks.length, 30);
+  const slice = tasks.slice(-maxTasks);
+
+  chart.innerHTML = slice.map(t => {
+    const hasCost = t.cost_usd > 0;
+    const barClass = hasCost ? 'sage' : 'warn';
+    const pct = Math.max(5, Math.min(100, (t.tokens / Math.max(...slice.map(s => s.tokens || 1))) * 100));
+    const label = t.task_id.length > 8 ? t.task_id.slice(0, 8) + '...' : t.task_id;
+    return `<div class="bar-group"><div class="bar ${barClass}" style="height:${pct}%" data-value="${t.tokens}tok"></div><div class="bar-label">${label}</div></div>`;
+  }).join('');
+}
+
+function renderCostBarChart(tasks) {
+  const chart = document.getElementById('cost-bar-chart');
+  const maxTasks = Math.min(tasks.length, 30);
+  const slice = tasks.slice(-maxTasks);
+  const maxCost = Math.max(...slice.map(t => t.cost_usd), 0.001);
+
+  chart.innerHTML = slice.map(t => {
+    const pct = Math.max(2, (t.cost_usd / maxCost) * 100);
+    const label = t.task_id.length > 8 ? t.task_id.slice(0, 8) + '...' : t.task_id;
+    return `<div class="bar-group"><div class="bar bone" style="height:${pct}%" data-value="$${t.cost_usd.toFixed(3)}"></div><div class="bar-label">${label}</div></div>`;
+  }).join('');
+}
+
+// ── Load real data into Self-Learning view ────────────────
+async function loadLearningData() {
+  const [efficiency, router, thresholds, episodes, cfactor] = await Promise.all([
+    fetchJSON(API + '/learn/efficiency'),
+    fetchJSON(API + '/learn/cascade-router'),
+    fetchJSON(API + '/learn/adaptive-thresholds'),
+    fetchJSON(API + '/episodes'),
+    fetchJSON(API + '/c-factor/trend'),
+  ]);
+
+  // Episode memory card
+  if (episodes) {
+    const eps = Array.isArray(episodes) ? episodes : (episodes.rows || []);
+    const passed = eps.filter(e => e.gate_verdicts?.some(v => v.passed)).length;
+    const failed = eps.length - passed;
+    setLearningMetric('episode-total', eps.length);
+    setLearningMetric('episode-passed', passed, 'up');
+    setLearningMetric('episode-failed', failed, failed > 0 ? 'down' : 'neutral');
+  }
+
+  // Cascade router card
+  if (router) {
+    const stats = router.confidence_stats || router.routing_stats || {};
+    const total = typeof stats.total_observations === 'number' ? stats.total_observations
+      : Object.values(stats).reduce((s, v) => s + (v.trials || 0), 0);
+    const models = router.model_slugs || router.model_weights?.map(w => w.model) || [];
+    setLearningMetric('router-switches', total);
+    setLearningMetric('router-models', models.length);
+    // Cost savings and quality from router weights if available
+    if (router.model_weights && router.model_weights.length > 0) {
+      const bestWeight = Math.max(...router.model_weights.map(w => w.weight || 0));
+      setLearningMetric('router-quality', (bestWeight * 100).toFixed(0) + '%', 'up');
+    }
+  }
+
+  // Gate thresholds card
+  if (thresholds) {
+    setLearningMetric('gate-rungs', thresholds.tracked_rungs || 0);
+    if (thresholds.rungs && thresholds.rungs.length > 0) {
+      const avgEma = thresholds.rungs.reduce((s, r) => s + r.ema_pass_rate, 0) / thresholds.rungs.length;
+      setLearningMetric('gate-ema', avgEma.toFixed(2), avgEma > 0.7 ? 'up' : 'down');
+      const skipped = thresholds.rungs.filter(r => r.should_skip_rung).length;
+      setLearningMetric('gate-skipped', skipped);
+    }
+  }
+
+  // C-factor trend card
+  if (cfactor && Array.isArray(cfactor)) {
+    const withData = cfactor.filter(b => b.samples > 0);
+    if (withData.length > 0) {
+      const latest = withData[withData.length - 1];
+      const first = withData[0];
+      const current = latest.avg_overall || latest.overall || 0;
+      const trend = withData.length > 1 ? (current > (first.avg_overall || first.overall || 0) ? 'improving' : 'declining') : 'stable';
+      setLearningMetric('cf-current', current.toFixed(2), 'up');
+      setLearningMetric('cf-trend', trend === 'improving' ? '\u2191 improving' : trend === 'declining' ? '\u2193 declining' : '\u2194 stable',
+        trend === 'improving' ? 'up' : trend === 'declining' ? 'down' : 'neutral');
+    }
+  }
+
+  // Render the learning chart with real c-factor data
+  if (cfactor && Array.isArray(cfactor)) {
+    initLearningChart(cfactor);
+  } else {
+    initLearningChart([]);
+  }
+}
+
+function setLearningMetric(id, value, colorClass) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = value;
+  if (colorClass) {
+    el.className = 'lm-value ' + colorClass;
+  }
+}
+
+// ── Load real data into Compare view ──────────────────────
+async function loadCompareData() {
+  const [router, efficiency] = await Promise.all([
+    fetchJSON(API + '/learn/cascade-router'),
+    fetchJSON(API + '/learn/efficiency'),
+  ]);
+
+  if (!router || !router.model_weights || router.model_weights.length === 0) return;
+
+  const tbody = document.getElementById('compare-table-body');
+  if (!tbody) return;
+
+  const costPerTask = efficiency ? efficiency.cost_per_task : 0;
+
+  tbody.innerHTML = router.model_weights.map(w => {
+    const trials = w.trials || 0;
+    const successes = w.successes || 0;
+    const passRate = trials > 0 ? Math.round((successes / trials) * 100) : 0;
+    const color = passRate >= 70 ? 'var(--sage-bright)' : passRate >= 50 ? 'var(--warn)' : 'var(--fail)';
+    return `<tr style="border-bottom:1px solid var(--glass-2-border)">
+      <td style="padding:10px;color:var(--text)">${w.model}</td>
+      <td style="text-align:right;padding:10px;color:${color};font-family:var(--font-mono)">${passRate}%</td>
+      <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$${(costPerTask * (w.weight || 1)).toFixed(3)}</td>
+      <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">${trials} trials</td>
+      <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">${(w.weight || 0).toFixed(2)}</td>
+      <td style="text-align:right;padding:10px;color:var(--text-dim)">${selectedStrategy}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Hero stats from real data + local runs ────────────────
+async function updateHeroStats() {
+  const efficiency = await fetchJSON(API + '/learn/efficiency');
+  const episodes = await fetchJSON(API + '/episodes');
+
+  const runCount = benchRuns.length;
+  document.getElementById('hero-runs').textContent = runCount;
+
+  if (efficiency) {
+    const tasks = efficiency.tasks || [];
+    document.getElementById('hero-pass').textContent = tasks.length > 0
+      ? `${Math.round(tasks.filter(t => t.cost_usd > 0).length / tasks.length * 100)}%` : '--';
+    document.getElementById('hero-cost').textContent = `$${efficiency.total_cost.toFixed(2)}`;
+  } else {
+    // Fallback to local run data
+    const totalPassed = benchRuns.reduce((s, r) => s + (r.passed || 0), 0);
+    const totalTasks = benchRuns.reduce((s, r) => s + (r.total || 0), 0);
+    const totalCost = benchRuns.reduce((s, r) => s + parseFloat(r.cost || 0), 0);
+    document.getElementById('hero-pass').textContent = totalTasks > 0 ? `${Math.round(totalPassed/totalTasks*100)}%` : '--';
+    document.getElementById('hero-cost').textContent = `$${totalCost.toFixed(2)}`;
+  }
+
+  if (episodes) {
+    const eps = Array.isArray(episodes) ? episodes : (episodes.rows || []);
+    document.getElementById('hero-learn').textContent = eps.length;
+  }
+}
+
+// ── Run log rendering ─────────────────────────────────────
+function renderRunLog() {
+  const log = document.getElementById('run-log');
+  if (benchRuns.length === 0) {
+    log.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:0.72rem">No runs yet. Configure and run a benchmark to see results here.</div>';
+    return;
+  }
+
+  log.innerHTML = benchRuns.slice(0, 20).map(r => {
+    const time = formatTimeAgo(r.time);
+    const name = `${r.suite} / ${r.model} / ${r.strategy}`;
+    const scoreClass = r.status === 'failed' ? 'fail' : r.status === 'running' ? '' : (r.passed === r.total && r.total > 0) ? 'pass' : r.passed > 0 ? 'partial' : 'fail';
+    const score = r.status === 'running' ? '<span class="status-dot running"></span>' : `${r.passed}/${r.total}`;
+    const cost = r.cost ? `$${parseFloat(r.cost).toFixed(2)}` : '$0.00';
+    return `<div class="run-entry">
+      <span class="re-time">${time}</span>
+      <span class="re-name">${name}</span>
+      <span class="re-score ${scoreClass}">${score}</span>
+      <span class="re-cost">${cost}</span>
+    </div>`;
+  }).join('');
+}
+
+function persistRuns() {
+  try { localStorage.setItem('roko-bench-runs', JSON.stringify(benchRuns.slice(0, 50))); } catch {}
 }
 
 function clearRuns() {
   benchRuns = [];
-  document.getElementById('run-log').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:0.72rem">No runs yet. Configure and run a benchmark to see results here.</div>';
+  persistRuns();
+  renderRunLog();
   updateHeroStats();
 }
 
+// ── View switching helper ─────────────────────────────────
+function switchToView(name) {
+  document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+  const tab = document.querySelector(`[data-view="${name}"]`);
+  if (tab) tab.classList.add('active');
+  const panel = document.getElementById(`view-${name}`);
+  if (panel) panel.classList.add('active');
+}
+
+// ── Error display ─────────────────────────────────────────
+function showError(msg) {
+  const section = document.getElementById('cmd-preview-section');
+  const text = document.getElementById('cmd-preview-text');
+  section.style.display = '';
+  text.style.color = 'var(--fail)';
+  text.textContent = msg;
+  setTimeout(() => { text.style.color = ''; }, 5000);
+}
+
+// ── Utilities ─────────────────────────────────────────────
+function formatTimeAgo(isoOrDate) {
+  const now = Date.now();
+  const then = new Date(isoOrDate).getTime();
+  const diff = Math.floor((now - then) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 // ── Learning chart (Three.js) ─────────────────────────────
-function initLearningChart() {
+function initLearningChart(cfactorData) {
   const canvas = document.getElementById('learning-canvas');
   if (!canvas || !window.THREE) return;
 
@@ -1184,15 +1569,23 @@ function initLearningChart() {
   const camera = new THREE.OrthographicCamera(-w/2, w/2, h/2, -h/2, 0.1, 100);
   camera.position.z = 10;
 
-  // Draw line chart showing improvement
-  const runs = 20;
+  // Use real c-factor data if available, otherwise generate sample
+  const withData = (cfactorData || []).filter(b => b.samples > 0);
+  const runs = withData.length > 2 ? withData.length : 20;
   const passData = [];
   const costData = [];
-  for (let i = 0; i < runs; i++) {
-    // Simulate improving pass rate
-    passData.push(0.45 + (i / runs) * 0.35 + (Math.random() - 0.5) * 0.08);
-    // Simulate decreasing cost
-    costData.push(0.8 - (i / runs) * 0.45 + (Math.random() - 0.5) * 0.05);
+
+  if (withData.length > 2) {
+    withData.forEach(b => {
+      passData.push(Math.min(1, Math.max(0, b.avg_overall || b.overall || 0)));
+      costData.push(Math.min(1, Math.max(0, 1 - (b.avg_overall || b.overall || 0.5))));
+    });
+  } else {
+    // Sample data for empty state
+    for (let i = 0; i < runs; i++) {
+      passData.push(0.45 + (i / runs) * 0.35 + (Math.random() - 0.5) * 0.08);
+      costData.push(0.8 - (i / runs) * 0.45 + (Math.random() - 0.5) * 0.05);
+    }
   }
 
   // Pass rate line (sage)
@@ -1202,8 +1595,7 @@ function initLearningChart() {
     0
   ));
   const passGeo = new THREE.BufferGeometry().setFromPoints(passPoints);
-  const passLine = new THREE.Line(passGeo, new THREE.LineBasicMaterial({ color: 0x70887A, linewidth: 2 }));
-  scene.add(passLine);
+  scene.add(new THREE.Line(passGeo, new THREE.LineBasicMaterial({ color: 0x70887A, linewidth: 2 })));
 
   // Cost line (bone)
   const costPoints = costData.map((v, i) => new THREE.Vector3(
@@ -1212,47 +1604,43 @@ function initLearningChart() {
     0
   ));
   const costGeo = new THREE.BufferGeometry().setFromPoints(costPoints);
-  const costLine = new THREE.Line(costGeo, new THREE.LineBasicMaterial({ color: 0xC8B890, linewidth: 2 }));
-  scene.add(costLine);
+  scene.add(new THREE.Line(costGeo, new THREE.LineBasicMaterial({ color: 0xC8B890, linewidth: 2 })));
 
-  // Data points
+  // Data points on pass line
   passPoints.forEach(p => {
     const dot = new THREE.Mesh(new THREE.CircleGeometry(3, 16), new THREE.MeshBasicMaterial({ color: 0x99c4ac }));
     dot.position.copy(p);
     scene.add(dot);
   });
 
-  // Axis lines
+  // Axes
   const axisColor = 0x302830;
-  const xAxis = new THREE.Line(
+  scene.add(new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0),
-      new THREE.Vector3(w/2 - 20, -h/2 + 30, 0)
-    ]),
-    new THREE.LineBasicMaterial({ color: axisColor })
-  );
-  scene.add(xAxis);
-
-  const yAxis = new THREE.Line(
+      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0), new THREE.Vector3(w/2 - 20, -h/2 + 30, 0)
+    ]), new THREE.LineBasicMaterial({ color: axisColor })
+  ));
+  scene.add(new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0),
-      new THREE.Vector3(-w/2 + 40, h/2 - 20, 0)
-    ]),
-    new THREE.LineBasicMaterial({ color: axisColor })
-  );
-  scene.add(yAxis);
+      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0), new THREE.Vector3(-w/2 + 40, h/2 - 20, 0)
+    ]), new THREE.LineBasicMaterial({ color: axisColor })
+  ));
 
   renderer.render(scene, camera);
 }
 
 // ── Init ──────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  initLearningChart();
+  updateHeroStats();
+  renderRunLog();
+  initLearningChart([]);
 });
 
-// If Three.js loads after DOMContentLoaded
-if (document.readyState === 'complete') initLearningChart();
-else window.addEventListener('load', initLearningChart);
+if (document.readyState === 'complete') {
+  updateHeroStats();
+  renderRunLog();
+  initLearningChart([]);
+}
 </script>
 </body>
 </html>

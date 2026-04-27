@@ -1,0 +1,23 @@
+.command-log {
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  background: var(--glass-bg, rgba(255,255,255,0.02));
+  border: 1px solid var(--glass-2-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.log-entry {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  line-height: 1.5;
+}
+.log-ts {
+  color: var(--text-ghost);
+  flex-shrink: 0;
+}
+.log-info .log-text { color: var(--text); }
+.log-success .log-text { color: var(--sage); }
+.log-error .log-text { color: var(--fail); }
+.log-dim .log-text { color: var(--text-dim); }

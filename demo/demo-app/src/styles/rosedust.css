@@ -1,0 +1,35 @@
+/* ─── ROSEDUST Design Tokens ─── */
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --surface: #100E14;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --rose-ember: #482838;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --sage-bright: #99c4ac;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --pass: #6A9870;
+  --eth-blue: #627EEA;
+  --eth-blue-dim: #3A4A8A;
+  --eth-blue-deep: #1A2040;
+  --glass-bg: rgba(255,255,255,0.03);
+  --glass-border: rgba(255,255,255,0.07);
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --glass-3-bg: rgba(255,255,255,0.06);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --rose-glow: 0 0 12px rgba(170,112,136,0.3), 0 0 24px rgba(170,112,136,0.1);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}

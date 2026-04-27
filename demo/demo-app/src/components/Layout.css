@@ -1,0 +1,112 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--glass-2-border);
+  background: var(--raised);
+  gap: 12px;
+  flex-shrink: 0;
+  height: 44px;
+}
+
+.topbar .logo {
+  color: var(--rose-bright);
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+.topbar .logo:hover { opacity: 0.85; }
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 16px;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: all 200ms var(--ease);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  position: relative;
+  text-decoration: none;
+}
+.tab:hover { color: var(--text); background: var(--glass-2-bg); }
+.tab.active {
+  color: var(--rose-bright);
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+}
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  background: var(--rose-bright);
+  border-radius: 1px;
+  animation: tabLineIn 200ms var(--ease);
+}
+@keyframes tabLineIn { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+.tab-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 0.55rem;
+  font-weight: 700;
+  background: rgba(255,255,255,0.04);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+.tab.active .tab-num {
+  background: var(--rose-dim);
+  color: var(--rose-bright);
+}
+
+.spacer { flex: 1; }
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.65rem;
+  color: var(--text-dim);
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+}
+.status-dot.connected { background: var(--sage); }
+.status-dot.disconnected { background: var(--fail); }
+.status-dot.checking { background: var(--warn); animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.content {
+  flex: 1;
+  overflow: auto;
+}

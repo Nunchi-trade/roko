@@ -12,7 +12,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::types::{
@@ -20,6 +20,14 @@ use crate::types::{
     McpServerConfig, ModeInfo, ModesInfo, SESSION_NOT_FOUND, SessionInfo, SessionListResult,
     SessionNewParams, SessionNewResult, SlashCommand,
 };
+use crate::workflow::WorkflowRun;
+
+/// Shared handle to the active workflow run, updated by the runner in real time.
+pub type SharedWorkflowRun = Arc<Mutex<Option<WorkflowRun>>>;
+
+fn new_shared_run() -> SharedWorkflowRun {
+    Arc::new(Mutex::new(None))
+}
 
 fn new_atomic_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
@@ -251,6 +259,13 @@ pub struct AcpSession {
     /// Multi-turn conversation history for context.
     #[serde(default)]
     pub conversation_history: Vec<ConversationTurn>,
+    /// Active workflow run (if any pipeline is in progress or recently completed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<WorkflowRun>,
+    /// Shared handle to the live workflow run, updated by the runner in real time.
+    /// Slash commands and status queries read from this handle.
+    #[serde(skip, default = "new_shared_run")]
+    pub shared_run: SharedWorkflowRun,
 }
 
 impl AcpSession {
@@ -270,6 +285,8 @@ impl AcpSession {
             mcp_servers: params.mcp_servers,
             config_options,
             conversation_history: Vec::new(),
+            active_run: None,
+            shared_run: new_shared_run(),
         }
     }
 
@@ -292,6 +309,8 @@ impl AcpSession {
             mcp_servers: params.mcp_servers,
             config_options,
             conversation_history: Vec::new(),
+            active_run: None,
+            shared_run: new_shared_run(),
         }
     }
 

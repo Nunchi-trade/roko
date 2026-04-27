@@ -21,8 +21,9 @@ use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, JsonRpcMessage, SESSION_BUSY, SessionCancelParams, SessionPromptParams,
-        SessionPromptResult, SessionUpdate, StopReason, ToolCallKind, ToolCallStatus, UsageInfo,
+        ContentBlock, JsonRpcMessage, PlanEntry, SESSION_BUSY, SessionCancelParams,
+        SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason, ToolCallKind,
+        ToolCallStatus, UsageInfo,
     },
 };
 
@@ -116,6 +117,9 @@ pub enum BridgeEventsError {
     /// The spawned cognitive task terminated unexpectedly.
     #[error("ACP cognitive task failed: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// A pipeline runner error.
+    #[error("ACP pipeline error: {0}")]
+    Pipeline(#[from] anyhow::Error),
 }
 
 impl BridgeEventsError {
@@ -127,7 +131,9 @@ impl BridgeEventsError {
                 SESSION_BUSY,
                 format!("session '{session_id}' already has an active prompt"),
             )),
-            Self::Serialize(_) | Self::Transport(_) | Self::TaskJoin(_) => None,
+            Self::Serialize(_) | Self::Transport(_) | Self::TaskJoin(_) | Self::Pipeline(_) => {
+                None
+            }
         }
     }
 }
@@ -155,6 +161,10 @@ pub enum CognitiveEvent {
         tool_call_id: String,
         status: ToolCallStatus,
         content: Vec<ContentBlock>,
+    },
+    /// A plan update with structured entries (shown as progress in editor).
+    PlanUpdate {
+        entries: Vec<PlanEntry>,
     },
     /// Prompt execution completed normally.
     Complete {
@@ -390,6 +400,15 @@ where
     let workdir = workdir.to_path_buf();
     let roko_config = roko_config.clone();
 
+    // Capture workflow config for the pipeline.
+    let workflow_config = session.config_state.workflow.clone();
+    let clippy_enabled = session.config_state.clippy_enabled;
+    let tests_enabled = session.config_state.tests_enabled;
+    let max_iterations = session.config_state.max_iterations;
+    let review_strictness = session.config_state.review_strictness.clone();
+
+    let shared_run = session.shared_run.clone();
+
     let cognitive_task = tokio::spawn(async move {
         if is_slash_command {
             return run_slash_command(
@@ -398,10 +417,37 @@ where
                 &workdir,
                 cancel_token,
                 event_sender,
+                shared_run,
             )
             .await;
         }
 
+        // Check if a workflow pipeline should handle this prompt.
+        let pipeline_template = if workflow_config == "auto" {
+            Some(crate::pipeline::WorkflowTemplate::auto_select(&prompt_text))
+        } else {
+            crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
+        };
+        if let Some(template) = pipeline_template {
+            return Ok(crate::runner::run_workflow_pipeline(
+                &session_id,
+                &prompt_text,
+                &workdir,
+                crate::runner::PipelineConfig {
+                    template,
+                    max_iterations,
+                    clippy_enabled,
+                    tests_enabled,
+                    review_strictness,
+                },
+                cancel_token,
+                event_sender,
+                shared_run,
+            )
+            .await?);
+        }
+
+        // Default: single-agent dispatch (workflow = "none").
         // Resolve the model to determine which provider to use.
         let resolved = resolve_model(&roko_config, &model_key);
         let provider_kind = resolved.provider_kind;
@@ -942,6 +988,7 @@ async fn run_slash_command(
     workdir: &Path,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
+    shared_run: crate::session::SharedWorkflowRun,
 ) -> Result<()> {
     let input = raw_input.trim_start_matches('/');
     let (command, args) = match input.split_once(char::is_whitespace) {
@@ -1154,13 +1201,20 @@ Use the Workflow dropdown in the status bar to select, or:
   /express <prompt>      Run express pipeline
   /full <prompt>         Run full pipeline
   /review-this           Review current changes
-  /pipeline <name>       Run a named pipeline",
-                        "status" => "No active workflow run. Start one with /express, /full, or select a workflow in the config dropdown.",
-                        "cancel" => "No active workflow to cancel.",
-                        "resume" => "No halted workflow to resume.",
-                        _ => "Unknown workflow subcommand. Use: list, status, cancel, resume",
+  /pipeline <name>       Run a named pipeline"
+                            .to_string(),
+                        "status" => {
+                            let guard = shared_run.lock().await;
+                            match guard.as_ref() {
+                                Some(run) => run.status_summary(),
+                                None => "No active workflow run. Start one with /express, /full, or select a workflow in the config dropdown.".to_string(),
+                            }
+                        }
+                        "cancel" => "No active workflow to cancel.".to_string(),
+                        "resume" => "No halted workflow to resume.".to_string(),
+                        _ => "Unknown workflow subcommand. Use: list, status, cancel, resume".to_string(),
                     };
-                    let _ = event_sender.send(CognitiveEvent::TokenChunk(msg.into())).await;
+                    let _ = event_sender.send(CognitiveEvent::TokenChunk(msg)).await;
                     let _ = event_sender
                         .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
                         .await;
@@ -1181,29 +1235,41 @@ Use the Workflow dropdown in the status bar to select, or:
         }
         "express" => {
             require_args!("express", "<prompt>");
-            // For now, route as a regular prompt. Workflow pipeline dispatch will be
-            // wired in Phase 1 (WorkflowRun + PipelineStateMachine).
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "[Express Pipeline] Running: {args}\n\n(Pipeline execution not yet wired — running as single agent prompt)"
-                )))
-                .await;
-            let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
-                .await;
-            return Ok(());
+            return Ok(crate::runner::run_workflow_pipeline(
+                session_id,
+                args,
+                workdir,
+                crate::runner::PipelineConfig {
+                    template: crate::pipeline::WorkflowTemplate::Express,
+                    max_iterations: 2,
+                    clippy_enabled: true,
+                    tests_enabled: true,
+                    review_strictness: "standard".to_string(),
+                },
+                cancel_token,
+                event_sender,
+                shared_run,
+            )
+            .await?);
         }
         "full" => {
             require_args!("full", "<prompt>");
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "[Full Pipeline] Running: {args}\n\n(Pipeline execution not yet wired — running as single agent prompt)"
-                )))
-                .await;
-            let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
-                .await;
-            return Ok(());
+            return Ok(crate::runner::run_workflow_pipeline(
+                session_id,
+                args,
+                workdir,
+                crate::runner::PipelineConfig {
+                    template: crate::pipeline::WorkflowTemplate::Full,
+                    max_iterations: 2,
+                    clippy_enabled: true,
+                    tests_enabled: true,
+                    review_strictness: "standard".to_string(),
+                },
+                cancel_token,
+                event_sender,
+                shared_run,
+            )
+            .await?);
         }
         "review-this" => {
             return run_shell_command(
@@ -1552,6 +1618,7 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             status,
             content,
         },
+        CognitiveEvent::PlanUpdate { entries } => SessionUpdate::Plan { entries },
         CognitiveEvent::Complete { .. } | CognitiveEvent::MaxTokens => {
             unreachable!("terminal cognitive events are handled before update mapping")
         }

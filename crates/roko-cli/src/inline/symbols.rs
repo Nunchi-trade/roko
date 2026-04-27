@@ -48,6 +48,8 @@ pub const COLLAPSED: &str = "▸";
 /// Expanded disclosure triangle (down-pointing).
 pub const EXPANDED: &str = "▾";
 
+/// Tool execution indicator.
+pub const TOOL: &str = "⚙";
 /// Text cursor.
 pub const CURSOR: &str = "█";
 

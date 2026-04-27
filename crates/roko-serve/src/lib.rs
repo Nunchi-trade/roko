@@ -77,6 +77,7 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
+pub mod embedded;
 pub mod terminal;
 pub mod truth_map;
 

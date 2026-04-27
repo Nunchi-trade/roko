@@ -60,6 +60,33 @@ demo/.runtime/
 /tmp/
 # mirage/roko test output piped into /tmp/mirage.log during dev - safe to ignore.
 /tmp/*
+!/tmp/
+!/tmp/mori-diffs/
+/tmp/mori-diffs/*
+!/tmp/mori-diffs/README.md
+!/tmp/mori-diffs/00-OVERVIEW.md
+!/tmp/mori-diffs/21-FEATURE-PARITY-MATRIX.md
+!/tmp/mori-diffs/23-HANDOFF-OPEN-ITEMS.md
+!/tmp/mori-diffs/24-DEFINITIVE-GAP-LIST.md
+!/tmp/mori-diffs/28-FEATURE-MATRIX-DOGFOOD-UX-AUDIT.md
+!/tmp/mori-diffs/29-CURRENT-RUNTIME-GAP-LEDGER.md
+!/tmp/mori-diffs/30-ARCHITECTURAL-SIDE-EFFECT-AUDIT.md
+!/tmp/mori-diffs/31-REPOSITORY-WIDE-ARCHITECTURE-SCAN.md
+!/tmp/mori-diffs/32-DEPENDENCY-LAYERING-AUDIT.md
+!/tmp/mori-diffs/33-CONFIGURATION-PROVIDER-POLICY-AUDIT.md
+!/tmp/mori-diffs/34-OBSERVABILITY-PROJECTION-QUERY-AUDIT.md
+!/tmp/mori-diffs/35-TASK-PROCESS-LIFECYCLE-AUDIT.md
+!/tmp/mori-diffs/36-WORKFLOW-ENTRYPOINT-ORCHESTRATION-AUDIT.md
+!/tmp/mori-diffs/37-WORKSPACE-LAYOUT-ARTIFACT-STORE-AUDIT.md
+!/tmp/mori-diffs/38-COGNITIVE-FEEDBACK-LOOP-AUDIT.md
+!/tmp/mori-diffs/39-RUNNER-EXECUTION-POLICY-AUDIT.md
+!/tmp/mori-diffs/40-SERVE-TUI-RUNTIME-ADAPTER-AUDIT.md
+!/tmp/mori-diffs/41-INFERENCE-GATEWAY-MODEL-CALL-SERVICE-AUDIT.md
+!/tmp/mori-diffs/archive/
+/tmp/mori-diffs/archive/*
+!/tmp/mori-diffs/archive/2026-04-26-verified/
+/tmp/mori-diffs/archive/2026-04-26-verified/*
+!/tmp/mori-diffs/archive/2026-04-26-verified/README.md
 
 
 # Temporary / work-in-progress (will be refined later) ----------------------
@@ -79,7 +106,9 @@ __pycache__/
 node_modules/
 *.tsbuildinfo
 .next/
-dist/
+
+# demo-app build output (embedded by rust-embed at compile time)
+demo/demo-app/dist/
 .roko-local-target/
 .codex-target/
 .cargo-target/

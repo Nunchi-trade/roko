@@ -7,9 +7,12 @@
 pub mod bridge_events;
 pub mod config;
 pub mod handler;
+pub mod pipeline;
+pub mod runner;
 pub mod session;
 pub mod transport;
 pub mod types;
+pub mod workflow;
 
 pub use config::AcpConfig;
 pub use handler::run_acp_server;
