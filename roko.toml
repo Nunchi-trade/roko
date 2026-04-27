@@ -10,8 +10,9 @@ fresh_base_branch = "main"
 auto_plan = false
 
 [agent]
+command = "claude"
 default_model = "claude-sonnet-4-6"
-default_backend = "anthropic_api"
+default_backend = "claude_cli"
 default_effort = "medium"
 temperament = "balanced"
 context_limit_k = 200
@@ -20,9 +21,70 @@ mode = "ephemeral"
 
 [agent.roles]
 
-[providers]
+[providers.anthropic]
+kind = "anthropic_api"
+api_key_env = "ANTHROPIC_API_KEY"
+default_model = "claude-sonnet-4-6"
+models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"]
+
+[providers.openai]
+kind = "openai_compat"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+models = ["gpt-4o", "gpt-4o-mini", "o3-mini"]
+
+[providers.perplexity]
+kind = "perplexity"
+api_key_env = "PERPLEXITY_API_KEY"
+default_model = "sonar-pro"
+models = ["sonar", "sonar-pro", "sonar-reasoning-pro"]
+
+[providers.moonshot]
+kind = "openai_compat"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.cn/v1"
+default_model = "moonshot-v1-auto"
+models = ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "moonshot-v1-auto"]
+
+[providers.zhipu]
+kind = "openai_compat"
+api_key_env = "ZAI_API_KEY"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+default_model = "glm-4-plus"
+models = ["glm-4-plus", "glm-4-flash", "glm-4-long"]
+
+[providers.ollama]
+kind = "ollama"
+base_url = "http://localhost:11434"
+default_model = "llama3.1"
+models = ["llama3.1", "codellama", "mistral", "deepseek-coder-v2"]
 
 [models]
+# Model routing aliases — CascadeRouter uses these to pick the right provider
+[models.haiku]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+
+[models.sonnet]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[models.opus]
+provider = "anthropic"
+model = "claude-opus-4-6"
+
+[models.gpt4o]
+provider = "openai"
+model = "gpt-4o"
+
+[models.gpt4o-mini]
+provider = "openai"
+model = "gpt-4o-mini"
+
+[models.sonar]
+provider = "perplexity"
+model = "sonar-pro"
 
 [gates]
 clippy_enabled = true

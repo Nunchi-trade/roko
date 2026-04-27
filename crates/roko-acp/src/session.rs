@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -90,30 +91,12 @@ impl Default for CancelToken {
 pub struct SessionConfigState {
     /// Active agent interaction mode.
     pub agent_mode: String,
-    /// Preferred model tier.
-    pub model_tier: String,
-    /// Thinking verbosity policy.
-    pub thinking: String,
-    /// Whether the gate pipeline is enabled.
-    pub gate_pipeline: bool,
-    /// Whether automatic correction is enabled.
-    pub auto_correct: bool,
-    /// Whether the knowledge store is enabled.
-    pub knowledge_store: bool,
-    /// Whether the daimon subsystem is enabled.
-    pub daimon_enabled: bool,
 }
 
 impl Default for SessionConfigState {
     fn default() -> Self {
         Self {
             agent_mode: "code".to_owned(),
-            model_tier: "auto".to_owned(),
-            thinking: "auto".to_owned(),
-            gate_pipeline: true,
-            auto_correct: true,
-            knowledge_store: true,
-            daimon_enabled: false,
         }
     }
 }
@@ -226,7 +209,7 @@ pub enum SessionError {
 }
 
 impl SessionError {
-    fn into_rpc_error(self) -> (i32, String) {
+    fn _into_rpc_error(self) -> (i32, String) {
         match self {
             Self::NotFound(session_id) => (
                 SESSION_NOT_FOUND,
@@ -236,22 +219,23 @@ impl SessionError {
     }
 }
 
-/// Result type used by ACP session management APIs.
-pub type Result<T> = std::result::Result<T, (i32, String)>;
-
 /// In-memory store for ACP sessions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionManager {
     sessions: HashMap<String, AcpSession>,
+    /// Working directory inherited from AcpConfig, used for Claude CLI dispatch.
+    #[serde(skip)]
+    pub workdir: PathBuf,
 }
 
 impl SessionManager {
     /// Creates an empty session manager.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(workdir: PathBuf) -> Self {
         Self {
             sessions: HashMap::new(),
+            workdir,
         }
     }
 
@@ -287,11 +271,16 @@ impl SessionManager {
     }
 
     /// Loads an existing session into the `session/new` response shape.
-    pub fn load_session(&mut self, id: &str) -> Result<SessionNewResult> {
+    pub fn load_session(&mut self, id: &str) -> Result<SessionNewResult, (i32, String)> {
         self.sessions
             .get(id)
             .map(AcpSession::new_result)
-            .ok_or_else(|| SessionError::NotFound(id.to_owned()).into_rpc_error())
+            .ok_or_else(|| {
+                (
+                    SESSION_NOT_FOUND,
+                    format!("ACP session '{id}' was not found"),
+                )
+            })
     }
 }
 
@@ -314,16 +303,6 @@ fn default_modes(current_mode_id: &str) -> ModesInfo {
                 name: "Research".to_owned(),
                 description: "Gather context and analyze options.".to_owned(),
             },
-            ModeInfo {
-                id: "review".to_owned(),
-                name: "Review".to_owned(),
-                description: "Inspect changes for bugs and regressions.".to_owned(),
-            },
-            ModeInfo {
-                id: "auto".to_owned(),
-                name: "Auto".to_owned(),
-                description: "Let the agent pick the best mode.".to_owned(),
-            },
         ],
     }
 }
@@ -342,7 +321,7 @@ mod tests {
 
     #[test]
     fn create_session_uses_prefixed_uuid_identifier() {
-        let mut manager = SessionManager::new();
+        let mut manager = SessionManager::new(PathBuf::from("."));
         let result = manager.create_session(session_params("alpha"));
 
         assert!(result.session_id.starts_with("sess_"));
@@ -353,7 +332,7 @@ mod tests {
 
     #[test]
     fn list_sessions_returns_expected_count() {
-        let mut manager = SessionManager::new();
+        let mut manager = SessionManager::new(PathBuf::from("."));
         manager.create_session(session_params("alpha"));
         manager.create_session(session_params("beta"));
 
@@ -363,26 +342,8 @@ mod tests {
 
     #[test]
     fn missing_session_lookup_returns_none() {
-        let manager = SessionManager::new();
-
+        let manager = SessionManager::new(PathBuf::from("."));
         assert!(manager.get_session("sess_missing").is_none());
-    }
-
-    #[test]
-    fn session_config_defaults_match_acp05() {
-        let session = AcpSession::new(SessionNewParams {
-            session_name: None,
-            client_capabilities: None,
-            mcp_servers: Vec::new(),
-        });
-
-        assert_eq!(session.config_state.agent_mode, "code");
-        assert_eq!(session.config_state.model_tier, "auto");
-        assert_eq!(session.config_state.thinking, "auto");
-        assert!(session.config_state.gate_pipeline);
-        assert!(session.config_state.auto_correct);
-        assert!(session.config_state.knowledge_store);
-        assert!(!session.config_state.daimon_enabled);
     }
 
     #[tokio::test]

@@ -644,12 +644,17 @@ async fn send_and_receive(
         .timeout(Duration::from_secs(120))
         .send()
         .await
-        .context("send message")?;
+        .with_context(|| format!("POST {url} — is `roko serve` running?"))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!("request failed: {status} {body}");
+        let body_text = response.text().await.unwrap_or_default();
+        // Try to extract a meaningful error message from JSON response
+        let detail = serde_json::from_str::<serde_json::Value>(&body_text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or(body_text);
+        bail!("{status}: {detail}");
     }
 
     #[derive(Deserialize)]

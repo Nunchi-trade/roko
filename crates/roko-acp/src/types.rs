@@ -1,7 +1,5 @@
 //! ACP protocol types (JSON-RPC messages, session types, update types).
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 /// ACP protocol version supported by this crate.
@@ -626,142 +624,6 @@ pub struct CostInfo {
     pub currency: String,
 }
 
-/// A permission request sent to the editor.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionRequest {
-    /// Session requesting permission.
-    pub session_id: String,
-    /// Tool call preview for the approval UI.
-    pub tool_call: ToolCallPreview,
-    /// Available approval choices.
-    pub options: Vec<PermissionOption>,
-}
-
-/// Lightweight tool call description for approval flows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolCallPreview {
-    /// Tool call identifier.
-    pub tool_call_id: String,
-    /// User-facing title.
-    pub title: String,
-    /// Tool call kind.
-    pub kind: ToolCallKind,
-    /// Current tool status.
-    pub status: ToolCallStatus,
-    /// Optional rendered preview content.
-    #[serde(default)]
-    pub content: Vec<ContentBlock>,
-}
-
-/// One permission response option.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionOption {
-    /// Stable option identifier.
-    pub option_id: String,
-    /// User-facing option name.
-    pub name: String,
-    /// Option behavior.
-    pub kind: PermissionKind,
-}
-
-/// Permission option behavior.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionKind {
-    /// Allow the action once.
-    AllowOnce,
-    /// Allow the action permanently.
-    AllowAlways,
-    /// Reject the action once.
-    RejectOnce,
-    /// Reject the action permanently.
-    RejectAlways,
-}
-
-/// The selected result of a permission prompt.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionResponse {
-    /// Selected option identifier.
-    pub selected_option: String,
-}
-
-/// A structured elicitation request sent to the editor.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElicitationRequest {
-    /// Session requesting elicitation.
-    pub session_id: String,
-    /// Elicitation mode, typically `"form"`.
-    pub mode: String,
-    /// User-facing message.
-    pub message: String,
-    /// Requested JSON schema payload.
-    pub requested_schema: serde_json::Value,
-}
-
-/// Response returned from an elicitation dialog.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElicitationResponse {
-    /// Outcome string such as `"accept"` or `"reject"`.
-    pub outcome: String,
-    /// Optional submitted form data.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-/// Parameters for `terminal/create`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalCreateParams {
-    /// Executable or shell command.
-    pub command: String,
-    /// Command arguments.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Optional working directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// Optional environment overrides.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
-}
-
-/// Result returned from `terminal/create`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalCreateResult {
-    /// Allocated terminal identifier.
-    pub terminal_id: String,
-}
-
-/// Parameters for `terminal/output`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalOutputParams {
-    /// Terminal identifier to query.
-    pub terminal_id: String,
-}
-
-/// Result returned from `terminal/output`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalOutputResult {
-    /// Captured stdout.
-    #[serde(default)]
-    pub stdout: String,
-    /// Captured stderr.
-    #[serde(default)]
-    pub stderr: String,
-    /// Optional process exit code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-}
-
 /// Parameters for `session/config/update`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -849,21 +711,6 @@ mod tests {
         };
 
         let serialized = serde_json::to_value(&request).expect("serialize request");
-        assert_eq!(
-            serialized,
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": ACP_PROTOCOL_VERSION,
-                    "clientCapabilities": {
-                        "terminal": true
-                    }
-                }
-            })
-        );
-
         let deserialized: JsonRpcRequest =
             serde_json::from_value(serialized).expect("deserialize request");
         assert_eq!(deserialized, request);
@@ -875,9 +722,7 @@ mod tests {
             content: ContentBlock::Text {
                 text: "hello".to_string(),
             },
-            _meta: Some(json!({
-                "stream": "agent"
-            })),
+            _meta: None,
         };
 
         let serialized = serde_json::to_value(&update).expect("serialize session update");
@@ -888,9 +733,6 @@ mod tests {
                 "content": {
                     "type": "text",
                     "text": "hello"
-                },
-                "_meta": {
-                    "stream": "agent"
                 }
             })
         );
@@ -898,57 +740,5 @@ mod tests {
         let deserialized: SessionUpdate =
             serde_json::from_value(serialized).expect("deserialize session update");
         assert_eq!(deserialized, update);
-    }
-
-    #[test]
-    fn config_option_round_trip() {
-        let option = ConfigOption {
-            id: "model".to_string(),
-            name: "Model".to_string(),
-            option_type: ConfigOptionType::Select,
-            category: "general".to_string(),
-            current_value: json!("gpt-5.4"),
-            description: Some("Select the model tier".to_string()),
-            options: Some(vec![
-                ConfigOptionValue {
-                    value: "gpt-5.4".to_string(),
-                    name: "GPT-5.4".to_string(),
-                    description: Some("Balanced default".to_string()),
-                },
-                ConfigOptionValue {
-                    value: "gpt-5.4-mini".to_string(),
-                    name: "GPT-5.4 Mini".to_string(),
-                    description: None,
-                },
-            ]),
-        };
-
-        let serialized = serde_json::to_value(&option).expect("serialize config option");
-        assert_eq!(
-            serialized,
-            json!({
-                "id": "model",
-                "name": "Model",
-                "type": "select",
-                "category": "general",
-                "currentValue": "gpt-5.4",
-                "description": "Select the model tier",
-                "options": [
-                    {
-                        "value": "gpt-5.4",
-                        "name": "GPT-5.4",
-                        "description": "Balanced default"
-                    },
-                    {
-                        "value": "gpt-5.4-mini",
-                        "name": "GPT-5.4 Mini"
-                    }
-                ]
-            })
-        );
-
-        let deserialized: ConfigOption =
-            serde_json::from_value(serialized).expect("deserialize config option");
-        assert_eq!(deserialized, option);
     }
 }

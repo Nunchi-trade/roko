@@ -1,23 +1,102 @@
 //! Cognitive event to session/update streaming.
+//!
+//! This module bridges the `claude` CLI subprocess (running with
+//! `--output-format stream-json`) to ACP `session/update` notifications.
 
-use std::time::Duration;
+use std::path::Path;
 
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _},
     sync::mpsc,
 };
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
     types::{
-        ContentBlock, JsonRpcMessage, PlanEntry, PlanStatus, Priority, SESSION_BUSY,
+        ContentBlock, JsonRpcMessage, SESSION_BUSY,
         SessionCancelParams, SessionPromptParams, SessionPromptResult, SessionUpdate, StopReason,
         ToolCallKind, ToolCallStatus, UsageInfo,
     },
 };
+
+// ── Claude CLI stream-json wire types (inlined from roko-agent) ──────
+
+/// Top-level stream event from `claude --output-format stream-json`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClaudeStreamEvent {
+    System(ClaudeSystemEvent),
+    Assistant(ClaudeAssistantEvent),
+    Tool(ClaudeToolEvent),
+    Result(ClaudeResultEvent),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeSystemEvent {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeAssistantEvent {
+    pub message: ClaudeMessage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeMessage {
+    #[serde(default)]
+    pub content: Vec<ClaudeContentBlock>,
+    #[serde(default)]
+    pub usage: Option<ClaudeUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClaudeContentBlock {
+    Text { text: String },
+    ToolUse { id: String, name: String },
+    Thinking { thinking: String },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeToolEvent {
+    #[serde(default, rename = "tool_name")]
+    pub _tool_name: String,
+    #[serde(default)]
+    pub tool_use_id: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeResultEvent {
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub usage: Option<ClaudeUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+}
+
+// ── Error types ──────────────────────────────────────────────────────
 
 /// Errors produced while bridging cognitive events to ACP session updates.
 #[derive(Debug, Error)]
@@ -53,6 +132,8 @@ impl BridgeEventsError {
 /// Result alias for ACP event bridge operations.
 pub type Result<T> = std::result::Result<T, BridgeEventsError>;
 
+// ── Cognitive events ─────────────────────────────────────────────────
+
 /// Events emitted by the cognitive loop and mapped to ACP session updates.
 #[derive(Debug, Clone)]
 pub enum CognitiveEvent {
@@ -62,66 +143,26 @@ pub enum CognitiveEvent {
     ThinkingChunk(String),
     /// A tool call has started running.
     ToolCallStart {
-        /// Stable tool call identifier.
         tool_call_id: String,
-        /// User-facing tool title.
         title: String,
-        /// ACP tool call category.
         kind: ToolCallKind,
     },
     /// A tool call has finished with rendered content.
     ToolCallComplete {
-        /// Stable tool call identifier.
         tool_call_id: String,
-        /// Final tool status.
         status: ToolCallStatus,
-        /// Rendered tool output blocks.
         content: Vec<ContentBlock>,
-    },
-    /// A gate has started.
-    GateStarted {
-        /// Gate display name.
-        gate_name: String,
-        /// Tool card identifier used for the gate.
-        tool_call_id: String,
-    },
-    /// A gate has completed and produced a summary.
-    GateCompleted {
-        /// Gate display name.
-        gate_name: String,
-        /// Tool card identifier used for the gate.
-        tool_call_id: String,
-        /// Whether the gate passed.
-        passed: bool,
-        /// Markdown/plaintext summary for the UI.
-        summary: String,
-        /// Gate runtime in milliseconds.
-        duration_ms: u64,
-    },
-    /// The plan execution phase has changed.
-    PhaseTransition {
-        /// New phase identifier.
-        phase: String,
-        /// Plan entries for the updated phase.
-        entries: Vec<PlanEntry>,
-    },
-    /// A conductor watcher fired an action.
-    WatcherTriggered {
-        /// Watcher display name.
-        watcher_name: String,
-        /// Action taken by the watcher.
-        action: String,
     },
     /// Prompt execution completed normally.
     Complete {
-        /// Final stop reason for the prompt.
         stop_reason: StopReason,
-        /// Optional token usage payload.
         usage: Option<UsageInfo>,
     },
     /// Prompt execution stopped because the token budget was exhausted.
     MaxTokens,
 }
+
+// ── Stream events → editor ───────────────────────────────────────────
 
 /// Maps cognitive events to ACP `session/update` notifications and streams them to the editor.
 pub async fn stream_events_to_editor<R, W>(
@@ -243,11 +284,14 @@ where
     }
 }
 
+// ── Session prompt entry point ───────────────────────────────────────
+
 /// Handles a `session/prompt` request by running the cognitive task and streaming updates.
 pub async fn handle_session_prompt<R, W>(
     transport: &mut StdioTransport<R, W>,
     session: &mut AcpSession,
     params: SessionPromptParams,
+    workdir: &Path,
 ) -> Result<SessionPromptResult>
 where
     R: AsyncRead + Unpin,
@@ -259,7 +303,7 @@ where
 
     session.begin_prompt();
 
-    let outcome = handle_session_prompt_inner(transport, session, params).await;
+    let outcome = handle_session_prompt_inner(transport, session, params, workdir).await;
     session.finish_prompt();
     outcome
 }
@@ -268,6 +312,7 @@ async fn handle_session_prompt_inner<R, W>(
     transport: &mut StdioTransport<R, W>,
     session: &mut AcpSession,
     params: SessionPromptParams,
+    workdir: &Path,
 ) -> Result<SessionPromptResult>
 where
     R: AsyncRead + Unpin,
@@ -279,15 +324,18 @@ where
         prompt_blocks = params.prompt.len(),
         prompt_chars = prompt_text.chars().count(),
         include_context = params.include_context,
+        workdir = %workdir.display(),
         "handling ACP session prompt"
     );
 
-    let (event_sender, event_receiver) = mpsc::channel(16);
+    let (event_sender, event_receiver) = mpsc::channel(64);
     let cancel_token = session.cancel_token.clone();
     let session_id = session.session_id.clone();
+    let workdir = workdir.to_path_buf();
 
     let cognitive_task = tokio::spawn(async move {
-        run_placeholder_cognitive_task(&session_id, &prompt_text, cancel_token, event_sender).await
+        run_claude_cognitive_task(&session_id, &prompt_text, &workdir, cancel_token, event_sender)
+            .await
     });
 
     let stream_result = stream_events_to_editor(
@@ -297,65 +345,241 @@ where
         &session.cancel_token,
     )
     .await;
+
     let task_result = cognitive_task.await?;
-    task_result?;
+    if let Err(e) = task_result {
+        error!(error = %e, "Claude cognitive task failed");
+    }
 
     stream_result
 }
 
-async fn run_placeholder_cognitive_task(
+// ── Real Claude CLI dispatch ─────────────────────────────────────────
+
+/// Spawns `claude --print --output-format stream-json --verbose` as a
+/// subprocess, pipes the prompt to stdin, and streams parsed events back
+/// through the `event_sender` channel.
+async fn run_claude_cognitive_task(
     session_id: &str,
     prompt_text: &str,
+    workdir: &Path,
     cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
     debug!(
         session_id,
         prompt_chars = prompt_text.chars().count(),
-        "running placeholder ACP cognitive task"
+        workdir = %workdir.display(),
+        "spawning claude CLI for ACP cognitive task"
     );
 
     if cancel_token.is_cancelled() {
         return Ok(());
     }
 
-    if event_sender
-        .send(CognitiveEvent::TokenChunk("Processing...".to_owned()))
-        .await
-        .is_err()
+    let mut child = match tokio::process::Command::new("claude")
+        .arg("--print")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .current_dir(workdir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     {
-        return Ok(());
+        Ok(child) => child,
+        Err(e) => {
+            error!(error = %e, "failed to spawn claude CLI");
+            let _ = event_sender
+                .send(CognitiveEvent::TokenChunk(format!(
+                    "Error: failed to spawn `claude` CLI: {e}"
+                )))
+                .await;
+            let _ = event_sender
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::Error,
+                    usage: None,
+                })
+                .await;
+            return Ok(());
+        }
+    };
+
+    // Write prompt to stdin and close it.
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt_text.as_bytes()).await;
+        let _ = stdin.shutdown().await;
     }
 
-    if cancel_token.is_cancelled() {
-        return Ok(());
+    // Accumulate usage across the stream.
+    let mut total_input = 0u64;
+    let mut total_output = 0u64;
+    let mut total_cache_read = 0u64;
+    let mut total_cache_write = 0u64;
+    let mut final_cost: Option<f64> = None;
+    let mut is_error = false;
+
+    // Read stdout line-by-line.
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+
+    loop {
+        if cancel_token.is_cancelled() {
+            let _ = child.kill().await;
+            return Ok(());
+        }
+
+        line.clear();
+
+        let read_result = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                let _ = child.kill().await;
+                return Ok(());
+            }
+            result = reader.read_line(&mut line) => result,
+        };
+
+        match read_result {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(e) => {
+                warn!(session_id, error = %e, "error reading claude stdout");
+                break;
+            }
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let event: ClaudeStreamEvent = match serde_json::from_str(trimmed) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let cognitive_events = match event {
+            ClaudeStreamEvent::System(sys) => {
+                debug!(
+                    session_id,
+                    claude_session = %sys.session_id,
+                    model = %sys.model,
+                    "claude CLI system init"
+                );
+                Vec::new()
+            }
+            ClaudeStreamEvent::Assistant(asst) => {
+                let mut events = Vec::new();
+                for block in &asst.message.content {
+                    match block {
+                        ClaudeContentBlock::Text { text } => {
+                            events.push(CognitiveEvent::TokenChunk(text.clone()));
+                        }
+                        ClaudeContentBlock::ToolUse { id, name } => {
+                            events.push(CognitiveEvent::ToolCallStart {
+                                tool_call_id: id.clone(),
+                                title: name.clone(),
+                                kind: tool_name_to_kind(name),
+                            });
+                        }
+                        ClaudeContentBlock::Thinking { thinking } => {
+                            events.push(CognitiveEvent::ThinkingChunk(thinking.clone()));
+                        }
+                    }
+                }
+                if let Some(usage) = &asst.message.usage {
+                    total_input = total_input.max(usage.input_tokens);
+                    total_output = total_output.max(usage.output_tokens);
+                    total_cache_read = total_cache_read.max(usage.cache_read_input_tokens);
+                    total_cache_write = total_cache_write.max(usage.cache_creation_input_tokens);
+                }
+                events
+            }
+            ClaudeStreamEvent::Tool(tool) => {
+                let truncated = if tool.content.len() > 4096 {
+                    format!("{}... [truncated]", &tool.content[..4096])
+                } else {
+                    tool.content
+                };
+                vec![CognitiveEvent::ToolCallComplete {
+                    tool_call_id: tool.tool_use_id,
+                    status: ToolCallStatus::Completed,
+                    content: vec![ContentBlock::Text { text: truncated }],
+                }]
+            }
+            ClaudeStreamEvent::Result(res) => {
+                if let Some(usage) = &res.usage {
+                    total_input = total_input.max(usage.input_tokens);
+                    total_output = total_output.max(usage.output_tokens);
+                    total_cache_read = total_cache_read.max(usage.cache_read_input_tokens);
+                    total_cache_write = total_cache_write.max(usage.cache_creation_input_tokens);
+                }
+                final_cost = res.total_cost_usd;
+                is_error = res.is_error;
+                Vec::new() // we'll emit Complete after the loop
+            }
+        };
+
+        for ce in cognitive_events {
+            if event_sender.send(ce).await.is_err() {
+                let _ = child.kill().await;
+                return Ok(());
+            }
+        }
     }
 
-    tokio::select! {
-        _ = cancel_token.cancelled() => return Ok(()),
-        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-    }
+    // Wait for process to exit.
+    let status = child.wait().await;
+    debug!(session_id, ?status, cost = ?final_cost, "claude CLI process exited");
 
-    if cancel_token.is_cancelled() {
-        return Ok(());
-    }
+    let stop_reason = if is_error {
+        StopReason::Error
+    } else {
+        StopReason::EndTurn
+    };
+
+    let usage = if total_input > 0 || total_output > 0 {
+        Some(UsageInfo {
+            total_tokens: total_input + total_output,
+            input_tokens: total_input,
+            output_tokens: total_output,
+            thought_tokens: None,
+            cached_read_tokens: if total_cache_read > 0 {
+                Some(total_cache_read)
+            } else {
+                None
+            },
+            cached_write_tokens: if total_cache_write > 0 {
+                Some(total_cache_write)
+            } else {
+                None
+            },
+        })
+    } else {
+        None
+    };
 
     let _ = event_sender
-        .send(CognitiveEvent::Complete {
-            stop_reason: StopReason::EndTurn,
-            usage: Some(UsageInfo {
-                total_tokens: 16,
-                input_tokens: 6,
-                output_tokens: 10,
-                thought_tokens: None,
-                cached_read_tokens: None,
-                cached_write_tokens: None,
-            }),
-        })
+        .send(CognitiveEvent::Complete { stop_reason, usage })
         .await;
 
     Ok(())
 }
+
+/// Maps a Claude tool name to an ACP tool call kind.
+fn tool_name_to_kind(name: &str) -> ToolCallKind {
+    match name {
+        "Edit" | "MultiEdit" => ToolCallKind::Edit,
+        "Write" => ToolCallKind::Create,
+        "Bash" | "Terminal" => ToolCallKind::Terminal,
+        _ => ToolCallKind::Other,
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
 
 fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
     match event {
@@ -385,53 +609,6 @@ fn map_event_to_update(event: CognitiveEvent) -> SessionUpdate {
             tool_call_id,
             status,
             content,
-        },
-        CognitiveEvent::GateStarted {
-            gate_name,
-            tool_call_id,
-        } => SessionUpdate::ToolCall {
-            tool_call_id,
-            title: format!("Gate: {gate_name}"),
-            kind: ToolCallKind::Other,
-            status: ToolCallStatus::InProgress,
-            content: vec![text_block(format!("Running gate `{gate_name}`."))],
-        },
-        CognitiveEvent::GateCompleted {
-            gate_name,
-            tool_call_id,
-            passed,
-            summary,
-            duration_ms,
-        } => SessionUpdate::ToolCallUpdate {
-            tool_call_id,
-            status: ToolCallStatus::Completed,
-            content: vec![text_block(format_gate_summary(
-                &gate_name,
-                passed,
-                &summary,
-                duration_ms,
-            ))],
-        },
-        CognitiveEvent::PhaseTransition { phase, entries } => SessionUpdate::Plan {
-            entries: if entries.is_empty() {
-                vec![PlanEntry {
-                    content: format!("Entered phase `{phase}`"),
-                    priority: Priority::Medium,
-                    status: PlanStatus::InProgress,
-                }]
-            } else {
-                entries
-            },
-        },
-        CognitiveEvent::WatcherTriggered {
-            watcher_name,
-            action,
-        } => SessionUpdate::ToolCall {
-            tool_call_id: watcher_tool_call_id(&watcher_name, &action),
-            title: format!("Watcher: {watcher_name}"),
-            kind: ToolCallKind::Other,
-            status: ToolCallStatus::Completed,
-            content: vec![text_block(format!("Watcher action: {action}"))],
         },
         CognitiveEvent::Complete { .. } | CognitiveEvent::MaxTokens => {
             unreachable!("terminal cognitive events are handled before update mapping")
@@ -464,44 +641,6 @@ fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn format_gate_summary(
-    gate_name: &str,
-    passed: bool,
-    summary: &str,
-    duration_ms: u64,
-) -> String {
-    let verdict = if passed { "passed" } else { "failed" };
-    format!("Gate `{gate_name}` {verdict} in {duration_ms} ms.\n\n{summary}")
-}
-
-fn watcher_tool_call_id(watcher_name: &str, action: &str) -> String {
-    format!(
-        "watcher_{}_{}",
-        slugify(watcher_name),
-        slugify(action),
-    )
-}
-
-fn slugify(value: &str) -> String {
-    let slug = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    let trimmed = slug.trim_matches('_');
-    if trimmed.is_empty() {
-        "event".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
 }
 
 fn text_block(text: String) -> ContentBlock {
@@ -554,17 +693,6 @@ mod tests {
 
         assert_eq!(result.session_id, "sess_test");
         assert_eq!(result.stop_reason, StopReason::EndTurn);
-        assert_eq!(
-            result.usage,
-            Some(UsageInfo {
-                total_tokens: 12,
-                input_tokens: 5,
-                output_tokens: 7,
-                thought_tokens: None,
-                cached_read_tokens: None,
-                cached_write_tokens: None,
-            })
-        );
 
         let mut line = String::new();
         reader
@@ -627,6 +755,7 @@ mod tests {
                 }],
                 include_context: false,
             },
+            Path::new("."),
         )
         .await
         .expect_err("busy session should be rejected");
@@ -638,5 +767,13 @@ mod tests {
                 format!("session '{session_id}' already has an active prompt")
             ))
         );
+    }
+
+    #[test]
+    fn tool_name_mapping() {
+        assert_eq!(tool_name_to_kind("Edit"), ToolCallKind::Edit);
+        assert_eq!(tool_name_to_kind("Write"), ToolCallKind::Create);
+        assert_eq!(tool_name_to_kind("Bash"), ToolCallKind::Terminal);
+        assert_eq!(tool_name_to_kind("Read"), ToolCallKind::Other);
     }
 }

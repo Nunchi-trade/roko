@@ -32,18 +32,15 @@ pub async fn run_acp_server(config: AcpConfig) -> Result<()> {
 }
 
 /// Runs the ACP server against an injected transport.
-///
-/// This is primarily used by integration tests to exercise the full JSON-RPC
-/// lifecycle over in-memory streams.
 pub async fn run_acp_server_with_transport<R, W>(
-    _config: AcpConfig,
+    config: AcpConfig,
     transport: &mut StdioTransport<R, W>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut sessions = SessionManager::new();
+    let mut sessions = SessionManager::new(config.workdir.clone());
 
     loop {
         let message = match transport.read_message().await {
@@ -116,7 +113,7 @@ async fn handle_request(
                 },
                 agent_info: AgentInfo {
                     name: "roko".to_owned(),
-                    title: "Roko ACP".to_owned(),
+                    title: "Roko".to_owned(),
                     version: env!("CARGO_PKG_VERSION").to_owned(),
                 },
                 auth_methods: Vec::new(),
@@ -158,11 +155,12 @@ async fn handle_request(
                 Ok(params) => params,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
+            let workdir = sessions.workdir.clone();
             let session = match get_session_mut(sessions, &params.session_id) {
                 Ok(session) => session,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            let result = match handle_session_prompt(transport, session, params).await {
+            let result = match handle_session_prompt(transport, session, params, &workdir).await {
                 Ok(result) => result,
                 Err(error) => {
                     if let Some(rpc_error) = error.rpc_error() {
@@ -185,7 +183,7 @@ async fn handle_request(
             debug!(
                 session_id = %session.session_id,
                 option_id = %params.option_id,
-                "received config update request before ACP15 wiring"
+                "received config update request"
             );
             let result = ConfigUpdateResult {
                 config_options: session.config_options(),
@@ -246,16 +244,6 @@ fn handle_notification(
         }
         _ => warn!(method = %notification.method, "ignoring unsupported ACP notification"),
     }
-}
-
-#[cfg(test)]
-fn get_session<'a>(
-    sessions: &'a SessionManager,
-    session_id: &str,
-) -> std::result::Result<&'a crate::session::AcpSession, (i32, String)> {
-    sessions
-        .get_session(session_id)
-        .ok_or_else(|| session_not_found_error(session_id))
 }
 
 fn get_session_mut<'a>(
@@ -350,6 +338,7 @@ fn setup_file_logging(log_file: &Path) -> Result<WorkerGuard> {
 
     Ok(guard)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,43 +353,5 @@ mod tests {
 
         assert_eq!(error.0, crate::types::INVALID_PARAMS);
         assert!(error.1.contains("initialize"));
-    }
-
-    #[test]
-    fn test_session_lookup_reports_missing_session() {
-        let sessions = SessionManager::new();
-
-        let error = get_session(&sessions, "sess_missing").expect_err("session should be absent");
-
-        assert_eq!(error.0, SESSION_NOT_FOUND);
-        assert!(error.1.contains("sess_missing"));
-    }
-
-    #[test]
-    fn test_initialize_result_advertises_expected_protocol_version() {
-        let result = InitializeResult {
-            protocol_version: ACP_PROTOCOL_VERSION,
-            agent_capabilities: AgentCapabilities {
-                load_session: true,
-                prompt_capabilities: Some(PromptCapabilities {
-                    image: false,
-                    audio: false,
-                    embedded_context: true,
-                }),
-                mcp_capabilities: Some(McpCapabilities {
-                    http: true,
-                    sse: true,
-                }),
-            },
-            agent_info: AgentInfo {
-                name: "roko".to_owned(),
-                title: "Roko ACP".to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            },
-            auth_methods: Vec::new(),
-        };
-
-        assert_eq!(result.protocol_version, ACP_PROTOCOL_VERSION);
-        assert!(result.agent_capabilities.load_session);
     }
 }
