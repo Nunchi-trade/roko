@@ -5,6 +5,11 @@ use crate::*;
 
 pub(crate) async fn cmd_bench(cli: &Cli, cmd: BenchCmd) -> Result<i32> {
     match cmd {
+        BenchCmd::Demo { real, workdir } => {
+            let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
+            roko_cli::bench_demo::run_bench_demo(&workdir, real).await?;
+            Ok(EXIT_SUCCESS)
+        }
         BenchCmd::Swe {
             dataset,
             batch_size,

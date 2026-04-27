@@ -111,6 +111,23 @@ pub fn cache_key(scope: &str, endpoint: &str, body: &[u8]) -> ContentHash {
     super::cache::request_hash(scope, endpoint, body)
 }
 
+/// Compute a cache key from a prompt string and model name.
+pub fn prompt_cache_key(model: &str, prompt: &str) -> ContentHash {
+    cache_key(model, "prompt", prompt.as_bytes())
+}
+
+/// Get the global file cache instance (lazily initialized).
+///
+/// Uses the current working directory's `.roko/demo-cache/` by default.
+/// Only active when `ROKO_DEMO_CACHE=1` is set.
+pub fn global_file_cache() -> Option<FileCache> {
+    if !FileCache::is_enabled() {
+        return None;
+    }
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    Some(FileCache::open_default(&workdir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

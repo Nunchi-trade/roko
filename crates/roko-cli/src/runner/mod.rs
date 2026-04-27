@@ -20,11 +20,13 @@
 pub mod agent_events;
 pub mod agent_stream;
 pub mod event_loop;
+pub mod extension_loader;
 pub mod gate_dispatch;
 pub mod merge;
 pub mod persist;
 pub mod plan_loader;
 pub mod projection;
+pub mod resume;
 pub mod state;
 pub mod task_dag;
 pub mod tui_bridge;

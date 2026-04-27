@@ -79,6 +79,8 @@ impl DashboardProjection {
             | EventCategory::Run
             | EventCategory::Resume
             | EventCategory::Gate
+            | EventCategory::Prompt
+            | EventCategory::Merge
             | EventCategory::Retry
             | EventCategory::Dream => Some(self.basic_snippet(event)),
             EventCategory::AgentLifecycle
@@ -239,6 +241,8 @@ mod tests {
             EventCategory::Task,
             EventCategory::Resume,
             EventCategory::Gate,
+            EventCategory::Prompt,
+            EventCategory::Merge,
             EventCategory::Retry,
             EventCategory::Dream,
         ] {
@@ -247,7 +251,7 @@ mod tests {
             assert!(snip.preview.is_none());
         }
         let stats = bridge.stats();
-        assert_eq!(stats.mapped, 7);
+        assert_eq!(stats.mapped, 9);
         assert_eq!(stats.unmapped, 0);
     }
 

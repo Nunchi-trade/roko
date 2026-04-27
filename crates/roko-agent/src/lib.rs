@@ -45,8 +45,6 @@ pub mod agent;
 /// Short-lived content-addressed response cache for identical backend requests.
 pub mod cache;
 pub mod chat_types;
-/// File-backed response cache for demo determinism.
-pub mod file_cache;
 pub mod claude_agent;
 pub mod claude_cli_agent;
 pub mod codex_agent;
@@ -54,6 +52,8 @@ pub mod composition;
 pub mod cursor_agent;
 pub mod dispatcher;
 pub mod exec;
+/// File-backed response cache for demo determinism.
+pub mod file_cache;
 pub mod format;
 pub mod gemini;
 pub mod http;
@@ -124,12 +124,12 @@ pub use provider::{
     with_scoped_safety_layer,
 };
 pub use rate_limit::ProviderRateLimiter;
-pub use runtime_events::{AgentEventStream, AgentRuntimeEvent};
 pub use roko_core::{
     BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
     MANIFEST_BACKED_BUILTIN_ROLE_IDS, PromptPolicy, RolePolicyManifest,
     RoleProfile as ManifestRoleProfile, ToolCapabilityPolicy,
 };
+pub use runtime_events::{AgentEventStream, AgentRuntimeEvent};
 pub use safety::{
     AgentWarrant, Capability, CapabilityError, DataSink, HookDecision, SafetyAuditRecord,
     SafetyHook, SafetyLayer, SafetyViolation, TaintLabel, TaintedString, ViolationSeverity,

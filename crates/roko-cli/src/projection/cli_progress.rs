@@ -59,6 +59,8 @@ impl CliProgressPrinter {
             EventCategory::Plan => Some(format_plan(event)),
             EventCategory::Task => Some(format_task(event)),
             EventCategory::Gate => Some(format_gate(event)),
+            EventCategory::Prompt => Some(format_prompt(event)),
+            EventCategory::Merge => Some(format_merge(event)),
             EventCategory::Retry => Some(format_retry(event)),
             EventCategory::Dream => Some(format_dream(event)),
             EventCategory::Resume => Some(format_resume(event)),
@@ -132,6 +134,48 @@ fn format_gate(event: &ProjectionEvent) -> String {
         format!("✓ gate rung {rung} passed for {plan}/{task}")
     } else {
         format!("✗ gate rung {rung} failed for {plan}/{task}")
+    }
+}
+
+fn format_prompt(event: &ProjectionEvent) -> String {
+    let plan = event.plan_id.as_deref().unwrap_or("?");
+    let task = event.task_id.as_deref().unwrap_or("?");
+    let estimated_tokens = event
+        .payload
+        .get("estimated_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let included = event
+        .payload
+        .get("included_sections")
+        .and_then(|v| v.as_array())
+        .map_or(0, |items| items.len());
+    let dropped = event
+        .payload
+        .get("dropped_sections")
+        .and_then(|v| v.as_array())
+        .map_or(0, |items| items.len());
+    format!(
+        "• prompt assembled for {plan}/{task}: ~{estimated_tokens} tokens, {included} sections, {dropped} dropped"
+    )
+}
+
+fn format_merge(event: &ProjectionEvent) -> String {
+    let plan = event.plan_id.as_deref().unwrap_or("?");
+    let passed = event
+        .payload
+        .get("passed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let conflicts = event
+        .payload
+        .get("conflict_paths")
+        .and_then(|v| v.as_array())
+        .map_or(0, |items| items.len());
+    if passed {
+        format!("✓ merge backend passed for {plan}")
+    } else {
+        format!("✗ merge backend failed for {plan} ({conflicts} conflicts)")
     }
 }
 

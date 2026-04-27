@@ -139,7 +139,9 @@ async fn dispatch_feeds_feedback_facade_and_projection() {
         .with_sink(Arc::new(RoutingObservationSink::new(router.clone())))
         .with_sink(Arc::new(KnowledgeIngestionSink::at(&knowledge_path)))
         .with_sink(Arc::new(ConductorObservationSink::at(&conductor_path)))
-        .with_sink(Arc::new(DreamTriggerSink::at(&dream_path).with_idle_threshold(2)));
+        .with_sink(Arc::new(
+            DreamTriggerSink::at(&dream_path).with_idle_threshold(2),
+        ));
 
     facade
         .on_event(&FeedbackEvent::TaskCompleted {
@@ -270,5 +272,10 @@ async fn retry_attempt_includes_gate_feedback_in_assembled_prompt() {
     let plan = dispatcher.plan(&task, &dctx).expect("plan");
     assert!(plan.prompt.system_prompt.contains("Previous attempt"));
     assert!(plan.prompt.system_prompt.contains("E0432"));
-    assert!(plan.prompt.diagnostics.included_sections.contains(&"retry".to_string()));
+    assert!(
+        plan.prompt
+            .diagnostics
+            .included_sections
+            .contains(&"retry".to_string())
+    );
 }

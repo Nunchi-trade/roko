@@ -222,6 +222,10 @@ pub enum EventCategory {
     Cost,
     /// Gate dispatch and verdict events.
     Gate,
+    /// Prompt assembly diagnostics.
+    Prompt,
+    /// Merge backend application and conflict evidence.
+    Merge,
     /// Retry policy decisions.
     Retry,
     /// Dream / consolidation events.
@@ -243,6 +247,8 @@ impl EventCategory {
             Self::Token => "token",
             Self::Cost => "cost",
             Self::Gate => "gate",
+            Self::Prompt => "prompt",
+            Self::Merge => "merge",
             Self::Retry => "retry",
             Self::Dream => "dream",
             Self::Other => "other",
@@ -265,6 +271,8 @@ impl EventCategory {
             RunnerEvent::GateDispatchStarted { .. } | RunnerEvent::GateCompleted { .. } => {
                 Self::Gate
             }
+            RunnerEvent::PromptAssembled { .. } => Self::Prompt,
+            RunnerEvent::MergeBackendCompleted { .. } => Self::Merge,
             RunnerEvent::RetryDecision { .. } => Self::Retry,
         }
     }
@@ -301,6 +309,10 @@ impl EventCategory {
             Self::Task
         } else if event_type.starts_with("gate.") {
             Self::Gate
+        } else if event_type.starts_with("prompt.") {
+            Self::Prompt
+        } else if event_type.starts_with("merge.") {
+            Self::Merge
         } else if event_type.starts_with("retry.") {
             Self::Retry
         } else if event_type.starts_with("run.") {
@@ -667,6 +679,41 @@ pub enum RunnerEvent {
         output: String,
         verdicts: Vec<GateVerdictSummary>,
     },
+    #[serde(rename = "prompt.assembled")]
+    PromptAssembled {
+        timestamp: String,
+        timestamp_ms: u64,
+        run_id: String,
+        #[serde(flatten)]
+        attempt: TaskAttemptRef,
+        role: String,
+        requested_model: String,
+        system_prompt_chars: usize,
+        user_prompt_chars: usize,
+        estimated_tokens: u32,
+        included_sections: Vec<String>,
+        dropped_sections: Vec<String>,
+        knowledge_ids: Vec<String>,
+        playbook_ids: Vec<String>,
+    },
+    #[serde(rename = "merge.backend.completed")]
+    MergeBackendCompleted {
+        timestamp: String,
+        timestamp_ms: u64,
+        run_id: String,
+        #[serde(flatten)]
+        attempt: TaskAttemptRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch_name: Option<String>,
+        passed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<RunnerFailureKind>,
+        duration_ms: u64,
+        output: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conflict_paths: Vec<String>,
+        verdicts: Vec<GateVerdictSummary>,
+    },
     #[serde(rename = "retry.decision")]
     RetryDecision {
         timestamp: String,
@@ -898,6 +945,56 @@ impl RunnerEvent {
         }
     }
 
+    pub fn prompt_assembled(
+        run_id: &str,
+        attempt: TaskAttemptRef,
+        role: &str,
+        requested_model: &str,
+        system_prompt_chars: usize,
+        user_prompt_chars: usize,
+        diagnostics: PromptAssemblyDiagnostics,
+    ) -> Self {
+        let stamp = EventStamp::now();
+        Self::PromptAssembled {
+            timestamp: stamp.timestamp,
+            timestamp_ms: stamp.timestamp_ms,
+            run_id: run_id.to_string(),
+            attempt,
+            role: role.to_string(),
+            requested_model: requested_model.to_string(),
+            system_prompt_chars,
+            user_prompt_chars,
+            estimated_tokens: diagnostics.estimated_tokens,
+            included_sections: diagnostics.included_sections,
+            dropped_sections: diagnostics.dropped_sections,
+            knowledge_ids: diagnostics.knowledge_ids,
+            playbook_ids: diagnostics.playbook_ids,
+        }
+    }
+
+    pub fn merge_backend_completed(
+        run_id: &str,
+        attempt: TaskAttemptRef,
+        completion: &GateCompletion,
+        branch_name: Option<String>,
+        conflict_paths: Vec<String>,
+    ) -> Self {
+        let stamp = EventStamp::now();
+        Self::MergeBackendCompleted {
+            timestamp: stamp.timestamp,
+            timestamp_ms: stamp.timestamp_ms,
+            run_id: run_id.to_string(),
+            attempt,
+            branch_name,
+            passed: completion.passed,
+            failure_kind: completion.failure_kind,
+            duration_ms: completion.duration_ms,
+            output: completion.output.clone(),
+            conflict_paths,
+            verdicts: completion.verdicts.clone(),
+        }
+    }
+
     pub fn retry_decision(
         run_id: &str,
         attempt: TaskAttemptRef,
@@ -937,6 +1034,8 @@ impl RunnerEvent {
             Self::AgentCompleted { .. } => "agent.completed",
             Self::GateDispatchStarted { .. } => "gate.dispatch.started",
             Self::GateCompleted { .. } => "gate.completed",
+            Self::PromptAssembled { .. } => "prompt.assembled",
+            Self::MergeBackendCompleted { .. } => "merge.backend.completed",
             Self::RetryDecision { .. } => "retry.decision",
         }
     }
@@ -955,6 +1054,8 @@ impl RunnerEvent {
             | Self::AgentCompleted { timestamp_ms, .. }
             | Self::GateDispatchStarted { timestamp_ms, .. }
             | Self::GateCompleted { timestamp_ms, .. }
+            | Self::PromptAssembled { timestamp_ms, .. }
+            | Self::MergeBackendCompleted { timestamp_ms, .. }
             | Self::RetryDecision { timestamp_ms, .. } => *timestamp_ms,
         }
     }
@@ -971,6 +1072,8 @@ impl RunnerEvent {
             | Self::AgentCompleted { attempt, .. }
             | Self::GateDispatchStarted { attempt, .. }
             | Self::GateCompleted { attempt, .. }
+            | Self::PromptAssembled { attempt, .. }
+            | Self::MergeBackendCompleted { attempt, .. }
             | Self::RetryDecision { attempt, .. } => Some(&attempt.plan_id),
             Self::ResumeMarker { .. } | Self::RunStarted { .. } | Self::RunCompleted { .. } => None,
         }
@@ -985,6 +1088,8 @@ impl RunnerEvent {
             | Self::AgentCompleted { attempt, .. }
             | Self::GateDispatchStarted { attempt, .. }
             | Self::GateCompleted { attempt, .. }
+            | Self::PromptAssembled { attempt, .. }
+            | Self::MergeBackendCompleted { attempt, .. }
             | Self::RetryDecision { attempt, .. } => Some(&attempt.task_id),
             _ => None,
         }
@@ -1033,6 +1138,25 @@ impl RunnerEvent {
                 failure_kind,
                 ..
             } => format!("gate completed: passed={passed} failure_kind={failure_kind:?}"),
+            Self::PromptAssembled {
+                estimated_tokens,
+                included_sections,
+                dropped_sections,
+                ..
+            } => format!(
+                "prompt assembled: estimated_tokens={estimated_tokens} included={} dropped={}",
+                included_sections.len(),
+                dropped_sections.len()
+            ),
+            Self::MergeBackendCompleted {
+                passed,
+                failure_kind,
+                conflict_paths,
+                ..
+            } => format!(
+                "merge backend completed: passed={passed} failure_kind={failure_kind:?} conflicts={}",
+                conflict_paths.len()
+            ),
             Self::RetryDecision {
                 action,
                 failure_kind,
@@ -1041,6 +1165,16 @@ impl RunnerEvent {
             } => format!("retry decision: {action:?} after {failure_kind:?}: {reason}"),
         }
     }
+}
+
+/// Stable prompt assembly diagnostics persisted by `prompt.assembled`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptAssemblyDiagnostics {
+    pub included_sections: Vec<String>,
+    pub dropped_sections: Vec<String>,
+    pub estimated_tokens: u32,
+    pub knowledge_ids: Vec<String>,
+    pub playbook_ids: Vec<String>,
 }
 
 /// Aggregate counters used to emit `run.completed`.
@@ -1171,9 +1305,14 @@ impl RunConfig {
             &router_path,
             model_slugs,
         ));
-        let extension_chain = Arc::new(tokio::sync::Mutex::new(
-            roko_core::extension::ExtensionChain::new(),
-        ));
+        let mut ext_chain = roko_core::extension::ExtensionChain::new();
+        let ext_names = &roko_config.agent.extensions;
+        let ext_count =
+            super::extension_loader::load_extensions(&workdir, ext_names, &mut ext_chain);
+        if ext_count > 0 {
+            tracing::info!(count = ext_count, "loaded plugin extensions into chain");
+        }
+        let extension_chain = Arc::new(tokio::sync::Mutex::new(ext_chain));
         let connector_registry =
             Arc::new(std::sync::Mutex::new(roko_core::ConnectorRegistry::new()));
         let feed_registry = Arc::new(std::sync::Mutex::new(roko_core::FeedRegistry::new()));

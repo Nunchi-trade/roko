@@ -1003,11 +1003,9 @@ mod tests {
 
     #[test]
     fn load_for_role_with_mode_strict_errors_on_missing() {
-        let err = AgentContract::load_for_role_with_mode(
-            "totally-not-a-role",
-            ContractLoadMode::Strict,
-        )
-        .expect_err("missing role must error in strict mode");
+        let err =
+            AgentContract::load_for_role_with_mode("totally-not-a-role", ContractLoadMode::Strict)
+                .expect_err("missing role must error in strict mode");
         match err {
             ContractLoadError::MissingAsset { .. } => {}
             other => panic!("expected MissingAsset, got {other:?}"),

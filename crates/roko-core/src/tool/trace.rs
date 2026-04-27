@@ -527,65 +527,78 @@ impl ToolTraceEvent {
     #[must_use]
     fn scrubbed(&self, scrubber: &crate::obs::scrub::LogScrubber) -> Self {
         match self {
-            Self::PromptAssembled { token_count, tools_offered, at_ms } => {
-                Self::PromptAssembled {
-                    token_count: *token_count,
-                    tools_offered: tools_offered.iter().map(|s| scrubber.scrub(s)).collect(),
-                    at_ms: *at_ms,
-                }
-            }
-            Self::ToolCallParsed { parser, raw_bytes_len, parse_ms, calls_extracted, at_ms } => {
-                Self::ToolCallParsed {
-                    parser: scrubber.scrub(parser),
-                    raw_bytes_len: *raw_bytes_len,
-                    parse_ms: *parse_ms,
-                    calls_extracted: *calls_extracted,
-                    at_ms: *at_ms,
-                }
-            }
-            Self::ArgsValidated { ok, schema_errors, validate_ms, at_ms } => {
-                Self::ArgsValidated {
-                    ok: *ok,
-                    schema_errors: schema_errors.iter().map(|s| scrubber.scrub(s)).collect(),
-                    validate_ms: *validate_ms,
-                    at_ms: *at_ms,
-                }
-            }
-            Self::PermissionsChecked { granted, missing, at_ms } => {
-                Self::PermissionsChecked {
-                    granted: *granted,
-                    missing: missing.iter().map(|s| scrubber.scrub(s)).collect(),
-                    at_ms: *at_ms,
-                }
-            }
-            Self::HandlerStarted { handler, category, concurrency, at_ms } => {
-                Self::HandlerStarted {
-                    handler: scrubber.scrub(handler),
-                    category: *category,
-                    concurrency: *concurrency,
-                    at_ms: *at_ms,
-                }
-            }
-            Self::Demotion { from, to, reason, at_ms } => {
-                Self::Demotion {
-                    from: from.clone(),
-                    to: to.clone(),
-                    reason: scrubber.scrub(reason),
-                    at_ms: *at_ms,
-                }
-            }
-            Self::Serialization { reason, at_ms } => {
-                Self::Serialization {
-                    reason: scrubber.scrub(reason),
-                    at_ms: *at_ms,
-                }
-            }
-            Self::McpConnectionLost { server, at_ms } => {
-                Self::McpConnectionLost {
-                    server: scrubber.scrub(server),
-                    at_ms: *at_ms,
-                }
-            }
+            Self::PromptAssembled {
+                token_count,
+                tools_offered,
+                at_ms,
+            } => Self::PromptAssembled {
+                token_count: *token_count,
+                tools_offered: tools_offered.iter().map(|s| scrubber.scrub(s)).collect(),
+                at_ms: *at_ms,
+            },
+            Self::ToolCallParsed {
+                parser,
+                raw_bytes_len,
+                parse_ms,
+                calls_extracted,
+                at_ms,
+            } => Self::ToolCallParsed {
+                parser: scrubber.scrub(parser),
+                raw_bytes_len: *raw_bytes_len,
+                parse_ms: *parse_ms,
+                calls_extracted: *calls_extracted,
+                at_ms: *at_ms,
+            },
+            Self::ArgsValidated {
+                ok,
+                schema_errors,
+                validate_ms,
+                at_ms,
+            } => Self::ArgsValidated {
+                ok: *ok,
+                schema_errors: schema_errors.iter().map(|s| scrubber.scrub(s)).collect(),
+                validate_ms: *validate_ms,
+                at_ms: *at_ms,
+            },
+            Self::PermissionsChecked {
+                granted,
+                missing,
+                at_ms,
+            } => Self::PermissionsChecked {
+                granted: *granted,
+                missing: missing.iter().map(|s| scrubber.scrub(s)).collect(),
+                at_ms: *at_ms,
+            },
+            Self::HandlerStarted {
+                handler,
+                category,
+                concurrency,
+                at_ms,
+            } => Self::HandlerStarted {
+                handler: scrubber.scrub(handler),
+                category: *category,
+                concurrency: *concurrency,
+                at_ms: *at_ms,
+            },
+            Self::Demotion {
+                from,
+                to,
+                reason,
+                at_ms,
+            } => Self::Demotion {
+                from: from.clone(),
+                to: to.clone(),
+                reason: scrubber.scrub(reason),
+                at_ms: *at_ms,
+            },
+            Self::Serialization { reason, at_ms } => Self::Serialization {
+                reason: scrubber.scrub(reason),
+                at_ms: *at_ms,
+            },
+            Self::McpConnectionLost { server, at_ms } => Self::McpConnectionLost {
+                server: scrubber.scrub(server),
+                at_ms: *at_ms,
+            },
             Self::Custom { name, data, at_ms } => {
                 // Scrub by re-serializing the JSON payload to a string,
                 // scrubbing it, then parsing it back. If the round-trip fails
@@ -659,11 +672,7 @@ impl ToolTrace {
     /// secrets never land in `.roko/traces/`.
     #[must_use]
     pub fn scrubbed(&self, scrubber: &crate::obs::scrub::LogScrubber) -> Self {
-        let events = self
-            .events
-            .iter()
-            .map(|e| e.scrubbed(scrubber))
-            .collect();
+        let events = self.events.iter().map(|e| e.scrubbed(scrubber)).collect();
         Self {
             trace_id: self.trace_id,
             call_id: scrubber.scrub(&self.call_id),
@@ -1154,7 +1163,10 @@ mod tests {
 
     #[test]
     fn classify_cancelled() {
-        assert_eq!(classify_tool_error(&ToolError::Cancelled), FailureKind::Cancelled);
+        assert_eq!(
+            classify_tool_error(&ToolError::Cancelled),
+            FailureKind::Cancelled
+        );
     }
 
     #[test]
@@ -1276,7 +1288,11 @@ mod tests {
             ended_at_ms: 10,
             events: vec![
                 ToolTraceEvent::StreamCoerced { at_ms: 42 },
-                ToolTraceEvent::Truncation { kept: 100, total: 200, at_ms: 43 },
+                ToolTraceEvent::Truncation {
+                    kept: 100,
+                    total: 200,
+                    at_ms: 43,
+                },
             ],
             outcome: ToolOutcome::success(10, 0.0),
         };

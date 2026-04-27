@@ -9,5 +9,7 @@
 | `P07-autofix-retry` | 5 | 4 | 1 | 🔄 in progress | 1 |
 | `W01-wire-system-prompts` | 4 | 4 | 0 | ✅ complete | 1 |
 | `architecture-core-queue` | 24 | 0 | 24 | 📋 ready | 2 |
+| `live-demo-phase1` | 2 | 0 | 2 | 📋 ready | 1 |
+| `live-demo-phase2` | 2 | 0 | 2 | 📋 ready | 1 |
 
-**Total**: 4 plans, 40 tasks, 15 done (38%)
+**Total**: 6 plans, 44 tasks, 15 done (34%)

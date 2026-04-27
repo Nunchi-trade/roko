@@ -283,6 +283,8 @@ impl RunState {
                 };
                 self.upsert_attempt(attempt, status, *timestamp_ms, None, *failure_kind);
             }
+            RunnerEvent::PromptAssembled { .. } => {}
+            RunnerEvent::MergeBackendCompleted { .. } => {}
             RunnerEvent::RetryDecision {
                 attempt,
                 action,

@@ -279,6 +279,8 @@ impl Projection {
             | RunnerEvent::AgentCompleted { run_id, .. }
             | RunnerEvent::GateDispatchStarted { run_id, .. }
             | RunnerEvent::GateCompleted { run_id, .. }
+            | RunnerEvent::PromptAssembled { run_id, .. }
+            | RunnerEvent::MergeBackendCompleted { run_id, .. }
             | RunnerEvent::RetryDecision { run_id, .. } => run_id.clone(),
         };
         let attempt = match &event {
@@ -289,6 +291,8 @@ impl Projection {
             | RunnerEvent::AgentCompleted { attempt, .. }
             | RunnerEvent::GateDispatchStarted { attempt, .. }
             | RunnerEvent::GateCompleted { attempt, .. }
+            | RunnerEvent::PromptAssembled { attempt, .. }
+            | RunnerEvent::MergeBackendCompleted { attempt, .. }
             | RunnerEvent::RetryDecision { attempt, .. } => Some(attempt.attempt),
             _ => None,
         };
@@ -300,6 +304,19 @@ impl Projection {
         };
         let preview = match &event {
             RunnerEvent::GateCompleted { output, .. } => Some(truncate_preview(output.clone())),
+            RunnerEvent::MergeBackendCompleted { output, .. } => {
+                Some(truncate_preview(output.clone()))
+            }
+            RunnerEvent::PromptAssembled {
+                estimated_tokens,
+                included_sections,
+                dropped_sections,
+                ..
+            } => Some(truncate_preview(format!(
+                "estimated_tokens={estimated_tokens} included={} dropped={}",
+                included_sections.len(),
+                dropped_sections.len()
+            ))),
             _ => None,
         };
 

@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use roko_agent::safety::contract::{AgentContract, ContractLoadMode};
 use roko_cli::runner::merge::{
-    MergeDispatch, PlanMerger, PlanMergerConfig, RegressionGate, RegressionOutcome,
+    MergeBackend, MergeBackendOutcome, MergeDispatch, PlanMerger, PlanMergerConfig, RegressionGate,
+    RegressionOutcome,
 };
 use roko_cli::runner::projection::{Projection, RawRuntimeEvent};
 use roko_cli::runner::task_dag::{DagConfig, SkippedReason, TaskDag};
@@ -109,24 +110,15 @@ async fn end_to_end_dag_merge_projection_pipeline() {
     // ────────────────────────────────────────────────────────────────────
     let workdir = tempdir().expect("tempdir");
     let mut config = PlanMergerConfig::new(workdir.path().to_path_buf(), Duration::from_secs(30));
-    let stub: Arc<dyn RegressionGate> = Arc::new(StubFailingGate);
-    config = config.with_regression_gate(stub);
+    let stub_gate: Arc<dyn RegressionGate> = Arc::new(StubFailingGate);
+    let stub_merge: Arc<dyn MergeBackend> = Arc::new(StubPassingMerge);
+    config = config.with_regression_gate(stub_gate).with_merge_backend(stub_merge);
 
     let queue = MergeQueue::default();
     let merger = PlanMerger::new(queue, config);
 
-    let req1 = MergeRequest::new(
-        "alpha",
-        "alpha-branch",
-        vec!["src/foo.rs".into()],
-        10,
-    );
-    let req2 = MergeRequest::new(
-        "beta",
-        "beta-branch",
-        vec!["src/foo.rs".into()],
-        10,
-    );
+    let req1 = MergeRequest::new("alpha", "alpha-branch", vec!["src/foo.rs".into()], 10);
+    let req2 = MergeRequest::new("beta", "beta-branch", vec!["src/foo.rs".into()], 10);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<GateCompletion>(8);
     match merger.submit(req1, tx.clone()) {
@@ -243,16 +235,28 @@ struct StubFailingGate;
 
 #[async_trait::async_trait]
 impl RegressionGate for StubFailingGate {
-    async fn run(
-        &self,
-        _request: &MergeRequest,
-        _config: &PlanMergerConfig,
-    ) -> RegressionOutcome {
+    async fn run(&self, _request: &MergeRequest, _config: &PlanMergerConfig) -> RegressionOutcome {
         RegressionOutcome::fail(
             "stub regression gate forced failure",
             RunnerFailureKind::Permanent,
             42,
         )
+    }
+}
+
+/// Stub merge backend that always reports a successful merge so the
+/// regression gate (which only runs on a successful merge) is exercised.
+#[derive(Debug)]
+struct StubPassingMerge;
+
+#[async_trait::async_trait]
+impl MergeBackend for StubPassingMerge {
+    async fn merge(
+        &self,
+        request: &MergeRequest,
+        _config: &PlanMergerConfig,
+    ) -> MergeBackendOutcome {
+        MergeBackendOutcome::pass(format!("stub merge accepted {}", request.branch_name), 5)
     }
 }
 
@@ -314,9 +318,7 @@ fn agent_event_to_event_category_is_provider_neutral() {
         EventCategory::AgentTool
     );
     assert_eq!(
-        EventCategory::from_agent_event(&MessageDelta {
-            text: "hi".into(),
-        }),
+        EventCategory::from_agent_event(&MessageDelta { text: "hi".into() }),
         EventCategory::AgentMessage
     );
     assert_eq!(
@@ -350,7 +352,10 @@ fn allowed_tools_intersects_with_forbidden_tools_correctly() {
         recovery: Vec::new(),
         allowed_tools: Some(vec!["bash".into(), "read_file".into()]),
     };
-    assert!(!contract.permits_tool("bash"), "ForbiddenTools must override allowlist");
+    assert!(
+        !contract.permits_tool("bash"),
+        "ForbiddenTools must override allowlist"
+    );
     assert!(contract.permits_tool("read_file"));
 }
 

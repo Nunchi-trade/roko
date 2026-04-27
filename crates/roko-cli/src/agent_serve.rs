@@ -852,12 +852,10 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
                 &format!("{total} registered"),
                 Some(&format!("{active} active, {idle} idle")),
             ),
-            ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(
-                    roko_cli::inline::symbols::BAR.to_string(),
-                    theme.muted(),
-                ),
-            ]),
+            ratatui::text::Line::from(vec![ratatui::text::Span::styled(
+                roko_cli::inline::symbols::BAR.to_string(),
+                theme.muted(),
+            )]),
             ratatui::text::Line::from(vec![
                 ratatui::text::Span::styled(
                     roko_cli::inline::symbols::BAR.to_string(),
@@ -865,7 +863,10 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
                 ),
                 ratatui::text::Span::raw("  "),
                 ratatui::text::Span::styled(
-                    format!("{:<16} {:<12} {:<30} {}", "NAME", "STATUS", "IDENTITY", "DOMAIN"),
+                    format!(
+                        "{:<16} {:<12} {:<30} {}",
+                        "NAME", "STATUS", "IDENTITY", "DOMAIN"
+                    ),
                     theme.muted(),
                 ),
             ]),
@@ -874,9 +875,9 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
         for (name, domain) in &agents {
             let rt = runtime_entries.iter().find(|e| e.name == *name);
             let (status_icon, status_label) = if rt.is_some_and(|e| is_process_alive(e.pid)) {
-                ("\u{25cf}", "active")    // ● active
+                ("\u{25cf}", "active") // ● active
             } else {
-                ("\u{25cb}", "idle")      // ○ idle
+                ("\u{25cb}", "idle") // ○ idle
             };
             let identity = format!("eid://roko/{name}");
 
@@ -886,17 +887,22 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
                     theme.muted(),
                 ),
                 ratatui::text::Span::raw("  "),
-                ratatui::text::Span::styled(
-                    format!("{:<16}", name),
-                    theme.text(),
-                ),
+                ratatui::text::Span::styled(format!("{:<16}", name), theme.text()),
                 ratatui::text::Span::styled(
                     format!("{status_icon} "),
-                    if status_label == "active" { theme.success() } else { theme.muted() },
+                    if status_label == "active" {
+                        theme.success()
+                    } else {
+                        theme.muted()
+                    },
                 ),
                 ratatui::text::Span::styled(
                     format!("{:<10}", status_label),
-                    if status_label == "active" { theme.success() } else { theme.muted() },
+                    if status_label == "active" {
+                        theme.success()
+                    } else {
+                        theme.muted()
+                    },
                 ),
                 ratatui::text::Span::styled(
                     format!("{:<30}", identity),
@@ -910,10 +916,7 @@ fn run_agent_list(workdir: Option<&Path>) -> Result<()> {
         }
 
         lines.push(ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                roko_cli::inline::symbols::BAR.to_string(),
-                theme.muted(),
-            ),
+            ratatui::text::Span::styled(roko_cli::inline::symbols::BAR.to_string(), theme.muted()),
         ]));
         lines.push(roko_cli::inline::styled::section_end(
             &theme,

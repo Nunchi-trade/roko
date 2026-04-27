@@ -205,6 +205,7 @@ impl MergeBackend for GitMergeBackend {
                 duration_ms,
             ),
             Ok(output) => {
+                let conflicted_paths = git_conflicted_paths(&config.workdir).await;
                 let _ = tokio::process::Command::new("git")
                     .args(["merge", "--abort"])
                     .current_dir(&config.workdir)
@@ -218,8 +219,16 @@ impl MergeBackend for GitMergeBackend {
                 } else {
                     stderr.trim().to_string()
                 };
+                let conflict_summary = if conflicted_paths.is_empty() {
+                    String::new()
+                } else {
+                    format!("; conflicted paths: {}", conflicted_paths.join(","))
+                };
                 MergeBackendOutcome::fail(
-                    format!("git merge `{}` failed: {details}", request.branch_name),
+                    format!(
+                        "git merge `{}` failed: {details}{conflict_summary}",
+                        request.branch_name
+                    ),
                     RunnerFailureKind::Structural,
                     duration_ms,
                 )
@@ -371,6 +380,17 @@ async fn git_output(workdir: &std::path::Path, args: &[&str]) -> Result<String, 
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn git_conflicted_paths(workdir: &std::path::Path) -> Vec<String> {
+    git_output(workdir, &["diff", "--name-only", "--diff-filter=U"])
+        .await
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 impl PlanMerger {
@@ -650,6 +670,7 @@ mod tests {
         assert!(!outcome.passed);
         assert_eq!(outcome.failure_kind, Some(RunnerFailureKind::Structural));
         assert!(outcome.summary.contains("git merge"));
+        assert!(outcome.summary.contains("conflicted paths: state.txt"));
         assert!(
             status.trim().is_empty(),
             "merge conflict should have been aborted, status:\n{status}"

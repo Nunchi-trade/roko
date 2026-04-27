@@ -102,9 +102,9 @@ pub mod causal;
 pub mod cfactor;
 /// Learned intervention policy for conductor retries and aborts.
 pub mod conductor;
+pub mod context_pack_cache;
 /// Contextual bandit policy for model-selection feedback and reward recording.
 pub mod contextual_bandit;
-pub mod context_pack_cache;
 pub mod cost_table;
 pub mod costs_db;
 pub mod costs_log;

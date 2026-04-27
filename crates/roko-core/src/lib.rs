@@ -156,7 +156,6 @@ pub use decay::Decay;
 pub use demurrage::Demurrage;
 pub use domain_profile::{DomainProfile, TypedContext};
 pub use engram::{Engram, EngramBuilder, HdcFingerprint};
-pub use signal::{Signal, SignalBuilder};
 pub use error::{Result, RokoError};
 pub use feed::{FeedAccess, FeedInfo, FeedKind, FeedRegistry};
 pub use forensic::{
@@ -211,6 +210,7 @@ pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use score::Score;
+pub use signal::{Signal, SignalBuilder};
 pub use signal_kinds::*;
 pub use task::{
     GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,

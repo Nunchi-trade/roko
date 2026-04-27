@@ -186,6 +186,216 @@ pub fn save_agent_pids(paths: &PersistPaths, pids: &[u32]) -> Result<()> {
     atomic_write(&paths.agent_pids_json, json.as_bytes())
 }
 
+/// Atomically write the runner-owned [`RunStateSnapshot`].
+pub fn save_run_state(paths: &PersistPaths, snapshot: &RunStateSnapshot) -> Result<()> {
+    let json = serde_json::to_string_pretty(snapshot).context("serializing run state")?;
+    atomic_write(&paths.run_state_json, json.as_bytes())
+}
+
+/// Load the runner-owned [`RunStateSnapshot`] if it exists. Returns
+/// `Ok(None)` when the file is missing; `Err` only on malformed payload
+/// or filesystem errors so callers can distinguish "fresh run" from
+/// "broken state".
+pub fn load_run_state(paths: &PersistPaths) -> Result<Option<RunStateSnapshot>> {
+    match fs::read_to_string(&paths.run_state_json) {
+        Ok(content) => serde_json::from_str(&content)
+            .map(Some)
+            .with_context(|| format!("parsing {}", paths.run_state_json.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", paths.run_state_json.display())),
+    }
+}
+
+/// Outcome of a JSONL recovery scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonlRecovery {
+    /// File is fully consistent — every line parsed.
+    Clean { lines: usize },
+    /// File ended with an incomplete line; recovered by truncating after
+    /// the last newline. `valid_lines` is what survives.
+    TruncatedTrailing {
+        valid_lines: usize,
+        truncated_bytes: u64,
+    },
+    /// File ended with one or more malformed JSON lines that did parse as
+    /// strings (have terminating `\n`) but failed serde validation.
+    /// Recovered by truncating to the last valid line.
+    DroppedInvalid {
+        valid_lines: usize,
+        dropped_lines: usize,
+    },
+}
+
+/// Inspect a JSONL file for partial-append corruption and recover by
+/// truncating at the last successfully-parsed line.
+///
+/// Strategy: read the file as bytes, try to parse each line through
+/// `validator`. If any tail line fails (or the file ends mid-line),
+/// the file is rewritten atomically with everything up through the last
+/// validated line.
+pub fn recover_jsonl<T, F>(path: &Path, validator: F) -> Result<JsonlRecovery>
+where
+    T: for<'de> Deserialize<'de>,
+    F: Fn(&str) -> std::result::Result<T, serde_json::Error>,
+{
+    let original = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JsonlRecovery::Clean { lines: 0 });
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("reading {}", path.display()));
+        }
+    };
+    if original.is_empty() {
+        return Ok(JsonlRecovery::Clean { lines: 0 });
+    }
+
+    let text = match std::str::from_utf8(&original) {
+        Ok(text) => text,
+        Err(_) => {
+            // Non-utf8 — refuse to silently destroy it.
+            anyhow::bail!("{} is not valid UTF-8; refusing to recover", path.display());
+        }
+    };
+
+    let trailing_partial = !text.ends_with('\n');
+    let mut last_good_byte = 0_u64;
+    let mut valid_lines = 0_usize;
+    let mut dropped_lines = 0_usize;
+
+    let mut byte_offset = 0_u64;
+    for raw_line in text.split_inclusive('\n') {
+        let trimmed = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let is_complete = raw_line.ends_with('\n');
+        if !is_complete {
+            // Trailing partial line — stop here without counting it as
+            // dropped.
+            break;
+        }
+        if trimmed.trim().is_empty() {
+            byte_offset += raw_line.len() as u64;
+            last_good_byte = byte_offset;
+            continue;
+        }
+        match validator(trimmed) {
+            Ok(_) => {
+                byte_offset += raw_line.len() as u64;
+                last_good_byte = byte_offset;
+                valid_lines += 1;
+            }
+            Err(_) => {
+                dropped_lines += 1;
+                // Stop on first malformed entry — don't trust the tail.
+                break;
+            }
+        }
+    }
+
+    let truncated_bytes = original.len() as u64 - last_good_byte;
+    if truncated_bytes == 0 && !trailing_partial && dropped_lines == 0 {
+        return Ok(JsonlRecovery::Clean { lines: valid_lines });
+    }
+
+    // Truncate to the last validated line.
+    if last_good_byte == 0 {
+        // Nothing valid — leave file alone, surface as dropped.
+        if dropped_lines > 0 {
+            return Ok(JsonlRecovery::DroppedInvalid {
+                valid_lines: 0,
+                dropped_lines,
+            });
+        }
+        return Ok(JsonlRecovery::TruncatedTrailing {
+            valid_lines: 0,
+            truncated_bytes,
+        });
+    }
+
+    let kept = &original[..last_good_byte as usize];
+    let tmp = path.with_extension("recover.tmp");
+    fs::write(&tmp, kept).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} → {}", tmp.display(), path.display()))?;
+
+    if dropped_lines > 0 {
+        Ok(JsonlRecovery::DroppedInvalid {
+            valid_lines,
+            dropped_lines,
+        })
+    } else {
+        Ok(JsonlRecovery::TruncatedTrailing {
+            valid_lines,
+            truncated_bytes,
+        })
+    }
+}
+
+impl TaskDefFingerprint {
+    /// Compute a forensic fingerprint for `task` in `plan_id`.
+    ///
+    /// The hash spans the fields a plan author can change between runs;
+    /// downstream resume validation rejects mismatches as a hard
+    /// failure.
+    #[must_use]
+    pub fn from_task(task: &crate::task_parser::TaskDef, plan_id: &str) -> Self {
+        let canonical = canonical_task_payload(task);
+        Self {
+            plan_id: plan_id.to_string(),
+            task_id: task.id.clone(),
+            fingerprint: fnv1a_hex(&canonical),
+        }
+    }
+}
+
+fn canonical_task_payload(task: &crate::task_parser::TaskDef) -> String {
+    let depends_on = task.depends_on.join(",");
+    let depends_on_plan = task.depends_on_plan.join(",");
+    let verify = task
+        .verify
+        .iter()
+        .map(|step| format!("{}:{}:{}", step.phase, step.command, step.timeout_ms))
+        .collect::<Vec<_>>()
+        .join("|");
+    let acceptance = task.acceptance.join("|");
+    let role = task.role.clone().unwrap_or_default();
+    let domain = task
+        .domain
+        .as_ref()
+        .map(|d| d.label().to_string())
+        .unwrap_or_default();
+    let max_loc = task
+        .max_loc
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    format!(
+        "id={};title={};role={};tier={};domain={};depends_on={};depends_on_plan={};verify={};acceptance={};max_loc={};max_retries={};timeout_secs={}",
+        task.id,
+        task.title,
+        role,
+        task.tier,
+        domain,
+        depends_on,
+        depends_on_plan,
+        verify,
+        acceptance,
+        max_loc,
+        task.max_retries,
+        task.timeout_secs,
+    )
+}
+
+fn fnv1a_hex(payload: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in payload.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 /// Read previously-saved agent PIDs and kill any that are still alive.
 pub fn cleanup_orphaned_agents(paths: &PersistPaths) {
     let Ok(content) = fs::read_to_string(&paths.agent_pids_json) else {

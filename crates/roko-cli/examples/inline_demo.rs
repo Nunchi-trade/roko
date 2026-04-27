@@ -5,15 +5,15 @@
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
+use ratatui::layout::{Constraint, Layout};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use roko_cli::inline::markdown;
 use roko_cli::inline::primitives::*;
 use roko_cli::inline::styled;
 use roko_cli::inline::symbols;
 use roko_cli::inline::terminal::InlineTerminal;
 use roko_cli::tui::Theme;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 const REVEAL: Duration = Duration::from_millis(25);
 const FAST: Duration = Duration::from_millis(12);
@@ -26,7 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pause(200);
     term.push_lines_revealed(
         &[
-            styled::section_start(&theme, "roko", "inline rendering engine", Some("all primitives")),
+            styled::section_start(
+                &theme,
+                "roko",
+                "inline rendering engine",
+                Some("all primitives"),
+            ),
             styled::continuation(&theme, "", "press any key to advance", None),
         ],
         REVEAL,
@@ -61,9 +66,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         actual_route: Some("haiku".into()),
         actual_time: Some(9.8),
         tool_calls: vec![
-            ToolCallInfo { name: "ReadFile".into(), summary: "src/auth.rs (247 lines)".into(), duration_s: 0.3 },
-            ToolCallInfo { name: "Edit".into(), summary: "src/auth.rs:42 (+3 -1)".into(), duration_s: 0.1 },
-            ToolCallInfo { name: "Bash".into(), summary: "cargo test --lib".into(), duration_s: 2.1 },
+            ToolCallInfo {
+                name: "ReadFile".into(),
+                summary: "src/auth.rs (247 lines)".into(),
+                duration_s: 0.3,
+            },
+            ToolCallInfo {
+                name: "Edit".into(),
+                summary: "src/auth.rs:42 (+3 -1)".into(),
+                duration_s: 0.1,
+            },
+            ToolCallInfo {
+                name: "Bash".into(),
+                summary: "cargo test --lib".into(),
+                duration_s: 2.1,
+            },
         ],
         deposited_count: 2,
         deposited_path: Some("/infra/payments-svc".into()),
@@ -80,13 +97,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gates = GateBlockData {
         policy: Some("prod-sec".into()),
         rungs: vec![
-            GateRung { name: "compile".into(), status: GateStatus::Passed { summary: "0 errors (142 crates)".into(), duration_s: 2.1 } },
-            GateRung { name: "clippy".into(), status: GateStatus::Passed { summary: "0 warnings".into(), duration_s: 0.8 } },
-            GateRung { name: "test".into(), status: GateStatus::Passed { summary: "11/11 pass".into(), duration_s: 3.4 } },
-            GateRung { name: "secret_scan".into(), status: GateStatus::Failed { reason: "AWS_SECRET in env.yaml:14".into(), duration_s: 0.3 } },
-            GateRung { name: "diff".into(), status: GateStatus::Skipped },
-            GateRung { name: "llm_judge".into(), status: GateStatus::Pending },
-            GateRung { name: "verify".into(), status: GateStatus::Pending },
+            GateRung {
+                name: "compile".into(),
+                status: GateStatus::Passed {
+                    summary: "0 errors (142 crates)".into(),
+                    duration_s: 2.1,
+                },
+            },
+            GateRung {
+                name: "clippy".into(),
+                status: GateStatus::Passed {
+                    summary: "0 warnings".into(),
+                    duration_s: 0.8,
+                },
+            },
+            GateRung {
+                name: "test".into(),
+                status: GateStatus::Passed {
+                    summary: "11/11 pass".into(),
+                    duration_s: 3.4,
+                },
+            },
+            GateRung {
+                name: "secret_scan".into(),
+                status: GateStatus::Failed {
+                    reason: "AWS_SECRET in env.yaml:14".into(),
+                    duration_s: 0.3,
+                },
+            },
+            GateRung {
+                name: "diff".into(),
+                status: GateStatus::Skipped,
+            },
+            GateRung {
+                name: "llm_judge".into(),
+                status: GateStatus::Pending,
+            },
+            GateRung {
+                name: "verify".into(),
+                status: GateStatus::Pending,
+            },
         ],
     };
     term.push_lines_revealed(&gates.to_lines(&theme), Duration::from_millis(50))?;
@@ -142,24 +192,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TreeWave {
                 number: 1,
                 tasks: vec![
-                    TreeTask { id: "T01".into(), title: "dep-scan".into(), status: TaskProgress::Done { cost_usd: 0.012, duration_s: 2.1 } },
-                    TreeTask { id: "T02".into(), title: "secret-scan".into(), status: TaskProgress::Done { cost_usd: 0.008, duration_s: 1.4 } },
-                    TreeTask { id: "T03".into(), title: "policy-check".into(), status: TaskProgress::Done { cost_usd: 0.031, duration_s: 4.2 } },
+                    TreeTask {
+                        id: "T01".into(),
+                        title: "dep-scan".into(),
+                        status: TaskProgress::Done {
+                            cost_usd: 0.012,
+                            duration_s: 2.1,
+                        },
+                    },
+                    TreeTask {
+                        id: "T02".into(),
+                        title: "secret-scan".into(),
+                        status: TaskProgress::Done {
+                            cost_usd: 0.008,
+                            duration_s: 1.4,
+                        },
+                    },
+                    TreeTask {
+                        id: "T03".into(),
+                        title: "policy-check".into(),
+                        status: TaskProgress::Done {
+                            cost_usd: 0.031,
+                            duration_s: 4.2,
+                        },
+                    },
                 ],
             },
             TreeWave {
                 number: 2,
                 tasks: vec![
-                    TreeTask { id: "T04".into(), title: "integration-test".into(), status: TaskProgress::Running { elapsed_s: 6.2 } },
-                    TreeTask { id: "T05".into(), title: "diff-review".into(), status: TaskProgress::Blocked { blocked_by: "T04".into() } },
-                    TreeTask { id: "T06".into(), title: "cost-analysis".into(), status: TaskProgress::Blocked { blocked_by: "T04".into() } },
+                    TreeTask {
+                        id: "T04".into(),
+                        title: "integration-test".into(),
+                        status: TaskProgress::Running { elapsed_s: 6.2 },
+                    },
+                    TreeTask {
+                        id: "T05".into(),
+                        title: "diff-review".into(),
+                        status: TaskProgress::Blocked {
+                            blocked_by: "T04".into(),
+                        },
+                    },
+                    TreeTask {
+                        id: "T06".into(),
+                        title: "cost-analysis".into(),
+                        status: TaskProgress::Blocked {
+                            blocked_by: "T04".into(),
+                        },
+                    },
                 ],
             },
             TreeWave {
                 number: 3,
                 tasks: vec![
-                    TreeTask { id: "T07".into(), title: "episode-log".into(), status: TaskProgress::Pending },
-                    TreeTask { id: "T08".into(), title: "chain-anchor".into(), status: TaskProgress::Pending },
+                    TreeTask {
+                        id: "T07".into(),
+                        title: "episode-log".into(),
+                        status: TaskProgress::Pending,
+                    },
+                    TreeTask {
+                        id: "T08".into(),
+                        title: "chain-anchor".into(),
+                        status: TaskProgress::Pending,
+                    },
                 ],
             },
         ],
@@ -174,9 +269,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let diff = DiffBlockData {
         entries: vec![
-            DiffEntry { path: "deploy/env.yaml".into(), additions: 1, deletions: 1, summary: Some("rotated AWS secret".into()) },
-            DiffEntry { path: "src/handler.rs".into(), additions: 8, deletions: 3, summary: Some("Secrets Manager integration".into()) },
-            DiffEntry { path: "tests/auth_test.rs".into(), additions: 22, deletions: 0, summary: Some("new test coverage".into()) },
+            DiffEntry {
+                path: "deploy/env.yaml".into(),
+                additions: 1,
+                deletions: 1,
+                summary: Some("rotated AWS secret".into()),
+            },
+            DiffEntry {
+                path: "src/handler.rs".into(),
+                additions: 8,
+                deletions: 3,
+                summary: Some("Secrets Manager integration".into()),
+            },
+            DiffEntry {
+                path: "tests/auth_test.rs".into(),
+                additions: 22,
+                deletions: 0,
+                summary: Some("new test coverage".into()),
+            },
         ],
         expanded: true,
     };
@@ -215,7 +325,12 @@ fn calculate_margin(revenue: f64, costs: f64) -> f64 {
 "#;
 
     term.push_lines_revealed(
-        &[styled::section_start(&theme, "markdown", "LLM output rendering", None)],
+        &[styled::section_start(
+            &theme,
+            "markdown",
+            "LLM output rendering",
+            None,
+        )],
         REVEAL,
     )?;
     let md_lines = markdown::render_markdown_with_bar(md, &theme);
@@ -233,10 +348,22 @@ fn calculate_margin(revenue: f64, costs: f64) -> f64 {
         REVEAL,
     )?;
     let tools: Vec<(&str, serde_json::Value, f64)> = vec![
-        ("ReadFile", serde_json::json!({"file_path": "/Users/will/dev/project/src/payments/handler.rs"}), 0.3),
+        (
+            "ReadFile",
+            serde_json::json!({"file_path": "/Users/will/dev/project/src/payments/handler.rs"}),
+            0.3,
+        ),
         ("Grep", serde_json::json!({"pattern": "AWS_SECRET"}), 0.2),
-        ("Bash", serde_json::json!({"command": "cargo test --workspace -- payments"}), 1.8),
-        ("Edit", serde_json::json!({"file_path": "src/payments/handler.rs"}), 0.1),
+        (
+            "Bash",
+            serde_json::json!({"command": "cargo test --workspace -- payments"}),
+            1.8,
+        ),
+        (
+            "Edit",
+            serde_json::json!({"file_path": "src/payments/handler.rs"}),
+            0.1,
+        ),
     ];
     for (name, input, dur) in &tools {
         let mut block = ToolCallBlock::from_start(name, input);
@@ -255,10 +382,26 @@ fn calculate_margin(revenue: f64, costs: f64) -> f64 {
     let waterfall = CostWaterfallData {
         baseline_usd: 2.61,
         entries: vec![
-            WaterfallEntry { label: "prompt caching".into(), savings_usd: 1.31, factor: 5.0 },
-            WaterfallEntry { label: "cascade routing (haiku)".into(), savings_usd: 0.78, factor: 3.1 },
-            WaterfallEntry { label: "knowledge pre-load".into(), savings_usd: 0.29, factor: 1.4 },
-            WaterfallEntry { label: "gate early-exit".into(), savings_usd: 0.14, factor: 1.2 },
+            WaterfallEntry {
+                label: "prompt caching".into(),
+                savings_usd: 1.31,
+                factor: 5.0,
+            },
+            WaterfallEntry {
+                label: "cascade routing (haiku)".into(),
+                savings_usd: 0.78,
+                factor: 3.1,
+            },
+            WaterfallEntry {
+                label: "knowledge pre-load".into(),
+                savings_usd: 0.29,
+                factor: 1.4,
+            },
+            WaterfallEntry {
+                label: "gate early-exit".into(),
+                savings_usd: 0.14,
+                factor: 1.2,
+            },
         ],
         actual_usd: 0.084,
     };
@@ -274,8 +417,12 @@ fn calculate_margin(revenue: f64, costs: f64) -> f64 {
     meter.record_run(0.031, 4821, 1203, "haiku", 0.93);
     meter.record_run(0.022, 3100, 890, "haiku", 0.71);
     meter.record_run(0.029, 4200, 1100, "haiku", 0.88);
-    for _ in 0..87 { meter.record_cache(true); }
-    for _ in 0..13 { meter.record_cache(false); }
+    for _ in 0..87 {
+        meter.record_cache(true);
+    }
+    for _ in 0..13 {
+        meter.record_cache(false);
+    }
 
     let summary = SessionSummaryData {
         cost: meter,
@@ -307,12 +454,20 @@ fn calculate_margin(revenue: f64, costs: f64) -> f64 {
                 Constraint::Min(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
-            ]).split(area);
+            ])
+            .split(area);
 
             let spinner = styled::spinner_line(&theme, tick, "Processing agent task...", elapsed);
             frame.render_widget(Paragraph::new(spinner), chunks[1]);
 
-            let status = styled::status_bar(&theme, 0.082, 12121, 3193, "haiku", Some((elapsed / 8.0).min(1.0)));
+            let status = styled::status_bar(
+                &theme,
+                0.082,
+                12121,
+                3193,
+                "haiku",
+                Some((elapsed / 8.0).min(1.0)),
+            );
             frame.render_widget(Paragraph::new(status), chunks[3]);
         })?;
 
@@ -346,10 +501,7 @@ fn pause(ms: u64) {
 fn wait_key(term: &mut InlineTerminal, theme: &Theme) -> Result<(), Box<dyn std::error::Error>> {
     term.draw(|frame| {
         let area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ]).split(area);
+        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![

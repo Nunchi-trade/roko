@@ -1,7 +1,7 @@
 //! System prompt and quality standards for PRD generation.
 //!
 //! This module defines the prompt template that produces PRD documents
-//! matching the quality bar of `/Users/will/dev/uniswap/bardo/prd/`.
+//! matching the quality bar of the project's `.roko/prd/` directory.
 
 /// The system prompt for PRD generation. Injected via `--append-system-prompt`
 /// or as the `system` field in API calls.
@@ -148,10 +148,11 @@ plan_template: <optional-template-name>
 
 ## Reference examples
 
-For the quality bar, study these documents:
-- `/Users/will/dev/uniswap/bardo/prd/03-daimon/00-overview.md` — 30+ citations, PAD vectors, somatic markers
-- `/Users/will/dev/uniswap/bardo/prd/10-safety/00-defense.md` — Defense-in-depth architecture, capability tokens
-- `/Users/will/dev/uniswap/bardo/prd/01-golem/01-cognition.md` — Cognitive architecture, heartbeat cycle
+For the quality bar, study existing PRD documents under the project's `.roko/prd/` directory.
+Each PRD should demonstrate:
+- 30+ academic citations with PAD vectors and somatic markers
+- Defense-in-depth architecture descriptions with capability tokens
+- Cognitive architecture details and heartbeat cycle specifications
 "#;
 
 /// Short quality checklist that can be appended to any PRD generation prompt.

@@ -46,8 +46,9 @@ use super::state::RunState;
 use super::tui_bridge::TuiBridge;
 use super::types::{
     AgentCompletionSummary, AgentDispatchOutcome, AgentEvent, GateCompletion, GateCompletionKind,
-    PlanOutcome, PlanRunSummary, ResumeMarker, ResumeOutcome, RetryAction, RunConfig, RunOutcome,
-    RunTotals, RunnerEvent, RunnerFailureKind, TaskAttemptOutcome, TaskAttemptRef,
+    PlanOutcome, PlanRunSummary, PromptAssemblyDiagnostics, ResumeMarker, ResumeOutcome,
+    RetryAction, RunConfig, RunOutcome, RunTotals, RunnerEvent, RunnerFailureKind,
+    TaskAttemptOutcome, TaskAttemptRef,
 };
 
 // ─── RunReport ──────────────────────────────────────────────────────────
@@ -167,6 +168,9 @@ pub async fn run(
         }
     };
 
+    // Seed playbooks if the store is empty (bootstrap chicken-and-egg).
+    seed_playbooks_if_empty(&config.workdir).await;
+
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
@@ -189,12 +193,14 @@ pub async fn run(
         &paths,
         &mut state,
         &tui,
+        config,
         RunnerEvent::resume_marker(&run_id, resume.marker.clone()),
     );
     emit_runner_event(
         &paths,
         &mut state,
         &tui,
+        config,
         RunnerEvent::run_started(
             &run_id,
             plan_ids.clone(),
@@ -299,6 +305,7 @@ pub async fn run(
                             &paths,
                             &mut state,
                             &tui,
+                            config,
                             RunnerEvent::agent_completed(
                                 &run_id,
                                 attempt,
@@ -365,6 +372,7 @@ pub async fn run(
                                 &paths,
                                 &mut state,
                                 &tui,
+                                config,
                                 RunnerEvent::agent_completed(
                                     &run_id,
                                     attempt,
@@ -388,6 +396,7 @@ pub async fn run(
                                 &paths,
                                 &mut state,
                                 &tui,
+                                config,
                                 RunnerEvent::agent_completed(
                                     &run_id,
                                     attempt,
@@ -452,12 +461,29 @@ pub async fn run(
                     &paths,
                     &mut state,
                     &tui,
+                    config,
                     RunnerEvent::gate_completed(
                         &run_id,
                         completion_attempt.clone(),
                         &completion,
                     ),
                 );
+
+                if completion.kind == GateCompletionKind::Merge {
+                    emit_runner_event(
+                        &paths,
+                        &mut state,
+                        &tui,
+                        config,
+                        RunnerEvent::merge_backend_completed(
+                            &run_id,
+                            completion_attempt.clone(),
+                            &completion,
+                            merge_branch_from_task_id(&completion.task_id),
+                            conflict_paths_from_merge_output(&completion.output),
+                        ),
+                    );
+                }
 
                 // Emit learning events for the completed agent+gate cycle.
                 emit_feedback(
@@ -523,6 +549,7 @@ pub async fn run(
                         &paths,
                         &mut state,
                         &tui,
+                        config,
                         RunnerEvent::task_attempt_completed(
                             &run_id,
                             completion_attempt.clone(),
@@ -634,6 +661,7 @@ pub async fn run(
                                     &paths,
                                     &mut state,
                                     &tui,
+                                    config,
                                     RunnerEvent::retry_decision(
                                         &run_id,
                                         completion_attempt.clone(),
@@ -688,6 +716,7 @@ pub async fn run(
                             &paths,
                             &mut state,
                             &tui,
+                            config,
                             RunnerEvent::retry_decision(
                                 &run_id,
                                 completion_attempt.clone(),
@@ -707,6 +736,7 @@ pub async fn run(
                             &paths,
                             &mut state,
                             &tui,
+                            config,
                             RunnerEvent::task_attempt_completed(
                                 &run_id,
                                 completion_attempt.clone(),
@@ -769,7 +799,7 @@ pub async fn run(
                 shutdown_subsystems(config, &tui).await;
                 let event =
                     build_run_completed_event(&executor, &plans, &state, RunOutcome::Cancelled);
-                emit_runner_event(&paths, &mut state, &tui, event);
+                emit_runner_event(&paths, &mut state, &tui, config, event);
                 break;
             }
         }
@@ -782,7 +812,7 @@ pub async fn run(
                 RunOutcome::Failed
             };
             let event = build_run_completed_event(&executor, &plans, &state, outcome);
-            emit_runner_event(&paths, &mut state, &tui, event);
+            emit_runner_event(&paths, &mut state, &tui, config, event);
             info!("all plans terminal — exiting event loop");
             break;
         }
@@ -868,7 +898,7 @@ fn handle_plan_verify_completion(
             state.iteration.max(1),
         );
         let next_attempt = Some(state.iteration.saturating_add(1).max(1));
-        emit_runner_event(
+        emit_runner_event_facadeless(
             paths,
             state,
             tui,
@@ -907,6 +937,32 @@ fn handle_plan_verify_completion(
     save_snapshot(executor, paths, state, merge_queue);
 }
 
+fn merge_branch_from_task_id(task_id: &str) -> Option<String> {
+    task_id
+        .strip_prefix("merge:")
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn conflict_paths_from_merge_output(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .find_map(|line| {
+            line.split_once("conflicted paths:")
+                .map(|(_, paths)| paths.to_string())
+        })
+        .map(|paths| {
+            paths
+                .split([',', ' ', '\t'])
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn handle_merge_completion(
     completion: &GateCompletion,
     executor: &mut ParallelExecutor,
@@ -924,7 +980,7 @@ fn handle_merge_completion(
             Ok(phase) => {
                 tui.phase_transition(&completion.plan_id, "merging", &format!("{phase:?}"));
                 tui.plan_completed(&completion.plan_id, true);
-                emit_runner_event(
+                emit_runner_event_facadeless(
                     paths,
                     state,
                     tui,
@@ -963,7 +1019,7 @@ fn handle_merge_completion(
                     .apply_event(&completion.plan_id, &ExecutorEvent::Fatal(reason.clone()));
             }
         }
-        emit_runner_event(
+        emit_runner_event_facadeless(
             paths,
             state,
             tui,
@@ -1054,7 +1110,41 @@ fn agent_event_json(event: &AgentEvent) -> serde_json::Value {
     }
 }
 
+/// Single emit path for runner lifecycle events.
+///
+/// Owns:
+/// - state apply (`RunState::apply_runner_event`)
+/// - TUI dashboard publish (`TuiBridge::runner_event`)
+/// - durable JSONL append (`persist::append_runner_event`)
+/// - **projection broadcast** (`config.projection`)
+/// - **feedback fan-out** (`config.feedback_facade`, fire-and-forget)
+///
+/// Helpers that do not have `&RunConfig` in scope use
+/// [`emit_runner_event_facadeless`] which is equivalent to passing
+/// `None`/`None` for projection + feedback.
 fn emit_runner_event(
+    paths: &PersistPaths,
+    state: &mut RunState,
+    tui: &TuiBridge,
+    config: &RunConfig,
+    event: RunnerEvent,
+) {
+    emit_runner_event_with_facades(
+        paths,
+        state,
+        tui,
+        config.projection.as_ref(),
+        config.feedback_facade.as_ref(),
+        event,
+    );
+}
+
+/// Drop-in for emit sites that do not hold a `&RunConfig` (helpers
+/// invoked outside `run()`). Skips projection + feedback fan-out; the
+/// runner-level emits still cover the lifecycle events these helpers
+/// produce because the helpers themselves only emit on their plan's
+/// completion which is also republished from `run()`.
+fn emit_runner_event_facadeless(
     paths: &PersistPaths,
     state: &mut RunState,
     tui: &TuiBridge,
@@ -1064,11 +1154,6 @@ fn emit_runner_event(
 }
 
 /// Internal variant accepting the optional projection + feedback facades.
-///
-/// All emit sites end up here. The facade refs are read off `RunConfig`
-/// in the `_via_config` wrapper so most sites do not need to thread the
-/// extra arguments — the simple 4-arg `emit_runner_event` continues to
-/// work for helpers that have no `&RunConfig` in scope.
 fn emit_runner_event_with_facades(
     paths: &PersistPaths,
     state: &mut RunState,
@@ -1115,24 +1200,6 @@ fn emit_runner_event_with_facades(
             });
         }
     }
-}
-
-/// Convenience wrapper that reads facades from `RunConfig`.
-fn emit_runner_event_via_config(
-    paths: &PersistPaths,
-    state: &mut RunState,
-    tui: &TuiBridge,
-    config: &RunConfig,
-    event: RunnerEvent,
-) {
-    emit_runner_event_with_facades(
-        paths,
-        state,
-        tui,
-        config.projection.as_ref(),
-        config.feedback_facade.as_ref(),
-        event,
-    );
 }
 
 /// Translate a [`RunnerEvent`] into a [`FeedbackEvent`] when the runner
@@ -1493,6 +1560,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::plan_started(&run_id, plan_id),
             );
 
@@ -1663,6 +1731,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 }
             };
             let requested_model = dispatch_plan.model.slug.clone();
+            let prompt_diagnostics = dispatch_plan.prompt.diagnostics.clone();
             ctx.tui
                 .model_selected(plan_id, &task_id, &requested_model, "dispatcher");
             let system_prompt = dispatch_plan.prompt.system_prompt;
@@ -1677,6 +1746,12 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 playbook_ids = ?dispatch_plan.prompt.diagnostics.playbook_ids,
                 "dispatch prompt assembled"
             );
+
+            // Append replan context before prompt diagnostics so the durable
+            // event captures the actual prompt shape sent to the runtime.
+            if let Some(replan) = ctx.state.take_replan_context(plan_id, &task_id) {
+                final_prompt.push_str(&replan);
+            }
 
             // Extension: pre-inference hook.
             fire_pre_inference_hook(ctx.config, plan_id, &task_id, &requested_model, ctx.tui).await;
@@ -1703,12 +1778,35 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::task_attempt_started(&run_id, attempt_ref.clone(), &task_def.title),
             );
             emit_runner_event(
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
+                RunnerEvent::prompt_assembled(
+                    &run_id,
+                    attempt_ref.clone(),
+                    role,
+                    &requested_model,
+                    system_prompt.len(),
+                    final_prompt.len(),
+                    PromptAssemblyDiagnostics {
+                        included_sections: prompt_diagnostics.included_sections,
+                        dropped_sections: prompt_diagnostics.dropped_sections,
+                        estimated_tokens: prompt_diagnostics.estimated_tokens,
+                        knowledge_ids: prompt_diagnostics.knowledge_ids,
+                        playbook_ids: prompt_diagnostics.playbook_ids,
+                    },
+                ),
+            );
+            emit_runner_event(
+                ctx.paths,
+                ctx.state,
+                ctx.tui,
+                ctx.config,
                 RunnerEvent::agent_dispatch_started(
                     &run_id,
                     attempt_ref.clone(),
@@ -1717,11 +1815,6 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                     &requested_model,
                 ),
             );
-
-            // Append replan context if accumulated from repeated failures.
-            if let Some(replan) = ctx.state.take_replan_context(plan_id, &task_id) {
-                final_prompt.push_str(&replan);
-            }
 
             match dispatch {
                 ResolvedAgentRuntime::Cli {
@@ -1751,6 +1844,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 ctx.paths,
                                 ctx.state,
                                 ctx.tui,
+                                ctx.config,
                                 RunnerEvent::agent_dispatch_completed(
                                     &run_id,
                                     attempt_ref,
@@ -1778,6 +1872,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 ctx.paths,
                                 ctx.state,
                                 ctx.tui,
+                                ctx.config,
                                 RunnerEvent::agent_dispatch_completed(
                                     &run_id,
                                     attempt_ref.clone(),
@@ -1792,6 +1887,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                                 ctx.paths,
                                 ctx.state,
                                 ctx.tui,
+                                ctx.config,
                                 RunnerEvent::task_attempt_completed(
                                     &run_id,
                                     attempt_ref,
@@ -1839,6 +1935,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                         ctx.paths,
                         ctx.state,
                         ctx.tui,
+                        ctx.config,
                         RunnerEvent::agent_dispatch_completed(
                             &run_id,
                             attempt_ref,
@@ -1904,6 +2001,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::gate_dispatch_started(
                     &run_id,
                     attempt_ref,
@@ -1971,6 +2069,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::gate_dispatch_started(
                     &run_id,
                     attempt_ref,
@@ -2001,6 +2100,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::plan_completed(&run_id, plan_id, PlanOutcome::Succeeded, None),
             );
             save_snapshot(ctx.executor, ctx.paths, ctx.state, ctx.merge_queue);
@@ -2017,6 +2117,7 @@ async fn dispatch_action(action: &ExecutorAction, ctx: &mut RunContext<'_>) {
                 ctx.paths,
                 ctx.state,
                 ctx.tui,
+                ctx.config,
                 RunnerEvent::plan_completed(
                     &run_id,
                     plan_id,
@@ -2640,6 +2741,118 @@ fn runtime_backend(state: &RunState) -> String {
     } else {
         state.agent_provider.clone()
     }
+}
+
+// ─── Playbook Seeding ────────────────────────────────────────────────────
+
+/// Seed the playbook store with starter templates when empty.
+///
+/// This solves the chicken-and-egg problem: playbooks are normally only
+/// saved on task SUCCESS, but without playbooks the system has no guidance
+/// from the start. These seeds give the first few runs structured advice.
+async fn seed_playbooks_if_empty(workdir: &Path) {
+    use roko_learn::playbook::{Playbook, PlaybookStep, PlaybookStore};
+
+    let pb_dir = workdir.join(".roko").join("learn").join("playbooks");
+
+    // Quick check: if the directory exists and has any .json files, skip.
+    if pb_dir.exists() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&pb_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+                    debug!("playbook store already has entries, skipping seed");
+                    return;
+                }
+            }
+        }
+    }
+
+    info!("playbook store empty — seeding with starter templates");
+
+    let store = PlaybookStore::new(&pb_dir);
+
+    let seeds: Vec<Playbook> = vec![
+        {
+            let mut pb = Playbook::new(
+                "minimal-edit",
+                "Make targeted edits to existing code. Keep diffs under 30 lines. Do not create new files unless explicitly required.",
+            );
+            pb.name = "Minimal Edit".to_string();
+            pb.steps = vec![
+                PlaybookStep::new(0, "Search codebase for the relevant function/type", "search", vec!["file_found".into()]),
+                PlaybookStep::new(1, "Read the target file to understand context", "read_file", vec!["context_loaded".into()]),
+                PlaybookStep::new(2, "Make the minimal edit that satisfies the requirement", "edit_file", vec!["file_modified".into()]),
+                PlaybookStep::new(3, "Verify the change compiles", "run_command", vec!["compile_success".into()]),
+            ];
+            pb
+        },
+        {
+            let mut pb = Playbook::new(
+                "test-first",
+                "Write or update tests first, then implement. Verify tests pass before finishing.",
+            );
+            pb.name = "Test First".to_string();
+            pb.steps = vec![
+                PlaybookStep::new(0, "Identify the test file for the target module", "search", vec!["test_file_found".into()]),
+                PlaybookStep::new(1, "Write a failing test that captures the requirement", "edit_file", vec!["test_added".into()]),
+                PlaybookStep::new(2, "Implement the code to make the test pass", "edit_file", vec!["implementation_done".into()]),
+                PlaybookStep::new(3, "Run the test suite and verify all tests pass", "run_command", vec!["tests_pass".into()]),
+            ];
+            pb
+        },
+        {
+            let mut pb = Playbook::new(
+                "grep-before-write",
+                "Search the codebase before writing new code. Check if the function/type already exists.",
+            );
+            pb.name = "Grep Before Write".to_string();
+            pb.steps = vec![
+                PlaybookStep::new(0, "Search for existing implementations of the target", "search", vec!["search_complete".into()]),
+                PlaybookStep::new(1, "If found, extend or modify rather than duplicate", "read_file", vec!["existing_found".into()]),
+                PlaybookStep::new(2, "Implement changes in the existing location", "edit_file", vec!["change_applied".into()]),
+                PlaybookStep::new(3, "Verify no duplicate definitions introduced", "search", vec!["no_duplicates".into()]),
+            ];
+            pb
+        },
+        {
+            let mut pb = Playbook::new(
+                "wire-not-build",
+                "Connect existing code rather than reimplementing. Check what already exists before creating anything new.",
+            );
+            pb.name = "Wire Not Build".to_string();
+            pb.steps = vec![
+                PlaybookStep::new(0, "Search for the target struct/function in the codebase", "search", vec!["target_found".into()]),
+                PlaybookStep::new(1, "Trace the call chain to find where it should be wired", "read_file", vec!["call_site_found".into()]),
+                PlaybookStep::new(2, "Add the function call or import at the correct call site", "edit_file", vec!["wired".into()]),
+                PlaybookStep::new(3, "Verify the feature is accessible via CLI or API", "run_command", vec!["feature_reachable".into()]),
+            ];
+            pb
+        },
+        {
+            let mut pb = Playbook::new(
+                "compile-check-loop",
+                "After every edit, run cargo check. Fix errors immediately before proceeding to the next change.",
+            );
+            pb.name = "Compile Check Loop".to_string();
+            pb.steps = vec![
+                PlaybookStep::new(0, "Make a single logical change", "edit_file", vec!["change_made".into()]),
+                PlaybookStep::new(1, "Run cargo check to verify compilation", "run_command", vec!["compile_success".into()]),
+                PlaybookStep::new(2, "If errors, fix them before proceeding", "edit_file", vec!["errors_fixed".into()]),
+                PlaybookStep::new(3, "Repeat until all changes are applied and compiling", "run_command", vec!["all_clean".into()]),
+            ];
+            pb
+        },
+    ];
+
+    for pb in &seeds {
+        if let Err(err) = store.save(pb).await {
+            warn!(playbook = %pb.id, error = %err, "failed to seed playbook");
+        } else {
+            debug!(playbook = %pb.id, "seeded playbook");
+        }
+    }
+
+    info!(count = seeds.len(), "playbook store seeded with starter templates");
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

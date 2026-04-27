@@ -398,6 +398,9 @@ Examples:
         #[command(subcommand)]
         cmd: BenchCmd,
     },
+    /// Demo setup and management.
+    #[command(subcommand)]
+    Demo(DemoCmd),
 
     // ── Configuration (providers, models, subscriptions, etc.) ──────
     /// Manage global and project config, providers, models, subscriptions, plugins.
@@ -840,7 +843,36 @@ enum LearnCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum DemoCmd {
+    /// Build release binary and prepare workspace for demos.
+    Setup {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+    /// Pre-warm the LLM response cache with demo prompts.
+    Warm {
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum BenchCmd {
+    /// Run a comparative benchmark: naive vs roko-optimized.
+    #[command(after_help = "\
+Examples:
+  roko bench demo                     Run with simulated data
+  roko bench demo --real              Run with real LLM dispatch")]
+    Demo {
+        /// Use real LLM dispatch instead of simulated results.
+        #[arg(long)]
+        real: bool,
+        /// Working directory (default: cwd).
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+    },
     /// Run a native SWE-bench-style proxy batch.
     #[command(after_help = "\
 Examples:
@@ -1912,6 +1944,23 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Learn { cmd } => commands::learn::dispatch_learn(cli, cmd).await,
         Command::Job { cmd } => commands::job::cmd_job(cli, cmd).await,
         Command::Bench { cmd } => commands::bench::cmd_bench(cli, cmd).await,
+        Command::Demo(cmd) => {
+            let workdir = match &cmd {
+                DemoCmd::Setup { workdir } | DemoCmd::Warm { workdir } => {
+                    workdir.clone().unwrap_or_else(|| resolve_workdir(cli))
+                }
+            };
+            match cmd {
+                DemoCmd::Setup { .. } => {
+                    roko_cli::demo_cmd::cmd_demo_setup(&workdir)?;
+                    Ok(EXIT_SUCCESS)
+                }
+                DemoCmd::Warm { .. } => {
+                    roko_cli::demo_cmd::cmd_demo_warm(&workdir).await?;
+                    Ok(EXIT_SUCCESS)
+                }
+            }
+        }
         Command::Config { cmd } => {
             match cmd {
                 ConfigCmd::Experiments { cmd: exp_cmd } => {
@@ -2056,14 +2105,12 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             if roko_cli::inline::should_use_inline() {
                 let theme = roko_cli::tui::Theme::from_env();
                 let id_display = run_id.as_deref().unwrap_or("latest");
-                let lines = vec![
-                    roko_cli::inline::styled::section_start(
-                        &theme,
-                        "resume",
-                        id_display,
-                        Some(&format!("from {}", snapshot.display())),
-                    ),
-                ];
+                let lines = vec![roko_cli::inline::styled::section_start(
+                    &theme,
+                    "resume",
+                    id_display,
+                    Some(&format!("from {}", snapshot.display())),
+                )];
                 roko_cli::inline::plaintext::print_plain(&lines);
             }
 

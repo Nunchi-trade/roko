@@ -76,6 +76,7 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
+pub mod terminal;
 pub mod truth_map;
 
 pub use crate::routes::reload_config_from_disk;
