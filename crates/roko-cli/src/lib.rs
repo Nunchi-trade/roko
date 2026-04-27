@@ -3,6 +3,7 @@
 //! This crate wires Roko's primitives (Store, Compose, Agent, Verify,
 //! React) into a one-shot CLI loop. It does **not** implement a plan runner
 //! or DAG executor — it drives a single prompt through the universal loop
+#![allow(dead_code, unused_imports, unused_variables)]
 //! and writes the resulting signals to disk.
 //!
 //! See [`run_once`] for the core loop and [`Config`] for the `roko.toml`
@@ -33,6 +34,7 @@ pub mod agent_episode;
 pub mod agent_exec;
 pub mod agent_spawn;
 pub mod auth;
+pub mod auth_detect;
 pub mod bench;
 pub mod bench_demo;
 pub mod chain_handler;
@@ -48,6 +50,7 @@ pub mod custody;
 pub mod daemon;
 pub mod deployment;
 pub mod dispatch;
+pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
 pub mod demo_cmd;
@@ -89,6 +92,7 @@ pub mod surface_inventory;
 pub mod task_helpers;
 pub mod task_parser;
 pub mod tui;
+pub mod unified;
 pub mod vision_loop;
 pub mod worker;
 pub mod workspace_paths;

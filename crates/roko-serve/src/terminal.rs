@@ -30,7 +30,7 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 
 /// A managed terminal session. Keeps the master PTY handle for resizing.
-struct PtySession {
+pub(crate) struct PtySession {
     /// PTY writer (send keystrokes to the shell).
     writer: Box<dyn Write + Send>,
     /// Master PTY handle — kept alive for resize support.

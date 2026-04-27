@@ -24,6 +24,7 @@ pub(crate) fn cmd_explain(topic: &str, depth: u8) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn cmd_repl(cli: &Cli) -> Result<i32> {
     let session_id = cli
         .resume

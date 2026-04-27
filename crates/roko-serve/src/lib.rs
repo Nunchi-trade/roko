@@ -3,6 +3,7 @@
 //! The [`ServerBuilder`] type is the main entrypoint for embedding the HTTP
 //! server. [`run_server`] remains as a convenience wrapper for the current
 //! CLI flow.
+#![allow(missing_docs)]
 #![allow(
     dead_code,
     clippy::assigning_clones,
@@ -264,16 +265,41 @@ impl ServerBuilder {
         info!("workdir: {}", self.config.workdir.display());
 
         // Spawn chain-watcher if chain.rpc_url is configured (best-effort).
+        // Redirect all subprocess output to .roko/chain-watcher.log to prevent
+        // flooding the terminal when serve runs in the background.
         if let Some(rpc_url) = self.config.roko_config.chain.rpc_url.as_deref() {
             let rpc = rpc_url.to_string();
+            let log_path = self.config.workdir.join(".roko").join("chain-watcher.log");
             tokio::spawn(async move {
                 let watcher = std::env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.join("roko-chain-watcher")))
                     .unwrap_or_else(|| std::path::PathBuf::from("roko-chain-watcher"));
+
+                // Open log file for subprocess output (fall back to /dev/null).
+                let (stdout_target, stderr_target) = if let Ok(f) =
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                {
+                    let f2 = f.try_clone().unwrap_or_else(|_| {
+                        std::fs::File::open("/dev/null").expect("/dev/null")
+                    });
+                    (std::process::Stdio::from(f), std::process::Stdio::from(f2))
+                } else {
+                    (
+                        std::process::Stdio::null(),
+                        std::process::Stdio::null(),
+                    )
+                };
+
                 match tokio::process::Command::new(&watcher)
                     .arg("--rpc-url")
                     .arg(&rpc)
+                    .env("ROKO_LOG", "warn")
+                    .stdout(stdout_target)
+                    .stderr(stderr_target)
                     .status()
                     .await
                 {

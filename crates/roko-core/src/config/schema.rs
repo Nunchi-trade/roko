@@ -315,7 +315,6 @@ impl RokoConfig {
             AgentBackend::Codex | AgentBackend::OpenAi | AgentBackend::Ollama => {
                 ProviderKind::OpenAiCompat.label()
             }
-            AgentBackend::Perplexity => ProviderKind::PerplexityApi.label(),
         };
         let context_window = match tool_profile.preferred {
             ToolFormat::AnthropicBlocks => 200_000,
