@@ -38,6 +38,17 @@ impl AcpConfig {
     pub fn log_file(&self) -> &Path {
         &self.log_file
     }
+
+    /// Load the workspace `RokoConfig` from `workdir/roko.toml`.
+    pub fn load_roko_config(&self) -> roko_core::config::schema::RokoConfig {
+        match roko_core::config::load_config(&self.workdir) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load roko.toml, using defaults");
+                roko_core::config::schema::RokoConfig::default()
+            }
+        }
+    }
 }
 
 impl Default for AcpConfig {

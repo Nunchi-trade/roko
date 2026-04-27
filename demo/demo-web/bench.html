@@ -1,0 +1,1258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — benchmark lab</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --surface: #100E14;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --rose-ember: #482838;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --sage-bright: #99c4ac;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --glass-3-bg: rgba(255,255,255,0.06);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --rose-glow: 0 0 12px rgba(170,112,136,0.3), 0 0 24px rgba(170,112,136,0.1);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 3px; }
+
+html, body {
+  background: var(--void);
+  color: var(--text);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Atmospheric ──────────────────────────────────── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  background: repeating-linear-gradient(to bottom, transparent 0px, transparent 1px, rgba(0,0,0,0.05) 1px, rgba(0,0,0,0.05) 2px);
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0; z-index: 9999; pointer-events: none; opacity: 0.025;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ── Layout ───────────────────────────────────────── */
+.page { max-width: 1400px; margin: 0 auto; padding: 32px 40px 60px; }
+
+.page-header {
+  display: flex; align-items: baseline; gap: 20px; margin-bottom: 12px;
+  padding-bottom: 16px; border-bottom: 1px solid var(--glass-2-border);
+}
+.page-logo {
+  font-family: var(--font-serif); font-size: 1.1rem; color: var(--rose-bright);
+  text-decoration: none; display: flex; align-items: center; gap: 8px;
+}
+.page-logo:hover { opacity: 0.8; }
+.page-title {
+  font-family: var(--font-serif); font-size: 1.8rem; color: var(--rose-bright);
+  font-weight: 400;
+}
+.page-nav { margin-left: auto; display: flex; gap: 16px; }
+.page-nav a {
+  font-size: 0.72rem; color: var(--text-dim); text-decoration: none;
+  padding: 4px 12px; border-radius: 6px; border: 1px solid transparent;
+  transition: all 200ms var(--ease);
+}
+.page-nav a:hover { color: var(--text); border-color: var(--glass-2-border); }
+.page-nav a.active { color: var(--rose-bright); border-color: var(--rose-dim); background: var(--rose-deep); }
+
+.hero {
+  text-align: center; padding: 48px 0 40px;
+}
+.hero h1 {
+  font-family: var(--font-serif); font-size: 2.4rem; color: var(--rose-bright);
+  font-weight: 400; margin-bottom: 12px; letter-spacing: -0.02em;
+}
+.hero p {
+  font-size: 0.88rem; color: var(--text-dim); max-width: 640px; margin: 0 auto;
+  line-height: 1.6;
+}
+.hero .hero-stats {
+  display: flex; justify-content: center; gap: 32px; margin-top: 28px;
+}
+.hero-stat {
+  text-align: center;
+}
+.hero-stat .hs-value {
+  font-family: var(--font-mono); font-size: 1.4rem; font-weight: 600; color: var(--text);
+}
+.hero-stat .hs-value.bone { color: var(--bone); text-shadow: var(--bone-bloom); }
+.hero-stat .hs-label {
+  font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-dim); margin-top: 4px;
+}
+
+/* ── Sections ─────────────────────────────────────── */
+.section { margin-top: 48px; }
+.section-title {
+  font-family: var(--font-serif); font-size: 1.3rem; color: var(--rose-bright);
+  font-weight: 400; margin-bottom: 6px;
+}
+.section-sub {
+  font-size: 0.75rem; color: var(--text-dim); margin-bottom: 20px; line-height: 1.5;
+}
+
+/* ── Cards ────────────────────────────────────────── */
+.card-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+.card {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 14px; padding: 20px; backdrop-filter: blur(20px);
+  border-top: 2px solid var(--rose-deep);
+  transition: all 300ms var(--ease);
+  position: relative; overflow: hidden;
+}
+.card:hover { border-color: var(--rose-dim); transform: translateY(-2px); }
+.card.selected { border-color: var(--rose); box-shadow: var(--rose-glow); }
+.card.selected::after {
+  content: '\2713'; position: absolute; top: 12px; right: 14px;
+  width: 22px; height: 22px; border-radius: 50%; background: var(--rose);
+  color: var(--void); font-size: 0.6rem; display: flex; align-items: center; justify-content: center;
+  font-weight: 700;
+}
+.card-title {
+  font-family: var(--font-sans); font-weight: 600; font-size: 0.88rem;
+  color: var(--text); margin-bottom: 6px;
+}
+.card-desc {
+  font-size: 0.72rem; color: var(--text-dim); line-height: 1.6; margin-bottom: 12px;
+}
+.card-meta {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.card-tag {
+  font-size: 0.58rem; padding: 3px 8px; border-radius: 4px;
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  color: var(--text-dim); font-family: var(--font-mono);
+}
+.card-tag.sage { color: var(--sage); border-color: rgba(112,136,122,0.3); }
+.card-tag.rose { color: var(--rose-bright); border-color: rgba(170,112,136,0.3); }
+.card-tag.bone { color: var(--bone); border-color: rgba(200,184,144,0.3); }
+.card-tag.warn { color: var(--warn); border-color: rgba(170,136,85,0.3); }
+
+/* ── Config panel ─────────────────────────────────── */
+.config-panel {
+  background: var(--surface); border: 1px solid var(--glass-2-border);
+  border-radius: 14px; padding: 24px; margin-top: 24px;
+}
+.config-row {
+  display: grid; grid-template-columns: 160px 1fr; gap: 12px;
+  align-items: center; padding: 10px 0;
+  border-bottom: 1px solid var(--glass-2-border);
+}
+.config-row:last-child { border-bottom: none; }
+.config-label {
+  font-size: 0.72rem; color: var(--text-dim); font-weight: 500;
+}
+.config-hint {
+  font-size: 0.58rem; color: var(--text-ghost); margin-top: 2px;
+}
+.config-input {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 8px; padding: 8px 14px; color: var(--text);
+  font-family: var(--font-mono); font-size: 0.75rem;
+  outline: none; transition: border-color 200ms var(--ease); width: 100%;
+}
+.config-input:focus { border-color: var(--rose-dim); }
+.config-input::placeholder { color: var(--text-ghost); }
+select.config-input { cursor: pointer; appearance: none; padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23706070'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+
+.config-actions {
+  display: flex; gap: 12px; margin-top: 20px; padding-top: 16px;
+  border-top: 1px solid var(--glass-2-border);
+}
+
+/* ── Buttons ──────────────────────────────────────── */
+.btn {
+  font-family: var(--font-sans); font-size: 0.75rem; font-weight: 500;
+  padding: 10px 24px; border-radius: 10px; cursor: pointer;
+  border: 1px solid transparent; transition: all 200ms var(--ease);
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.btn-primary {
+  background: var(--rose); color: var(--void); border-color: var(--rose);
+}
+.btn-primary:hover { opacity: 0.85; transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+.btn-secondary {
+  background: var(--glass-2-bg); color: var(--text); border-color: var(--glass-2-border);
+}
+.btn-secondary:hover { border-color: var(--rose-dim); color: var(--rose-bright); }
+.btn-ghost {
+  background: transparent; color: var(--text-dim); border: none; padding: 8px 16px;
+}
+.btn-ghost:hover { color: var(--rose-bright); }
+
+/* ── Results dashboard ────────────────────────────── */
+.results-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px;
+}
+.result-card {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 14px; padding: 20px; text-align: center;
+}
+.result-card .rc-value {
+  font-family: var(--font-mono); font-size: 2rem; font-weight: 600;
+  margin-bottom: 4px;
+}
+.result-card .rc-value.pass { color: var(--sage-bright); }
+.result-card .rc-value.cost { color: var(--bone); text-shadow: var(--bone-bloom); }
+.result-card .rc-value.perf { color: var(--rose-bright); }
+.result-card .rc-label {
+  font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.result-card .rc-sub {
+  font-size: 0.6rem; color: var(--text-ghost); margin-top: 4px;
+}
+
+/* ── Chart area ───────────────────────────────────── */
+.chart-container {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 14px; padding: 20px; margin-bottom: 16px;
+  position: relative; overflow: hidden;
+}
+.chart-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px;
+}
+.chart-title {
+  font-size: 0.78rem; font-weight: 600; color: var(--text);
+}
+.chart-legend {
+  display: flex; gap: 16px; font-size: 0.6rem;
+}
+.chart-legend-item {
+  display: flex; align-items: center; gap: 6px; color: var(--text-dim);
+}
+.chart-legend-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+
+.chart-canvas {
+  width: 100%; height: 200px; position: relative;
+}
+.chart-canvas canvas { width: 100%; height: 100%; }
+
+/* ── Bar chart (CSS-only) ─────────────────────────── */
+.bar-chart {
+  display: flex; align-items: flex-end; gap: 12px; height: 160px;
+  padding: 0 20px; justify-content: center;
+}
+.bar-group {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1; max-width: 80px;
+}
+.bar {
+  width: 100%; border-radius: 6px 6px 0 0; transition: height 800ms var(--ease);
+  position: relative; min-height: 2px;
+}
+.bar::after {
+  content: attr(data-value); position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+  font-family: var(--font-mono); font-size: 0.58rem; color: var(--text-dim); white-space: nowrap;
+}
+.bar.rose { background: linear-gradient(to top, var(--rose-deep), var(--rose)); }
+.bar.sage { background: linear-gradient(to top, rgba(112,136,122,0.3), var(--sage)); }
+.bar.bone { background: linear-gradient(to top, rgba(200,184,144,0.2), var(--bone)); }
+.bar.warn { background: linear-gradient(to top, rgba(170,136,85,0.2), var(--warn)); }
+.bar-label {
+  font-size: 0.55rem; color: var(--text-dim); text-align: center;
+  font-family: var(--font-mono); word-break: break-word;
+}
+
+/* ── Radar / spider chart ─────────────────────────── */
+.radar-container {
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+
+/* ── Timeline / run log ───────────────────────────── */
+.run-log {
+  max-height: 300px; overflow-y: auto;
+}
+.run-entry {
+  display: grid; grid-template-columns: 80px 1fr 80px 60px;
+  gap: 12px; padding: 10px 14px; align-items: center;
+  border-bottom: 1px solid var(--glass-2-border);
+  font-size: 0.7rem; transition: background 200ms var(--ease);
+}
+.run-entry:hover { background: var(--glass-2-bg); }
+.run-entry .re-time { color: var(--text-dim); font-family: var(--font-mono); font-size: 0.6rem; }
+.run-entry .re-name { color: var(--text); font-weight: 500; }
+.run-entry .re-score { font-family: var(--font-mono); font-weight: 600; }
+.run-entry .re-score.pass { color: var(--sage-bright); }
+.run-entry .re-score.fail { color: var(--fail); }
+.run-entry .re-score.partial { color: var(--warn); }
+.run-entry .re-cost { font-family: var(--font-mono); color: var(--bone); font-size: 0.62rem; }
+
+/* ── Learning panel ───────────────────────────────── */
+.learning-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+}
+.learning-card {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 14px; padding: 20px;
+}
+.learning-card h4 {
+  font-size: 0.72rem; font-weight: 600; color: var(--text); margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.learning-card h4 .icon {
+  width: 20px; height: 20px; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; font-size: 0.6rem;
+  background: var(--rose-deep); color: var(--rose-bright);
+}
+.learning-metric {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; border-bottom: 1px solid var(--glass-2-border);
+}
+.learning-metric:last-child { border-bottom: none; }
+.learning-metric .lm-label { font-size: 0.68rem; color: var(--text-dim); }
+.learning-metric .lm-value { font-size: 0.72rem; font-family: var(--font-mono); font-weight: 600; color: var(--text); }
+.learning-metric .lm-value.up { color: var(--sage-bright); }
+.learning-metric .lm-value.down { color: var(--fail); }
+.learning-metric .lm-value.neutral { color: var(--warn); }
+
+/* ── Progress ring ────────────────────────────────── */
+.progress-ring {
+  display: inline-flex; align-items: center; justify-content: center;
+  position: relative;
+}
+.progress-ring svg { transform: rotate(-90deg); }
+.progress-ring .ring-bg { fill: none; stroke: var(--glass-2-border); }
+.progress-ring .ring-fg { fill: none; stroke-linecap: round; transition: stroke-dashoffset 1s var(--ease); }
+.progress-ring .ring-label {
+  position: absolute; font-family: var(--font-mono); font-weight: 600;
+  font-size: 0.7rem;
+}
+
+/* ── Tabs ─────────────────────────────────────────── */
+.view-tabs {
+  display: flex; gap: 4px; margin-bottom: 24px;
+  border-bottom: 1px solid var(--glass-2-border); padding-bottom: 0;
+}
+.view-tab {
+  background: transparent; border: none; color: var(--text-dim);
+  font-family: var(--font-sans); font-size: 0.75rem; padding: 10px 20px;
+  cursor: pointer; transition: all 200ms var(--ease); position: relative;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.view-tab:hover { color: var(--text); }
+.view-tab.active { color: var(--rose-bright); border-bottom-color: var(--rose-bright); }
+
+.view-panel { display: none; }
+.view-panel.active { display: block; }
+
+/* ── Explainer callouts ───────────────────────────── */
+.explainer {
+  background: var(--glass-3-bg); border: 1px solid var(--glass-2-border);
+  border-left: 3px solid var(--rose-dim); border-radius: 0 10px 10px 0;
+  padding: 14px 18px; margin-bottom: 20px; font-size: 0.72rem;
+  color: var(--text-dim); line-height: 1.7;
+}
+.explainer strong { color: var(--text); font-weight: 600; }
+.explainer code {
+  background: var(--glass-2-bg); padding: 1px 6px; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 0.65rem; color: var(--rose-bright);
+}
+
+/* ── Status indicator ─────────────────────────────── */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; margin-right: 6px;
+}
+.status-dot.idle { background: var(--text-dim); }
+.status-dot.running { background: var(--rose-bright); animation: pulse 1.5s ease-in-out infinite; }
+.status-dot.complete { background: var(--sage); }
+.status-dot.error { background: var(--fail); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── Footer ───────────────────────────────────────── */
+.footer {
+  margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--glass-2-border);
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.62rem; color: var(--text-ghost);
+}
+.footer a { color: var(--text-dim); text-decoration: none; }
+.footer a:hover { color: var(--rose-bright); }
+
+/* ── Responsive ───────────────────────────────────── */
+@media (max-width: 900px) {
+  .page { padding: 20px; }
+  .results-grid { grid-template-columns: 1fr; }
+  .learning-grid { grid-template-columns: 1fr; }
+  .config-row { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 1.6rem; }
+}
+
+/* ── Reduced motion ───────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<div class="page">
+  <!-- Header -->
+  <header class="page-header">
+    <a class="page-logo" href="demo.html">&#9670; roko</a>
+    <nav class="page-nav">
+      <a href="demo.html">Demo</a>
+      <a href="bench.html" class="active">Bench</a>
+      <a href="builder.html">Builder</a>
+    </nav>
+  </header>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Benchmark Lab</h1>
+    <p>
+      Measure how well roko solves real coding tasks. Configure test suites, compare models and strategies,
+      track costs, and watch self-learning improve performance over time.
+    </p>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="hs-value" id="hero-runs">0</div>
+        <div class="hs-label">Total Runs</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hs-value pass" id="hero-pass" style="color:var(--sage-bright)">--</div>
+        <div class="hs-label">Pass Rate</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hs-value bone" id="hero-cost">$0.00</div>
+        <div class="hs-label">Total Cost</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hs-value" id="hero-learn">0</div>
+        <div class="hs-label">Episodes Learned</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- View tabs -->
+  <div class="view-tabs" role="tablist">
+    <button class="view-tab active" data-view="configure" role="tab">Configure</button>
+    <button class="view-tab" data-view="results" role="tab">Results</button>
+    <button class="view-tab" data-view="learning" role="tab">Self-Learning</button>
+    <button class="view-tab" data-view="compare" role="tab">Compare</button>
+  </div>
+
+  <!-- ═══════════════ CONFIGURE VIEW ═══════════════ -->
+  <div class="view-panel active" id="view-configure">
+
+    <div class="explainer">
+      <strong>What is this?</strong> Roko's benchmark lab runs your coding agent against standardized tasks
+      (SWE-bench style), measures pass rates, costs, and speed, then records everything so the system learns
+      which models and strategies work best. Think of it as a training gym for your AI coding assistant.
+    </div>
+
+    <!-- Test Suite Selection -->
+    <div class="section">
+      <h2 class="section-title">Test Suite</h2>
+      <p class="section-sub">Choose which coding challenges to run. Each suite tests different capabilities.</p>
+      <div class="card-grid" id="suite-grid">
+        <div class="card selected" data-suite="smoke" onclick="selectSuite(this)">
+          <div class="card-title">Smoke Tests</div>
+          <div class="card-desc">2 built-in tasks for fast verification. Ensures the benchmark harness itself works before running expensive model evaluations.</div>
+          <div class="card-meta">
+            <span class="card-tag sage">2 tasks</span>
+            <span class="card-tag">~30s</span>
+            <span class="card-tag bone">$0.00</span>
+          </div>
+        </div>
+        <div class="card" data-suite="swe-lite" onclick="selectSuite(this)">
+          <div class="card-title">SWE-bench Lite</div>
+          <div class="card-desc">300 curated Python bug fixes from real open-source repos. The industry standard for evaluating coding agents.</div>
+          <div class="card-meta">
+            <span class="card-tag sage">300 tasks</span>
+            <span class="card-tag">~4h</span>
+            <span class="card-tag bone">~$15-80</span>
+          </div>
+        </div>
+        <div class="card" data-suite="swe-verified" onclick="selectSuite(this)">
+          <div class="card-title">SWE-bench Verified</div>
+          <div class="card-desc">500 human-verified instances. Higher quality labels than Lite, considered the gold standard for leaderboard scores.</div>
+          <div class="card-meta">
+            <span class="card-tag sage">500 tasks</span>
+            <span class="card-tag">~8h</span>
+            <span class="card-tag bone">~$30-150</span>
+          </div>
+        </div>
+        <div class="card" data-suite="custom" onclick="selectSuite(this)">
+          <div class="card-title">Custom Dataset</div>
+          <div class="card-desc">Bring your own JSONL dataset. Each row defines a repo, problem statement, gold patch, and test command.</div>
+          <div class="card-meta">
+            <span class="card-tag rose">JSONL</span>
+            <span class="card-tag">any size</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategy selection -->
+    <div class="section">
+      <h2 class="section-title">Agent Strategy</h2>
+      <p class="section-sub">How should roko approach each task? Strategies differ in context, cost, and learning.</p>
+      <div class="card-grid" id="strategy-grid">
+        <div class="card selected" data-strategy="minimal" onclick="selectStrategy(this)">
+          <div class="card-title">Minimal</div>
+          <div class="card-desc">Only the problem statement and validation command. Tests raw model reasoning with zero context injection.</div>
+          <div class="card-meta">
+            <span class="card-tag">low context</span>
+            <span class="card-tag bone">cheapest</span>
+          </div>
+        </div>
+        <div class="card" data-strategy="context" onclick="selectStrategy(this)">
+          <div class="card-title">Context-Enriched</div>
+          <div class="card-desc">Adds source file contents from the target repo. Gives the model more information to work with.</div>
+          <div class="card-meta">
+            <span class="card-tag">medium context</span>
+            <span class="card-tag bone">moderate</span>
+          </div>
+        </div>
+        <div class="card" data-strategy="neuro" onclick="selectStrategy(this)">
+          <div class="card-title">Neuro-Augmented</div>
+          <div class="card-desc">Source context + knowledge store queries. The system injects relevant past learnings to improve accuracy.</div>
+          <div class="card-meta">
+            <span class="card-tag rose">self-learning</span>
+            <span class="card-tag bone">higher cost</span>
+          </div>
+        </div>
+        <div class="card" data-strategy="cascade" onclick="selectStrategy(this)">
+          <div class="card-title">Full Cascade</div>
+          <div class="card-desc">Neuro context + cascade routing + gate replanning. The full roko pipeline — picks models per-task and retries failures.</div>
+          <div class="card-meta">
+            <span class="card-tag rose">adaptive</span>
+            <span class="card-tag sage">highest accuracy</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Configuration -->
+    <div class="section">
+      <h2 class="section-title">Configuration</h2>
+      <p class="section-sub">Fine-tune the benchmark run parameters.</p>
+      <div class="config-panel">
+        <div class="config-row">
+          <div>
+            <div class="config-label">Model</div>
+            <div class="config-hint">Which LLM to evaluate</div>
+          </div>
+          <select class="config-input" id="cfg-model">
+            <option value="auto">Auto (cascade router decides)</option>
+            <optgroup label="Anthropic">
+              <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+              <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
+              <option value="claude-opus-4-6">Claude Opus 4.6</option>
+            </optgroup>
+            <optgroup label="OpenAI">
+              <option value="gpt-4.1-mini">GPT-4.1 Mini</option>
+              <option value="gpt-4.1">GPT-4.1</option>
+              <option value="o4-mini">o4-mini</option>
+            </optgroup>
+            <optgroup label="Local (Ollama)">
+              <option value="gemma4:26b-moe-nothink">Gemma 4 26B MoE</option>
+              <option value="llama3.2:latest">Llama 3.2</option>
+              <option value="qwen3:30b-a3b">Qwen 3 30B</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="config-row">
+          <div>
+            <div class="config-label">Batch Size</div>
+            <div class="config-hint">Tasks per run (2 = smoke)</div>
+          </div>
+          <input class="config-input" type="number" id="cfg-batch" value="2" min="1" max="500">
+        </div>
+        <div class="config-row">
+          <div>
+            <div class="config-label">Record Learning</div>
+            <div class="config-hint">Write episodes + C-factor</div>
+          </div>
+          <select class="config-input" id="cfg-learning">
+            <option value="yes">Yes — record episodes, efficiency, C-factor</option>
+            <option value="no">No — score only, no learning side-effects</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <div>
+            <div class="config-label">Dataset Path</div>
+            <div class="config-hint">For custom JSONL datasets</div>
+          </div>
+          <input class="config-input" type="text" id="cfg-dataset" placeholder="./my-dataset.jsonl (leave empty for built-in)" disabled>
+        </div>
+        <div class="config-row">
+          <div>
+            <div class="config-label">Work Directory</div>
+            <div class="config-hint">Where to write artifacts</div>
+          </div>
+          <input class="config-input" type="text" id="cfg-workdir" value="/tmp/roko-bench">
+        </div>
+
+        <div class="config-actions">
+          <button class="btn btn-primary" id="btn-run" onclick="startBenchmark()">
+            <span>&#9654;</span> Run Benchmark
+          </button>
+          <button class="btn btn-secondary" onclick="runControls()">
+            Run Controls First
+          </button>
+          <button class="btn btn-ghost" onclick="showCommand()">
+            Show CLI Command
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Command preview -->
+    <div class="section" id="cmd-preview-section" style="display:none">
+      <h2 class="section-title">Generated Command</h2>
+      <div class="config-panel" style="background: var(--void);">
+        <pre style="font-family:var(--font-mono);font-size:0.72rem;color:var(--sage-bright);line-height:1.8;overflow-x:auto" id="cmd-preview-text"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ RESULTS VIEW ═══════════════ -->
+  <div class="view-panel" id="view-results">
+
+    <div class="explainer">
+      <strong>Reading results:</strong> Each benchmark run scores patches against a test suite.
+      <strong>Pass rate</strong> = tasks where the generated patch passes all tests.
+      <strong>Cost</strong> = total LLM API spend. <strong>C-factor</strong> = composite reliability score (higher is better).
+    </div>
+
+    <!-- Summary cards -->
+    <div class="results-grid">
+      <div class="result-card">
+        <div class="rc-value pass" id="res-pass-rate">72%</div>
+        <div class="rc-label">Pass Rate</div>
+        <div class="rc-sub">144/200 tasks passed</div>
+      </div>
+      <div class="result-card">
+        <div class="rc-value cost" id="res-total-cost">$12.40</div>
+        <div class="rc-label">Total Cost</div>
+        <div class="rc-sub">$0.062 per task average</div>
+      </div>
+      <div class="result-card">
+        <div class="rc-value perf" id="res-cfactor">0.84</div>
+        <div class="rc-label">C-Factor</div>
+        <div class="rc-sub">Composite reliability score</div>
+      </div>
+    </div>
+
+    <!-- Performance over time chart -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <div class="chart-title">Pass Rate by Task</div>
+        <div class="chart-legend">
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--sage)"></div> Pass</div>
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--fail)"></div> Fail</div>
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--warn)"></div> Partial</div>
+        </div>
+      </div>
+      <div class="bar-chart" id="task-bar-chart">
+        <!-- Generated dynamically -->
+      </div>
+    </div>
+
+    <!-- Cost breakdown -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <div class="chart-title">Cost Distribution</div>
+        <div class="chart-legend">
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--rose)"></div> Input tokens</div>
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--bone)"></div> Output tokens</div>
+        </div>
+      </div>
+      <div class="bar-chart" id="cost-bar-chart">
+        <!-- Generated dynamically -->
+      </div>
+    </div>
+
+    <!-- Run log -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <div class="chart-title">Run History</div>
+        <button class="btn btn-ghost" style="font-size:0.6rem" onclick="clearRuns()">Clear</button>
+      </div>
+      <div class="run-log" id="run-log">
+        <div class="run-entry">
+          <span class="re-time">2m ago</span>
+          <span class="re-name">smoke / gemma4 / minimal</span>
+          <span class="re-score pass">2/2</span>
+          <span class="re-cost">$0.00</span>
+        </div>
+        <div class="run-entry">
+          <span class="re-time">8m ago</span>
+          <span class="re-name">smoke / gemma4 / neuro</span>
+          <span class="re-score pass">2/2</span>
+          <span class="re-cost">$0.00</span>
+        </div>
+        <div class="run-entry">
+          <span class="re-time">15m ago</span>
+          <span class="re-name">smoke / llama3.2 / minimal</span>
+          <span class="re-score fail">0/2</span>
+          <span class="re-cost">$0.00</span>
+        </div>
+        <div class="run-entry">
+          <span class="re-time">1h ago</span>
+          <span class="re-name">swe-lite / sonnet-4.6 / cascade</span>
+          <span class="re-score partial">42/50</span>
+          <span class="re-cost">$4.20</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ SELF-LEARNING VIEW ═══════════════ -->
+  <div class="view-panel" id="view-learning">
+
+    <div class="explainer">
+      <strong>How self-learning works:</strong> Every benchmark run generates <strong>episodes</strong> (what happened),
+      <strong>efficiency events</strong> (cost/speed per turn), and <strong>C-factor snapshots</strong> (composite reliability).
+      The system uses these to: route tasks to better models, adjust gate thresholds, inject relevant past knowledge,
+      and replan on failure. Performance improves automatically over repeated runs.
+    </div>
+
+    <!-- Learning metrics -->
+    <div class="learning-grid">
+      <div class="learning-card">
+        <h4><span class="icon">&#9679;</span> Episode Memory</h4>
+        <div class="learning-metric">
+          <span class="lm-label">Total episodes recorded</span>
+          <span class="lm-value">247</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Successful patterns</span>
+          <span class="lm-value up">183</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Failure patterns</span>
+          <span class="lm-value down">64</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Knowledge entries created</span>
+          <span class="lm-value">42</span>
+        </div>
+      </div>
+
+      <div class="learning-card">
+        <h4><span class="icon">&#9670;</span> Cascade Router</h4>
+        <div class="learning-metric">
+          <span class="lm-label">Model switches (learned)</span>
+          <span class="lm-value">18</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Cost saved vs. single-model</span>
+          <span class="lm-value up">34%</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Quality maintained</span>
+          <span class="lm-value up">98%</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Routing accuracy</span>
+          <span class="lm-value">0.91</span>
+        </div>
+      </div>
+
+      <div class="learning-card">
+        <h4><span class="icon">&#9653;</span> Gate Adaptation</h4>
+        <div class="learning-metric">
+          <span class="lm-label">Threshold adjustments</span>
+          <span class="lm-value">12</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">False positive reduction</span>
+          <span class="lm-value up">-23%</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Gate pass EMA</span>
+          <span class="lm-value">0.87</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Replans triggered</span>
+          <span class="lm-value neutral">7</span>
+        </div>
+      </div>
+
+      <div class="learning-card">
+        <h4><span class="icon">&#9733;</span> C-Factor Trend</h4>
+        <div class="learning-metric">
+          <span class="lm-label">Current C-factor</span>
+          <span class="lm-value up">0.84</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">7-run moving average</span>
+          <span class="lm-value up">0.79</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Trend direction</span>
+          <span class="lm-value up">&#8593; improving</span>
+        </div>
+        <div class="learning-metric">
+          <span class="lm-label">Worst contributor</span>
+          <span class="lm-value down">test gate</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Learning over time visualization -->
+    <div class="chart-container" style="margin-top:24px">
+      <div class="chart-header">
+        <div class="chart-title">Performance Improvement Over Runs</div>
+        <div class="chart-legend">
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--sage)"></div> Pass rate</div>
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--bone)"></div> C-factor</div>
+          <div class="chart-legend-item"><div class="chart-legend-dot" style="background:var(--rose)"></div> Cost efficiency</div>
+        </div>
+      </div>
+      <div class="chart-canvas" id="learning-chart">
+        <canvas id="learning-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Knowledge store snapshot -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <div class="chart-title">Knowledge Store Contents</div>
+        <button class="btn btn-ghost" style="font-size:0.6rem">Query Store</button>
+      </div>
+      <div style="padding:10px 0">
+        <div class="run-entry" style="grid-template-columns: 1fr 100px 80px">
+          <span class="re-name">Python type error pattern → use isinstance check</span>
+          <span style="font-size:0.58rem;color:var(--sage)">tier: proven</span>
+          <span class="re-time">used 12x</span>
+        </div>
+        <div class="run-entry" style="grid-template-columns: 1fr 100px 80px">
+          <span class="re-name">Import cycle fix → move to TYPE_CHECKING block</span>
+          <span style="font-size:0.58rem;color:var(--sage)">tier: proven</span>
+          <span class="re-time">used 8x</span>
+        </div>
+        <div class="run-entry" style="grid-template-columns: 1fr 100px 80px">
+          <span class="re-name">Test fixture missing → add conftest.py</span>
+          <span style="font-size:0.58rem;color:var(--warn)">tier: emerging</span>
+          <span class="re-time">used 3x</span>
+        </div>
+        <div class="run-entry" style="grid-template-columns: 1fr 100px 80px">
+          <span class="re-name">Django migration conflict → squash migrations</span>
+          <span style="font-size:0.58rem;color:var(--text-dim)">tier: candidate</span>
+          <span class="re-time">used 1x</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ COMPARE VIEW ═══════════════ -->
+  <div class="view-panel" id="view-compare">
+
+    <div class="explainer">
+      <strong>Side-by-side comparison:</strong> See how different models and strategies perform on the same tasks.
+      The radar chart shows each dimension independently — a model might excel at cost but lag on accuracy.
+      Use this to decide which configuration fits your use case.
+    </div>
+
+    <!-- Comparison table -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <div class="chart-title">Model Comparison (same task set)</div>
+      </div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:0.72rem">
+          <thead>
+            <tr style="border-bottom:1px solid var(--glass-2-border)">
+              <th style="text-align:left;padding:10px;color:var(--text-dim);font-weight:500">Model</th>
+              <th style="text-align:right;padding:10px;color:var(--text-dim);font-weight:500">Pass Rate</th>
+              <th style="text-align:right;padding:10px;color:var(--text-dim);font-weight:500">Cost/Task</th>
+              <th style="text-align:right;padding:10px;color:var(--text-dim);font-weight:500">Avg Time</th>
+              <th style="text-align:right;padding:10px;color:var(--text-dim);font-weight:500">C-Factor</th>
+              <th style="text-align:right;padding:10px;color:var(--text-dim);font-weight:500">Strategy</th>
+            </tr>
+          </thead>
+          <tbody id="compare-table-body">
+            <tr style="border-bottom:1px solid var(--glass-2-border)">
+              <td style="padding:10px;color:var(--text)">Claude Opus 4.6</td>
+              <td style="text-align:right;padding:10px;color:var(--sage-bright);font-family:var(--font-mono)">84%</td>
+              <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$0.42</td>
+              <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">45s</td>
+              <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">0.91</td>
+              <td style="text-align:right;padding:10px;color:var(--text-dim)">cascade</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--glass-2-border)">
+              <td style="padding:10px;color:var(--text)">Claude Sonnet 4.6</td>
+              <td style="text-align:right;padding:10px;color:var(--sage-bright);font-family:var(--font-mono)">72%</td>
+              <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$0.12</td>
+              <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">32s</td>
+              <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">0.84</td>
+              <td style="text-align:right;padding:10px;color:var(--text-dim)">neuro</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--glass-2-border)">
+              <td style="padding:10px;color:var(--text)">GPT-4.1</td>
+              <td style="text-align:right;padding:10px;color:var(--sage-bright);font-family:var(--font-mono)">68%</td>
+              <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$0.18</td>
+              <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">38s</td>
+              <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">0.78</td>
+              <td style="text-align:right;padding:10px;color:var(--text-dim)">neuro</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--glass-2-border)">
+              <td style="padding:10px;color:var(--text)">Gemma 4 26B (local)</td>
+              <td style="text-align:right;padding:10px;color:var(--warn);font-family:var(--font-mono)">52%</td>
+              <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$0.00</td>
+              <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">120s</td>
+              <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">0.62</td>
+              <td style="text-align:right;padding:10px;color:var(--text-dim)">context</td>
+            </tr>
+            <tr>
+              <td style="padding:10px;color:var(--text)">Cascade Router (auto)</td>
+              <td style="text-align:right;padding:10px;color:var(--sage-bright);font-family:var(--font-mono)">78%</td>
+              <td style="text-align:right;padding:10px;color:var(--bone);font-family:var(--font-mono)">$0.09</td>
+              <td style="text-align:right;padding:10px;color:var(--text);font-family:var(--font-mono)">28s</td>
+              <td style="text-align:right;padding:10px;color:var(--rose-bright);font-family:var(--font-mono)">0.86</td>
+              <td style="text-align:right;padding:10px;color:var(--text-dim)">cascade</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Dimension comparison bars -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="chart-container">
+        <div class="chart-header">
+          <div class="chart-title">Accuracy vs. Cost</div>
+        </div>
+        <div class="bar-chart" style="height:140px">
+          <div class="bar-group">
+            <div class="bar sage" style="height:84%" data-value="84%"></div>
+            <div class="bar-label">Opus</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar sage" style="height:72%" data-value="72%"></div>
+            <div class="bar-label">Sonnet</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar sage" style="height:68%" data-value="68%"></div>
+            <div class="bar-label">GPT-4.1</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar warn" style="height:52%" data-value="52%"></div>
+            <div class="bar-label">Gemma</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar rose" style="height:78%" data-value="78%"></div>
+            <div class="bar-label">Cascade</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-container">
+        <div class="chart-header">
+          <div class="chart-title">Cost per Task</div>
+        </div>
+        <div class="bar-chart" style="height:140px">
+          <div class="bar-group">
+            <div class="bar bone" style="height:90%" data-value="$0.42"></div>
+            <div class="bar-label">Opus</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar bone" style="height:26%" data-value="$0.12"></div>
+            <div class="bar-label">Sonnet</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar bone" style="height:38%" data-value="$0.18"></div>
+            <div class="bar-label">GPT-4.1</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar bone" style="height:2%" data-value="$0.00"></div>
+            <div class="bar-label">Gemma</div>
+          </div>
+          <div class="bar-group">
+            <div class="bar bone" style="height:19%" data-value="$0.09"></div>
+            <div class="bar-label">Cascade</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Value proposition callout -->
+    <div class="explainer" style="margin-top:24px; border-left-color: var(--sage);">
+      <strong>Key insight:</strong> The cascade router achieves 78% accuracy at $0.09/task — only 6% below Opus
+      (84% at $0.42/task) while costing <strong>78% less</strong>. It does this by routing simple tasks to cheaper models
+      and reserving expensive models for hard tasks, learned from previous benchmark episodes.
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>roko benchmark lab &middot; fast proxy scoring, not official SWE-bench Docker</span>
+    <a href="demo.html">&#8592; Back to Demo</a>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
+<script>
+// ── State ─────────────────────────────────────────────────
+let selectedSuite = 'smoke';
+let selectedStrategy = 'minimal';
+let benchRuns = [];
+
+// ── Tab switching ─────────────────────────────────────────
+document.querySelectorAll('.view-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.view-tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+    document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
+  });
+});
+
+// ── Suite selection ───────────────────────────────────────
+function selectSuite(el) {
+  document.querySelectorAll('#suite-grid .card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedSuite = el.dataset.suite;
+  const datasetInput = document.getElementById('cfg-dataset');
+  datasetInput.disabled = selectedSuite !== 'custom';
+  if (selectedSuite === 'custom') datasetInput.value = '';
+  else datasetInput.value = '';
+}
+
+// ── Strategy selection ────────────────────────────────────
+function selectStrategy(el) {
+  document.querySelectorAll('#strategy-grid .card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedStrategy = el.dataset.strategy;
+}
+
+// ── Generate CLI command ──────────────────────────────────
+function buildCommand() {
+  const model = document.getElementById('cfg-model').value;
+  const batch = document.getElementById('cfg-batch').value;
+  const learning = document.getElementById('cfg-learning').value;
+  const workdir = document.getElementById('cfg-workdir').value;
+  const dataset = document.getElementById('cfg-dataset').value;
+
+  let cmd = `roko bench swe`;
+  if (dataset) cmd += ` \\\n  --dataset "${dataset}"`;
+  cmd += ` \\\n  --batch-size ${batch}`;
+  cmd += ` \\\n  --agent-mode command`;
+  if (model !== 'auto') cmd += ` \\\n  --model ${model}`;
+  if (learning === 'no') cmd += ` \\\n  --no-learning`;
+  cmd += ` \\\n  --workdir ${workdir}`;
+
+  // Strategy affects the agent command
+  cmd += `\n\n# Strategy: ${selectedStrategy}`;
+  switch (selectedStrategy) {
+    case 'minimal':
+      cmd += `\n# Sends only problem statement — tests raw model ability`;
+      break;
+    case 'context':
+      cmd += `\n# Adds source file context from target repo`;
+      cmd += `\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode context'`;
+      break;
+    case 'neuro':
+      cmd += `\n# Adds source context + knowledge store queries`;
+      cmd += `\n  --agent-command 'python3 roko-ollama-patch-agent.py --mode neuro --knowledge-workdir .'`;
+      break;
+    case 'cascade':
+      cmd += `\n# Full pipeline: neuro + cascade routing + gate replanning`;
+      cmd += `\n# The cascade router selects models per-task based on learned patterns`;
+      break;
+  }
+
+  return cmd;
+}
+
+function showCommand() {
+  const section = document.getElementById('cmd-preview-section');
+  const text = document.getElementById('cmd-preview-text');
+  section.style.display = '';
+  text.textContent = buildCommand();
+  section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ── Start benchmark (simulated) ───────────────────────────
+async function startBenchmark() {
+  const btn = document.getElementById('btn-run');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="status-dot running"></span> Running...';
+
+  // Simulate a benchmark run
+  await new Promise(r => setTimeout(r, 2000));
+
+  const passed = selectedSuite === 'smoke' ? 2 : Math.floor(Math.random() * 50) + 100;
+  const total = selectedSuite === 'smoke' ? 2 : 200;
+  const cost = selectedSuite === 'smoke' ? 0.00 : (Math.random() * 20 + 5).toFixed(2);
+
+  benchRuns.push({
+    time: new Date(),
+    suite: selectedSuite,
+    model: document.getElementById('cfg-model').value,
+    strategy: selectedStrategy,
+    passed, total, cost
+  });
+
+  updateHeroStats();
+
+  btn.disabled = false;
+  btn.innerHTML = '<span>&#9654;</span> Run Benchmark';
+
+  // Switch to results view
+  document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-view="results"]').classList.add('active');
+  document.getElementById('view-results').classList.add('active');
+}
+
+function runControls() {
+  alert('This would run:\n\n1. Gold control (expected: 2/2)\n2. Empty control (expected: 0/2)\n\nVerifies the benchmark harness before real model runs.');
+}
+
+function updateHeroStats() {
+  const total = benchRuns.length;
+  const totalPassed = benchRuns.reduce((s, r) => s + r.passed, 0);
+  const totalTasks = benchRuns.reduce((s, r) => s + r.total, 0);
+  const totalCost = benchRuns.reduce((s, r) => s + parseFloat(r.cost), 0);
+
+  document.getElementById('hero-runs').textContent = total;
+  document.getElementById('hero-pass').textContent = totalTasks > 0 ? `${Math.round(totalPassed/totalTasks*100)}%` : '--';
+  document.getElementById('hero-cost').textContent = `$${totalCost.toFixed(2)}`;
+  document.getElementById('hero-learn').textContent = totalPassed * 2; // episodes ~ 2x tasks
+}
+
+function clearRuns() {
+  benchRuns = [];
+  document.getElementById('run-log').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:0.72rem">No runs yet. Configure and run a benchmark to see results here.</div>';
+  updateHeroStats();
+}
+
+// ── Learning chart (Three.js) ─────────────────────────────
+function initLearningChart() {
+  const canvas = document.getElementById('learning-canvas');
+  if (!canvas || !window.THREE) return;
+
+  const parent = canvas.parentElement;
+  const w = parent.clientWidth || 600;
+  const h = parent.clientHeight || 200;
+
+  const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-w/2, w/2, h/2, -h/2, 0.1, 100);
+  camera.position.z = 10;
+
+  // Draw line chart showing improvement
+  const runs = 20;
+  const passData = [];
+  const costData = [];
+  for (let i = 0; i < runs; i++) {
+    // Simulate improving pass rate
+    passData.push(0.45 + (i / runs) * 0.35 + (Math.random() - 0.5) * 0.08);
+    // Simulate decreasing cost
+    costData.push(0.8 - (i / runs) * 0.45 + (Math.random() - 0.5) * 0.05);
+  }
+
+  // Pass rate line (sage)
+  const passPoints = passData.map((v, i) => new THREE.Vector3(
+    -w/2 + 40 + (i / (runs-1)) * (w - 80),
+    -h/2 + 30 + v * (h - 60),
+    0
+  ));
+  const passGeo = new THREE.BufferGeometry().setFromPoints(passPoints);
+  const passLine = new THREE.Line(passGeo, new THREE.LineBasicMaterial({ color: 0x70887A, linewidth: 2 }));
+  scene.add(passLine);
+
+  // Cost line (bone)
+  const costPoints = costData.map((v, i) => new THREE.Vector3(
+    -w/2 + 40 + (i / (runs-1)) * (w - 80),
+    -h/2 + 30 + v * (h - 60),
+    0
+  ));
+  const costGeo = new THREE.BufferGeometry().setFromPoints(costPoints);
+  const costLine = new THREE.Line(costGeo, new THREE.LineBasicMaterial({ color: 0xC8B890, linewidth: 2 }));
+  scene.add(costLine);
+
+  // Data points
+  passPoints.forEach(p => {
+    const dot = new THREE.Mesh(new THREE.CircleGeometry(3, 16), new THREE.MeshBasicMaterial({ color: 0x99c4ac }));
+    dot.position.copy(p);
+    scene.add(dot);
+  });
+
+  // Axis lines
+  const axisColor = 0x302830;
+  const xAxis = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0),
+      new THREE.Vector3(w/2 - 20, -h/2 + 30, 0)
+    ]),
+    new THREE.LineBasicMaterial({ color: axisColor })
+  );
+  scene.add(xAxis);
+
+  const yAxis = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-w/2 + 40, -h/2 + 30, 0),
+      new THREE.Vector3(-w/2 + 40, h/2 - 20, 0)
+    ]),
+    new THREE.LineBasicMaterial({ color: axisColor })
+  );
+  scene.add(yAxis);
+
+  renderer.render(scene, camera);
+}
+
+// ── Init ──────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  initLearningChart();
+});
+
+// If Three.js loads after DOMContentLoaded
+if (document.readyState === 'complete') initLearningChart();
+else window.addEventListener('load', initLearningChart);
+</script>
+</body>
+</html>

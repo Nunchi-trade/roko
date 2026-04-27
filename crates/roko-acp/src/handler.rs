@@ -40,7 +40,16 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut sessions = SessionManager::new(config.workdir.clone());
+    let roko_config = config.load_roko_config();
+    info!(
+        providers = roko_config.providers.len(),
+        models = roko_config.models.len(),
+        "loaded roko.toml configuration"
+    );
+    let mut sessions = SessionManager::new(config.workdir.clone(), roko_config);
+
+    // GC old persisted sessions at startup (7 days).
+    sessions.gc_old_sessions(chrono::Duration::days(7));
 
     loop {
         let message = match transport.read_message().await {
@@ -101,22 +110,22 @@ async fn handle_request(
                 protocol_version: ACP_PROTOCOL_VERSION,
                 agent_capabilities: AgentCapabilities {
                     load_session: true,
-                    prompt_capabilities: Some(PromptCapabilities {
+                    prompt_capabilities: PromptCapabilities {
                         image: false,
                         audio: false,
                         embedded_context: true,
-                    }),
-                    mcp_capabilities: Some(McpCapabilities {
+                    },
+                    mcp_capabilities: McpCapabilities {
                         http: true,
                         sse: true,
-                    }),
-                },
-                agent_info: AgentInfo {
-                    name: "roko".to_owned(),
-                    title: "Roko".to_owned(),
-                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    },
                 },
                 auth_methods: Vec::new(),
+                agent_info: Some(AgentInfo {
+                    name: "roko".to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    title: Some("Roko".to_owned()),
+                }),
             };
             send_success(transport, id, result).await
         }
@@ -126,10 +135,24 @@ async fn handle_request(
                 Err(error) => return send_error_response(transport, id, error).await,
             };
             let result = sessions.create_session(params);
-            send_success(transport, id, result).await
+            let session_id = result.session_id.clone();
+            send_success(transport, id, result).await?;
+            // Send available slash commands after session creation.
+            let commands = crate::session::build_slash_commands();
+            let update = serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": commands,
+                }
+            });
+            transport
+                .send_notification("session/update", update)
+                .await
+                .context("failed to send slash commands notification")
         }
         "session/list" => {
-            let result = sessions.list_sessions();
+            let result = sessions.list_sessions_with_persisted();
             send_success(transport, id, result).await
         }
         "session/load" => {
@@ -156,11 +179,13 @@ async fn handle_request(
                 Err(error) => return send_error_response(transport, id, error).await,
             };
             let workdir = sessions.workdir.clone();
+            let roko_config = sessions.roko_config.clone();
             let session = match get_session_mut(sessions, &params.session_id) {
                 Ok(session) => session,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
-            let result = match handle_session_prompt(transport, session, params, &workdir).await {
+            let session_id_for_persist = params.session_id.clone();
+            let result = match handle_session_prompt(transport, session, params, &workdir, &roko_config).await {
                 Ok(result) => result,
                 Err(error) => {
                     if let Some(rpc_error) = error.rpc_error() {
@@ -169,13 +194,16 @@ async fn handle_request(
                     return Err(error).context("failed to handle ACP session prompt");
                 }
             };
+            // Persist session after prompt completes.
+            sessions.persist_session(&session_id_for_persist);
             send_success(transport, id, result).await
         }
-        "session/config/update" => {
+        "session/config/update" | "session/set_config_option" => {
             let params: ConfigUpdateParams = match parse_params(params, &method) {
                 Ok(params) => params,
                 Err(error) => return send_error_response(transport, id, error).await,
             };
+            let roko_config = sessions.roko_config.clone();
             let session = match get_session_mut(sessions, &params.session_id) {
                 Ok(session) => session,
                 Err(error) => return send_error_response(transport, id, error).await,
@@ -183,8 +211,10 @@ async fn handle_request(
             debug!(
                 session_id = %session.session_id,
                 option_id = %params.option_id,
+                new_value = %params.new_value,
                 "received config update request"
             );
+            session.update_config(&params.option_id, &params.new_value, &roko_config);
             let result = ConfigUpdateResult {
                 config_options: session.config_options(),
             };

@@ -11,8 +11,8 @@ auto_plan = false
 
 [agent]
 command = "claude"
-default_model = "claude-sonnet-4-6"
-default_backend = "claude_cli"
+default_model = "glm-5.1"
+default_backend = "zhipu"
 default_effort = "medium"
 temperament = "balanced"
 context_limit_k = 200
@@ -22,8 +22,8 @@ mode = "ephemeral"
 [agent.roles]
 
 [providers.anthropic]
-kind = "anthropic_api"
-api_key_env = "ANTHROPIC_API_KEY"
+kind = "claude_cli"
+command = "claude"
 default_model = "claude-sonnet-4-6"
 models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"]
 
@@ -31,11 +31,11 @@ models = ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"]
 kind = "openai_compat"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
-default_model = "gpt-4o"
-models = ["gpt-4o", "gpt-4o-mini", "o3-mini"]
+default_model = "gpt-4.1"
+models = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3", "o3-mini", "o4-mini", "codex-mini-latest"]
 
 [providers.perplexity]
-kind = "perplexity"
+kind = "perplexity_api"
 api_key_env = "PERPLEXITY_API_KEY"
 default_model = "sonar-pro"
 models = ["sonar", "sonar-pro", "sonar-reasoning-pro"]
@@ -43,48 +43,122 @@ models = ["sonar", "sonar-pro", "sonar-reasoning-pro"]
 [providers.moonshot]
 kind = "openai_compat"
 api_key_env = "MOONSHOT_API_KEY"
-base_url = "https://api.moonshot.cn/v1"
-default_model = "moonshot-v1-auto"
-models = ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "moonshot-v1-auto"]
+base_url = "https://api.moonshot.ai/v1"
+default_model = "kimi-k2.6"
+models = ["kimi-k2.6", "kimi-k2.5", "kimi-k2", "moonshot-v1-auto"]
 
 [providers.zhipu]
 kind = "openai_compat"
 api_key_env = "ZAI_API_KEY"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
-default_model = "glm-4-plus"
-models = ["glm-4-plus", "glm-4-flash", "glm-4-long"]
+default_model = "glm-5.1"
+models = ["glm-5.1", "glm-5-turbo", "glm-4.5-flash", "glm-4-plus"]
+
+[providers.gemini]
+kind = "openai_compat"
+api_key_env = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+default_model = "gemini-2.5-flash"
+models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
 [providers.ollama]
-kind = "ollama"
-base_url = "http://localhost:11434"
+kind = "openai_compat"
+api_key_env = ""
+base_url = "http://localhost:11434/v1"
 default_model = "llama3.1"
 models = ["llama3.1", "codellama", "mistral", "deepseek-coder-v2"]
 
 [models]
-# Model routing aliases — CascadeRouter uses these to pick the right provider
+
+# Anthropic
 [models.haiku]
 provider = "anthropic"
-model = "claude-haiku-4-5"
+slug = "claude-haiku-4-5"
 
 [models.sonnet]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+slug = "claude-sonnet-4-6"
 
 [models.opus]
 provider = "anthropic"
-model = "claude-opus-4-6"
+slug = "claude-opus-4-6"
 
-[models.gpt4o]
+# OpenAI
+[models.gpt41]
 provider = "openai"
-model = "gpt-4o"
+slug = "gpt-4.1"
 
-[models.gpt4o-mini]
+[models.gpt41-mini]
 provider = "openai"
-model = "gpt-4o-mini"
+slug = "gpt-4.1-mini"
 
+[models.gpt41-nano]
+provider = "openai"
+slug = "gpt-4.1-nano"
+
+[models.o3]
+provider = "openai"
+slug = "o3"
+
+[models.o3-mini]
+provider = "openai"
+slug = "o3-mini"
+
+[models.o4-mini]
+provider = "openai"
+slug = "o4-mini"
+
+[models.codex-mini]
+provider = "openai"
+slug = "codex-mini-latest"
+
+# Perplexity
 [models.sonar]
 provider = "perplexity"
-model = "sonar-pro"
+slug = "sonar-pro"
+
+[models.sonar-reasoning]
+provider = "perplexity"
+slug = "sonar-reasoning-pro"
+
+# Moonshot / Kimi
+[models.kimi-k26]
+provider = "moonshot"
+slug = "kimi-k2.6"
+
+[models.kimi-k25]
+provider = "moonshot"
+slug = "kimi-k2.5"
+
+[models.kimi-k2]
+provider = "moonshot"
+slug = "kimi-k2"
+
+# Zhipu / GLM
+[models.glm51]
+provider = "zhipu"
+slug = "glm-5.1"
+
+[models.glm5-turbo]
+provider = "zhipu"
+slug = "glm-5-turbo"
+
+[models.glm45-flash]
+provider = "zhipu"
+slug = "glm-4.5-flash"
+
+[models.glm4]
+provider = "zhipu"
+slug = "glm-4-plus"
+
+# Gemini
+[models.gemini-flash]
+provider = "gemini"
+slug = "gemini-2.5-flash"
+
+[models.gemini-pro]
+provider = "gemini"
+slug = "gemini-2.5-pro"
 
 [gates]
 clippy_enabled = true

@@ -272,6 +272,10 @@ struct Cli {
     #[arg(long, global = true)]
     timing: bool,
 
+    /// Don't start the HTTP control plane in the background.
+    #[arg(long, global = true)]
+    no_serve: bool,
+
     /// One-shot mode: execute this prompt and exit.
     #[arg(global = false)]
     prompt: Option<String>,
@@ -1631,8 +1635,48 @@ fn main() {
     let mut cli = Cli::parse();
     apply_env_overrides(&mut cli);
 
+    // ── ACP early exit ───────────────────────────────────────────────
+    // ACP mode uses stdio for JSON-RPC, so we MUST NOT install any
+    // tracing subscriber that writes to stdout.  Fork into its own
+    // Tokio runtime here, before the CLI subscriber is initialised.
+    if let Some(Command::Acp {
+        ref workdir,
+        ref profile,
+        ref config,
+        ref log_file,
+    }) = cli.command
+    {
+        let acp_config = roko_acp::AcpConfig {
+            workdir: workdir.clone(),
+            profile: profile.clone(),
+            config_path: config.clone(),
+            log_file: log_file.clone(),
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build Tokio runtime for ACP");
+        let code = runtime.block_on(async {
+            match roko_acp::run_acp_server(acp_config).await {
+                Ok(()) => EXIT_SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    EXIT_FAILURE
+                }
+            }
+        });
+        std::process::exit(code);
+    }
+
     // ── TUI mode detection ─────────────────────────────────────────
-    let tui_mode = matches!(&cli.command, Some(Command::Serve { tui: true, .. }));
+    // Unified chat (no subcommand, TTY stdin) also needs file-based tracing
+    // to prevent serve/pheromone logs from corrupting the inline chat display.
+    let unified_chat_mode = cli.command.is_none()
+        && !cli.headless
+        && cli.prompt.is_none()
+        && std::io::stdin().is_terminal();
+    let tui_mode = unified_chat_mode
+        || matches!(&cli.command, Some(Command::Serve { tui: true, .. }));
 
     // ── Color mode ──────────────────────────────────────────────────
     let use_color = cli.color.should_color();
@@ -1903,13 +1947,16 @@ async fn dispatch(mut cli: Cli) -> Result<i32> {
     if cli.headless {
         return commands::util::cmd_headless(&cli).await;
     }
+    // Bare prompt: `roko "fix the bug"` → one-shot inline dispatch
     if let Some(prompt) = &cli.prompt {
-        return commands::util::cmd_oneshot(&cli, prompt).await;
+        return roko_cli::unified::cmd_oneshot_inline(prompt, cli.quiet).await;
     }
+    // Piped input: `echo "prompt" | roko`
     if !roko_cli::stdin_is_tty() {
         return commands::util::cmd_pipe(&cli).await;
     }
-    commands::util::cmd_repl(&cli)
+    // Default: unified inline chat (auto-detect auth, direct dispatch)
+    roko_cli::unified::cmd_unified_chat(cli.config.as_deref(), cli.quiet, cli.no_serve).await
 }
 
 async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {

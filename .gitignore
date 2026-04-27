@@ -1,6 +1,6 @@
 # Rust build artifacts --------------------------------------------------------
 # Cargo target dir (also redirected to bardo/.mori/cache/cargo-target/ via
-# bardo/.cargo/config.toml — keep this rule in case someone builds with a
+# bardo/.cargo/config.toml - keep this rule in case someone builds with a
 # different config).
 target/
 **/target/
@@ -9,7 +9,7 @@ target/
 **/rust-toolchain.toml.orig
 
 # Foundry / contracts artifacts ----------------------------------------------
-# Built bytecode + ABI — regenerate with `forge build`.
+# Built bytecode + ABI - regenerate with `forge build`.
 contracts/out/
 contracts/cache/
 # Broadcast logs for non-local runs (keep per-chain deploy history out of git
@@ -58,7 +58,9 @@ demo/.runtime/
 *.log
 *.tmp
 /tmp/
-# mirage/roko test output piped into /tmp/mirage.log during dev — safe to ignore.
+# mirage/roko test output piped into /tmp/mirage.log during dev - safe to ignore.
+/tmp/*
+
 
 # Temporary / work-in-progress (will be refined later) ----------------------
 CLAUDE.md

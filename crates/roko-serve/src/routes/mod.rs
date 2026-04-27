@@ -182,6 +182,9 @@ async fn root_index() -> Html<&'static str> {
   <p class="sub">agent runtime control plane</p>
   <div class="links">
     <div class="section">demo</div>
+    <a href="/demo/demo.html"><span class="label">Unified Demo</span><div class="desc">Series A pitch demo — 7 scenarios, live terminals, ROSEDUST visual system</div></a>
+    <a href="/demo/bench.html"><span class="label">Benchmark Lab</span><div class="desc">Configure and run SWE-bench evaluations, compare models, track self-learning</div></a>
+    <a href="/demo/bench-live.html"><span class="label">Live Monitor</span><div class="desc">Real-time benchmark observation — task grid, cost chart, activity feed</div></a>
     <a href="/demo/builder.html"><span class="label">Builder</span><div class="desc">Type a request — roko builds it live in a temp repo</div></a>
     <a href="/demo/terminal.html"><span class="label">Terminal</span><div class="desc">Multi-pane browser terminal with real PTY sessions</div></a>
     <a href="/demo/index.html"><span class="label">Scripted Demo</span><div class="desc">Pre-recorded demo sequence (no backend needed)</div></a>

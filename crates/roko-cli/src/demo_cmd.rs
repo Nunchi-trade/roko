@@ -54,7 +54,8 @@ pub fn cmd_demo_setup(workdir: &Path) -> Result<()> {
         plaintext::print_plain(&[
             styled::continuation(&theme, "workspace", "initializing .roko/...", None),
         ]);
-        let _ = Command::new("./target/release/roko")
+        let roko = std::env::current_exe().unwrap_or_else(|_| "roko".into());
+        let _ = Command::new(roko)
             .arg("init")
             .current_dir(workdir)
             .status();
@@ -78,7 +79,7 @@ pub fn cmd_demo_setup(workdir: &Path) -> Result<()> {
 
     println!();
     println!("  To run the demo:");
-    println!("    ./target/release/roko serve");
+    println!("    roko serve");
     println!("    open http://localhost:6677");
     println!();
     println!("  Pages:");

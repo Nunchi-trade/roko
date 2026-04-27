@@ -114,6 +114,11 @@ pub struct RunStateSnapshot {
     /// Consecutive snapshot save failures (degradation tracking).
     #[serde(default)]
     pub snapshot_fail_streak: u32,
+    /// Forensic fingerprints of every task definition known when this
+    /// snapshot was written. Read by [`super::resume::prepare_resume`]
+    /// to detect drift between runs.
+    #[serde(default)]
+    pub fingerprints: Vec<TaskDefFingerprint>,
 }
 
 /// Forensic fingerprint of a task definition used for strict resume validation.

@@ -12,12 +12,16 @@ set -euo pipefail
 BASE="${ROKO_SERVE_URL:-http://127.0.0.1:6677}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ROKO="${REPO_ROOT}/target/debug/roko"
-if [[ ! -x "$ROKO" ]]; then
-  ROKO="${REPO_ROOT}/target/release/roko"
-fi
-if [[ ! -x "$ROKO" ]] && command -v roko &>/dev/null; then
+# Prefer `roko` on PATH, fall back to local builds.
+if command -v roko &>/dev/null; then
   ROKO="roko"
+elif [[ -x "${REPO_ROOT}/target/release/roko" ]]; then
+  ROKO="${REPO_ROOT}/target/release/roko"
+elif [[ -x "${REPO_ROOT}/target/debug/roko" ]]; then
+  ROKO="${REPO_ROOT}/target/debug/roko"
+else
+  echo "error: roko binary not found. Run: cargo build -p roko-cli --release" >&2
+  exit 1
 fi
 
 # ── Colors & formatting ───────────────────────────────────────────

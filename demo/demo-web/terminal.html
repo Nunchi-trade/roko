@@ -205,110 +205,172 @@ function updateStatus() {
   document.getElementById('sb-sessions').textContent = `${terminals.length} session${terminals.length === 1 ? '' : 's'}`;
 }
 
-// Send a command to a terminal by typing it + pressing enter
-function sendCommand(entry, cmd) {
-  return new Promise(resolve => {
-    if (entry.ws.readyState !== WebSocket.OPEN) { resolve(); return; }
-    entry.ws.send(cmd + '\r');
-    // Wait for output to settle
-    setTimeout(resolve, 100);
-  });
-}
+// ── Command execution infrastructure ─────────────────────────
+// Each terminal entry gets an output buffer for prompt detection.
 
-// Wait for WebSocket to be open
+const PROMPT_RE = /[❯\$>]\s*$/;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 function waitForOpen(ws, timeout = 5000) {
   return new Promise((resolve, reject) => {
     if (ws.readyState === WebSocket.OPEN) { resolve(); return; }
     const t = setTimeout(() => reject(new Error('ws timeout')), timeout);
-    const origOpen = ws.onopen;
     ws.addEventListener('open', () => { clearTimeout(t); resolve(); }, { once: true });
   });
 }
 
-// Type a command character by character with delays
-async function typeCommand(entry, cmd, charDelay = 30) {
+// Type a command character by character, then press Enter.
+async function typeCommand(entry, cmd, charDelay = 20) {
   await waitForOpen(entry.ws);
   for (const ch of cmd) {
     if (entry.ws.readyState !== WebSocket.OPEN) return;
     entry.ws.send(ch);
-    await new Promise(r => setTimeout(r, charDelay + Math.random() * 15));
+    await sleep(charDelay + Math.random() * 10);
   }
-  await new Promise(r => setTimeout(r, 200));
-  if (entry.ws.readyState === WebSocket.OPEN) {
-    entry.ws.send('\r');
-  }
+  await sleep(100);
+  if (entry.ws.readyState === WebSocket.OPEN) entry.ws.send('\r');
 }
 
-// Demo sequences
-// Use pre-built binary to avoid cargo compilation warnings flooding the terminal.
-// Build once with: cargo build -p roko-cli --release
-// Then symlink: ln -sf target/release/roko /usr/local/bin/roko
-const ROKO = './target/release/roko';
+// Wait until the terminal shows a shell prompt (command complete).
+async function waitForPrompt(entry, timeoutMs = 60000) {
+  entry._outBuf = '';
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await sleep(300);
+    if (PROMPT_RE.test(entry._outBuf || '')) return true;
+  }
+  return false;
+}
 
-const DEMOS = [
-  {
-    label: 'self-hosting workflow',
-    commands: [
-      `${ROKO} init`,
-      `${ROKO} prd idea "Wire SystemPromptBuilder into orchestrate.rs"`,
-      `${ROKO} status`,
-    ],
-  },
-  {
-    label: 'benchmark comparison',
-    commands: [
-      `${ROKO} bench demo`,
-    ],
-  },
-  {
-    label: 'agent chat',
-    commands: [
-      `${ROKO} agent list`,
-      `${ROKO} status --cfactor`,
-    ],
-  },
-  {
-    label: 'knowledge + replay',
-    commands: [
-      `${ROKO} learn efficiency`,
-      `${ROKO} learn all`,
-    ],
-  },
-];
+// Type a command and wait for the shell prompt to return.
+async function runCommand(entry, cmd, timeoutMs = 60000) {
+  await typeCommand(entry, cmd);
+  return await waitForPrompt(entry, timeoutMs);
+}
+
+// Resolve the roko binary path inside a PTY shell.
+async function resolveRokoPath(entry) {
+  entry._outBuf = '';
+  await typeCommand(entry, 'command -v roko >/dev/null 2>&1 && echo __OK__ || echo __MISS__');
+  await waitForPrompt(entry, 5000);
+  if ((entry._outBuf || '').includes('__OK__')) return 'roko';
+
+  // Try local builds
+  for (const p of ['./target/release/roko', './target/debug/roko']) {
+    entry._outBuf = '';
+    await typeCommand(entry, `test -x ${p} && echo __OK__ || echo __MISS__`);
+    await waitForPrompt(entry, 3000);
+    if ((entry._outBuf || '').includes('__OK__')) return p;
+  }
+  return 'roko';  // hope for the best
+}
+
+// ── Demo definitions ─────────────────────────────────────────
+// Commands use `$R` which is resolved per-terminal at runtime.
+// Each command runs only after the previous one completes.
+
+function makeDemos(R, DIR) {
+  return [
+    {
+      label: 'self-hosting workflow',
+      commands: [
+        `rm -rf ${DIR} && mkdir -p ${DIR} && cd ${DIR} && ${R} init`,
+        `cd ${DIR} && ${R} prd idea "Wire SystemPromptBuilder into orchestrate.rs"`,
+        `cd ${DIR} && ${R} status`,
+      ],
+    },
+    {
+      label: 'benchmark comparison',
+      commands: [
+        `rm -rf ${DIR} && mkdir -p ${DIR} && cd ${DIR} && ${R} init && ${R} bench demo`,
+      ],
+    },
+    {
+      label: 'agent chat',
+      commands: [
+        `rm -rf ${DIR} && mkdir -p ${DIR} && cd ${DIR} && ${R} init && ${R} agent list`,
+        `cd ${DIR} && ${R} status --cfactor`,
+      ],
+    },
+    {
+      label: 'knowledge + replay',
+      commands: [
+        `rm -rf ${DIR} && mkdir -p ${DIR} && cd ${DIR} && ${R} init && ${R} learn efficiency`,
+        `cd ${DIR} && ${R} learn all`,
+      ],
+    },
+  ];
+}
+
+let demoPaused = false;
+let demoRunning = false;
 
 async function runAllDemos() {
-  document.getElementById('btn-demo').disabled = true;
-  destroyAll();
-  await new Promise(r => setTimeout(r, 300));
-
-  // Create one terminal per demo
-  const entries = [];
-  for (const demo of DEMOS) {
-    const entry = await addTerminal(null, demo.label);
-    entries.push({ entry, demo });
-    await new Promise(r => setTimeout(r, 500)); // stagger connections
+  if (demoRunning) {
+    // Toggle pause
+    demoPaused = !demoPaused;
+    document.getElementById('btn-demo').textContent = demoPaused ? 'Resume' : 'Pause';
+    return;
   }
 
-  // Wait for all shells to start (shell prompt takes ~1-2s)
-  await new Promise(r => setTimeout(r, 2500));
+  demoRunning = true;
+  demoPaused = false;
+  document.getElementById('btn-demo').textContent = 'Pause';
+  destroyAll();
+  await sleep(300);
 
-  // Run all demos in parallel
-  const promises = entries.map(async ({ entry, demo }) => {
-    // Wait for this terminal's WS to be open
+  // Create one terminal per demo (placeholder labels, demos resolved later)
+  const labels = ['self-hosting workflow', 'benchmark comparison', 'agent chat', 'knowledge + replay'];
+  const entries = [];
+  for (const label of labels) {
+    const entry = await addTerminal(null, label);
+    entry._outBuf = '';
+    // Hook output buffer for prompt detection
+    const origOnMsg = entry.ws.onmessage;
+    entry.ws.onmessage = (e) => {
+      if (origOnMsg) origOnMsg(e);
+      if (e.data instanceof ArrayBuffer) {
+        entry._outBuf += new TextDecoder().decode(e.data);
+      } else if (typeof e.data === 'string') {
+        entry._outBuf += e.data;
+      }
+      // Keep bounded
+      if (entry._outBuf.length > 2048) entry._outBuf = entry._outBuf.slice(-1024);
+    };
+    entries.push(entry);
+    await sleep(400);
+  }
+
+  // Wait for shells to start
+  await sleep(2000);
+
+  // Resolve roko path from first terminal
+  const rokoPath = await resolveRokoPath(entries[0]);
+  const demos = makeDemos(rokoPath, '/tmp/roko-demo');
+
+  // Run each demo panel in parallel, commands sequential within each
+  const promises = entries.map(async (entry, i) => {
+    const demo = demos[i];
+    if (!demo) return;
+
     try { await waitForOpen(entry.ws); } catch(e) { return; }
-    // Extra wait for shell prompt
-    await new Promise(r => setTimeout(r, 1000));
+    await waitForPrompt(entry, 5000);
 
     for (const cmd of demo.commands) {
-      await typeCommand(entry, cmd);
-      // Wait for command to complete (longer for complex commands)
-      const wait = cmd.includes('bench') ? 8000 : cmd.includes('prd') ? 5000 : 3000;
-      await new Promise(r => setTimeout(r, wait));
+      // Check for pause
+      while (demoPaused) await sleep(500);
+      if (!demoRunning) return;
+
+      const timeout = cmd.includes('bench') ? 30000 : 15000;
+      await runCommand(entry, cmd, timeout);
     }
   });
 
   await Promise.all(promises);
-  document.getElementById('btn-demo').disabled = false;
+  demoRunning = false;
+  demoPaused = false;
+  document.getElementById('btn-demo').textContent = 'Run All Demos';
 }
 
 // Check server health on load

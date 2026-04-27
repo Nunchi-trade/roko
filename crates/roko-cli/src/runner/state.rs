@@ -103,6 +103,12 @@ pub struct RunState {
     // ─── Replan Context ──────────────────────────────────────────────
     /// Accumulated failure context per plan/task for retry prompt enrichment.
     pub replan_contexts: HashMap<String, String>,
+
+    // ─── Resume Fingerprints ─────────────────────────────────────────
+    /// Forensic fingerprints for every task definition known to this
+    /// run. Populated once at startup so `run-state.json` snapshots
+    /// always carry the data the strict resume validator needs.
+    pub task_fingerprints: Vec<super::persist::TaskDefFingerprint>,
 }
 
 impl RunState {
@@ -144,6 +150,7 @@ impl RunState {
             started_at: Instant::now(),
             task_started_at: Instant::now(),
             replan_contexts: HashMap::new(),
+            task_fingerprints: Vec::new(),
         }
     }
 

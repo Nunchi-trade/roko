@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko — live bench monitor</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void: #060608;
+  --raised: #0C0A0E;
+  --mid: #080810;
+  --surface: #100E14;
+  --rose: #AA7088;
+  --rose-bright: #CC90A8;
+  --rose-dim: #7A5060;
+  --rose-deep: #3A2030;
+  --bone: #C8B890;
+  --sage: #70887A;
+  --sage-bright: #99c4ac;
+  --fail: #C36E55;
+  --warn: #AA8855;
+  --glass-2-bg: rgba(255,255,255,0.04);
+  --glass-2-border: rgba(255,255,255,0.08);
+  --text: #B0A0B0;
+  --text-dim: #706070;
+  --text-ghost: #302830;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --bone-bloom: 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15);
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans: 'General Sans', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', 'SF Mono', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--glass-2-border); border-radius: 3px; }
+
+html, body {
+  background: var(--void); color: var(--text); font-family: var(--font-sans);
+  height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+}
+
+body::before {
+  content: ''; position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+  background: repeating-linear-gradient(to bottom, transparent 0px, transparent 1px, rgba(0,0,0,0.05) 1px, rgba(0,0,0,0.05) 2px);
+}
+
+/* ── Header ───────────────────────────────────────── */
+.header {
+  display: flex; align-items: center; padding: 10px 24px; gap: 16px;
+  border-bottom: 1px solid var(--glass-2-border); background: var(--raised);
+  flex-shrink: 0; height: 48px;
+}
+.header .logo {
+  font-family: var(--font-serif); font-size: 1rem; color: var(--rose-bright);
+  display: flex; align-items: center; gap: 8px;
+}
+.header .title {
+  font-family: var(--font-sans); font-size: 0.78rem; color: var(--text);
+  font-weight: 500;
+}
+.header .status {
+  display: flex; align-items: center; gap: 6px; font-size: 0.68rem;
+  margin-left: auto;
+}
+.header .status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--sage);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.header .elapsed {
+  font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-dim);
+  padding: 3px 10px; background: var(--glass-2-bg); border-radius: 4px;
+}
+
+/* ── Main grid ────────────────────────────────────── */
+.grid {
+  flex: 1; display: grid;
+  grid-template-columns: 1fr 1fr 320px;
+  grid-template-rows: auto 1fr;
+  gap: 1px; background: var(--glass-2-border); overflow: hidden;
+}
+.grid > * { background: var(--void); }
+
+/* ── Top metrics row ──────────────────────────────── */
+.metrics-row {
+  grid-column: 1 / -1; display: flex; padding: 14px 24px; gap: 24px;
+  align-items: center; background: var(--raised);
+}
+.metric-block {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.metric-block .mb-value {
+  font-family: var(--font-mono); font-size: 1.6rem; font-weight: 600;
+}
+.metric-block .mb-value.pass { color: var(--sage-bright); }
+.metric-block .mb-value.cost { color: var(--bone); text-shadow: var(--bone-bloom); }
+.metric-block .mb-value.perf { color: var(--rose-bright); }
+.metric-block .mb-value.time { color: var(--text); }
+.metric-block .mb-label {
+  font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.metric-block .mb-bar {
+  width: 120px; height: 4px; background: var(--glass-2-border); border-radius: 2px;
+  margin-top: 4px; overflow: hidden;
+}
+.metric-block .mb-bar-fill {
+  height: 100%; border-radius: 2px; transition: width 500ms var(--ease);
+}
+.metric-block .mb-bar-fill.pass { background: var(--sage); }
+.metric-block .mb-bar-fill.cost { background: var(--bone); }
+
+.metrics-divider { width: 1px; height: 36px; background: var(--glass-2-border); }
+
+/* ── Task grid (left panel) ───────────────────────── */
+.task-panel {
+  padding: 16px; overflow-y: auto;
+}
+.task-panel-title {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); margin-bottom: 12px; font-weight: 500;
+}
+.task-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(28px, 1fr));
+  gap: 4px;
+}
+.task-cell {
+  width: 28px; height: 28px; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; font-size: 0.5rem;
+  font-family: var(--font-mono); font-weight: 600;
+  transition: all 300ms var(--ease); cursor: default;
+  border: 1px solid transparent;
+}
+.task-cell.pending { background: var(--glass-2-bg); color: var(--text-ghost); }
+.task-cell.running { background: var(--rose-deep); border-color: var(--rose-dim); color: var(--rose-bright); animation: taskPulse 1.5s ease-in-out infinite; }
+.task-cell.pass { background: rgba(112,136,122,0.2); border-color: var(--sage); color: var(--sage-bright); }
+.task-cell.fail { background: rgba(195,110,85,0.15); border-color: var(--fail); color: var(--fail); }
+.task-cell.partial { background: rgba(170,136,85,0.15); border-color: var(--warn); color: var(--warn); }
+@keyframes taskPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.task-cell:hover { transform: scale(1.3); z-index: 2; }
+.task-cell:hover::after {
+  content: attr(data-tooltip); position: absolute; bottom: 100%; left: 50%;
+  transform: translateX(-50%); white-space: nowrap; padding: 4px 8px;
+  background: var(--raised); border: 1px solid var(--glass-2-border);
+  border-radius: 4px; font-size: 0.55rem; color: var(--text); pointer-events: none;
+}
+
+/* ── Visualization panel (center) ─────────────────── */
+.viz-panel {
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+}
+.viz-panel-title {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); font-weight: 500;
+}
+
+.viz-canvas-wrap {
+  flex: 1; position: relative; border-radius: 12px; overflow: hidden;
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  min-height: 200px;
+}
+.viz-canvas-wrap canvas { width: 100%; height: 100%; }
+
+.cost-timeline {
+  background: var(--glass-2-bg); border: 1px solid var(--glass-2-border);
+  border-radius: 12px; padding: 14px; flex-shrink: 0;
+}
+.cost-timeline-title {
+  font-size: 0.62rem; color: var(--text-dim); margin-bottom: 8px; font-weight: 500;
+}
+.cost-bars {
+  display: flex; align-items: flex-end; gap: 3px; height: 60px;
+}
+.cost-bar {
+  flex: 1; border-radius: 2px 2px 0 0; min-height: 1px;
+  transition: height 300ms var(--ease);
+  background: linear-gradient(to top, rgba(200,184,144,0.2), var(--bone));
+}
+.cost-bar.current { background: linear-gradient(to top, var(--rose-deep), var(--rose-bright)); }
+
+/* ── Activity feed (right panel) ──────────────────── */
+.feed-panel {
+  display: flex; flex-direction: column; border-left: 1px solid var(--glass-2-border);
+}
+.feed-title {
+  padding: 14px 16px; font-size: 0.65rem; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); font-weight: 500;
+  border-bottom: 1px solid var(--glass-2-border); flex-shrink: 0;
+}
+.feed-list {
+  flex: 1; overflow-y: auto; padding: 8px;
+}
+.feed-item {
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 4px;
+  background: var(--glass-2-bg); border: 1px solid transparent;
+  animation: feedSlide 200ms var(--ease);
+  transition: border-color 200ms var(--ease);
+}
+.feed-item:hover { border-color: var(--glass-2-border); }
+.feed-item.pass { border-left: 2px solid var(--sage); }
+.feed-item.fail { border-left: 2px solid var(--fail); }
+.feed-item.info { border-left: 2px solid var(--rose-dim); }
+.feed-item.learn { border-left: 2px solid var(--bone); }
+@keyframes feedSlide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.feed-item .fi-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;
+}
+.feed-item .fi-title {
+  font-size: 0.68rem; font-weight: 500; color: var(--text);
+}
+.feed-item .fi-time {
+  font-size: 0.55rem; color: var(--text-dim); font-family: var(--font-mono);
+}
+.feed-item .fi-body {
+  font-size: 0.62rem; color: var(--text-dim); line-height: 1.5;
+}
+.feed-item .fi-body code {
+  background: rgba(255,255,255,0.04); padding: 1px 4px; border-radius: 3px;
+  color: var(--rose-bright); font-family: var(--font-mono); font-size: 0.58rem;
+}
+.feed-item .fi-metric {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
+  font-size: 0.58rem; font-family: var(--font-mono);
+}
+.feed-item .fi-metric.cost { color: var(--bone); }
+.feed-item .fi-metric.tokens { color: var(--text-dim); }
+
+/* ── Bottom bar ───────────────────────────────────── */
+.bottom-bar {
+  display: flex; align-items: center; padding: 6px 24px; gap: 16px;
+  border-top: 1px solid var(--glass-2-border); background: var(--raised);
+  font-size: 0.58rem; color: var(--text-dim); flex-shrink: 0;
+}
+.bottom-bar .bb-item { display: flex; align-items: center; gap: 4px; }
+.bottom-bar .bb-value { font-family: var(--font-mono); color: var(--text); }
+.bottom-bar .bb-value.cost { color: var(--bone); }
+.bottom-bar .bb-spacer { flex: 1; }
+.bottom-bar a { color: var(--text-dim); text-decoration: none; }
+.bottom-bar a:hover { color: var(--rose-bright); }
+
+/* ── Responsive ───────────────────────────────────── */
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: 1fr 1fr; }
+  .feed-panel { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <span class="logo">&#9670; roko</span>
+  <span class="title">Live Benchmark Monitor</span>
+  <div class="status">
+    <div class="status-dot"></div>
+    <span>running &middot; swe-lite / cascade</span>
+  </div>
+  <span class="elapsed" id="elapsed">02:34</span>
+</header>
+
+<!-- Top metrics -->
+<div class="metrics-row">
+  <div class="metric-block">
+    <div class="mb-value pass" id="live-pass">37/50</div>
+    <div class="mb-label">Passed</div>
+    <div class="mb-bar"><div class="mb-bar-fill pass" style="width:74%"></div></div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value cost" id="live-cost">$4.82</div>
+    <div class="mb-label">Cost so far</div>
+    <div class="mb-bar"><div class="mb-bar-fill cost" style="width:48%"></div></div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value perf" id="live-cfactor">0.82</div>
+    <div class="mb-label">C-Factor (live)</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value time" id="live-avg">18.4s</div>
+    <div class="mb-label">Avg per task</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value" id="live-model" style="font-size:0.9rem;color:var(--rose-bright)">sonnet-4.6</div>
+    <div class="mb-label">Current model</div>
+  </div>
+  <div class="metrics-divider"></div>
+  <div class="metric-block">
+    <div class="mb-value" id="live-progress" style="font-size:0.9rem">42/50</div>
+    <div class="mb-label">Tasks completed</div>
+  </div>
+</div>
+
+<!-- Main grid -->
+<div class="grid">
+  <!-- Task grid -->
+  <div class="task-panel">
+    <div class="task-panel-title">Task Map (each cell = 1 task)</div>
+    <div class="task-grid" id="task-grid"></div>
+  </div>
+
+  <!-- Visualization -->
+  <div class="viz-panel">
+    <div class="viz-panel-title">Cost Accumulation (real-time)</div>
+    <div class="viz-canvas-wrap">
+      <canvas id="viz-canvas" aria-hidden="true"></canvas>
+    </div>
+    <div class="cost-timeline">
+      <div class="cost-timeline-title">Cost per task (last 20)</div>
+      <div class="cost-bars" id="cost-bars"></div>
+    </div>
+  </div>
+
+  <!-- Activity feed -->
+  <div class="feed-panel">
+    <div class="feed-title">Activity Feed</div>
+    <div class="feed-list" id="feed-list"></div>
+  </div>
+</div>
+
+<!-- Bottom bar -->
+<div class="bottom-bar">
+  <div class="bb-item"><span>Suite:</span> <span class="bb-value">swe-lite</span></div>
+  <div class="bb-item"><span>Strategy:</span> <span class="bb-value">cascade</span></div>
+  <div class="bb-item"><span>Batch:</span> <span class="bb-value">50</span></div>
+  <div class="bb-item"><span>Learning:</span> <span class="bb-value" style="color:var(--sage)">enabled</span></div>
+  <span class="bb-spacer"></span>
+  <div class="bb-item"><span>Budget:</span> <span class="bb-value cost">$4.82 / $10.00</span></div>
+  <a href="bench.html">&#8592; Back to Lab</a>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.min.js"></script>
+<script>
+// ── Simulation state ──────────────────────────────────────
+const TOTAL_TASKS = 50;
+let tasks = [];
+let feedItems = [];
+let costHistory = [];
+let elapsed = 154; // seconds
+let totalCost = 4.82;
+let passed = 37;
+let failed = 5;
+let completed = 42;
+
+const TASK_NAMES = [
+  'django__django-11001', 'astropy__astropy-6938', 'matplotlib__matplotlib-23314',
+  'sympy__sympy-13146', 'scikit-learn__scikit-learn-13497', 'requests__requests-3362',
+  'flask__flask-4045', 'pandas__pandas-21587', 'pytest__pytest-5103',
+  'sphinx__sphinx-8273', 'pylint__pylint-7277', 'black__black-3312',
+];
+
+// Init tasks
+for (let i = 0; i < TOTAL_TASKS; i++) {
+  if (i < passed) tasks.push({ state: 'pass', cost: (Math.random() * 0.2 + 0.02).toFixed(3) });
+  else if (i < passed + failed) tasks.push({ state: 'fail', cost: (Math.random() * 0.15 + 0.01).toFixed(3) });
+  else if (i === completed) tasks.push({ state: 'running', cost: '0.00' });
+  else tasks.push({ state: 'pending', cost: '0.00' });
+}
+
+// Init cost history
+for (let i = 0; i < 20; i++) {
+  costHistory.push(Math.random() * 0.15 + 0.03);
+}
+
+// ── Render task grid ──────────────────────────────────────
+function renderTaskGrid() {
+  const grid = document.getElementById('task-grid');
+  grid.innerHTML = tasks.map((t, i) => {
+    const icon = t.state === 'pass' ? '\u2713' : t.state === 'fail' ? '\u2717' : t.state === 'running' ? '\u25CF' : '';
+    return `<div class="task-cell ${t.state}" data-tooltip="Task ${i+1}: ${t.state} ($${t.cost})">${icon || (i+1)}</div>`;
+  }).join('');
+}
+
+// ── Render cost bars ──────────────────────────────────────
+function renderCostBars() {
+  const container = document.getElementById('cost-bars');
+  const max = Math.max(...costHistory, 0.01);
+  container.innerHTML = costHistory.map((v, i) => {
+    const h = (v / max * 100).toFixed(0);
+    const cls = i === costHistory.length - 1 ? 'cost-bar current' : 'cost-bar';
+    return `<div class="${cls}" style="height:${h}%"></div>`;
+  }).join('');
+}
+
+// ── Feed ──────────────────────────────────────────────────
+function addFeedItem(type, title, body, metrics) {
+  const list = document.getElementById('feed-list');
+  const now = new Date();
+  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const metricsHtml = metrics ? metrics.map(m =>
+    `<span class="fi-metric ${m.type}">${m.label}: ${m.value}</span>`
+  ).join(' &middot; ') : '';
+
+  const item = document.createElement('div');
+  item.className = `feed-item ${type}`;
+  item.innerHTML = `
+    <div class="fi-header">
+      <span class="fi-title">${title}</span>
+      <span class="fi-time">${time}</span>
+    </div>
+    <div class="fi-body">${body}</div>
+    ${metricsHtml ? `<div style="margin-top:4px">${metricsHtml}</div>` : ''}
+  `;
+  list.prepend(item);
+
+  // Keep max 50 items
+  while (list.children.length > 50) list.lastChild.remove();
+}
+
+// ── Three.js cost accumulation chart ──────────────────────
+let vizRenderer, vizScene, vizCamera, costLine, costPoints = [];
+
+function initViz() {
+  const canvas = document.getElementById('viz-canvas');
+  if (!canvas || !window.THREE) return;
+
+  const parent = canvas.parentElement;
+  const w = parent.clientWidth || 400;
+  const h = parent.clientHeight || 200;
+
+  vizRenderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  vizRenderer.setSize(w, h);
+  vizRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  vizScene = new THREE.Scene();
+  vizCamera = new THREE.OrthographicCamera(-w/2, w/2, h/2, -h/2, 0.1, 100);
+  vizCamera.position.z = 10;
+
+  // Generate initial data points
+  let cumCost = 0;
+  for (let i = 0; i < completed; i++) {
+    cumCost += parseFloat(tasks[i].cost || 0) || (Math.random() * 0.12 + 0.02);
+    costPoints.push(cumCost);
+  }
+
+  // Axis
+  const axisColor = 0x302830;
+  vizScene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-w/2 + 30, -h/2 + 30, 0),
+      new THREE.Vector3(w/2 - 20, -h/2 + 30, 0)
+    ]),
+    new THREE.LineBasicMaterial({ color: axisColor })
+  ));
+  vizScene.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-w/2 + 30, -h/2 + 30, 0),
+      new THREE.Vector3(-w/2 + 30, h/2 - 20, 0)
+    ]),
+    new THREE.LineBasicMaterial({ color: axisColor })
+  ));
+
+  // Grid lines
+  for (let i = 1; i <= 4; i++) {
+    const y = -h/2 + 30 + (i / 4) * (h - 50);
+    vizScene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-w/2 + 30, y, 0),
+        new THREE.Vector3(w/2 - 20, y, 0)
+      ]),
+      new THREE.LineBasicMaterial({ color: axisColor, transparent: true, opacity: 0.3 })
+    ));
+  }
+
+  renderCostLine(w, h);
+  vizRenderer.render(vizScene, vizCamera);
+}
+
+function renderCostLine(w, h) {
+  if (costLine) vizScene.remove(costLine);
+
+  if (costPoints.length < 2) return;
+  const maxCost = Math.max(...costPoints, 1);
+  const usableW = w - 50;
+  const usableH = h - 50;
+
+  const points = costPoints.map((c, i) => new THREE.Vector3(
+    -w/2 + 30 + (i / (TOTAL_TASKS - 1)) * usableW,
+    -h/2 + 30 + (c / maxCost) * usableH,
+    0
+  ));
+
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  costLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xC8B890, linewidth: 2 }));
+  vizScene.add(costLine);
+
+  // Current point indicator
+  const lastPt = points[points.length - 1];
+  const dot = new THREE.Mesh(
+    new THREE.CircleGeometry(4, 16),
+    new THREE.MeshBasicMaterial({ color: 0xCC90A8 })
+  );
+  dot.position.copy(lastPt);
+  vizScene.add(dot);
+
+  // Fill area under curve
+  const fillPoints = [...points, new THREE.Vector3(lastPt.x, -h/2 + 30, 0), new THREE.Vector3(points[0].x, -h/2 + 30, 0)];
+  const shape = new THREE.Shape();
+  shape.moveTo(fillPoints[0].x, fillPoints[0].y);
+  for (let i = 1; i < fillPoints.length; i++) shape.lineTo(fillPoints[i].x, fillPoints[i].y);
+  shape.closePath();
+  const fillGeo = new THREE.ShapeGeometry(shape);
+  const fillMat = new THREE.MeshBasicMaterial({ color: 0xC8B890, transparent: true, opacity: 0.08 });
+  vizScene.add(new THREE.Mesh(fillGeo, fillMat));
+}
+
+// ── Simulation loop ───────────────────────────────────────
+function simulate() {
+  if (completed >= TOTAL_TASKS) return;
+
+  // Complete current task
+  const success = Math.random() > 0.25;
+  const cost = (Math.random() * 0.18 + 0.03).toFixed(3);
+  tasks[completed].state = success ? 'pass' : 'fail';
+  tasks[completed].cost = cost;
+
+  if (success) passed++;
+  else failed++;
+
+  totalCost += parseFloat(cost);
+  costHistory.push(parseFloat(cost));
+  if (costHistory.length > 20) costHistory.shift();
+  costPoints.push(totalCost);
+
+  completed++;
+
+  // Start next task
+  if (completed < TOTAL_TASKS) {
+    tasks[completed].state = 'running';
+  }
+
+  // Add feed item
+  const taskName = TASK_NAMES[completed % TASK_NAMES.length];
+  if (success) {
+    addFeedItem('pass', `Task ${completed} passed`, `<code>${taskName}</code> — patch applied, tests passed.`, [
+      { type: 'cost', label: 'cost', value: `$${cost}` },
+      { type: 'tokens', label: 'tokens', value: `${Math.floor(Math.random() * 3000 + 800)}` },
+    ]);
+  } else {
+    addFeedItem('fail', `Task ${completed} failed`, `<code>${taskName}</code> — ${Math.random() > 0.5 ? 'tests failed after patch' : 'patch did not apply cleanly'}.`, [
+      { type: 'cost', label: 'cost', value: `$${cost}` },
+    ]);
+  }
+
+  // Occasionally add learning events
+  if (completed % 5 === 0) {
+    addFeedItem('learn', 'Knowledge updated', `Pattern extracted from last 5 tasks. Cascade router weights updated.`, []);
+  }
+  if (completed % 8 === 0) {
+    addFeedItem('info', 'Model switch', `Cascade router switched to <code>${Math.random() > 0.5 ? 'haiku-4.5' : 'sonnet-4.6'}</code> based on task complexity estimate.`, []);
+  }
+
+  // Update UI
+  updateMetrics();
+  renderTaskGrid();
+  renderCostBars();
+
+  if (vizRenderer) {
+    const canvas = document.getElementById('viz-canvas');
+    const parent = canvas.parentElement;
+    renderCostLine(parent.clientWidth, parent.clientHeight);
+    vizRenderer.render(vizScene, vizCamera);
+  }
+}
+
+function updateMetrics() {
+  document.getElementById('live-pass').textContent = `${passed}/${TOTAL_TASKS}`;
+  document.getElementById('live-cost').textContent = `$${totalCost.toFixed(2)}`;
+  document.getElementById('live-cfactor').textContent = (passed / Math.max(completed, 1) * 1.1).toFixed(2);
+  document.getElementById('live-avg').textContent = `${(elapsed / Math.max(completed, 1)).toFixed(1)}s`;
+  document.getElementById('live-progress').textContent = `${completed}/${TOTAL_TASKS}`;
+
+  // Update progress bars
+  const passBar = document.querySelector('.mb-bar-fill.pass');
+  if (passBar) passBar.style.width = `${passed / TOTAL_TASKS * 100}%`;
+  const costBar = document.querySelector('.mb-bar-fill.cost');
+  if (costBar) costBar.style.width = `${Math.min(totalCost / 10 * 100, 100)}%`;
+}
+
+// ── Elapsed timer ─────────────────────────────────────────
+setInterval(() => {
+  elapsed++;
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  document.getElementById('elapsed').textContent = `${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+}, 1000);
+
+// ── Init ──────────────────────────────────────────────────
+renderTaskGrid();
+renderCostBars();
+
+// Seed feed with initial items
+addFeedItem('info', 'Benchmark started', 'Suite: swe-lite, Strategy: cascade, Batch: 50, Model: auto', []);
+addFeedItem('learn', 'Knowledge loaded', '42 entries from neuro store injected into context', []);
+addFeedItem('pass', 'Task 42 passed', `<code>django__django-11001</code> — patch applied, tests passed.`, [
+  { type: 'cost', label: 'cost', value: '$0.087' },
+  { type: 'tokens', label: 'tokens', value: '2,341' },
+]);
+
+// Start simulation after a short delay
+setTimeout(() => {
+  initViz();
+  setInterval(simulate, 3000);
+}, 500);
+</script>
+</body>
+</html>

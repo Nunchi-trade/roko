@@ -127,6 +127,62 @@ pub async fn run(
         warn!(error = %err, "failed to create neuro directory");
     }
 
+    // ── Strict resume validation + JSONL recovery ─────────────────────────
+    //
+    // Run before any state file is reopened. The validator:
+    // 1. Loads `.roko/state/run-state.json` if present.
+    // 2. Verifies every current task's fingerprint matches what the prior
+    //    run recorded — drift is a hard error.
+    // 3. Truncates `episodes.jsonl`, `events.jsonl`, and
+    //    `efficiency.jsonl` after their last validated line (recovers
+    //    from partial-append corruption left by a prior crash).
+    //
+    // On `ResumeError::TaskMismatch` / `PlanMissing` / `UnsupportedSchema`
+    // the validator returns Err. We surface the failure and abort the
+    // run so the operator can either edit the plan back into a known
+    // state or discard the snapshot.
+    {
+        let mut plan_map: HashMap<String, Vec<TaskDef>> = HashMap::new();
+        for plan in &plans {
+            plan_map.insert(plan.id.clone(), plan.tasks.tasks.clone());
+        }
+        let prior_fingerprints = match persist::load_run_state(&paths) {
+            Ok(Some(snapshot)) => snapshot.fingerprints,
+            Ok(None) => Vec::new(),
+            Err(err) => {
+                warn!(error = %err, "failed to read prior run-state.json; treating as fresh run");
+                Vec::new()
+            }
+        };
+        match super::resume::prepare_resume(&paths, &plan_map, &prior_fingerprints) {
+            Ok(report) => {
+                if report.resumed {
+                    info!(
+                        prior_run_id = ?report.prior_run_id,
+                        validated_tasks = report.validated_tasks,
+                        "resume validated"
+                    );
+                }
+                for f in &report.recovered_files {
+                    use super::resume::JsonlRecoveryReport;
+                    match &f.recovery {
+                        JsonlRecoveryReport::Clean { .. } => {}
+                        JsonlRecoveryReport::TruncatedTrailing { truncated_bytes, .. } => {
+                            warn!(file = %f.path, truncated_bytes, "recovered partial JSONL");
+                        }
+                        JsonlRecoveryReport::DroppedInvalid { dropped_lines, .. } => {
+                            warn!(file = %f.path, dropped_lines, "recovered malformed JSONL");
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!(error = %err, "resume validation failed; aborting run");
+                return Err(anyhow::anyhow!("resume validation failed: {err}"));
+            }
+        }
+    }
+
     // Build plan ID set for resume validation.
     let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
 
@@ -174,6 +230,20 @@ pub async fn run(
     // State and TUI bridge.
     let tui = TuiBridge::new(state_hub.sender());
     let mut state = RunState::new(total_tasks);
+
+    // Compute task fingerprints once at startup so every subsequent
+    // `save_snapshot` writes them into `run-state.json` for the strict
+    // resume validator to consume on the next run.
+    state.task_fingerprints = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.tasks
+                .tasks
+                .iter()
+                .map(move |task| persist::TaskDefFingerprint::from_task(task, &plan.id))
+        })
+        .collect();
+
     let mut agent_handle: Option<AgentHandle> = None;
 
     let skip_enrichment: HashMap<String, bool> = plans
@@ -511,6 +581,7 @@ pub async fn run(
                         &config.workdir,
                         Duration::from_secs(config.timeout_secs),
                         &tui,
+                        config,
                     );
                     continue;
                 }
@@ -523,6 +594,7 @@ pub async fn run(
                         &paths,
                         &merge_queue,
                         &tui,
+                        config,
                     );
                     continue;
                 }
@@ -868,6 +940,7 @@ fn handle_plan_verify_completion(
     paths: &PersistPaths,
     merge_queue: &MergeQueue,
     tui: &TuiBridge,
+    config: &RunConfig,
 ) {
     if completion.passed {
         state.clear_retry_backoff(&completion.plan_id);
@@ -898,10 +971,11 @@ fn handle_plan_verify_completion(
             state.iteration.max(1),
         );
         let next_attempt = Some(state.iteration.saturating_add(1).max(1));
-        emit_runner_event_facadeless(
+        emit_runner_event(
             paths,
             state,
             tui,
+            config,
             RunnerEvent::retry_decision(
                 &run_id,
                 attempt,
@@ -973,6 +1047,7 @@ fn handle_merge_completion(
     workdir: &Path,
     regression_timeout: Duration,
     tui: &TuiBridge,
+    config: &RunConfig,
 ) {
     let run_id = state.run_id().to_string();
     if completion.passed {
@@ -980,10 +1055,11 @@ fn handle_merge_completion(
             Ok(phase) => {
                 tui.phase_transition(&completion.plan_id, "merging", &format!("{phase:?}"));
                 tui.plan_completed(&completion.plan_id, true);
-                emit_runner_event_facadeless(
+                emit_runner_event(
                     paths,
                     state,
                     tui,
+                    config,
                     RunnerEvent::plan_completed(
                         &run_id,
                         &completion.plan_id,
@@ -1019,10 +1095,11 @@ fn handle_merge_completion(
                     .apply_event(&completion.plan_id, &ExecutorEvent::Fatal(reason.clone()));
             }
         }
-        emit_runner_event_facadeless(
+        emit_runner_event(
             paths,
             state,
             tui,
+            config,
             RunnerEvent::plan_completed(
                 &run_id,
                 &completion.plan_id,
@@ -1316,6 +1393,13 @@ fn build_run_completed_event(
 // ─── Snapshot Helper ────────────────────────────────────────────────────
 
 /// Save executor snapshot and track consecutive failures.
+///
+/// Writes three files atomically:
+/// - `.roko/state/orchestrator.json` (aggregate)
+/// - `.roko/state/executor.json` (orchestrator snapshot)
+/// - `.roko/state/run-state.json` (runner-owned: cost, tokens,
+///   completed-task set, run_id, fingerprints — used by
+///   `runner::resume::prepare_resume`)
 fn save_snapshot(
     executor: &ParallelExecutor,
     paths: &PersistPaths,
@@ -1331,10 +1415,40 @@ fn save_snapshot(
         state.snapshot_failed();
         return;
     }
-    match persist::save_executor_snapshot(paths, &snapshot) {
+    if let Err(e) = persist::save_executor_snapshot(paths, &snapshot) {
+        error!(err = %e, "failed to save executor snapshot");
+        state.snapshot_failed();
+        return;
+    }
+
+    // Runner-owned run-state.json — cost, tokens, completed tasks,
+    // fingerprints. Without this file the strict resume validator
+    // cannot detect drift.
+    let run_state = persist::RunStateSnapshot {
+        schema_version: persist::RUN_STATE_SCHEMA_VERSION,
+        run_id: state.run_id().to_string(),
+        started_at_ms: state
+            .started_at
+            .elapsed()
+            .as_millis()
+            .saturating_sub(0) as u64,
+        timestamp_ms,
+        tasks_total: state.tasks_total,
+        tasks_completed: state.tasks_completed,
+        tasks_failed: state.tasks_failed,
+        total_tokens_in: state.total_tokens_in,
+        total_tokens_out: state.total_tokens_out,
+        total_cost_usd: state.total_cost_usd,
+        total_agent_calls: state.total_agent_calls,
+        plan_costs: state.plan_costs.clone(),
+        completed_tasks: state.completed_tasks.clone(),
+        snapshot_fail_streak: state.snapshot_fail_streak,
+        fingerprints: state.task_fingerprints.clone(),
+    };
+    match persist::save_run_state(paths, &run_state) {
         Ok(()) => state.snapshot_succeeded(),
         Err(e) => {
-            error!(err = %e, "failed to save executor snapshot");
+            error!(err = %e, "failed to save run-state snapshot");
             state.snapshot_failed();
         }
     }

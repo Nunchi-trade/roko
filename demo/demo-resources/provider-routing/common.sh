@@ -228,10 +228,12 @@ show_stats() {
 
 # ── Locate roko binary ───────────────────────────────────────────
 find_roko() {
-    # Prefer the compiled binary over shell functions/aliases
+    # Prefer `roko` on PATH, fall back to local builds.
     local repo_root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-    if [[ -x "${repo_root}/target/release/roko" ]]; then
+    if command -v roko &>/dev/null; then
+        echo "roko"
+    elif [[ -x "${repo_root}/target/release/roko" ]]; then
         echo "${repo_root}/target/release/roko"
     elif [[ -x "${repo_root}/target/debug/roko" ]]; then
         echo "${repo_root}/target/debug/roko"
@@ -239,8 +241,6 @@ find_roko() {
         echo "${CARGO_TARGET_DIR:-target}/release/roko"
     elif [[ -x "${CARGO_TARGET_DIR:-target}/debug/roko" ]]; then
         echo "${CARGO_TARGET_DIR:-target}/debug/roko"
-    elif command -v roko &>/dev/null; then
-        echo "roko"
     else
         err "roko binary not found. Run: cargo build -p roko-cli"
         exit 1

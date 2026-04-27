@@ -69,6 +69,13 @@ fn sidecar_health_url(base: &str) -> String {
 }
 
 /// Try to find the agent's sidecar bind address from `.roko/runtime/agents.json`.
+///
+/// Public alias for use by `chat_inline`.
+pub fn lookup_sidecar_url(agent_id: &str, workdir: &Path) -> Option<String> {
+    lookup_sidecar(agent_id, workdir)
+}
+
+/// Try to find the agent's sidecar bind address from `.roko/runtime/agents.json`.
 fn lookup_sidecar(agent_id: &str, workdir: &Path) -> Option<String> {
     let path = workdir.join(".roko/runtime/agents.json");
     let contents = std::fs::read_to_string(path).ok()?;

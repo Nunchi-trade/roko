@@ -111,7 +111,10 @@ const SERVE_URL = location.protocol === 'file:'
   : (location.port === '6677' || location.pathname.startsWith('/demo'))
     ? location.origin : 'http://localhost:6677';
 const WS_BASE = SERVE_URL.replace(/^http/, 'ws');
-const ROKO = './target/release/roko';
+// Resolve roko binary: prefer PATH, fall back to local builds.
+// The PTY shell may not have roko on PATH, so we probe at connect time.
+let ROKO = 'roko';
+let rokoResolved = false;
 
 const theme = {
   background: '#0e0c10', foreground: '#a58e9e', cursor: '#b97894', cursorAccent: '#0e0c10',
@@ -154,12 +157,12 @@ function connectTerminal() {
     if (e.data instanceof ArrayBuffer) {
       const text = new TextDecoder().decode(e.data);
       term.write(new Uint8Array(e.data));
-      // Watch for gate results in output
+      appendOutput(text);
       detectGates(text);
-      // Watch for file creation
       detectFiles(text);
     } else {
       term.write(e.data);
+      appendOutput(typeof e.data === 'string' ? e.data : '');
     }
   };
   ws.onclose = () => {
@@ -179,14 +182,73 @@ function connectTerminal() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function typeCmd(cmd, delay = 25) {
+// Buffer of recent terminal output for prompt detection.
+let outputBuffer = '';
+const PROMPT_RE = /[❯\$>]\s*$/;  // Matches common shell prompts
+
+// Track output for prompt detection.
+function appendOutput(text) {
+  outputBuffer += text;
+  // Keep buffer bounded (last 2KB)
+  if (outputBuffer.length > 2048) outputBuffer = outputBuffer.slice(-1024);
+}
+
+// Wait until the shell shows a prompt (command finished).
+// Returns false if timed out.
+async function waitForPrompt(timeoutMs = 60000) {
+  const start = Date.now();
+  // Clear buffer so we only see new output
+  outputBuffer = '';
+  while (Date.now() - start < timeoutMs) {
+    await sleep(300);
+    if (PROMPT_RE.test(outputBuffer)) return true;
+  }
+  return false;
+}
+
+async function typeCmd(cmd, delay = 20) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   for (const ch of cmd) {
     ws.send(ch);
-    await sleep(delay + Math.random() * 10);
+    await sleep(delay + Math.random() * 8);
   }
-  await sleep(150);
+  await sleep(100);
   ws.send('\r');
+}
+
+// Type a command and wait for the shell prompt to return.
+// Returns true if prompt returned (success), false if timed out.
+async function runCmd(cmd, timeoutMs = 60000) {
+  await typeCmd(cmd);
+  return await waitForPrompt(timeoutMs);
+}
+
+// Resolve the roko binary path inside the PTY shell.
+async function resolveRoko() {
+  if (rokoResolved) return;
+  // Try `which roko` — if it's on PATH, use it directly.
+  outputBuffer = '';
+  await typeCmd('which roko 2>/dev/null && echo __ROKO_OK__ || echo __ROKO_MISS__');
+  await waitForPrompt(5000);
+  if (outputBuffer.includes('__ROKO_OK__')) {
+    ROKO = 'roko';
+    rokoResolved = true;
+    return;
+  }
+  // Fall back to local builds.
+  for (const p of ['./target/release/roko', './target/debug/roko']) {
+    outputBuffer = '';
+    await typeCmd(`test -x ${p} && echo __ROKO_OK__ || echo __ROKO_MISS__`);
+    await waitForPrompt(3000);
+    if (outputBuffer.includes('__ROKO_OK__')) {
+      ROKO = p;
+      rokoResolved = true;
+      return;
+    }
+  }
+  // Last resort
+  ROKO = 'roko';
+  rokoResolved = true;
 }
 
 function submitFromInput() {
@@ -201,7 +263,7 @@ async function submitTask(prompt) {
   if (building) return;
   building = true;
   document.getElementById('btn-build').disabled = true;
-  document.getElementById('sb-status').textContent = 'building...';
+  document.getElementById('sb-status').textContent = 'initializing...';
 
   // Reset gates
   ['compile', 'test', 'clippy'].forEach(g => {
@@ -211,37 +273,50 @@ async function submitTask(prompt) {
   });
 
   // Reset file tree
-  document.getElementById('file-tree').innerHTML = '<div class="file" style="color:var(--ghost)">creating project...</div>';
+  document.getElementById('file-tree').innerHTML =
+    '<div class="file" style="color:var(--ghost)">creating project...</div>';
 
-  // Wait for terminal to be ready
+  // Ensure terminal is connected
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectTerminal();
     await sleep(2000);
   }
 
-  // Wait for shell prompt
-  await sleep(1500);
+  // Wait for initial shell prompt
+  await waitForPrompt(5000);
 
-  // Create temp directory and run roko
+  // Resolve roko binary path
+  await resolveRoko();
+
+  // Create clean demo workspace
   tmpDir = `/tmp/roko-demo-${Date.now()}`;
-  await typeCmd(`mkdir -p ${tmpDir} && cd ${tmpDir}`);
-  await sleep(500);
+  document.getElementById('sb-status').textContent = 'creating workspace...';
+  if (!await runCmd(`mkdir -p ${tmpDir} && cd ${tmpDir}`, 5000)) {
+    document.getElementById('sb-status').textContent = 'error: cd failed';
+    building = false;
+    document.getElementById('btn-build').disabled = false;
+    return;
+  }
 
-  // Initialize and run
-  await typeCmd(`${ROKO} init`);
-  await sleep(1000);
-  await typeCmd(`${ROKO} run "${prompt.replace(/"/g, '\\"')}" --share`);
+  // Initialize roko workspace
+  document.getElementById('sb-status').textContent = 'initializing workspace...';
+  if (!await runCmd(`${ROKO} init`, 10000)) {
+    document.getElementById('sb-status').textContent = 'error: init timed out';
+    building = false;
+    document.getElementById('btn-build').disabled = false;
+    return;
+  }
 
-  // Poll for completion (watch for the ✔ or ✖ in output)
+  // Run the build task
   document.getElementById('sb-status').textContent = 'agent working...';
+  const escaped = prompt.replace(/"/g, '\\"');
+  if (!await runCmd(`${ROKO} run "${escaped}" --share`, 120000)) {
+    document.getElementById('sb-status').textContent = 'timed out (2 min)';
+  }
 
-  // The terminal will show real-time output. We just wait.
-  // After some time, check if done
-  await sleep(15000);
-
-  // Show the file tree
-  await typeCmd(`find . -type f -not -path './.roko/*' -not -path './target/*' | head -20`);
-  await sleep(1000);
+  // List created files
+  document.getElementById('sb-status').textContent = 'listing files...';
+  await runCmd(`find . -type f -not -path './.roko/*' -not -path './target/*' | head -20`, 5000);
 
   building = false;
   document.getElementById('btn-build').disabled = false;

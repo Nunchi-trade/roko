@@ -172,61 +172,69 @@ pub struct InitializeResult {
     /// ACP protocol version negotiated for the session.
     pub protocol_version: u32,
     /// Capabilities supported by the agent.
-    pub agent_capabilities: AgentCapabilities,
-    /// Agent identity metadata.
-    pub agent_info: AgentInfo,
-    /// Supported authentication methods.
     #[serde(default)]
+    pub agent_capabilities: AgentCapabilities,
+    /// Supported authentication methods.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_methods: Vec<serde_json::Value>,
+    /// Agent identity metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_info: Option<AgentInfo>,
 }
 
 /// Capabilities reported by the ACP agent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
     /// Whether previous sessions can be loaded.
     #[serde(default)]
     pub load_session: bool,
     /// Prompt content capabilities.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_capabilities: Option<PromptCapabilities>,
+    #[serde(default)]
+    pub prompt_capabilities: PromptCapabilities,
     /// MCP transport capabilities.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_capabilities: Option<McpCapabilities>,
+    #[serde(default)]
+    pub mcp_capabilities: McpCapabilities,
 }
 
 /// Prompt content capabilities supported by the agent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptCapabilities {
     /// Whether image input is supported.
+    #[serde(default)]
     pub image: bool,
     /// Whether audio input is supported.
+    #[serde(default)]
     pub audio: bool,
     /// Whether embedded context blocks are supported.
+    #[serde(default)]
     pub embedded_context: bool,
 }
 
 /// MCP transport capabilities supported by the agent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpCapabilities {
     /// Whether HTTP MCP servers are supported.
+    #[serde(default)]
     pub http: bool,
     /// Whether SSE MCP servers are supported.
+    #[serde(default)]
     pub sse: bool,
 }
 
-/// Metadata describing the agent.
+/// Metadata describing the agent (matches ACP `Implementation` type).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
     /// Stable agent name.
     pub name: String,
-    /// Human-readable agent title.
-    pub title: String,
     /// Agent version string.
     pub version: String,
+    /// Optional human-readable agent title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Parameters for creating a new ACP session.
@@ -278,11 +286,12 @@ pub enum McpTransport {
 pub struct SessionNewResult {
     /// Server-generated session identifier.
     pub session_id: String,
-    /// Session configuration options.
-    pub config_options: Vec<ConfigOption>,
     /// Available interaction modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<ModesInfo>,
+    /// Session configuration options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_options: Option<Vec<ConfigOption>>,
 }
 
 /// Metadata about the available session modes.
@@ -324,13 +333,8 @@ pub struct SessionPromptParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPromptResult {
-    /// Target session identifier.
-    pub session_id: String,
     /// Reason the turn finished.
     pub stop_reason: StopReason,
-    /// Optional token usage for the turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<UsageInfo>,
 }
 
 /// Terminal reason for a prompt response.
@@ -341,15 +345,17 @@ pub enum StopReason {
     EndTurn,
     /// The model hit a max token limit.
     MaxTokens,
+    /// The maximum number of turn requests was reached.
+    MaxTurnRequests,
+    /// The agent refused to answer.
+    Refusal,
     /// The session was cancelled.
     Cancelled,
-    /// The session ended because of an error.
-    Error,
 }
 
 /// ACP prompt content block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ContentBlock {
     /// A plain text content block.
     Text {
@@ -372,7 +378,7 @@ pub enum ContentBlock {
 
 /// Reference to an ACP resource.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum ResourceRef {
     /// A file resource reference.
     File {
@@ -394,7 +400,7 @@ pub enum SessionUpdate {
         _meta: Option<serde_json::Value>,
     },
     /// A streamed thought/output chunk.
-    ThoughtMessageChunk {
+    AgentThoughtChunk {
         /// Content chunk payload.
         content: ContentBlock,
     },
@@ -435,7 +441,7 @@ pub enum SessionUpdate {
         available_commands: Vec<SlashCommand>,
     },
     /// Updated configuration options.
-    ConfigOptionsUpdate {
+    ConfigOptionUpdate {
         /// Available config options.
         config_options: Vec<ConfigOption>,
     },
