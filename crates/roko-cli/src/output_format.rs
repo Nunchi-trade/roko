@@ -87,7 +87,11 @@ pub fn intro(title: &str) {
 /// `"cascade-router → claude-sonnet-4-6-20251001"` or `"direct"`.
 pub fn print_identity(agent: &str, model: &str, routing: &str) {
     intro(agent);
-    bar(&format!("{}  {}", dim(&format!("{:<8}", "model")), cyan(model)));
+    bar(&format!(
+        "{}  {}",
+        dim(&format!("{:<8}", "model")),
+        cyan(model)
+    ));
 
     let routing_display = if let Some((before, after)) = routing.split_once(" → ") {
         format!("{} {} {}", magenta(before), symbols::ARROW, cyan(after))
@@ -119,6 +123,35 @@ pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
         "~{} USD",
         yellow(&format!("${:.4}", estimated_cost_usd))
     ));
+}
+
+/// Print the knowledge loading status block.
+///
+/// Prints:
+/// ```text
+/// ◇  Knowledge
+/// │  N facts loaded (avg confidence: 0.XX)
+/// ```
+///
+/// When `fact_count` is 0, prints:
+/// ```text
+/// ◇  Knowledge
+/// │  no facts loaded
+/// ```
+///
+/// `fact_count` is the number of knowledge facts retrieved from the neuro store.
+/// `avg_confidence` is the mean confidence score across loaded facts (0.0-1.0).
+pub fn print_knowledge_loaded(fact_count: usize, avg_confidence: f64) {
+    step("Knowledge", "");
+    if fact_count == 0 {
+        note("no facts loaded");
+    } else {
+        bar(&format!(
+            "{} facts loaded {}",
+            cyan(&fact_count.to_string()),
+            dim(&format!("(avg confidence: {:.2})", avg_confidence)),
+        ));
+    }
 }
 
 /// Print a step line: `◇  <label>` with an optional value.
@@ -203,5 +236,18 @@ mod tests {
     fn cost_prediction_no_panic() {
         print_cost_prediction(8_400, 0.042);
         print_cost_prediction(0, 0.0);
+    }
+
+    #[test]
+    fn knowledge_loaded_no_panic() {
+        print_knowledge_loaded(12, 0.87);
+        print_knowledge_loaded(0, 0.0);
+        print_knowledge_loaded(1, 1.0);
+    }
+
+    #[test]
+    fn knowledge_loaded_zero_facts() {
+        // Just verify the zero-fact branch doesn't panic.
+        print_knowledge_loaded(0, 0.5);
     }
 }
