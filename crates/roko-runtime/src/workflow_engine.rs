@@ -107,6 +107,7 @@ impl WorkflowEngine {
 
         let driver = EffectDriver::new(
             EffectServices {
+                model: self.services.model.clone(),
                 model_caller: Arc::clone(&self.services.model_caller),
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
@@ -148,43 +149,19 @@ impl WorkflowEngine {
 
             let input = match &output {
                 PipelineOutput::SpawnStrategist { prompt } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "strategist".to_string(),
-                        model: String::new(),
-                    });
                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
                 }
                 PipelineOutput::SpawnImplementer { prompt, context } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "implementer".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("implementer", prompt, context.as_deref())
                         .await
                 }
                 PipelineOutput::SpawnAutoFixer { error_output } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "autofix".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
                         .await
                 }
                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "reviewer".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
                         .await
@@ -301,6 +278,7 @@ impl WorkflowEngine {
 
         let driver = EffectDriver::new(
             EffectServices {
+                model: self.services.model.clone(),
                 model_caller: Arc::clone(&self.services.model_caller),
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
@@ -325,43 +303,19 @@ impl WorkflowEngine {
 
             let input = match &output {
                 PipelineOutput::SpawnStrategist { prompt } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "strategist".to_string(),
-                        model: String::new(),
-                    });
                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
                 }
                 PipelineOutput::SpawnImplementer { prompt, context } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "implementer".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("implementer", prompt, context.as_deref())
                         .await
                 }
                 PipelineOutput::SpawnAutoFixer { error_output } => {
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "autofix".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
                         .await
                 }
                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
-                    self.emit(RuntimeEvent::AgentSpawned {
-                        run_id: run_id.clone(),
-                        agent_id: String::new(),
-                        role: "reviewer".to_string(),
-                        model: String::new(),
-                    });
                     driver
                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
                         .await
@@ -850,6 +804,7 @@ mod tests {
 
     fn mock_services() -> EffectServices {
         EffectServices {
+            model: "mock".to_string(),
             model_caller: Arc::new(MockModelCaller),
             prompt_assembler: Arc::new(MockPromptAssembler),
             feedback_sink: Arc::new(MockFeedbackSink),

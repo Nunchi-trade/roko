@@ -16,7 +16,7 @@ pub use roko_core::foundation::{
 };
 use roko_core::foundation::{
     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
-    PromptAssembler, PromptSpec, ShellGateCommand,
+    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
 };
 
 use crate::event_bus::emit_runtime_event;
@@ -25,8 +25,18 @@ use crate::pipeline_state::PipelineInput;
 /// Fallible result type used by the effect driver.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
+const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
+const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
+const BASE_TEMPERATURE: f32 = 0.2;
+const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
+const TIER_TEMPERATURE_RANGE: f32 = 0.1;
+const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
+
 /// Services required by the `EffectDriver`.
 pub struct EffectServices {
+    /// Default model used for runtime-dispatched model calls.
+    pub model: String,
     /// Model call service.
     pub model_caller: Arc<dyn ModelCaller>,
     /// Prompt assembly service.
@@ -88,6 +98,25 @@ impl EffectDriver {
             let _ctx = policy.pre_dispatch(&agent_id, role);
             policy.modulate_dispatch(role, &mut modulation);
         }
+        if modulation.turn_limit_factor <= 0.0 {
+            tracing::debug!(
+                run_id = %self.run_id,
+                agent_id,
+                role,
+                tier_bias = modulation.tier_bias,
+                turn_limit_factor = modulation.turn_limit_factor,
+                exploration_rate = modulation.exploration_rate,
+                "affect policy deferred agent dispatch"
+            );
+            return PipelineInput::ResourceExhausted {
+                reason: format!("affect policy deferred {role} dispatch"),
+            };
+        }
+        if self.services.model.trim().is_empty() {
+            return PipelineInput::AgentFailed {
+                error: format!("model is not configured for {role} dispatch"),
+            };
+        }
 
         let system_prompt = match self
             .services
@@ -114,32 +143,39 @@ impl EffectDriver {
             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
         );
 
+        let request = model_call_request(
+            &self.services.model,
+            role,
+            system_prompt,
+            user_content,
+            &modulation,
+        );
+
+        tracing::debug!(
+            run_id = %self.run_id,
+            agent_id,
+            role,
+            model = %request.model,
+            max_tokens = request.max_tokens,
+            temperature = request.temperature,
+            budget = ?request.budget,
+            cache_policy = ?request.cache_policy,
+            tier_bias = modulation.tier_bias,
+            turn_limit_factor = modulation.turn_limit_factor,
+            exploration_rate = modulation.exploration_rate,
+            "applied affect dispatch modulation"
+        );
+
         emit_runtime_event(RuntimeEvent::AgentSpawned {
             run_id: self.run_id.clone(),
             agent_id: agent_id.clone(),
             role: role.to_string(),
-            model: String::new(),
+            model: request.model.clone(),
         });
 
         let start = Instant::now();
-        let result = self
-            .services
-            .model_caller
-            .call(ModelCallRequest {
-                model: String::new(),
-                system: Some(system_prompt),
-                messages: vec![ChatMessage {
-                    role: MessageRole::User,
-                    content: user_content,
-                }],
-                max_tokens: None,
-                temperature: None,
-                role: Some(role.to_string()),
-                caller: None,
-                budget: None,
-                cache_policy: CachePolicy::Default,
-            })
-            .await;
+        let request_model = request.model.clone();
+        let result = self.services.model_caller.call(request).await;
         let latency_ms = duration_millis(start);
 
         match result {
@@ -197,7 +233,7 @@ impl EffectDriver {
                     .feedback_sink
                     .record(FeedbackEvent::ModelCall {
                         run_id: self.run_id.clone(),
-                        model: String::new(),
+                        model: request_model,
                         role: role.to_string(),
                         input_tokens: 0,
                         output_tokens: 0,
@@ -423,6 +459,62 @@ fn duration_millis(start: Instant) -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
+fn model_call_request(
+    model: &str,
+    role: &str,
+    system_prompt: String,
+    user_content: String,
+    modulation: &DispatchModulation,
+) -> ModelCallRequest {
+    let max_tokens = modulated_max_tokens(modulation);
+    ModelCallRequest {
+        model: model.to_string(),
+        system: Some(system_prompt),
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: user_content,
+        }],
+        max_tokens: Some(max_tokens),
+        temperature: Some(modulated_temperature(modulation)),
+        role: Some(role.to_string()),
+        caller: None,
+        budget: Some(TokenBudget {
+            max_input: None,
+            max_output: Some(u64::from(max_tokens)),
+            max_cost_usd: None,
+        }),
+        cache_policy: modulated_cache_policy(modulation),
+    }
+}
+
+fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
+    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
+        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
+    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
+}
+
+fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
+    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
+    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
+    (BASE_TEMPERATURE
+        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
+        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
+        .clamp(0.0, 1.0)
+}
+
+fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
+    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
+    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
+        CachePolicy::Bypass
+    } else {
+        CachePolicy::Default
+    }
+}
+
+fn finite_or_default(value: f32, default: f32) -> f32 {
+    if value.is_finite() { value } else { default }
+}
+
 fn truncate_message(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -470,4 +562,189 @@ fn uuid_short() -> String {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
     format!("{:x}", millis & 0xFFFF_FFFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use parking_lot::Mutex;
+    use roko_core::BehavioralState;
+    use roko_core::foundation::AffectContext;
+
+    struct RecordingModelCaller {
+        captured: Arc<Mutex<Option<ModelCallRequest>>>,
+    }
+
+    impl ModelCaller for RecordingModelCaller {
+        fn call<'life0, 'async_trait>(
+            &'life0 self,
+            req: ModelCallRequest,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let captured = Arc::clone(&self.captured);
+            Box::pin(async move {
+                captured.lock().replace(req);
+                Ok(ModelCallResponse {
+                    content: "done".to_string(),
+                    model: "mock-model".to_string(),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                        total_tokens: 30,
+                        cost_usd: 0.01,
+                    },
+                    stop_reason: None,
+                    request_id: None,
+                })
+            })
+        }
+    }
+
+    struct StaticPromptAssembler;
+
+    impl PromptAssembler for StaticPromptAssembler {
+        fn assemble<'life0, 'async_trait>(
+            &'life0 self,
+            _spec: PromptSpec,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok("system prompt".to_string()) })
+        }
+    }
+
+    struct RecordingFeedbackSink;
+
+    impl FeedbackSink for RecordingFeedbackSink {
+        fn record<'life0, 'async_trait>(
+            &'life0 self,
+            _event: FeedbackEvent,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct UnusedGateRunner;
+
+    impl GateRunner for UnusedGateRunner {
+        fn run_gates<'life0, 'async_trait>(
+            &'life0 self,
+            _config: GateConfig,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Ok(GateReport {
+                    verdicts: Vec::new(),
+                })
+            })
+        }
+    }
+
+    struct ModulatingAffectPolicy;
+
+    impl AffectPolicy for ModulatingAffectPolicy {
+        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
+            AffectContext {
+                behavioral_state: BehavioralState::Exploring,
+                pad: [0.0, 0.3, 0.1],
+                emotional_tag: Some("exploring".to_string()),
+            }
+        }
+
+        fn on_task_outcome(
+            &mut self,
+            _task_id: &str,
+            _succeeded: bool,
+            _tokens_used: u64,
+            _cost_usd: f64,
+        ) {
+        }
+
+        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
+        }
+
+        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
+            params.tier_bias = 0.4;
+            params.turn_limit_factor = 1.5;
+            params.exploration_rate = 0.75;
+        }
+
+        fn behavioral_state(&self) -> BehavioralState {
+            BehavioralState::Exploring
+        }
+
+        fn persist<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_applies_affect_modulation_to_model_request() {
+        let captured = Arc::new(Mutex::new(None));
+        let services = EffectServices {
+            model: "mock-model".to_string(),
+            model_caller: Arc::new(RecordingModelCaller {
+                captured: Arc::clone(&captured),
+            }),
+            prompt_assembler: Arc::new(StaticPromptAssembler),
+            feedback_sink: Arc::new(RecordingFeedbackSink),
+            gate_runner: Arc::new(UnusedGateRunner),
+            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
+        };
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
+
+        let input = driver.spawn_agent("implementer", "do work", None).await;
+
+        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
+        let request = captured
+            .lock()
+            .clone()
+            .expect("model caller should capture request");
+        assert_eq!(request.model, "mock-model");
+        assert_eq!(request.max_tokens, Some(3072));
+        assert_eq!(
+            request.budget.and_then(|budget| budget.max_output),
+            Some(3072)
+        );
+        assert_eq!(request.cache_policy, CachePolicy::Bypass);
+        assert!(
+            request
+                .temperature
+                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
+            "expected modulated temperature, got {:?}",
+            request.temperature
+        );
+    }
 }
