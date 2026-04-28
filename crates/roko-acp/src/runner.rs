@@ -498,7 +498,13 @@ fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
     match event {
         FeedbackEvent::ModelCall {
             run_id,
+            request_id,
+            prompt_section_ids,
+            knowledge_ids,
             model,
+            provider,
+            token_usage,
+            cost,
             role,
             input_tokens,
             output_tokens,
@@ -508,7 +514,13 @@ fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
         } => serde_json::json!({
             "kind": "model_call",
             "run_id": run_id,
+            "request_id": request_id,
+            "prompt_section_ids": prompt_section_ids,
+            "knowledge_ids": knowledge_ids,
             "model": model,
+            "provider": provider,
+            "token_usage": token_usage,
+            "cost": cost,
             "role": role,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,

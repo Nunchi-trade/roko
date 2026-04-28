@@ -136,7 +136,12 @@ impl EffectDriver {
                 temperature: None,
                 role: Some(role.to_string()),
                 caller: None,
+                run_id: None,
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
                 budget: None,
+                budget_remaining: None,
+                routing_hints: Vec::new(),
                 cache_policy: CachePolicy::Default,
             })
             .await;
@@ -160,8 +165,14 @@ impl EffectDriver {
                     .services
                     .feedback_sink
                     .record(FeedbackEvent::ModelCall {
-                        run_id: self.run_id.clone(),
-                        model: response.model.clone(),
+                        run_id: Some(self.run_id.clone()),
+                        request_id: response.request_id.clone(),
+                        prompt_section_ids: Vec::new(),
+                        knowledge_ids: Vec::new(),
+                        model: Some(response.model.clone()),
+                        provider: None,
+                        token_usage: None,
+                        cost: None,
                         role: role.to_string(),
                         input_tokens: response.usage.input_tokens,
                         output_tokens: response.usage.output_tokens,
@@ -196,8 +207,14 @@ impl EffectDriver {
                     .services
                     .feedback_sink
                     .record(FeedbackEvent::ModelCall {
-                        run_id: self.run_id.clone(),
-                        model: String::new(),
+                        run_id: Some(self.run_id.clone()),
+                        request_id: None,
+                        prompt_section_ids: Vec::new(),
+                        knowledge_ids: Vec::new(),
+                        model: None,
+                        provider: None,
+                        token_usage: None,
+                        cost: None,
                         role: role.to_string(),
                         input_tokens: 0,
                         output_tokens: 0,

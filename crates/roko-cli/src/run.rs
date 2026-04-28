@@ -337,68 +337,19 @@ fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         role: req.role,
-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
+        caller: Some(roko_core::foundation::CallerIdentity::Cli.into()),
+        run_id: None,
+        prompt_section_ids: Vec::new(),
+        knowledge_ids: Vec::new(),
         budget: req.budget,
+        budget_remaining: None,
+        routing_hints: Vec::new(),
         cache_policy: req.cache_policy,
     }
 }
 
 fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
-    match event {
-        RuntimeFeedbackEvent::ModelCall {
-            run_id,
-            model,
-            role,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            latency_ms,
-            success,
-        } => CoreFeedbackEvent::ModelCall {
-            run_id,
-            model,
-            role,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            latency_ms,
-            success,
-        },
-        RuntimeFeedbackEvent::GateResult {
-            run_id,
-            gate_name,
-            passed,
-            duration_ms,
-        } => CoreFeedbackEvent::GateResult {
-            run_id,
-            gate_name,
-            passed,
-            duration_ms,
-        },
-        RuntimeFeedbackEvent::WorkflowComplete {
-            run_id,
-            outcome,
-            total_cost_usd,
-            total_tokens,
-            duration_ms,
-        } => {
-            let success = outcome == "success";
-            CoreFeedbackEvent::WorkflowComplete {
-                event_type: if success {
-                    "workflow_completed".to_string()
-                } else {
-                    "workflow_failed".to_string()
-                },
-                run_id,
-                model: None,
-                success,
-                outcome,
-                total_cost_usd,
-                total_tokens,
-                duration_ms,
-            }
-        }
-    }
+    event
 }
 
 fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {

@@ -115,7 +115,13 @@ impl FeedbackService {
             let json = match event {
                 FeedbackEvent::ModelCall {
                     run_id,
+                    request_id,
+                    prompt_section_ids,
+                    knowledge_ids,
                     model,
+                    provider,
+                    token_usage,
+                    cost,
                     role,
                     input_tokens,
                     output_tokens,
@@ -125,7 +131,13 @@ impl FeedbackService {
                 } => serde_json::json!({
                     "kind": "model_call",
                     "run_id": run_id,
+                    "request_id": request_id,
+                    "prompt_section_ids": prompt_section_ids,
+                    "knowledge_ids": knowledge_ids,
                     "model": model,
+                    "provider": provider,
+                    "token_usage": token_usage,
+                    "cost": cost,
                     "role": role,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
@@ -363,7 +375,7 @@ impl FeedbackService {
 impl FeedbackSink for FeedbackService {
     async fn record(&self, event: FeedbackEvent) -> Result<()> {
         if let FeedbackEvent::ModelCall {
-            ref model,
+            model: Some(ref model),
             ref role,
             latency_ms,
             success,
@@ -459,8 +471,14 @@ mod tests {
         let svc = FeedbackService::new(dir.path().to_path_buf());
 
         svc.record(FeedbackEvent::ModelCall {
-            run_id: "r1".into(),
-            model: "sonnet".into(),
+            run_id: Some("r1".into()),
+            request_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some("sonnet".into()),
+            provider: None,
+            token_usage: None,
+            cost: None,
             role: "implementer".into(),
             input_tokens: 1000,
             output_tokens: 500,
@@ -593,8 +611,14 @@ mod tests {
         let svc = FeedbackService::new(dir.path().to_path_buf());
 
         svc.record(FeedbackEvent::ModelCall {
-            run_id: "r1".into(),
-            model: "sonnet".into(),
+            run_id: Some("r1".into()),
+            request_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some("sonnet".into()),
+            provider: None,
+            token_usage: None,
+            cost: None,
             role: "implementer".into(),
             input_tokens: 1000,
             output_tokens: 500,
@@ -621,8 +645,14 @@ mod tests {
             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
 
         svc.record(FeedbackEvent::ModelCall {
-            run_id: "r1".into(),
-            model: "sonnet".into(),
+            run_id: Some("r1".into()),
+            request_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some("sonnet".into()),
+            provider: None,
+            token_usage: None,
+            cost: None,
             role: "implementer".into(),
             input_tokens: 1000,
             output_tokens: 500,
@@ -644,8 +674,14 @@ mod tests {
             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
 
         svc.record(FeedbackEvent::ModelCall {
-            run_id: "r1".into(),
-            model: "unknown-model".into(),
+            run_id: Some("r1".into()),
+            request_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some("unknown-model".into()),
+            provider: None,
+            token_usage: None,
+            cost: None,
             role: "implementer".into(),
             input_tokens: 1000,
             output_tokens: 500,

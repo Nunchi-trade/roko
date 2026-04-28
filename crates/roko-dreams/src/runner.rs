@@ -1318,8 +1318,13 @@ impl Agent for DreamReviewAgent {
                     max_tokens: None,
                     temperature: None,
                     role: Some("dream-review".to_string()),
-                    caller: Some(CallerIdentity::Dreams),
+                    caller: Some(CallerIdentity::Dreams.into()),
+                    run_id: None,
+                    prompt_section_ids: Vec::new(),
+                    knowledge_ids: Vec::new(),
                     budget: None,
+                    budget_remaining: None,
+                    routing_hints: Vec::new(),
                     cache_policy: CachePolicy::Default,
                 };
 
