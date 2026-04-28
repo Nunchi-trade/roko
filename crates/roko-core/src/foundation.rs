@@ -204,6 +204,12 @@ pub struct PromptSpec {
 pub trait PromptAssembler: Send + Sync {
     /// Build a complete system prompt from the spec.
     async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+
+    /// Prompt section ids included by the most recent assembly.
+    fn last_prompt_section_ids(&self) -> Vec<String>;
+
+    /// Knowledge entry ids included by the most recent assembly.
+    fn last_knowledge_ids(&self) -> Vec<String>;
 }
 
 // -- FeedbackSink --

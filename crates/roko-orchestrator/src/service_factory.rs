@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use roko_agent::ModelCallService;
 use roko_compose::prompt_assembly_service::PromptAssemblyService;
 use roko_core::agent::resolve_model;
-use roko_core::config::schema::RokoConfig;
+use roko_core::config::schema::{RokoConfig, ToolsConfig};
 use roko_core::foundation::{
     AffectPolicy, FeedbackEvent, FeedbackSink, GateRunner, ModelCaller, PromptAssembler,
 };
@@ -16,6 +16,8 @@ use roko_core::{Result, RokoError};
 use roko_daimon::policy::DaimonPolicy;
 use roko_gate::gate_service::GateService;
 use roko_learn::feedback_service::FeedbackService;
+use roko_learn::playbook::PlaybookStore;
+use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_neuro::knowledge_store::KnowledgeStore;
 use roko_runtime::effect_driver::EffectServices;
 
@@ -102,7 +104,9 @@ impl ServiceFactory {
             .clone()
             .unwrap_or_else(|| workspace_config.agent.default_model.clone());
         if model_key.trim().is_empty() {
-            return Err(RokoError::invalid("model is not configured for service factory"));
+            return Err(RokoError::invalid(
+                "model is not configured for service factory",
+            ));
         }
         let model = resolve_model(&workspace_config, &model_key).slug;
         if model.trim().is_empty() {
@@ -111,9 +115,13 @@ impl ServiceFactory {
             )));
         }
         workspace_config.agent.default_model = model.clone();
+        let prompt_token_budget = workspace_config.budget.prompt_token_budget;
+        let tool_instructions = tool_instructions_for_config(&workspace_config.tools);
 
         let feedback_sink: Arc<dyn FeedbackSink> = if config.feedback_enabled {
-            Arc::new(FeedbackService::from_roko_dir_with_episodes(&config.roko_dir))
+            Arc::new(FeedbackService::from_roko_dir_with_episodes(
+                &config.roko_dir,
+            ))
         } else {
             Arc::new(MemoryFeedbackSink::default())
         };
@@ -128,8 +136,29 @@ impl ServiceFactory {
         let model_call_service = Arc::new(model_call_service);
 
         let knowledge_store = Arc::new(KnowledgeStore::for_roko_dir(&config.roko_dir));
-        let prompt_assembler: Arc<dyn PromptAssembler> =
-            Arc::new(PromptAssemblyService::new().with_knowledge_store(knowledge_store));
+        let playbook_store = Arc::new(PlaybookStore::new(
+            config.roko_dir.join("learn").join("playbooks"),
+        ));
+        let section_effectiveness = SectionEffectivenessRegistry::load_or_new(
+            &config.roko_dir.join("learn").join("section-effects.json"),
+        )
+        .lift_weights();
+
+        let mut prompt_service = PromptAssemblyService::new()
+            .with_knowledge_store(knowledge_store)
+            .with_episodes(config.roko_dir.join("episodes.jsonl"))
+            .with_playbooks(playbook_store);
+        if prompt_token_budget > 0 {
+            prompt_service = prompt_service.with_token_budget(prompt_token_budget);
+        }
+        if let Some(tools) = tool_instructions {
+            prompt_service = prompt_service.with_tool_instructions(tools);
+        }
+        if !section_effectiveness.is_empty() {
+            prompt_service = prompt_service.with_section_effectiveness(section_effectiveness);
+        }
+
+        let prompt_assembler: Arc<dyn PromptAssembler> = Arc::new(prompt_service);
         let gate_runner: Arc<dyn GateRunner> = Arc::new(GateService::new());
         let affect_policy = config.affect_enabled.then(|| {
             let state_path = config.roko_dir.join("state").join("daimon.json");
@@ -146,6 +175,36 @@ impl ServiceFactory {
             affect_policy,
         })
     }
+}
+
+fn tool_instructions_for_config(tools: &ToolsConfig) -> Option<String> {
+    if tools.allow.is_empty() && tools.deny.is_empty() && tools.profiles.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    if !tools.allow.is_empty() {
+        lines.push(format!("Allowed tools: {}", tools.allow.join(", ")));
+    }
+    if !tools.deny.is_empty() {
+        lines.push(format!("Denied tools: {}", tools.deny.join(", ")));
+    }
+    let mut profiles = tools.profiles.iter().collect::<Vec<_>>();
+    profiles.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (name, profile) in profiles {
+        let mut parts = Vec::new();
+        if !profile.extra_tools.is_empty() {
+            parts.push(format!("extra: {}", profile.extra_tools.join(", ")));
+        }
+        if !profile.excluded_tools.is_empty() {
+            parts.push(format!("excluded: {}", profile.excluded_tools.join(", ")));
+        }
+        if !parts.is_empty() {
+            lines.push(format!("{name} profile tools: {}", parts.join("; ")));
+        }
+    }
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 #[derive(Default)]
