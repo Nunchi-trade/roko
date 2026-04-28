@@ -8,10 +8,10 @@ use roko_core::foundation::{PromptAssembler, PromptSpec};
 use roko_core::{AgentRole, Result};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::playbook::{PlaybookStore, QueryContext};
-use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
+use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeTier, NeuroStore};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::conventions::detect_conventions;
 use crate::role_prompts::role_identity_for;
@@ -20,6 +20,22 @@ use crate::token_counter::TokenCounter;
 
 const SOURCE_SAMPLE_LIMIT: usize = 12;
 const WORKSPACE_MAP_LINE_LIMIT: usize = 200;
+
+// TODO(converge): roko_neuro::NeuroStore currently has a `Sized` supertrait,
+// so it cannot be stored directly as `dyn NeuroStore`. Keep this object-safe
+// adapter local until roko-neuro exposes an object-safe query trait.
+trait PromptKnowledgeStore {
+    fn query(&self, topic: &str, limit: usize) -> Vec<KnowledgeEntry>;
+}
+
+impl<T> PromptKnowledgeStore for T
+where
+    T: NeuroStore + Send + Sync,
+{
+    fn query(&self, topic: &str, limit: usize) -> Vec<KnowledgeEntry> {
+        NeuroStore::query(self, topic, limit).unwrap_or_default()
+    }
+}
 
 /// Service that assembles system prompts via the 9-layer `SystemPromptBuilder`.
 ///
@@ -33,8 +49,11 @@ pub struct PromptAssemblyService {
     default_conventions: Option<String>,
     /// Static domain knowledge injected into layer 3.
     domain_context: Option<String>,
-    /// Durable knowledge source injected into layer 3 when relevant.
-    knowledge_store: Option<Arc<KnowledgeStore>>,
+    /// Optional knowledge store for injecting relevant knowledge into prompts.
+    knowledge_store: Option<Arc<dyn PromptKnowledgeStore + Send + Sync>>,
+    /// IDs of knowledge entries used in the most recent assembly.
+    /// Cleared on each `assemble()` call.
+    last_knowledge_ids: Mutex<Vec<String>>,
     /// Path to append-only episode history used for recent execution context.
     episodes_path: Option<PathBuf>,
     /// Learned playbook source used for relevant technique injection.
@@ -50,11 +69,12 @@ pub struct PromptAssemblyService {
 impl PromptAssemblyService {
     /// Create a new `PromptAssemblyService`.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             default_conventions: None,
             domain_context: None,
             knowledge_store: None,
+            last_knowledge_ids: Mutex::new(Vec::new()),
             episodes_path: None,
             playbook_store: None,
             tool_instructions: None,
@@ -77,11 +97,22 @@ impl PromptAssemblyService {
         self
     }
 
-    /// Add a durable knowledge store for layer 3 domain context.
+    /// Attach a knowledge store for prompt enrichment.
     #[must_use]
-    pub fn with_knowledge_store(mut self, store: Arc<KnowledgeStore>) -> Self {
+    pub fn with_knowledge_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: NeuroStore + Send + Sync + 'static,
+    {
         self.knowledge_store = Some(store);
         self
+    }
+
+    /// Return the knowledge entry IDs used in the most recent assembly.
+    pub fn last_knowledge_ids(&self) -> Vec<String> {
+        self.last_knowledge_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Add recent episode history for layer 3b context.
@@ -160,6 +191,69 @@ impl PromptAssemblyService {
             .sum();
         (included, total)
     }
+
+    /// Query knowledge store for relevant technique insights.
+    fn query_techniques(&self, task: &str) -> Vec<String> {
+        let Some(store) = self.knowledge_store.as_ref() else {
+            return Vec::new();
+        };
+        let entries = store.query(task, 5);
+        let mut ids = Vec::new();
+        let techniques = entries
+            .into_iter()
+            .filter(|e| e.kind != KnowledgeKind::AntiKnowledge)
+            .filter(|e| e.confidence >= 0.3)
+            .map(|e| {
+                ids.push(e.id);
+                e.content
+            })
+            .collect();
+        self.record_knowledge_ids(ids);
+        techniques
+    }
+
+    /// Query knowledge store for anti-knowledge warnings.
+    fn query_anti_patterns(&self, task: &str) -> Vec<String> {
+        let Some(store) = self.knowledge_store.as_ref() else {
+            return Vec::new();
+        };
+        let entries = store.query(&format!("{task} warning anti-pattern"), 5);
+        let mut ids = Vec::new();
+        let warnings = entries
+            .into_iter()
+            .filter(|e| e.kind == KnowledgeKind::AntiKnowledge)
+            .filter(|e| e.confidence >= 0.2)
+            .map(|e| {
+                ids.push(e.id);
+                format!("WARNING: {}", e.content)
+            })
+            .collect();
+        self.record_knowledge_ids(ids);
+        warnings
+    }
+
+    fn clear_last_knowledge_ids(&self) {
+        self.last_knowledge_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    fn record_knowledge_ids(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let mut last_ids = self
+            .last_knowledge_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            if !id.is_empty() && !last_ids.contains(&id) {
+                last_ids.push(id);
+            }
+        }
+    }
 }
 
 impl Default for PromptAssemblyService {
@@ -171,6 +265,8 @@ impl Default for PromptAssemblyService {
 #[async_trait]
 impl PromptAssembler for PromptAssemblyService {
     async fn assemble(&self, spec: PromptSpec) -> Result<String> {
+        self.clear_last_knowledge_ids();
+
         let role = resolve_role(spec.role.as_deref());
         let identity = role_identity_for(role);
 
@@ -217,11 +313,12 @@ impl PromptAssembler for PromptAssemblyService {
         }
 
         if self.should_include("domain") {
-            if let Some(domain) = domain_context_for_spec(
+            if let Some((domain, ids)) = domain_context_for_spec(
                 &spec,
                 self.domain_context.as_deref(),
                 self.knowledge_store.as_deref(),
             ) {
+                self.record_knowledge_ids(ids);
                 builder = builder.with_domain(domain);
             }
         }
@@ -232,14 +329,10 @@ impl PromptAssembler for PromptAssemblyService {
             context_blocks.push(workspace_map);
         }
 
-        if self.should_include("context") && !context_blocks.is_empty() {
-            builder = builder.with_context(context_blocks.join("\n\n"));
-        }
-
         if self.should_include("task")
-            && let Some(task) = spec.task
+            && let Some(task) = spec.task.as_ref()
         {
-            builder = builder.with_task(task);
+            builder = builder.with_task(task.clone());
         }
 
         if self.should_include("tools")
@@ -249,13 +342,38 @@ impl PromptAssembler for PromptAssemblyService {
         }
 
         if self.should_include("gate_feedback") {
-            for feedback in spec.gate_feedback {
+            for feedback in &spec.gate_feedback {
                 builder = builder.with_gate_feedback_text(feedback);
             }
         }
 
-        if self.should_include("anti_patterns") && !spec.anti_patterns.is_empty() {
-            builder = builder.with_anti_patterns(spec.anti_patterns);
+        let mut anti_patterns = spec.anti_patterns;
+        if self.knowledge_store.is_some()
+            && let Some(task_text) = spec.task.as_deref()
+        {
+            let techniques = self.query_techniques(task_text);
+            let warnings = self.query_anti_patterns(task_text);
+
+            if self.should_include("context") && !techniques.is_empty() {
+                context_blocks.push(format_techniques_section(&techniques));
+            }
+            if self.should_include("anti_patterns") {
+                anti_patterns.extend(warnings.clone());
+            }
+
+            tracing::debug!(
+                techniques = %techniques.len(),
+                warnings = %warnings.len(),
+                "injected knowledge into prompt assembly"
+            );
+        }
+
+        if self.should_include("context") && !context_blocks.is_empty() {
+            builder = builder.with_context(context_blocks.join("\n\n"));
+        }
+
+        if self.should_include("anti_patterns") && !anti_patterns.is_empty() {
+            builder = builder.with_anti_patterns(anti_patterns);
         }
 
         if let Some(base_budget) = self.token_budget {
@@ -301,34 +419,40 @@ fn workspace_map_for_spec(spec: &PromptSpec) -> Option<String> {
 fn domain_context_for_spec(
     spec: &PromptSpec,
     static_domain_context: Option<&str>,
-    knowledge_store: Option<&KnowledgeStore>,
-) -> Option<String> {
+    knowledge_store: Option<&(dyn PromptKnowledgeStore + Send + Sync)>,
+) -> Option<(String, Vec<String>)> {
     let knowledge_text = knowledge_store.and_then(|store| relevant_knowledge_for_spec(store, spec));
 
     match (static_domain_context, knowledge_text) {
-        (Some(existing), Some(knowledge)) if !existing.trim().is_empty() => {
-            Some(format!("{existing}\n\n{knowledge}"))
+        (Some(existing), Some((knowledge, ids))) if !existing.trim().is_empty() => {
+            Some((format!("{existing}\n\n{knowledge}"), ids))
         }
-        (Some(existing), _) if !existing.trim().is_empty() => Some(existing.to_owned()),
-        (_, Some(knowledge)) => Some(knowledge),
+        (Some(existing), _) if !existing.trim().is_empty() => Some((existing.to_owned(), vec![])),
+        (_, Some((knowledge, ids))) => Some((knowledge, ids)),
         _ => None,
     }
 }
 
-fn relevant_knowledge_for_spec(store: &KnowledgeStore, spec: &PromptSpec) -> Option<String> {
+fn relevant_knowledge_for_spec(
+    store: &(dyn PromptKnowledgeStore + Send + Sync),
+    spec: &PromptSpec,
+) -> Option<(String, Vec<String>)> {
     let topic = spec
         .task
         .as_deref()
         .map(|task| first_chars(task, 200))
         .or(spec.role.as_deref())?;
 
-    let entries = store.query(topic, 5).ok()?;
+    let entries = store.query(topic, 5);
     let facts = entries
         .iter()
         .filter(|entry| entry.confidence >= 0.5 && !matches!(entry.tier, KnowledgeTier::Transient))
         .collect::<Vec<_>>();
 
-    (!facts.is_empty()).then(|| format_knowledge_section(&facts))
+    (!facts.is_empty()).then(|| {
+        let ids = facts.iter().map(|entry| entry.id.clone()).collect();
+        (format_knowledge_section(&facts), ids)
+    })
 }
 
 fn first_chars(value: &str, max_chars: usize) -> &str {
@@ -342,6 +466,16 @@ fn format_knowledge_section(entries: &[&KnowledgeEntry]) -> String {
     let lines = entries
         .iter()
         .map(|entry| format!("- [{}] {}", knowledge_kind_label(entry.kind), entry.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("## Relevant Knowledge\n\n{lines}")
+}
+
+fn format_techniques_section(techniques: &[String]) -> String {
+    let lines = techniques
+        .iter()
+        .map(|technique| format!("- {technique}"))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -497,6 +631,7 @@ fn path_to_string(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_neuro::KnowledgeStore;
 
     #[tokio::test]
     async fn basic_assembly() {
