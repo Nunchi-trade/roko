@@ -192,6 +192,25 @@ impl FeedbackSink for AcpFeedbackSink {
             let line = feedback_json(event).to_string();
             file.write_all(line.as_bytes()).await?;
             file.write_all(b"\n").await?;
+            file.flush().await?;
+            Ok(())
+        })
+    }
+
+    fn flush<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        let path = self.data_dir.join("efficiency.jsonl");
+        Box::pin(async move {
+            match tokio::fs::OpenOptions::new().read(true).open(path).await {
+                Ok(file) => file.sync_all().await?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
             Ok(())
         })
     }
@@ -512,14 +531,20 @@ fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
             "ts": ts,
         }),
         FeedbackEvent::WorkflowComplete {
+            event_type,
             run_id,
+            model,
+            success,
             outcome,
             total_cost_usd,
             total_tokens,
             duration_ms,
         } => serde_json::json!({
-            "kind": "workflow_complete",
+            "kind": event_type,
+            "event_type": event_type,
             "run_id": run_id,
+            "model": model,
+            "success": success,
             "outcome": outcome,
             "total_cost_usd": total_cost_usd,
             "total_tokens": total_tokens,

@@ -39,11 +39,19 @@ pub struct EffectServices {
     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkflowFeedbackTotals {
+    pub primary_model: Option<String>,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+}
+
 /// Drives workflow execution by translating state-machine actions into effects.
 pub struct EffectDriver {
     services: EffectServices,
     run_id: String,
     workdir: PathBuf,
+    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
 }
 
 impl EffectDriver {
@@ -53,7 +61,12 @@ impl EffectDriver {
             services,
             run_id,
             workdir,
+            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
         }
+    }
+
+    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
+        self.feedback_totals.lock().await.clone()
     }
 
     /// Spawn an agent with the given role and prompt.
@@ -131,6 +144,8 @@ impl EffectDriver {
 
         match result {
             Ok(response) => {
+                self.record_model_totals(role, &response).await;
+
                 if let Some(ref affect) = self.services.affect_policy {
                     let mut policy = affect.lock().await;
                     policy.on_task_outcome(
@@ -389,6 +404,17 @@ impl EffectDriver {
                 duration_ms: verdict.duration_ms,
             })
             .await;
+    }
+
+    async fn record_model_totals(&self, role: &str, response: &ModelCallResponse) {
+        let mut totals = self.feedback_totals.lock().await;
+        if !response.model.is_empty() && (totals.primary_model.is_none() || role == "implementer") {
+            totals.primary_model = Some(response.model.clone());
+        }
+        totals.total_tokens = totals
+            .total_tokens
+            .saturating_add(response.usage.total_tokens);
+        totals.total_cost_usd += response.usage.cost_usd;
     }
 }
 

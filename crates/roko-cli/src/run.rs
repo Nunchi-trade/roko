@@ -275,6 +275,10 @@ impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
         self.inner.record(core_feedback_event(event)).await?;
         Ok(())
     }
+
+    async fn flush(&self) -> roko_core::Result<()> {
+        self.inner.flush().await
+    }
 }
 
 struct RuntimeGateRunnerAdapter {
@@ -377,13 +381,23 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
             total_cost_usd,
             total_tokens,
             duration_ms,
-        } => CoreFeedbackEvent::WorkflowComplete {
-            run_id,
-            outcome,
-            total_cost_usd,
-            total_tokens,
-            duration_ms,
-        },
+        } => {
+            let success = outcome == "success";
+            CoreFeedbackEvent::WorkflowComplete {
+                event_type: if success {
+                    "workflow_completed".to_string()
+                } else {
+                    "workflow_failed".to_string()
+                },
+                run_id,
+                model: None,
+                success,
+                outcome,
+                total_cost_usd,
+                total_tokens,
+                duration_ms,
+            }
+        }
     }
 }
 
