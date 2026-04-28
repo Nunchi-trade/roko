@@ -865,23 +865,26 @@ impl CacheCell {
     }
 
     /// Compute a cache key from request fields.
-    /// Hash of: model + sorted message contents + temperature (if set).
-    fn cache_key(model: &str, messages: &[ChatMessage], temperature: Option<f32>) -> u64 {
+    /// Hash of: model + system prompt + ordered messages + relevant generation parameters.
+    fn cache_key(
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         model.hash(&mut hasher);
+        system.hash(&mut hasher);
+        messages.len().hash(&mut hasher);
 
-        let mut messages = messages
-            .iter()
-            .map(|message| (message_role_tag(&message.role), message.content.as_str()))
-            .collect::<Vec<_>>();
-        messages.sort_unstable();
-
-        for (role, content) in messages {
-            role.hash(&mut hasher);
-            content.hash(&mut hasher);
+        for message in messages {
+            message_role_tag(&message.role).hash(&mut hasher);
+            message.content.hash(&mut hasher);
         }
 
         temperature.map(f32::to_bits).hash(&mut hasher);
+        max_tokens.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -940,7 +943,8 @@ fn message_role_tag(role: &MessageRole) -> u8 {
     }
 }
 
-/// Tracks cumulative cost across calls within a workflow run and enforces per-call budgets.
+/// Tracks process-local, best-effort cumulative cost across calls and enforces per-call budgets.
+/// This is not durable, reserved, or cross-run budget accounting.
 struct BudgetCell {
     /// Cumulative cost in micro-USD (1e-6 USD) for atomic tracking.
     cumulative_cost_micro_usd: AtomicU64,
@@ -1371,7 +1375,13 @@ impl ModelCaller for ModelCallService {
         let model = self.resolve_model(&req);
         let start = Instant::now();
         let agent_id = format!("model-call:{model}");
-        let cache_key = CacheCell::cache_key(&model, &req.messages, req.temperature);
+        let cache_key = CacheCell::cache_key(
+            &model,
+            req.system.as_deref(),
+            &req.messages,
+            req.temperature,
+            req.max_tokens,
+        );
         let request_id = self.next_request_id(cache_key);
         let provider = self.provider_for_model(&model);
 
@@ -1921,8 +1931,8 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, Some(0.2));
-        let second = CacheCell::cache_key("model-a", &messages, Some(0.2));
+        let first = CacheCell::cache_key("model-a", None, &messages, Some(0.2), Some(1024));
+        let second = CacheCell::cache_key("model-a", None, &messages, Some(0.2), Some(1024));
 
         assert_eq!(first, second);
     }
@@ -1934,8 +1944,8 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, None);
-        let second = CacheCell::cache_key("model-b", &messages, None);
+        let first = CacheCell::cache_key("model-a", None, &messages, None, None);
+        let second = CacheCell::cache_key("model-b", None, &messages, None, None);
 
         assert_ne!(first, second);
     }
@@ -1947,8 +1957,51 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, Some(0.1));
-        let second = CacheCell::cache_key("model-a", &messages, Some(0.9));
+        let first = CacheCell::cache_key("model-a", None, &messages, Some(0.1), None);
+        let second = CacheCell::cache_key("model-a", None, &messages, Some(0.9), None);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_differs_on_max_tokens() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "hello".into(),
+        }];
+
+        let first = CacheCell::cache_key("model-a", None, &messages, None, Some(1024));
+        let second = CacheCell::cache_key("model-a", None, &messages, None, Some(2048));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_preserves_message_order() {
+        let first_messages = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".into(),
+            },
+        ];
+        let swapped_messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".into(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".into(),
+            },
+        ];
+
+        let first = CacheCell::cache_key("model-a", None, &first_messages, Some(0.2), Some(1024));
+        let second =
+            CacheCell::cache_key("model-a", None, &swapped_messages, Some(0.2), Some(1024));
 
         assert_ne!(first, second);
     }
