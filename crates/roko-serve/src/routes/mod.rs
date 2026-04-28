@@ -27,6 +27,7 @@ mod projections;
 mod providers;
 mod research;
 mod run;
+mod runs;
 mod secrets;
 pub mod shared_runs;
 mod sse;
@@ -73,6 +74,7 @@ pub fn build_router(
         .merge(plans::routes())
         .merge(prds::routes())
         .merge(run::routes())
+        .merge(runs::routes())
         .merge(research::routes())
         .merge(subscriptions::routes())
         .merge(templates::routes())
