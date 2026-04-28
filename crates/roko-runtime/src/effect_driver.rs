@@ -4,217 +4,28 @@
 //! `PipelineOutput`. The `EffectDriver` performs the requested side effects and
 //! returns `PipelineInput` values that callers can feed back into the state
 //! machine.
-//!
-//! TODO(arch): Replace the local foundation-compatible contracts below with
-//! `roko_core::foundation` and `roko_core::RuntimeEvent` after the manifest
-//! dependency direction is corrected. This checkout currently has
-//! `roko-core -> roko-runtime`, so importing `roko_core` here would create a
-//! crate cycle, and Cargo.toml changes are out of scope for this batch.
 
-use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use roko_core::foundation::{
+    FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCallRequest,
+    ModelCaller, PromptAssembler, PromptSpec,
+};
+pub use roko_core::foundation::{
+    ChatMessage, GateReport, MessageRole, ModelCallResponse, TokenUsage,
+};
+
 use crate::event_bus::emit_runtime_event;
 use crate::pipeline_state::PipelineInput;
 
-/// Fallible result type used by the effect driver service contracts.
+/// Fallible result type used by the effect driver.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Boxed future returned by async service trait methods.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Request to call an LLM model.
-#[derive(Debug, Clone)]
-pub struct ModelCallRequest {
-    /// Model identifier. An empty value lets the model service route by role.
-    pub model: String,
-    /// System prompt assembled for the agent.
-    pub system: Option<String>,
-    /// Conversation messages.
-    pub messages: Vec<ChatMessage>,
-    /// Maximum tokens to generate.
-    pub max_tokens: Option<u32>,
-    /// Sampling temperature.
-    pub temperature: Option<f32>,
-    /// Role hint for model routing.
-    pub role: Option<String>,
-}
-
-/// A single chat message.
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    /// Message role.
-    pub role: MessageRole,
-    /// Message content.
-    pub content: String,
-}
-
-/// Message role in a conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MessageRole {
-    /// System-authored message.
-    System,
-    /// User-authored message.
-    User,
-    /// Assistant-authored message.
-    Assistant,
-}
-
-/// Response from a model call.
-#[derive(Debug, Clone)]
-pub struct ModelCallResponse {
-    /// Complete model output.
-    pub content: String,
-    /// Resolved model identifier.
-    pub model: String,
-    /// Token and cost accounting.
-    pub usage: TokenUsage,
-    /// Provider stop reason, when available.
-    pub stop_reason: Option<String>,
-}
-
-/// Token usage and cost from a model call.
-#[derive(Debug, Clone, Default)]
-pub struct TokenUsage {
-    /// Prompt/input tokens.
-    pub input_tokens: u64,
-    /// Completion/output tokens.
-    pub output_tokens: u64,
-    /// Total tokens.
-    pub total_tokens: u64,
-    /// Estimated call cost in USD.
-    pub cost_usd: f64,
-}
-
-/// Call an LLM model.
-pub trait ModelCaller: Send + Sync {
-    /// Single-shot model call, returning the complete response.
-    fn call(&self, req: ModelCallRequest) -> BoxFuture<'_, Result<ModelCallResponse>>;
-}
-
-/// Specification for assembling a system prompt.
-#[derive(Debug, Clone, Default)]
-pub struct PromptSpec {
-    /// Agent role.
-    pub role: Option<String>,
-    /// Task description.
-    pub task: Option<String>,
-    /// Working directory for convention detection.
-    pub workdir: Option<PathBuf>,
-    /// Gate feedback from prior attempts.
-    pub gate_feedback: Vec<String>,
-    /// Anti-patterns to include.
-    pub anti_patterns: Vec<String>,
-}
-
-/// Assemble a system prompt for a given role and context.
-pub trait PromptAssembler: Send + Sync {
-    /// Build a complete system prompt from the spec.
-    fn assemble(&self, spec: PromptSpec) -> BoxFuture<'_, Result<String>>;
-}
-
-/// A feedback event to record.
-#[derive(Debug, Clone)]
-pub enum FeedbackEvent {
-    /// Feedback from a model call.
-    ModelCall {
-        /// Workflow run id.
-        run_id: String,
-        /// Resolved model identifier.
-        model: String,
-        /// Agent role.
-        role: String,
-        /// Prompt/input tokens.
-        input_tokens: u64,
-        /// Completion/output tokens.
-        output_tokens: u64,
-        /// Estimated call cost in USD.
-        cost_usd: f64,
-        /// End-to-end call latency.
-        latency_ms: u64,
-        /// Whether the call succeeded.
-        success: bool,
-    },
-    /// Feedback from a gate execution.
-    GateResult {
-        /// Workflow run id.
-        run_id: String,
-        /// Gate name.
-        gate_name: String,
-        /// Whether the gate passed.
-        passed: bool,
-        /// Gate runtime.
-        duration_ms: u64,
-    },
-}
-
-/// Record feedback from model calls and gate results.
-pub trait FeedbackSink: Send + Sync {
-    /// Record a feedback event.
-    fn record(&self, event: FeedbackEvent) -> BoxFuture<'_, Result<()>>;
-}
-
-/// Configuration for a gate run.
-#[derive(Debug, Clone)]
-pub struct GateConfig {
-    /// Working directory to verify.
-    pub workdir: PathBuf,
-    /// Gate names to run.
-    pub enabled_gates: Vec<String>,
-    /// Maximum rung to run.
-    pub max_rung: Option<u8>,
-}
-
-/// Result from a single gate.
-#[derive(Debug, Clone)]
-pub struct GateVerdict {
-    /// Gate name.
-    pub gate_name: String,
-    /// Whether the gate passed.
-    pub passed: bool,
-    /// Gate output or diagnostics.
-    pub output: String,
-    /// Gate runtime.
-    pub duration_ms: u64,
-}
-
-/// Report from running gates.
-#[derive(Debug, Clone)]
-pub struct GateReport {
-    /// Individual verdicts.
-    pub verdicts: Vec<GateVerdict>,
-}
-
-impl GateReport {
-    /// Returns true when every reported gate passed.
-    pub fn all_passed(&self) -> bool {
-        self.verdicts.iter().all(|verdict| verdict.passed)
-    }
-
-    /// Returns the first failing gate.
-    pub fn first_failure(&self) -> Option<&GateVerdict> {
-        self.verdicts.iter().find(|verdict| !verdict.passed)
-    }
-
-    /// Collects all failure outputs for agent feedback.
-    pub fn failure_summary(&self) -> String {
-        self.verdicts
-            .iter()
-            .filter(|verdict| !verdict.passed)
-            .map(|verdict| format!("{}: {}", verdict.gate_name, verdict.output))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
-}
-
-/// Run verification gates against a working directory.
-pub trait GateRunner: Send + Sync {
-    /// Execute gates per the config.
-    fn run_gates(&self, config: GateConfig) -> BoxFuture<'_, Result<GateReport>>;
-}
+/// Boxed future (kept for internal use).
+pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Runtime events emitted by the effect driver.
 #[derive(Debug, Clone)]

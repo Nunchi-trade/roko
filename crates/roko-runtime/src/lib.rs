@@ -61,10 +61,12 @@ pub mod task_scheduler;
 pub mod theta_consumer;
 pub mod workflow_engine;
 
-pub use effect_driver::{
-    ChatMessage, EffectDriver, EffectServices, FeedbackEvent, FeedbackSink, GateConfig, GateReport,
-    GateRunner, GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller,
-    PromptAssembler, PromptSpec, RuntimeEvent, TokenUsage,
+pub use effect_driver::{EffectDriver, EffectServices};
+// Foundation types re-exported from roko-core for backwards compatibility
+pub use roko_core::foundation::{
+    ChatMessage, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict,
+    MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
+    TokenUsage,
 };
 pub use jsonl_logger::{EventConsumer, JsonlLogger};
 pub use lifecycle::{

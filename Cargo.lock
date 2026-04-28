@@ -6367,6 +6367,7 @@ dependencies = [
  "chrono",
  "nix 0.29.0",
  "parking_lot",
+ "roko-core",
  "roko-primitives",
  "serde",
  "serde_json",
