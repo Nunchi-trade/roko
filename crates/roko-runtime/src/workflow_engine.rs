@@ -920,6 +920,7 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
 mod tests {
     use super::*;
     use std::future::Future;
+    use std::path::Path;
     use std::pin::Pin;
     use std::process::Command;
 
@@ -971,6 +972,45 @@ mod tests {
                     content: content.into(),
                     model: "mock".into(),
                     usage: TokenUsage::default(),
+                    stop_reason: None,
+                    request_id: None,
+                })
+            })
+        }
+    }
+
+    struct RecordingModelCaller {
+        roles: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModelCaller for RecordingModelCaller {
+        fn call<'life0, 'async_trait>(
+            &'life0 self,
+            req: ModelCallRequest,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let roles = Arc::clone(&self.roles);
+            Box::pin(async move {
+                let role = req.role.unwrap_or_else(|| "unknown".to_string());
+                roles.lock().push(role.clone());
+                let content = if role == "reviewer" {
+                    "approved"
+                } else {
+                    "done"
+                };
+
+                Ok(ModelCallResponse {
+                    content: content.into(),
+                    model: "mock".into(),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                        total_tokens: 30,
+                        cost_usd: 0.01,
+                    },
                     stop_reason: None,
                     request_id: None,
                 })
@@ -1053,6 +1093,149 @@ mod tests {
         fn consume(&self, event: &RuntimeEvent) {
             self.events.lock().push(event.clone());
         }
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_resume_round_trip() {
+        let (config, _tempdir) = workflow_config();
+        let roles = Arc::new(Mutex::new(Vec::new()));
+        let engine = WorkflowEngine::new(recording_services(Arc::clone(&roles)));
+        let run1_id = unique_test_run_id("checkpoint");
+        let driver = EffectDriver::new(
+            recording_services(Arc::clone(&roles)),
+            run1_id.clone(),
+            config.workdir.clone(),
+        );
+
+        let run1_start_seq = crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
+        let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+
+        engine.emit(RuntimeEvent::WorkflowStarted {
+            run_id: run1_id.clone(),
+            template: template_name(&config.workflow).to_string(),
+            prompt: config.prompt.clone(),
+        });
+
+        let old_phase = pipeline.phase.label();
+        let output = pipeline.step(PipelineInput::Start);
+        engine.emit_phase_transition(&run1_id, old_phase, pipeline.phase.label());
+
+        let PipelineOutput::SpawnImplementer { prompt, context } = output else {
+            panic!("express workflow should enter implementation");
+        };
+        let input = driver
+            .spawn_agent("implementer", &prompt, context.as_deref())
+            .await;
+        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
+
+        let old_phase = pipeline.phase.label();
+        let output = pipeline.step(input);
+        engine.emit_phase_transition(&run1_id, old_phase, pipeline.phase.label());
+        assert!(matches!(output, PipelineOutput::RunGates));
+        assert_eq!(pipeline.phase, Phase::Gating);
+
+        let checkpoint_path = config.workdir.join(".roko/checkpoint-resume-test.json");
+        driver
+            .save_checkpoint(&pipeline, &checkpoint_path)
+            .await
+            .expect("checkpoint should be persisted");
+        assert!(checkpoint_path.is_file());
+
+        let checkpoint = tokio::fs::read_to_string(&checkpoint_path)
+            .await
+            .expect("checkpoint should be readable");
+        let restored = PipelineStateV2::from_checkpoint(&checkpoint)
+            .expect("checkpoint should restore pipeline state");
+        assert_eq!(restored.phase, Phase::Gating);
+
+        let run1_events = collect_run_events(&run1_id, run1_start_seq);
+        assert_checkpoint_run_sequence(&run1_events, &checkpoint_path);
+        assert_eq!(roles.lock().as_slice(), ["implementer"]);
+
+        let resume_start_seq =
+            crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
+        let resumed = engine
+            .resume(config.clone(), &checkpoint)
+            .await
+            .expect("resume should complete from checkpoint");
+        assert!(matches!(
+            resumed.outcome,
+            WorkflowOutcome::Success {
+                commit_hash: Some(_)
+            }
+        ));
+        assert_eq!(resumed.iterations, 1);
+
+        let resumed_events = collect_run_events(&resumed.run_id, resume_start_seq);
+        assert_resume_run_sequence(&resumed_events);
+        assert_eq!(
+            roles.lock().as_slice(),
+            ["implementer"],
+            "resume should not rerun the completed implementation phase"
+        );
+
+        let report = report_from_events(
+            &resumed.run_id,
+            true,
+            "mock",
+            &config.prompt,
+            0.0,
+            resumed_events.clone(),
+        );
+        assert_eq!(report.run_id, resumed.run_id);
+        assert!(report.success);
+        assert_eq!(report.model, "mock");
+        assert!(!report.events.is_empty());
+
+        let run1_log = config.workdir.join(".roko/run1-events.jsonl");
+        let run2_log = config.workdir.join(".roko/run2-events.jsonl");
+        let full_log = config.workdir.join(".roko/all-events.jsonl");
+        write_event_log(&run1_log, &run1_events);
+        write_event_log(&run2_log, &resumed_events);
+        write_event_log(
+            &full_log,
+            &run1_events
+                .iter()
+                .chain(resumed_events.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+
+        let run1_summary = crate::projection::RuntimeProjection::for_run(&run1_log, &run1_id)
+            .expect("run1 projection should load")
+            .expect("run1 summary should exist");
+        assert!(!run1_summary.is_complete);
+        assert_eq!(run1_summary.current_phase.as_deref(), Some("gating"));
+        assert_eq!(run1_summary.agents_completed, 1);
+        assert_eq!(
+            run1_summary.last_checkpoint.as_deref(),
+            Some(checkpoint_path.to_string_lossy().as_ref())
+        );
+
+        let run2_summary =
+            crate::projection::RuntimeProjection::for_run(&run2_log, &resumed.run_id)
+                .expect("run2 projection should load")
+                .expect("run2 summary should exist");
+        assert!(run2_summary.is_complete);
+        assert_eq!(run2_summary.current_phase.as_deref(), Some("complete"));
+        assert!(
+            run2_summary
+                .phases_visited
+                .iter()
+                .any(|phase| phase == "gating")
+        );
+        assert!(
+            !run2_summary
+                .phases_visited
+                .iter()
+                .any(|phase| phase == "implementing"),
+            "resume should continue from the recovered phase, not from the beginning"
+        );
+
+        let full_projection = crate::projection::RuntimeProjection::from_file(&full_log)
+            .expect("combined projection should load");
+        assert!(full_projection.contains_key(&run1_id));
+        assert!(full_projection.contains_key(&resumed.run_id));
     }
 
     #[tokio::test]
@@ -1168,6 +1351,17 @@ mod tests {
         }
     }
 
+    fn recording_services(roles: Arc<Mutex<Vec<String>>>) -> EffectServices {
+        EffectServices {
+            model: "mock".to_string(),
+            model_caller: Arc::new(RecordingModelCaller { roles }),
+            prompt_assembler: Arc::new(MockPromptAssembler),
+            feedback_sink: Arc::new(MockFeedbackSink),
+            gate_runner: Arc::new(MockGateRunner),
+            affect_policy: None,
+        }
+    }
+
     fn workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
         let tempdir = isolated_git_workdir();
         let config = WorkflowRunConfig {
@@ -1192,6 +1386,98 @@ mod tests {
             commit_prefix: None,
         };
         (config, tempdir)
+    }
+
+    fn assert_checkpoint_run_sequence(events: &[RuntimeEventEnvelope], checkpoint_path: &Path) {
+        let started = event_position(events, "workflow_started", |event| {
+            matches!(event, RuntimeEvent::WorkflowStarted { .. })
+        });
+        let implementing = event_position(
+            events,
+            "phase_transition_to_implementing",
+            |event| matches!(event, RuntimeEvent::PhaseTransition { to, .. } if to == "implementing"),
+        );
+        let agent_completed = event_position(events, "agent_completed", |event| {
+            matches!(event, RuntimeEvent::AgentCompleted { .. })
+        });
+        let checkpointed = event_position(events, "state_checkpointed", |event| {
+            matches!(
+                event,
+                RuntimeEvent::StateCheckpointed { path, .. }
+                    if !path.is_empty() && Path::new(path).is_file() && path == &checkpoint_path.to_string_lossy()
+            )
+        });
+
+        assert!(
+            started < implementing
+                && implementing < agent_completed
+                && agent_completed < checkpointed,
+            "run1 should start, enter implementation, complete the agent turn, then checkpoint"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|envelope| matches!(envelope.payload, RuntimeEvent::WorkflowCompleted { .. })),
+            "interrupted run should stop before workflow completion"
+        );
+    }
+
+    fn assert_resume_run_sequence(events: &[RuntimeEventEnvelope]) {
+        let recovered_phase = event_position(events, "recovered_phase_transition", |event| {
+            matches!(
+                event,
+                RuntimeEvent::PhaseTransition { from, to, .. }
+                    if from == "checkpoint" && to == "gating"
+            )
+        });
+        let completed = event_position(events, "workflow_completed", |event| {
+            matches!(event, RuntimeEvent::WorkflowCompleted { .. })
+        });
+
+        assert!(
+            recovered_phase < completed,
+            "run2 should emit the recovered phase transition before completion"
+        );
+        assert!(
+            !events.iter().any(|envelope| matches!(
+                &envelope.payload,
+                RuntimeEvent::AgentSpawned { role, .. } if role == "implementer"
+            )),
+            "resume should not spawn a new implementer from a gating checkpoint"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|envelope| matches!(&envelope.payload, RuntimeEvent::AgentCompleted { .. })),
+            "resume should not replay the completed agent turn"
+        );
+    }
+
+    fn event_position<F>(events: &[RuntimeEventEnvelope], label: &str, predicate: F) -> usize
+    where
+        F: Fn(&RuntimeEvent) -> bool,
+    {
+        events
+            .iter()
+            .position(|envelope| predicate(&envelope.payload))
+            .unwrap_or_else(|| panic!("missing event {label}"))
+    }
+
+    fn write_event_log(path: &Path, events: &[RuntimeEventEnvelope]) {
+        let mut lines = String::new();
+        for event in events {
+            lines.push_str(&serde_json::to_string(event).expect("event should serialize"));
+            lines.push('\n');
+        }
+        std::fs::write(path, lines).expect("event log should be written");
+    }
+
+    fn unique_test_run_id(label: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("run_{label}_{nanos}")
     }
 
     fn isolated_git_workdir() -> tempfile::TempDir {
