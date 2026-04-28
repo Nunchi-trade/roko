@@ -239,6 +239,48 @@ pub fn branch(text: &str) {
     println!("{}  {}", symbols::BRANCH, text);
 }
 
+/// Print a single gate result line.
+///
+/// Prints:
+/// ```text
+/// ├  ✔ <name>   <duration>ms
+/// ```
+/// for a passing gate, or:
+/// ```text
+/// ├  ✖ <name>   <duration>ms
+/// │    <first line of error output>
+/// │    <second line of error output>
+/// ```
+/// for a failing gate. Error output is truncated to the first 3 lines.
+///
+/// `name` is the gate name (e.g., `"compile"`, `"test"`).
+/// `passed` indicates whether the gate passed.
+/// `duration_ms` is the gate execution time in milliseconds.
+/// `error_output` is the stderr/error content (only shown when `!passed`).
+pub fn print_gate_result(name: &str, passed: bool, duration_ms: u64, error_output: &str) {
+    let icon = if passed {
+        green(symbols::PASS)
+    } else {
+        red(symbols::FAIL)
+    };
+    let name_display = if passed { green(name) } else { red(name) };
+    let duration = dim(&format!("{}ms", duration_ms));
+
+    println!(
+        "{}  {} {:<12} {}",
+        symbols::BRANCH,
+        icon,
+        name_display,
+        duration,
+    );
+
+    if !passed && !error_output.is_empty() {
+        for line in error_output.lines().filter(|line| !line.is_empty()).take(3) {
+            println!("{}    {}", symbols::BAR, dim(line));
+        }
+    }
+}
+
 /// Print an end line: `└  <text>`.
 pub fn end(text: &str) {
     println!("{}  {}", symbols::END, text);
@@ -310,5 +352,35 @@ mod tests {
     fn knowledge_loaded_zero_facts() {
         // Just verify the zero-fact branch doesn't panic.
         print_knowledge_loaded(0, 0.5);
+    }
+
+    #[test]
+    fn gate_result_pass_no_panic() {
+        print_gate_result("compile", true, 12, "");
+        print_gate_result("clippy", true, 45, "");
+    }
+
+    #[test]
+    fn gate_result_fail_no_panic() {
+        print_gate_result(
+            "test",
+            false,
+            340,
+            "error[E0308]: mismatched types\n  --> src/main.rs:42:5",
+        );
+    }
+
+    #[test]
+    fn gate_result_fail_long_error_truncates() {
+        let long_error = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        print_gate_result("test", false, 500, &long_error);
+    }
+
+    #[test]
+    fn gate_result_fail_empty_error_no_panic() {
+        print_gate_result("lint", false, 10, "");
     }
 }
