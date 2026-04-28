@@ -42,6 +42,20 @@ pub fn magenta(s: &str) -> String {
     format!("{FG_MAGENTA}{s}{RESET}")
 }
 
+/// Format a token count with thin-space thousands grouping.
+/// 1234567 -> "1 234 567"
+fn fmt_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push('\u{202F}');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
 /// Returns `true` if stdout is connected to a terminal.
 ///
 /// When false, color helpers should be skipped. However, the current
@@ -84,6 +98,26 @@ pub fn print_identity(agent: &str, model: &str, routing: &str) {
         "{}  {}",
         dim(&format!("{:<8}", "routing")),
         routing_display
+    ));
+}
+
+/// Print a cost prediction block before execution starts.
+///
+/// Prints:
+/// ```text
+/// ◇  Cost estimate
+/// │  ~<tokens> tokens
+/// │  ~$<cost> USD
+/// ```
+///
+/// `estimated_tokens` is the predicted token count (input + output combined).
+/// `estimated_cost_usd` is the predicted cost in US dollars.
+pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
+    step("Cost estimate", "");
+    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
+    bar(&format!(
+        "~{} USD",
+        yellow(&format!("${:.4}", estimated_cost_usd))
     ));
 }
 
@@ -150,5 +184,24 @@ mod tests {
             "cascade-router → claude-sonnet-4-6",
         );
         print_identity("coder", "gpt-4o", "direct");
+    }
+
+    #[test]
+    fn fmt_tokens_small() {
+        assert_eq!(fmt_tokens(0), "0");
+        assert_eq!(fmt_tokens(999), "999");
+    }
+
+    #[test]
+    fn fmt_tokens_thousands() {
+        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
+        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
+        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
+    }
+
+    #[test]
+    fn cost_prediction_no_panic() {
+        print_cost_prediction(8_400, 0.042);
+        print_cost_prediction(0, 0.0);
     }
 }
