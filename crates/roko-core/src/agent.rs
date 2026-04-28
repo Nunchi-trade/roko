@@ -149,6 +149,7 @@ impl From<AgentBackend> for ProviderKind {
             AgentBackend::Cursor => ProviderKind::CursorAcp,
             AgentBackend::Ollama => ProviderKind::OpenAiCompat,
             AgentBackend::Perplexity => ProviderKind::PerplexityApi,
+            AgentBackend::Cerebras => ProviderKind::CerebrasApi,
         }
     }
 }
