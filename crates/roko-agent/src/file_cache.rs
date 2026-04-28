@@ -61,8 +61,7 @@ impl FileCache {
     /// Store a response in the cache.
     pub fn put(&self, key: &ContentHash, entry: &FileCacheEntry) -> std::io::Result<()> {
         let path = self.entry_path(key);
-        let json = serde_json::to_string_pretty(entry)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(entry).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 

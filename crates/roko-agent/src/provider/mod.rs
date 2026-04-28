@@ -59,12 +59,14 @@ use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub mod anthropic_api;
+pub mod cerebras;
 pub mod claude_cli;
 pub mod cursor_acp;
 pub mod openai_compat;
 pub mod openrouter_meta;
 
 pub use anthropic_api::AnthropicApiAdapter;
+pub use cerebras::CerebrasAdapter;
 pub use claude_cli::ClaudeCliAdapter;
 pub use cursor_acp::CursorAcpAdapter;
 pub use openai_compat::OpenAiCompatAdapter;
@@ -73,6 +75,7 @@ pub use openrouter_meta::fetch_model_metadata;
 use crate::perplexity::{PerplexityAdapter, SearchOptions};
 
 static ANTHROPIC_API_ADAPTER: AnthropicApiAdapter = AnthropicApiAdapter;
+static CEREBRAS_ADAPTER: CerebrasAdapter = CerebrasAdapter;
 static CLAUDE_CLI_ADAPTER: ClaudeCliAdapter = ClaudeCliAdapter;
 static CURSOR_ACP_ADAPTER: CursorAcpAdapter = CursorAcpAdapter;
 static OPENAI_COMPAT_ADAPTER: OpenAiCompatAdapter = OpenAiCompatAdapter;
@@ -96,6 +99,7 @@ pub fn adapter_for_kind(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         ProviderKind::CursorAcp => &CURSOR_ACP_ADAPTER,
         ProviderKind::PerplexityApi => &PERPLEXITY_ADAPTER,
         ProviderKind::GeminiApi => &GEMINI_ADAPTER,
+        ProviderKind::CerebrasApi => &CEREBRAS_ADAPTER,
     }
 }
 
@@ -767,6 +771,10 @@ mod tests {
         assert_eq!(
             adapter_for_kind(ProviderKind::GeminiApi).kind(),
             ProviderKind::GeminiApi
+        );
+        assert_eq!(
+            adapter_for_kind(ProviderKind::CerebrasApi).kind(),
+            ProviderKind::CerebrasApi
         );
     }
 

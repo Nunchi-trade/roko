@@ -804,7 +804,8 @@ fn classify_runtime(
         | ProviderKind::OpenAiCompat
         | ProviderKind::PerplexityApi
         | ProviderKind::GeminiApi
-        | ProviderKind::CursorAcp => ProviderRuntime::AgentResultBridge { provider_kind },
+        | ProviderKind::CursorAcp
+        | ProviderKind::CerebrasApi => ProviderRuntime::AgentResultBridge { provider_kind },
         ProviderKind::ClaudeCli => ProviderRuntime::Unsupported(UnsupportedProvider {
             reason: UnsupportedProviderReason::UnsupportedCliProvider,
             detail: format!("provider `{provider_id}` is not dispatchable as configured"),

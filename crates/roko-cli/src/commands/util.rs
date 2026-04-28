@@ -250,9 +250,14 @@ pub(crate) async fn cmd_run(
             })
             .collect();
 
-        let result =
-            roko_cli::run::run_with_workflow_engine(&prompt, &workdir, template, enabled_gates)
-                .await;
+        let result = roko_cli::run::run_with_workflow_engine(
+            &prompt,
+            &workdir,
+            template,
+            enabled_gates,
+            Some(&config),
+        )
+        .await;
 
         // Shut down the HTTP server if it was started.
         if let Some((state, handle)) = server_guard {

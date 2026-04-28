@@ -49,6 +49,7 @@ export interface PipelineVerifyStep {
   phase: string;
   command: string;
   failMsg?: string;
+  status?: 'pending' | 'passed' | 'failed';
 }
 
 export interface PipelineTask {
@@ -64,7 +65,10 @@ export interface PipelineTask {
   maxLoc?: number;
   files: string[];
   dependsOn: string[];
+  dependsOnPlan?: string[];
   verify: PipelineVerifyStep[];
+  phase?: string;
+  agentId?: string;
 }
 
 export interface PipelinePlan {
@@ -85,6 +89,17 @@ export interface PipelineEvent {
   kind?: 'info' | 'success' | 'warning' | 'error';
 }
 
+export type PipelineStreamConnection = 'idle' | 'connecting' | 'live' | 'error' | 'closed';
+
+export interface PipelineStreamState {
+  sse: PipelineStreamConnection;
+  ws: PipelineStreamConnection;
+  workdir?: string;
+  workflowId?: string;
+  cursor?: number;
+  message?: string;
+}
+
 export interface PipelineDemoState {
   source: PipelineSource;
   phase: PipelinePhase;
@@ -95,6 +110,7 @@ export interface PipelineDemoState {
   plans: PipelinePlan[];
   events: PipelineEvent[];
   lastUpdated?: string;
+  stream?: PipelineStreamState;
 }
 
 export const EMPTY_PIPELINE_STATE: PipelineDemoState = {
@@ -103,6 +119,10 @@ export const EMPTY_PIPELINE_STATE: PipelineDemoState = {
   headline: 'Waiting for a live Roko pipeline run',
   plans: [],
   events: [],
+  stream: {
+    sse: 'idle',
+    ws: 'idle',
+  },
 };
 
 export function normalizePipelineTaskStatus(status?: string): PipelineTaskStatus {

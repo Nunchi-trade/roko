@@ -477,16 +477,23 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
     }
 }
 
-fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
+fn build_workflow_effect_services(
+    workdir: &std::path::Path,
+    cli_config: Option<&crate::config::Config>,
+) -> anyhow::Result<EffectServices> {
     // Import the concrete service implementations.
     use roko_compose::prompt_assembly_service::PromptAssemblyService;
     use roko_daimon::policy::DaimonPolicy;
     use roko_gate::gate_service::GateService;
     use roko_learn::feedback_service::FeedbackService;
 
-    let config = crate::config::load_layered(workdir)
-        .map(|resolved| resolved.config)
-        .unwrap_or_default();
+    let config = if let Some(c) = cli_config {
+        c.clone()
+    } else {
+        crate::config::load_layered(workdir)
+            .map(|resolved| resolved.config)
+            .unwrap_or_default()
+    };
     let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
     model_config.apply_process_env();
     crate::config::merge_global_providers(&mut model_config);
@@ -567,8 +574,17 @@ pub async fn run_with_workflow_engine(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
+    cli_config: Option<&crate::config::Config>,
 ) -> anyhow::Result<()> {
-    run_with_workflow_engine_with_hub(prompt, workdir, workflow_template, enabled_gates, None).await
+    run_with_workflow_engine_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        None,
+        cli_config,
+    )
+    .await
 }
 
 /// Execute a prompt via the new WorkflowEngine and optionally publish lifecycle
@@ -579,6 +595,7 @@ pub async fn run_with_workflow_engine_with_hub(
     workflow_template: &str,
     enabled_gates: Vec<String>,
     external_hub: Option<&StateHub>,
+    cli_config: Option<&crate::config::Config>,
 ) -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
 
@@ -595,8 +612,18 @@ pub async fn run_with_workflow_engine_with_hub(
         }
     }
 
-    let services = build_workflow_effect_services(workdir)?;
+    let services = build_workflow_effect_services(workdir, cli_config)?;
     let gates_summary = (!enabled_gates.is_empty()).then(|| enabled_gates.join(", "));
+
+    // Resolve the actual model name for display
+    let display_model = cli_config
+        .and_then(|c| c.agent.model.clone())
+        .unwrap_or_else(|| {
+            crate::config::load_layered(workdir)
+                .ok()
+                .and_then(|r| r.config.agent.model)
+                .unwrap_or_else(|| "default".to_string())
+        });
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
@@ -609,7 +636,7 @@ pub async fn run_with_workflow_engine_with_hub(
     output_format::intro("roko run");
     output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
     output_format::step("workflow", workflow_template);
-    output_format::step("model", "claude-sonnet-4-20250514");
+    output_format::step("model", &display_model);
     output_format::divider();
     output_format::bar("starting workflow...");
     output_format::divider();
@@ -687,7 +714,7 @@ pub async fn run_plan_with_workflow_engine(
     workflow_template: &str,
     enabled_gates: Vec<String>,
 ) -> anyhow::Result<PlanWorkflowReport> {
-    let services = build_workflow_effect_services(workdir)?;
+    let services = build_workflow_effect_services(workdir, None)?;
     let engine = WorkflowEngine::new(services);
     let workflow = workflow_config_for_template(workflow_template);
 

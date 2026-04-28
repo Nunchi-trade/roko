@@ -74,3 +74,9 @@
 [INFO]  A03          tail -f /Users/will/dev/nunchi/roko/roko/tmp/runners/converge-followup/logs/run-20260428-231543/A03.log
 [ OK ]  B02          Codex done (8m 28s)
 [ OK ]  B02          Merged 688ed438
+[ OK ]  A03          Codex done (7m 17s)
+
+━━━ WAVE 3 — 1 batch(es): B01  [6/33 done, 3 failed] ━━━
+
+[INFO]  B01          Attempt 1/2 — Agent event ownership — driver emits real lifecycle events, remove empty duplicates
+[INFO]  B01          tail -f /Users/will/dev/nunchi/roko/roko/tmp/runners/converge-followup/logs/run-20260428-231543/B01.log

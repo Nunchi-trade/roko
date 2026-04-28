@@ -60,15 +60,16 @@
 
 .pipeline-eyebrow,
 .pipeline-section-head,
-  .pipeline-command,
-  .pipeline-task-meta,
-  .pipeline-plan-meta,
-  .pipeline-event,
-  .pipeline-metric span,
-  .pipeline-route-card span,
-  .pipeline-route-card em,
-  .pipeline-gate-list,
-  .pipeline-task-verify em {
+.pipeline-command,
+.pipeline-stream-row,
+.pipeline-task-meta,
+.pipeline-plan-meta,
+.pipeline-event,
+.pipeline-metric span,
+.pipeline-route-card span,
+.pipeline-route-card em,
+.pipeline-gate-list,
+.pipeline-task-verify em {
   font-family: var(--mono);
 }
 
@@ -98,6 +99,62 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.pipeline-stream-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  font-size: 9px;
+  color: var(--text-ghost);
+}
+
+.pipeline-stream-row span,
+.pipeline-stream-row em {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+  padding: 3px 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.pipeline-stream-row em {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+
+.pipeline-stream-row b {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+}
+
+.pipeline-stream-live b {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(162, 206, 142, 0.6);
+}
+
+.pipeline-stream-connecting b {
+  background: var(--bone-bright);
+}
+
+.pipeline-stream-error b {
+  background: var(--danger);
+}
+
+.pipeline-stream-closed b {
+  background: var(--text-dim);
 }
 
 .pipeline-score {
@@ -584,6 +641,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pipeline-task-verify code.pipeline-verify-passed {
+  border-color: rgba(162, 206, 142, 0.4);
+  color: var(--success);
+}
+
+.pipeline-task-verify code.pipeline-verify-failed {
+  border-color: rgba(221, 120, 120, 0.5);
+  color: var(--danger);
 }
 
 .pipeline-task-verify code span {

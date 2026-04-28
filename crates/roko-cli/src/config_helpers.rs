@@ -252,6 +252,7 @@ pub(crate) fn model_matches_forced_backend(
         roko_core::agent::AgentBackend::Perplexity => {
             forced_backend == "perplexity" || forced_backend == "sonar"
         }
+        roko_core::agent::AgentBackend::Cerebras => forced_backend == "cerebras",
         _ => false,
     }
 }

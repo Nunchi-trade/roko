@@ -61,6 +61,13 @@ base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 default_model = "gemini-2.5-flash"
 models = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
+[providers.cerebras]
+kind = "cerebras_api"
+api_key_env = "CEREBRAS_API_KEY"
+base_url = "https://api.cerebras.ai/v1"
+default_model = "llama-3.3-70b"
+models = ["llama-3.3-70b", "llama-3.1-8b", "llama-4-scout-17b-16e"]
+
 [providers.ollama]
 kind = "openai_compat"
 api_key_env = ""
@@ -150,6 +157,19 @@ slug = "glm-4.5-flash"
 [models.glm4]
 provider = "zhipu"
 slug = "glm-4-plus"
+
+# Cerebras
+[models.cerebras-70b]
+provider = "cerebras"
+slug = "llama-3.3-70b"
+
+[models.cerebras-8b]
+provider = "cerebras"
+slug = "llama-3.1-8b"
+
+[models.cerebras-scout]
+provider = "cerebras"
+slug = "llama-4-scout-17b-16e"
 
 # Gemini
 [models.gemini-flash]

@@ -15,6 +15,7 @@ import {
   EMPTY_PIPELINE_STATE,
   type PipelineDemoState,
   type PipelineEvent,
+  type PipelineStreamState,
   type PipelineTask,
 } from '../lib/prd-pipeline-types';
 import {
@@ -72,6 +73,18 @@ export default function Demo() {
   // Build scenario context matching ScenarioContext from scenarios.ts
   const patchPipeline = useCallback((patch: Partial<PipelineDemoState>) => {
     setPipeline((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const patchPipelineStream = useCallback((patch: Partial<PipelineStreamState>) => {
+    setPipeline((prev) => ({
+      ...prev,
+      stream: {
+        sse: prev.stream?.sse ?? 'idle',
+        ws: prev.stream?.ws ?? 'idle',
+        ...prev.stream,
+        ...patch,
+      },
+    }));
   }, []);
 
   const updatePipelineTask = useCallback((
@@ -138,13 +151,14 @@ export default function Demo() {
       },
       setPipeline,
       patchPipeline,
+      patchPipelineStream,
       updatePipelineTask,
       appendPipelineEvent,
       pipelineExample: selectedPipelineExample,
       paused: pausedRef,
       running: runningRef,
     };
-  }, [appendPipelineEvent, patchPipeline, selectedPipelineExample, updatePipelineTask]);
+  }, [appendPipelineEvent, patchPipeline, patchPipelineStream, selectedPipelineExample, updatePipelineTask]);
 
   // ── Scenario lifecycle ──────────────────────────────────────
 

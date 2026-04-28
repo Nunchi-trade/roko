@@ -116,13 +116,17 @@ function routeLabel(tier: PipelineRouteTier): string {
   return 'T3 risk';
 }
 
+function connectionClass(status?: string): string {
+  return `pipeline-stream-${status ?? 'idle'}`;
+}
+
 function EmptyState() {
   return (
     <div className="pipeline-empty">
       <div className="pipeline-empty-kicker">Live pipeline</div>
       <div className="pipeline-empty-title">PRD, plan, and task artifacts will appear here.</div>
       <div className="pipeline-empty-sub">
-        The scenario reads the files generated under .roko and renders the task graph as it runs.
+        The scenario subscribes to workflow SSE and WebSocket projections, then renders generated artifacts as they appear.
       </div>
     </div>
   );
@@ -173,6 +177,7 @@ export default function PrdPipelinePanel({
           </div>
           <h2>{state.headline}</h2>
           {state.currentCommand && <div className="pipeline-command">{state.currentCommand}</div>}
+          {state.stream && <StreamStatus stream={state.stream} />}
         </div>
         <div className="pipeline-score">
           <span>{progress.done}</span>
@@ -322,6 +327,21 @@ function Metric({ label, value, mono }: { label: string; value: string; mono?: b
   );
 }
 
+function StreamStatus({ stream }: { stream: NonNullable<PipelineDemoState['stream']> }) {
+  return (
+    <div className="pipeline-stream-row">
+      <span className={connectionClass(stream.sse)}>
+        <b /> SSE {stream.sse}
+      </span>
+      <span className={connectionClass(stream.ws)}>
+        <b /> WS {stream.ws}
+      </span>
+      {stream.workflowId && <em>{stream.workflowId}</em>}
+      {stream.cursor != null && <em>#{stream.cursor}</em>}
+    </div>
+  );
+}
+
 function PlanCard({ plan }: { plan: PipelinePlan }) {
   const progress = planProgress(plan);
   const pct = progress.total === 0 ? 0 : Math.round((progress.done / progress.total) * 100);
@@ -368,16 +388,19 @@ function TaskRow({ planId, task }: { planId: string; task: PipelineTask }) {
         {task.description && <p>{task.description}</p>}
         <div className="pipeline-task-meta">
           <span>{task.tier ?? routeLabel(routeTier)}</span>
+          {task.phase && <span>{task.phase}</span>}
           {task.role && <span>{task.role}</span>}
           <span>{task.modelHint ?? 'model pending'}</span>
+          {task.agentId && <span>{task.agentId}</span>}
           {task.maxLoc != null && <span>{task.maxLoc} max loc</span>}
           <span>{shortList(task.files)}</span>
           {task.dependsOn.length > 0 && <span>after {task.dependsOn.join(', ')}</span>}
+          {task.dependsOnPlan && task.dependsOnPlan.length > 0 && <span>after plan {task.dependsOnPlan.join(', ')}</span>}
         </div>
         {task.verify.length > 0 && (
           <div className="pipeline-task-verify">
             {task.verify.slice(0, 2).map((verify, i) => (
-              <code key={`${task.id}-verify-${i}`}>
+              <code key={`${task.id}-verify-${i}`} className={`pipeline-verify-${verify.status ?? 'pending'}`}>
                 <span>{verify.phase}</span>
                 {verify.command}
               </code>

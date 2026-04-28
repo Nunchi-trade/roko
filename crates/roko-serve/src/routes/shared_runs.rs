@@ -147,12 +147,15 @@ fn load_transcript(state: &AppState, id: &str) -> Option<RunTranscript> {
 
 fn render_html(t: &RunTranscript) -> String {
     use std::fmt::Write as _;
-    let gates_html: String = t.gates.iter().fold(String::new(), |mut acc, (name, passed)| {
-        let icon = if *passed { "✔" } else { "✖" };
-        let color = if *passed { "#7d9e8c" } else { "#c36e55" };
-        let _ = write!(acc, "<span style=\"color:{color}\">{icon} {name}</span>  ");
-        acc
-    });
+    let gates_html: String = t
+        .gates
+        .iter()
+        .fold(String::new(), |mut acc, (name, passed)| {
+            let icon = if *passed { "✔" } else { "✖" };
+            let color = if *passed { "#7d9e8c" } else { "#c36e55" };
+            let _ = write!(acc, "<span style=\"color:{color}\">{icon} {name}</span>  ");
+            acc
+        });
 
     let output_html = t
         .output

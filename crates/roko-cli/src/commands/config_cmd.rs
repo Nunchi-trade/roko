@@ -342,6 +342,11 @@ pub(crate) async fn cmd_provider_test(workdir: &Path, provider_name: &str) -> Re
             run_openai_compat_provider_test(provider_name, provider, &model.1).await
         }
         ProviderKind::CursorAcp => run_cursor_provider_test(provider_name, provider).await,
+        ProviderKind::CerebrasApi => {
+            let model = select_provider_test_model(&config, provider_name)
+                .ok_or_else(|| anyhow!("provider '{provider_name}' has no configured models"))?;
+            run_openai_compat_provider_test(provider_name, provider, &model.1).await
+        }
     }
 }
 
