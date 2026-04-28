@@ -10,8 +10,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Result, RokoError};
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+const KNOWLEDGE_FEEDBACK_FILE: &str = "knowledge-feedback.jsonl";
 
 /// Service that records feedback events for the learning subsystem.
 ///
@@ -101,7 +105,6 @@ impl FeedbackService {
         std::fs::create_dir_all(&self.data_dir)?;
         let efficiency_path = self.data_dir.join("efficiency.jsonl");
 
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -164,6 +167,110 @@ impl FeedbackService {
         }
 
         Ok(())
+    }
+
+    /// Record which knowledge entries influenced a routing/prompt decision
+    /// and whether the subsequent gate check passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data directory cannot be created, the feedback
+    /// file cannot be opened, or the JSONL record cannot be written.
+    pub fn record_knowledge_usage(
+        &self,
+        run_id: &str,
+        knowledge_ids: Vec<String>,
+        gate_passed: bool,
+        model_slug: &str,
+    ) -> Result<()> {
+        if knowledge_ids.is_empty() {
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(&self.data_dir)?;
+        let path = self.data_dir.join(KNOWLEDGE_FEEDBACK_FILE);
+        let timestamp = Utc::now().to_rfc3339();
+        let json = serde_json::json!({
+            "type": "knowledge_usage",
+            "run_id": run_id,
+            "knowledge_ids": knowledge_ids,
+            "gate_passed": gate_passed,
+            "model_slug": model_slug,
+            "timestamp": timestamp,
+        });
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(file, "{json}")?;
+
+        tracing::debug!(
+            run_id,
+            model_slug,
+            gate_passed,
+            knowledge_count = json
+                .get("knowledge_ids")
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len),
+            "recorded knowledge usage feedback"
+        );
+
+        Ok(())
+    }
+
+    /// Read the knowledge feedback log and compute per-entry success rates.
+    ///
+    /// Returns a map of knowledge_id -> (successes, total_uses).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the feedback file cannot be read or a non-empty
+    /// JSONL line cannot be parsed as JSON.
+    pub fn compute_knowledge_scores(&self) -> Result<HashMap<String, (u32, u32)>> {
+        let path = self.data_dir.join(KNOWLEDGE_FEEDBACK_FILE);
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let mut scores: HashMap<String, (u32, u32)> = HashMap::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let value: serde_json::Value = serde_json::from_str(trimmed)?;
+            let gate_passed = value
+                .get("gate_passed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let Some(knowledge_ids) = value
+                .get("knowledge_ids")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for knowledge_id in knowledge_ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                let (successes, total_uses) =
+                    scores.entry(knowledge_id.to_string()).or_insert((0, 0));
+                *total_uses += 1;
+                if gate_passed {
+                    *successes += 1;
+                }
+            }
+        }
+
+        Ok(scores)
     }
 
     /// Flush buffered events to disk and append workflow-complete episodes.
@@ -405,6 +512,65 @@ mod tests {
                 .iter()
                 .any(|episode| episode.kind == "workflow_complete")
         );
+    }
+
+    #[test]
+    fn records_knowledge_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = FeedbackService::new(dir.path().to_path_buf());
+
+        svc.record_knowledge_usage(
+            "r1",
+            vec!["knowledge-a".into(), "knowledge-b".into()],
+            true,
+            "sonnet",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(KNOWLEDGE_FEEDBACK_FILE)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+
+        assert_eq!(value["type"], "knowledge_usage");
+        assert_eq!(value["run_id"], "r1");
+        assert_eq!(value["gate_passed"], true);
+        assert_eq!(value["model_slug"], "sonnet");
+        assert_eq!(
+            value["knowledge_ids"],
+            serde_json::json!(["knowledge-a", "knowledge-b"])
+        );
+        assert!(value["timestamp"].as_str().is_some());
+    }
+
+    #[test]
+    fn skips_empty_knowledge_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = FeedbackService::new(dir.path().to_path_buf());
+
+        svc.record_knowledge_usage("r1", Vec::new(), true, "sonnet")
+            .unwrap();
+
+        assert!(!dir.path().join(KNOWLEDGE_FEEDBACK_FILE).exists());
+    }
+
+    #[test]
+    fn computes_knowledge_scores() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = FeedbackService::new(dir.path().to_path_buf());
+
+        svc.record_knowledge_usage(
+            "r1",
+            vec!["knowledge-a".into(), "knowledge-b".into()],
+            true,
+            "sonnet",
+        )
+        .unwrap();
+        svc.record_knowledge_usage("r2", vec!["knowledge-a".into()], false, "haiku")
+            .unwrap();
+
+        let scores = svc.compute_knowledge_scores().unwrap();
+
+        assert_eq!(scores.get("knowledge-a"), Some(&(1, 2)));
+        assert_eq!(scores.get("knowledge-b"), Some(&(1, 1)));
     }
 
     #[tokio::test]
