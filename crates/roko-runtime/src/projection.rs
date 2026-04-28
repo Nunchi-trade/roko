@@ -30,6 +30,20 @@ pub struct RunSummary {
     pub is_complete: bool,
     /// Final workflow outcome, when present.
     pub outcome: Option<String>,
+    /// Number of completed agent turns observed.
+    pub agents_completed: u32,
+    /// Number of failed agent turns observed.
+    pub agents_failed: u32,
+    /// Cumulative tokens used across all agent calls (parsed from event log).
+    pub total_tokens: u64,
+    /// Cumulative cost in USD across all agent calls (parsed from event log).
+    pub total_cost_usd: f64,
+    /// Number of feedback_recorded events observed.
+    pub feedback_count: u32,
+    /// Last state checkpoint path recorded.
+    pub last_checkpoint: Option<String>,
+    /// Errors from agent_failed events.
+    pub agent_errors: Vec<String>,
 }
 
 /// Reads JSONL event logs and produces per-run summaries.
@@ -74,7 +88,11 @@ impl RuntimeProjection {
         let runs = Self::from_file(path)?;
         Ok(runs.into_iter().find_map(
             |(id, summary)| {
-                if id == run_id { Some(summary) } else { None }
+                if id == run_id {
+                    Some(summary)
+                } else {
+                    None
+                }
             },
         ))
     }
@@ -109,6 +127,37 @@ fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value) 
             summary.is_complete = true;
             summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
         }
+        "agent_completed" => {
+            summary.agents_completed += 1;
+            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
+                if let Ok(tokens) = tokens_str.parse::<u64>() {
+                    summary.total_tokens += tokens;
+                }
+            }
+            if let Some(cost_str) = event_scalar(value, "cost_usd") {
+                if let Ok(cost) = cost_str.parse::<f64>() {
+                    summary.total_cost_usd += cost;
+                }
+            }
+        }
+        "agent_failed" => {
+            summary.agents_failed += 1;
+            if let Some(error) = event_field(value, "error") {
+                summary.agent_errors.push(error);
+            }
+        }
+        "feedback_recorded" => {
+            summary.feedback_count += 1;
+        }
+        "state_checkpointed" => {
+            summary.last_checkpoint = event_field(value, "path");
+        }
+        "agent_output" => {
+            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
+        }
+        "gate_started" => {
+            // GateStarted is informational; pass/fail events update gate summary fields.
+        }
         _ => {}
     }
 }
@@ -133,6 +182,41 @@ fn debug_field(event: &str, field: &str) -> Option<String> {
     let rest = &event[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get("event")
+        .and_then(|event| event.get(field))
+        .map(|value| match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        })
+        .or_else(|| {
+            value
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|event| debug_scalar(event, field))
+        })
+}
+
+fn debug_scalar(event: &str, field: &str) -> Option<String> {
+    let needle = format!("{field}: ");
+    let start = event.find(&needle)? + needle.len();
+    let rest = event[start..].trim_start();
+
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +259,45 @@ mod tests {
         assert_eq!(summary.current_phase.as_deref(), Some("implement"));
         assert_eq!(summary.agents_spawned, 1);
         assert_eq!(summary.gates_passed, vec!["compile"]);
+    }
+
+    #[test]
+    fn tracks_agent_completed_and_costs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
+            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
+        assert_eq!(summary.agents_spawned, 1);
+        assert_eq!(summary.agents_completed, 1);
+        assert_eq!(summary.total_tokens, 500);
+        assert_eq!(summary.total_cost_usd, 0.01);
+    }
+
+    #[test]
+    fn tracks_failures_feedback_and_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
+            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
+            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
+            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
+            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
+        assert_eq!(summary.agents_failed, 1);
+        assert_eq!(summary.agent_errors, vec!["compile failed"]);
+        assert_eq!(summary.feedback_count, 1);
+        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
     }
 }
