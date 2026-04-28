@@ -991,6 +991,14 @@ mod tests {
         {
             Box::pin(async { Ok("system prompt".to_string()) })
         }
+
+        fn last_prompt_section_ids(&self) -> Vec<String> {
+            vec!["role_identity".to_string()]
+        }
+
+        fn last_knowledge_ids(&self) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     struct MockFeedbackSink;

@@ -137,6 +137,8 @@ impl EffectDriver {
                 };
             }
         };
+        let prompt_section_ids = self.services.prompt_assembler.last_prompt_section_ids();
+        let knowledge_ids = self.services.prompt_assembler.last_knowledge_ids();
 
         let user_content = context.map_or_else(
             || user_prompt.to_string(),
@@ -150,6 +152,8 @@ impl EffectDriver {
             system_prompt,
             user_content,
             &modulation,
+            prompt_section_ids.clone(),
+            knowledge_ids.clone(),
         );
 
         tracing::debug!(
@@ -198,8 +202,8 @@ impl EffectDriver {
                     .record(FeedbackEvent::ModelCall {
                         run_id: Some(self.run_id.clone()),
                         request_id: response.request_id.clone(),
-                        prompt_section_ids: Vec::new(),
-                        knowledge_ids: Vec::new(),
+                        prompt_section_ids,
+                        knowledge_ids,
                         model: Some(response.model.clone()),
                         provider: None,
                         token_usage: None,
@@ -240,8 +244,8 @@ impl EffectDriver {
                     .record(FeedbackEvent::ModelCall {
                         run_id: Some(self.run_id.clone()),
                         request_id: None,
-                        prompt_section_ids: Vec::new(),
-                        knowledge_ids: Vec::new(),
+                        prompt_section_ids,
+                        knowledge_ids,
                         model: None,
                         provider: None,
                         token_usage: None,
@@ -517,6 +521,8 @@ fn model_call_request(
     system_prompt: String,
     user_content: String,
     modulation: &DispatchModulation,
+    prompt_section_ids: Vec<String>,
+    knowledge_ids: Vec<String>,
 ) -> ModelCallRequest {
     let max_tokens = modulated_max_tokens(modulation);
     ModelCallRequest {
@@ -531,8 +537,8 @@ fn model_call_request(
         role: Some(role.to_string()),
         caller: Some("effect_driver".to_string()),
         run_id: Some(run_id.to_string()),
-        prompt_section_ids: Vec::new(),
-        knowledge_ids: Vec::new(),
+        prompt_section_ids,
+        knowledge_ids,
         budget: Some(TokenBudget {
             max_input: None,
             max_output: Some(u64::from(max_tokens)),
@@ -689,6 +695,14 @@ mod tests {
             Self: 'async_trait,
         {
             Box::pin(async { Ok("system prompt".to_string()) })
+        }
+
+        fn last_prompt_section_ids(&self) -> Vec<String> {
+            vec!["role_identity".to_string()]
+        }
+
+        fn last_knowledge_ids(&self) -> Vec<String> {
+            Vec::new()
         }
     }
 
