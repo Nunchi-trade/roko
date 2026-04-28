@@ -49,28 +49,47 @@ pub struct WorkflowResult {
     pub iterations: u32,
 }
 
+/// Per-gate result included in a workflow run report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateOutcome {
+    /// Gate name.
     pub name: String,
+    /// Whether the gate passed.
     pub passed: bool,
+    /// Optional gate output or failure details.
     pub output: Option<String>,
+    /// Gate runtime in milliseconds.
     pub duration_ms: u64,
 }
 
+/// Summary returned by `WorkflowEngine` after a workflow run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunReport {
+    /// Workflow run id.
     pub run_id: String,
+    /// Whether the workflow completed successfully.
     pub success: bool,
+    /// Primary model used by the workflow.
     pub model: String,
+    /// Provider used for the primary model, when known.
     pub provider: Option<String>,
+    /// Short summary of the prompt.
     pub prompt_summary: String,
+    /// Final workflow output.
     pub output: String,
+    /// Number of agent turns used.
     pub agent_turns: u32,
+    /// Total tokens used.
     pub token_usage: u64,
+    /// Total cost, when known.
     pub cost: Option<f64>,
+    /// Total runtime in seconds.
     pub duration_secs: f64,
+    /// Gate outcomes collected during the run.
     pub gates: Vec<GateOutcome>,
+    /// Runtime events emitted during the run.
     pub events: Vec<RuntimeEventEnvelope>,
+    /// Last checkpoint path, when one was written.
     pub checkpoint_path: Option<String>,
 }
 
@@ -1141,15 +1160,21 @@ mod tests {
         assert_eq!(report.model, "mock");
         assert!(!report.output.trim().is_empty());
         assert!(report.token_usage > 0);
-        assert!(report.events.iter().any(|event| {
-            matches!(event.payload, RuntimeEvent::WorkflowStarted { .. })
-        }));
-        assert!(report.events.iter().any(|event| {
-            matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. })
-        }));
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| { matches!(event.payload, RuntimeEvent::WorkflowStarted { .. }) })
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| { matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. }) })
+        );
 
-        let event_lines = std::fs::read_to_string(&event_log)
-            .expect("runtime event JSONL should be written");
+        let event_lines =
+            std::fs::read_to_string(&event_log).expect("runtime event JSONL should be written");
         let envelopes = event_lines
             .lines()
             .map(|line| {
@@ -1157,12 +1182,16 @@ mod tests {
                     .expect("runtime event log line should be typed JSON")
             })
             .collect::<Vec<_>>();
-        assert!(envelopes.iter().any(|event| {
-            matches!(event.payload, RuntimeEvent::WorkflowStarted { .. })
-        }));
-        assert!(envelopes.iter().any(|event| {
-            matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. })
-        }));
+        assert!(
+            envelopes
+                .iter()
+                .any(|event| { matches!(event.payload, RuntimeEvent::WorkflowStarted { .. }) })
+        );
+        assert!(
+            envelopes
+                .iter()
+                .any(|event| { matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. }) })
+        );
 
         let feedback_lines =
             std::fs::read_to_string(&feedback_log).expect("feedback JSONL should be written");
@@ -1190,7 +1219,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|outcome| outcome.starts_with("success"))
         );
-        assert_eq!(summary.prompt.as_deref(), Some("write the smallest useful change"));
+        assert_eq!(
+            summary.prompt.as_deref(),
+            Some("write the smallest useful change")
+        );
     }
 
     #[tokio::test]

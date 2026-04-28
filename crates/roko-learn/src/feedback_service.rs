@@ -446,8 +446,8 @@ impl FeedbackService {
 
     fn remember_model_call_provenance(
         &self,
-        run_id: &Option<String>,
-        request_id: &Option<String>,
+        run_id: Option<&String>,
+        request_id: Option<&String>,
         prompt_section_ids: &[String],
         knowledge_ids: &[String],
         role: &str,
@@ -455,12 +455,12 @@ impl FeedbackService {
         if prompt_section_ids.is_empty() && knowledge_ids.is_empty() {
             return Ok(None);
         }
-        let Some(request_id) = request_id.as_ref().filter(|id| !id.trim().is_empty()) else {
+        let Some(request_id) = request_id.filter(|id| !id.trim().is_empty()) else {
             return Ok(None);
         };
 
         let record = ProvenanceRecord {
-            run_id: run_id.clone(),
+            run_id: run_id.cloned(),
             request_id: request_id.clone(),
             prompt_section_ids: prompt_section_ids.to_vec(),
             knowledge_ids: knowledge_ids.to_vec(),
@@ -485,9 +485,8 @@ impl FeedbackService {
             .map_err(|error| RokoError::Invalid(format!("lock poisoned: {error}")))?;
         let request_ids: Vec<_> = provenance
             .iter()
-            .filter_map(|(request_id, record)| {
-                (record.run_id.as_deref() == Some(run_id)).then(|| request_id.clone())
-            })
+            .filter(|(_, record)| record.run_id.as_deref() == Some(run_id))
+            .map(|(request_id, _)| request_id.clone())
             .collect();
 
         Ok(request_ids
@@ -695,8 +694,8 @@ impl FeedbackSink for FeedbackService {
                 self.observe_model_call(model, *success, role, *latency_ms);
                 if *success {
                     if let Some(record) = self.remember_model_call_provenance(
-                        run_id,
-                        request_id,
+                        run_id.as_ref(),
+                        request_id.as_ref(),
                         prompt_section_ids,
                         knowledge_ids,
                         role,
@@ -1052,10 +1051,17 @@ mod tests {
         assert!(updated_score > initial_score);
 
         let reloaded = FeedbackService::new(feedback_dir);
-        assert_eq!(reloaded.knowledge_scores().get("K001"), Some(&updated_score));
+        assert_eq!(
+            reloaded.knowledge_scores().get("K001"),
+            Some(&updated_score)
+        );
 
         let effectiveness = reloaded.section_effectiveness();
-        assert!(effectiveness.get("domain_context").is_some_and(|score| *score > 1.0));
+        assert!(
+            effectiveness
+                .get("domain_context")
+                .is_some_and(|score| *score > 1.0)
+        );
     }
 
     #[tokio::test]

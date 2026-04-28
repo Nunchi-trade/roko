@@ -2634,8 +2634,8 @@ mod tests {
     use super::*;
     use clap::Parser;
     use commands::config_cmd::{
-        ModelListRow, PROVIDER_FAILURE_THRESHOLD, ProviderHealthRow, ProviderLatencySummary,
-        ProviderListRow, build_model_list_row, build_provider_health_row, format_model_rows,
+        ModelListRow, ProviderHealthRow, ProviderLatencySummary, ProviderListRow,
+        build_model_list_row, build_provider_health_row, format_model_rows,
         format_provider_health_rows, format_provider_rows, select_provider_test_model,
     };
     use commands::dashboard::dashboard_output;
@@ -2998,7 +2998,13 @@ mod tests {
     #[test]
     fn resolve_workdir_defaults_to_cwd() {
         let cli = Cli::try_parse_from(["roko"]).unwrap();
-        assert_eq!(resolve_workdir(&cli), PathBuf::from("."));
+        let cwd = PathBuf::from(".").canonicalize().unwrap();
+        let expected = cwd
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".roko"))
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        assert_eq!(resolve_workdir(&cli), expected);
     }
 
     #[tokio::test]

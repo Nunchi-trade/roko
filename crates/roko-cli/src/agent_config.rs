@@ -103,6 +103,7 @@ pub fn synthesize_subprocess_config(command: &str) -> RokoConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -111,12 +112,17 @@ mod tests {
         synthesize_subprocess_config,
     };
 
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
     fn temp_workdir() -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("roko-agent-config-test-{unique}"));
+        let counter = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir =
+            std::env::temp_dir().join(format!("roko-agent-config-test-{pid}-{unique}-{counter}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

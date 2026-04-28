@@ -12,7 +12,6 @@
 mod common;
 
 use common::{run_sample_plan, setup_sample_plan_workspace};
-use std::path::Path;
 
 /// Run a full plan and verify all Phase 0 subsystems produced artifacts.
 #[test]

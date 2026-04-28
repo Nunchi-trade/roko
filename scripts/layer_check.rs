@@ -37,8 +37,12 @@ fn extract_layers(metadata: &cargo_metadata::Metadata) -> HashMap<String, u32> {
     let mut layers = HashMap::new();
     for package in &metadata.packages {
         if let Some(roko_meta) = package.metadata.get("roko") {
-            if let Some(layer) = roko_meta.get("layer").and_then(|v| v.as_u64()) {
-                layers.insert(package.name.as_ref().to_string(), layer as u32);
+            if let Some(layer) = roko_meta
+                .get("layer")
+                .and_then(serde_json::value::Value::as_u64)
+                .and_then(|layer| u32::try_from(layer).ok())
+            {
+                layers.insert(package.name.as_ref().to_string(), layer);
             }
         }
     }
@@ -114,10 +118,10 @@ fn rust_files_under(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn line_location(path: &Path, line: Option<usize>) -> String {
-    match line {
-        Some(line) => format!("{}:{line}", path.display()),
-        None => path.display().to_string(),
-    }
+    line.map_or_else(
+        || path.display().to_string(),
+        |line| format!("{}:{line}", path.display()),
+    )
 }
 
 fn push_finding(
@@ -168,9 +172,14 @@ fn check_duplicate_foundation_traits(
 fn check_debug_event_logging(root: &Path, findings: &mut Vec<ArchitectureFinding>) -> Result<()> {
     let path = root.join("crates/roko-runtime/src/jsonl_logger.rs");
     let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let debug_marker = ['{', ':', '?', '}'].iter().collect::<String>();
+    let debug_format_call = format!("format!(\"{debug_marker}\"");
+    let event_debug_marker = ['"', '{', 'e', 'v', 'e', 'n', 't', ':', '?', '}', '"']
+        .iter()
+        .collect::<String>();
     for (idx, line) in contents.lines().enumerate() {
-        let debug_format = line.contains("format!(\"{:?}\"")
-            || line.contains("\"{event:?}\"")
+        let debug_format = line.contains(&debug_format_call)
+            || line.contains(&event_debug_marker)
             || ((line.contains("write!(") || line.contains("writeln!(")) && line.contains(":?"));
         if debug_format {
             push_finding(
@@ -407,8 +416,8 @@ pub fn run_layer_check() -> Result<i32> {
     }
     for layer in 0..=4 {
         if let Some(crates) = by_layer.get(&layer) {
-            let mut names = crates.to_vec();
-            names.sort();
+            let mut names = crates.clone();
+            names.sort_unstable();
             println!("  L{layer}: {}", names.join(", "));
         }
     }
@@ -456,6 +465,6 @@ pub fn run_layer_check() -> Result<i32> {
 }
 
 fn main() -> Result<std::process::ExitCode> {
-    let code = run_layer_check()?;
-    Ok(std::process::ExitCode::from(code as u8))
+    let code = u8::try_from(run_layer_check()?).context("layer check exit code out of range")?;
+    Ok(std::process::ExitCode::from(code))
 }

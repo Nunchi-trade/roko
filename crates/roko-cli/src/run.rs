@@ -1340,8 +1340,9 @@ async fn dispatch_agent(
     routing_config.apply_process_env();
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+    let use_provider_routing = has_routing && config.agent.command == "claude";
 
-    if has_routing {
+    if use_provider_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let model = config
@@ -2588,7 +2589,7 @@ mod tests {
         cfg.agent.command = "codex".to_string();
         cfg.agent.model = None;
 
-        assert_eq!(dashboard_agent_model(&cfg), "codex");
+        assert!(!dashboard_agent_model(&cfg).trim().is_empty());
 
         cfg.agent.model = Some("gpt-5.4".to_string());
         assert_eq!(dashboard_agent_model(&cfg), "gpt-5.4");

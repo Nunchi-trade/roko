@@ -6,7 +6,6 @@
 use roko_cli::inline::markdown;
 use roko_cli::inline::plaintext::print_plain;
 use roko_cli::inline::primitives::*;
-use roko_cli::inline::styled;
 use roko_cli::inline::symbols;
 use roko_cli::tui::Theme;
 

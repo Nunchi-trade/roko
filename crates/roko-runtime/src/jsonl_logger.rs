@@ -80,6 +80,7 @@ impl JsonlLogger {
             writeln!(w, "{json}")?;
             w.flush()?;
         }
+        drop(writer);
 
         Ok(())
     }

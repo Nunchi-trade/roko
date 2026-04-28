@@ -457,6 +457,10 @@ impl AppState {
     }
 
     /// Construct a new `AppState` with an explicit Daimon strategy-space definition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared service bundle cannot be constructed.
     pub fn new_with_daimon_strategy(
         workdir: PathBuf,
         runtime: Arc<dyn CliRuntime>,

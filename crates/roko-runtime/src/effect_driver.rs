@@ -145,16 +145,16 @@ impl EffectDriver {
             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
         );
 
-        let request = model_call_request(
-            &self.services.model,
+        let request = model_call_request(ModelCallRequestParts {
+            model: &self.services.model,
             role,
-            &self.run_id,
+            run_id: &self.run_id,
             system_prompt,
             user_content,
-            &modulation,
-            prompt_section_ids.clone(),
-            knowledge_ids.clone(),
-        );
+            modulation: &modulation,
+            prompt_section_ids: prompt_section_ids.clone(),
+            knowledge_ids: knowledge_ids.clone(),
+        });
 
         tracing::debug!(
             run_id = %self.run_id,
@@ -331,21 +331,11 @@ impl EffectDriver {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let error = format!("git add failed: {}", command_failure_details(&output));
-                self.emit(RuntimeEvent::FeedbackRecorded {
-                    run_id: self.run_id.clone(),
-                    kind: "commit_error".to_string(),
-                    summary: error.clone(),
-                });
-                return PipelineInput::CommitFailed { error };
+                return self.commit_error(error);
             }
             Err(err) => {
                 let error = format!("git add failed: {err}");
-                self.emit(RuntimeEvent::FeedbackRecorded {
-                    run_id: self.run_id.clone(),
-                    kind: "commit_error".to_string(),
-                    summary: error.clone(),
-                });
-                return PipelineInput::CommitFailed { error };
+                return self.commit_error(error);
             }
         }
 
@@ -368,33 +358,18 @@ impl EffectDriver {
                         let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if hash.is_empty() {
                             let error = "git rev-parse returned an empty commit hash".to_string();
-                            self.emit(RuntimeEvent::FeedbackRecorded {
-                                run_id: self.run_id.clone(),
-                                kind: "commit_error".to_string(),
-                                summary: error.clone(),
-                            });
-                            return PipelineInput::CommitFailed { error };
+                            return self.commit_error(error);
                         }
                         hash
                     }
                     Ok(output) => {
                         let error =
                             format!("git rev-parse failed: {}", command_failure_details(&output));
-                        self.emit(RuntimeEvent::FeedbackRecorded {
-                            run_id: self.run_id.clone(),
-                            kind: "commit_error".to_string(),
-                            summary: error.clone(),
-                        });
-                        return PipelineInput::CommitFailed { error };
+                        return self.commit_error(error);
                     }
                     Err(err) => {
                         let error = format!("git rev-parse failed: {err}");
-                        self.emit(RuntimeEvent::FeedbackRecorded {
-                            run_id: self.run_id.clone(),
-                            kind: "commit_error".to_string(),
-                            summary: error.clone(),
-                        });
-                        return PipelineInput::CommitFailed { error };
+                        return self.commit_error(error);
                     }
                 };
 
@@ -427,6 +402,15 @@ impl EffectDriver {
                 error: format!("git commit failed: {err}"),
             },
         }
+    }
+
+    fn commit_error(&self, error: String) -> PipelineInput {
+        self.emit(RuntimeEvent::FeedbackRecorded {
+            run_id: self.run_id.clone(),
+            kind: "commit_error".to_string(),
+            summary: error.clone(),
+        });
+        PipelineInput::CommitFailed { error }
     }
 
     /// Serialize `state` to JSON and write it atomically to `path`.
@@ -514,31 +498,33 @@ fn duration_millis(start: Instant) -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
-fn model_call_request(
-    model: &str,
-    role: &str,
-    run_id: &str,
+struct ModelCallRequestParts<'a> {
+    model: &'a str,
+    role: &'a str,
+    run_id: &'a str,
     system_prompt: String,
     user_content: String,
-    modulation: &DispatchModulation,
+    modulation: &'a DispatchModulation,
     prompt_section_ids: Vec<String>,
     knowledge_ids: Vec<String>,
-) -> ModelCallRequest {
-    let max_tokens = modulated_max_tokens(modulation);
+}
+
+fn model_call_request(parts: ModelCallRequestParts<'_>) -> ModelCallRequest {
+    let max_tokens = modulated_max_tokens(parts.modulation);
     ModelCallRequest {
-        model: model.to_string(),
-        system: Some(system_prompt),
+        model: parts.model.to_string(),
+        system: Some(parts.system_prompt),
         messages: vec![ChatMessage {
             role: MessageRole::User,
-            content: user_content,
+            content: parts.user_content,
         }],
         max_tokens: Some(max_tokens),
-        temperature: Some(modulated_temperature(modulation)),
-        role: Some(role.to_string()),
+        temperature: Some(modulated_temperature(parts.modulation)),
+        role: Some(parts.role.to_string()),
         caller: Some("effect_driver".to_string()),
-        run_id: Some(run_id.to_string()),
-        prompt_section_ids,
-        knowledge_ids,
+        run_id: Some(parts.run_id.to_string()),
+        prompt_section_ids: parts.prompt_section_ids,
+        knowledge_ids: parts.knowledge_ids,
         budget: Some(TokenBudget {
             max_input: None,
             max_output: Some(u64::from(max_tokens)),
@@ -546,7 +532,7 @@ fn model_call_request(
         }),
         budget_remaining: None,
         routing_hints: Vec::new(),
-        cache_policy: modulated_cache_policy(modulation),
+        cache_policy: modulated_cache_policy(parts.modulation),
     }
 }
 

@@ -20138,6 +20138,12 @@ depends_on = []
             .unwrap_err();
         assert!(err.to_string().contains("circuit breaker tripped"));
 
+        for summary in local_hub.current_snapshot().diagnoses.iter().cloned() {
+            state
+                .state_hub
+                .publish(roko_core::DashboardEvent::Diagnosis { summary });
+        }
+
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             let response = app

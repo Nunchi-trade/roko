@@ -157,8 +157,10 @@ impl ServiceFactory {
             .with_knowledge_store(gateway_knowledge_query)
             .with_cascade_router(Arc::clone(&cascade_router))
             .with_model_router(move |role| {
-                let mut ctx = RoutingContext::default();
-                ctx.role = agent_role_from_label(role.unwrap_or("implementer"));
+                let ctx = RoutingContext {
+                    role: agent_role_from_label(role.unwrap_or("implementer")),
+                    ..Default::default()
+                };
                 model_router.route(&ctx).primary.slug
             })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
@@ -221,7 +223,7 @@ fn tool_instructions_for_config(tools: &ToolsConfig) -> Option<String> {
         lines.push(format!("Denied tools: {}", tools.deny.join(", ")));
     }
     let mut profiles = tools.profiles.iter().collect::<Vec<_>>();
-    profiles.sort_by(|(left, _), (right, _)| left.cmp(right));
+    profiles.sort_by_key(|(left, _)| *left);
     for (name, profile) in profiles {
         let mut parts = Vec::new();
         if !profile.extra_tools.is_empty() {
@@ -305,7 +307,6 @@ impl FeedbackSink for MemoryFeedbackSink {
 fn default_run_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_millis());
     format!("service_factory_{millis}")
 }
