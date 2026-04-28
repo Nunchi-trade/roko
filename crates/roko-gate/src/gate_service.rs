@@ -5,8 +5,10 @@
 
 use async_trait::async_trait;
 use roko_core::foundation::{GateConfig, GateReport, GateRunner, GateVerdict};
-use roko_core::{Body, Context, Engram, Kind, Result, Verdict, Verify};
+use roko_core::{Body, Context, Engram, Kind, Result, RokoError, Verdict, Verify};
+use std::sync::{Arc, Mutex};
 
+use crate::adaptive_threshold::AdaptiveThresholds;
 use crate::clippy_gate::ClippyGate;
 use crate::compile::CompileGate;
 use crate::payload::{BuildSystem, GatePayload};
@@ -20,13 +22,28 @@ use crate::test_gate::TestGate;
 /// - Runs supported gates in rung order: compile, clippy, test, diff, fmt, custom, judge
 /// - Stops at the first failing gate
 /// - Returns a unified `GateReport`
-pub struct GateService;
+pub struct GateService {
+    adaptive: Option<Arc<Mutex<AdaptiveThresholds>>>,
+}
 
 impl GateService {
     /// Construct a `GateService`.
     #[must_use]
     pub const fn new() -> Self {
-        Self
+        Self { adaptive: None }
+    }
+
+    /// Attach adaptive thresholds for gate skip/observe decisions.
+    ///
+    /// When thresholds are attached, the service will:
+    /// - Skip gates whose rung has a long consecutive-pass streak
+    /// - Record pass/fail outcomes back to the thresholds after each gate
+    ///
+    /// Rung 0 (compile) is never skipped regardless of thresholds.
+    #[must_use]
+    pub fn with_adaptive_thresholds(mut self, thresholds: AdaptiveThresholds) -> Self {
+        self.adaptive = Some(Arc::new(Mutex::new(thresholds)));
+        self
     }
 
     /// Map a gate name to its rung index.
@@ -50,8 +67,7 @@ impl GateService {
             "clippy" | "clippy:cargo" => Some(Box::new(ClippyGate::new(build_system))),
             "test" | "test:cargo" => Some(Box::new(TestGate::new(build_system))),
             "diff" | "diff:git" => Some(Box::new(
-                ShellGate::new("git", vec!["diff".into(), "--stat".into()])
-                    .with_timeout_ms(30_000),
+                ShellGate::new("git", vec!["diff".into(), "--stat".into()]).with_timeout_ms(30_000),
             )),
             "fmt" | "fmt:cargo" | "format" => Some(Box::new(FormatCheckGate::cargo())),
             "custom" | "custom:shell" => {
@@ -83,6 +99,24 @@ impl GateService {
             .into_iter()
             .map(|(_, name)| name.clone())
             .collect()
+    }
+
+    fn should_skip_rung_adaptively(&self, rung: Option<u8>) -> Result<bool> {
+        let Some(r) = rung else {
+            return Ok(false);
+        };
+        let Some(adaptive) = &self.adaptive else {
+            return Ok(false);
+        };
+
+        if r > 0 {
+            let thresholds = adaptive
+                .lock()
+                .map_err(|e| RokoError::Invalid(format!("threshold lock: {e}")))?;
+            return Ok(thresholds.should_skip_rung(u32::from(r)));
+        }
+
+        Ok(false)
     }
 }
 
@@ -175,6 +209,20 @@ impl GateRunner for GateService {
         let mut verdicts = Vec::new();
 
         for gate_name in Self::ordered_gate_names(&config) {
+            let rung = Self::rung_for_name(&gate_name);
+
+            if let Some(r) = rung {
+                if self.should_skip_rung_adaptively(Some(r))? {
+                    verdicts.push(GateVerdict {
+                        gate_name: gate_name.clone(),
+                        passed: true,
+                        output: format!("Skipped (adaptive: high pass rate for rung {r})"),
+                        duration_ms: 0,
+                    });
+                    continue;
+                }
+            }
+
             let Some(gate) = self.gate_for_name(&gate_name, build_system) else {
                 verdicts.push(GateVerdict {
                     gate_name: gate_name.clone(),
@@ -188,6 +236,12 @@ impl GateRunner for GateService {
             let verdict = gate.verify(&signal, &ctx).await;
             let passed = verdict.passed;
             verdicts.push(to_gate_verdict(gate_name, verdict));
+
+            if let (Some(r), Some(adaptive)) = (rung, &self.adaptive)
+                && let Ok(mut thresholds) = adaptive.lock()
+            {
+                thresholds.observe(u32::from(r), passed);
+            }
 
             if !passed {
                 break;
@@ -260,7 +314,9 @@ mod tests {
         };
         assert_eq!(
             GateService::ordered_gate_names(&config),
-            vec!["compile", "clippy", "test", "diff", "fmt", "custom", "judge"]
+            vec![
+                "compile", "clippy", "test", "diff", "fmt", "custom", "judge"
+            ]
         );
     }
 
@@ -324,6 +380,100 @@ mod tests {
         assert_eq!(
             GateService::ordered_gate_names(&config),
             vec!["compile".to_string(), "clippy".to_string()]
+        );
+    }
+
+    #[test]
+    fn adaptive_skips_high_pass_rate_rung() {
+        let mut thresholds = AdaptiveThresholds::new();
+        for _ in 0..25 {
+            thresholds.observe(1, true);
+        }
+
+        assert!(thresholds.should_skip_rung(1));
+
+        let svc = GateService::new().with_adaptive_thresholds(thresholds);
+        let config = GateConfig {
+            workdir: ".".into(),
+            enabled_gates: vec!["compile".into(), "clippy".into()],
+            max_rung: None,
+        };
+
+        assert!(svc.adaptive.is_some());
+        assert_eq!(
+            GateService::ordered_gate_names(&config),
+            vec!["compile".to_string(), "clippy".to_string()]
+        );
+        assert!(
+            svc.should_skip_rung_adaptively(Some(1))
+                .expect("adaptive lock should not be poisoned")
+        );
+    }
+
+    #[test]
+    fn adaptive_never_skips_compile() {
+        let mut thresholds = AdaptiveThresholds::new();
+        for _ in 0..30 {
+            thresholds.observe(0, true);
+        }
+
+        let compile_would_be_skipped_by_threshold = thresholds.should_skip_rung(0);
+        let svc = GateService::new().with_adaptive_thresholds(thresholds);
+
+        assert!(compile_would_be_skipped_by_threshold);
+        assert!(
+            !svc.should_skip_rung_adaptively(Some(0))
+                .expect("adaptive lock should not be poisoned")
+        );
+    }
+
+    #[test]
+    fn adaptive_records_outcomes() {
+        let svc = GateService::new().with_adaptive_thresholds(AdaptiveThresholds::new());
+        let adaptive = svc
+            .adaptive
+            .as_ref()
+            .expect("adaptive thresholds should be attached");
+
+        {
+            let mut thresholds = adaptive
+                .lock()
+                .expect("adaptive lock should not be poisoned");
+            thresholds.observe(0, true);
+        }
+
+        let thresholds = adaptive
+            .lock()
+            .expect("adaptive lock should not be poisoned");
+        let stats = thresholds
+            .rung_stats(0)
+            .expect("rung 0 should have one observation");
+        assert_eq!(stats.total_observations, 1);
+    }
+
+    #[test]
+    fn no_adaptive_runs_all_gates() {
+        let svc = GateService::new();
+        let config = GateConfig {
+            workdir: ".".into(),
+            enabled_gates: vec![
+                "compile".into(),
+                "clippy".into(),
+                "test".into(),
+                "diff".into(),
+                "fmt".into(),
+                "custom".into(),
+                "judge".into(),
+            ],
+            max_rung: None,
+        };
+
+        assert!(svc.adaptive.is_none());
+        assert_eq!(
+            GateService::ordered_gate_names(&config),
+            vec![
+                "compile", "clippy", "test", "diff", "fmt", "custom", "judge"
+            ]
         );
     }
 }
