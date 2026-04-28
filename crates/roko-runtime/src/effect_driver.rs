@@ -283,6 +283,40 @@ impl EffectDriver {
         }
     }
 
+    /// Serialize `state` to JSON and write it atomically to `path`.
+    ///
+    /// The write is atomic: the JSON is first written to `<path>.tmp`, then
+    /// renamed to `path`. If the parent directory does not exist, it is created.
+    ///
+    /// On success, emits `RuntimeEvent::StateCheckpointed`.
+    pub async fn save_checkpoint(
+        &self,
+        state: &crate::pipeline_state::PipelineStateV2,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let json = state.checkpoint()?;
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, &json).await?;
+        tokio::fs::rename(&tmp_path, path).await?;
+
+        self.emit(RuntimeEvent::FeedbackRecorded {
+            run_id: self.run_id.clone(),
+            kind: "checkpoint".to_string(),
+            summary: format!("state saved to {}", path.display()),
+        });
+        self.emit(RuntimeEvent::StateCheckpointed {
+            run_id: self.run_id.clone(),
+            path: path.display().to_string(),
+        });
+
+        Ok(())
+    }
+
     /// Emit a runtime event directly.
     pub fn emit(&self, event: RuntimeEvent) {
         emit_runtime_event(event);
