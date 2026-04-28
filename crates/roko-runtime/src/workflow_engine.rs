@@ -104,24 +104,55 @@ impl WorkflowEngine {
 
             let input = match &output {
                 PipelineOutput::SpawnStrategist { prompt } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "strategist".to_string(),
+                        model: String::new(),
+                    });
                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
                 }
                 PipelineOutput::SpawnImplementer { prompt, context } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "implementer".to_string(),
+                        model: String::new(),
+                    });
                     driver
                         .spawn_agent("implementer", prompt, context.as_deref())
                         .await
                 }
                 PipelineOutput::SpawnAutoFixer { error_output } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "autofix".to_string(),
+                        model: String::new(),
+                    });
                     driver
                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
                         .await
                 }
-                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input(
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "reviewer".to_string(),
+                        model: String::new(),
+                    });
                     driver
                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
-                        .await,
-                ),
-                PipelineOutput::RunGates => driver.run_gates(&config.enabled_gates).await,
+                        .await
+                }),
+                PipelineOutput::RunGates => {
+                    self.emit(RuntimeEvent::GateStarted {
+                        run_id: run_id.clone(),
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver.run_gates(&config.enabled_gates).await
+                }
                 PipelineOutput::Commit => {
                     let message = commit_message(&config);
                     driver.commit(&message).await
