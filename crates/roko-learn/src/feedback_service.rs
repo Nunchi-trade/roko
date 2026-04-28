@@ -824,6 +824,9 @@ fn build_episode_from_workflow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_compose::prompt_assembly_service::PromptAssemblyService;
+    use roko_core::foundation::{PromptAssembler, PromptSpec};
+    use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
 
     #[tokio::test]
     async fn records_model_call() {
@@ -963,6 +966,96 @@ mod tests {
 
         assert_eq!(scores.get("knowledge-a"), Some(&(1, 2)));
         assert_eq!(scores.get("knowledge-b"), Some(&(1, 1)));
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_loop_scoring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(KnowledgeStore::new(
+            dir.path().join("neuro").join("knowledge.jsonl"),
+        ));
+        store
+            .add(KnowledgeEntry {
+                id: "K001".into(),
+                kind: KnowledgeKind::Insight,
+                content: "Testing workflows should assert durable feedback loops.".into(),
+                confidence: 0.95,
+                tags: vec!["testing".into()],
+                tier: KnowledgeTier::Consolidated,
+                ..KnowledgeEntry::default()
+            })
+            .unwrap();
+
+        let assembler = PromptAssemblyService::new().with_knowledge_store(Arc::clone(&store));
+        let feedback_dir = dir.path().join("learn");
+        let feedback = FeedbackService::new(feedback_dir.clone());
+        let initial_score = feedback
+            .knowledge_scores()
+            .get("K001")
+            .copied()
+            .unwrap_or_default();
+
+        let prompt = assembler
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Improve testing for knowledge feedback loops".into()),
+                ..PromptSpec::default()
+            })
+            .await
+            .unwrap();
+        assert!(prompt.contains("Testing workflows should assert durable feedback loops."));
+
+        let knowledge_ids = assembler.last_knowledge_ids();
+        assert_eq!(knowledge_ids, vec!["K001".to_string()]);
+        let prompt_section_ids = assembler.last_prompt_section_ids();
+        assert!(prompt_section_ids.contains(&"domain_context".to_string()));
+
+        feedback
+            .record(FeedbackEvent::ModelCall {
+                run_id: Some("run-knowledge-loop".into()),
+                request_id: Some("req-knowledge-loop".into()),
+                prompt_section_ids: prompt_section_ids.clone(),
+                knowledge_ids: knowledge_ids.clone(),
+                model: Some("sonnet".into()),
+                provider: None,
+                token_usage: None,
+                cost: None,
+                role: "implementer".into(),
+                input_tokens: 1000,
+                output_tokens: 200,
+                cost_usd: 0.01,
+                latency_ms: 1500,
+                success: true,
+            })
+            .await
+            .unwrap();
+        feedback
+            .record(FeedbackEvent::GateResult {
+                run_id: "run-knowledge-loop".into(),
+                gate_name: "test".into(),
+                passed: true,
+                duration_ms: 250,
+            })
+            .await
+            .unwrap();
+
+        feedback.flush().unwrap();
+
+        let computed_scores = feedback.compute_knowledge_scores().unwrap();
+        assert_eq!(computed_scores.get("K001"), Some(&(1, 1)));
+
+        let updated_score = feedback
+            .knowledge_scores()
+            .get("K001")
+            .copied()
+            .unwrap_or_default();
+        assert!(updated_score > initial_score);
+
+        let reloaded = FeedbackService::new(feedback_dir);
+        assert_eq!(reloaded.knowledge_scores().get("K001"), Some(&updated_score));
+
+        let effectiveness = reloaded.section_effectiveness();
+        assert!(effectiveness.get("domain_context").is_some_and(|score| *score > 1.0));
     }
 
     #[tokio::test]
