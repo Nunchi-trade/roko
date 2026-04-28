@@ -202,6 +202,7 @@ pub(crate) async fn cmd_run(
     workdir: Option<PathBuf>,
     prompt: String,
     serve: bool,
+    share: bool,
     engine: crate::EngineVariant,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
@@ -213,7 +214,7 @@ pub(crate) async fn cmd_run(
     let server_guard: Option<(
         std::sync::Arc<roko_serve::state::AppState>,
         tokio::task::JoinHandle<anyhow::Result<()>>,
-    )> = if serve {
+    )> = if serve || share {
         let repo_registry = RepoRegistry::load(&config, &workdir).unwrap_or_default();
         let runtime =
             roko_cli::serve_runtime::RokoCliRuntime::new(config.clone(), repo_registry).into_arc();
@@ -266,9 +267,14 @@ pub(crate) async fn cmd_run(
                     roko_cli::run::print_workflow_run_report(&prompt, template, &report);
                 }
 
-                if serve {
-                    let legacy_report = roko_cli::run::workflow_report_as_run_report(&report);
-                    if let Err(err) = roko_cli::run::write_shared_run(&workdir, &legacy_report) {
+                if share {
+                    if let Err(err) = roko_cli::run::write_shared_workflow_run(
+                        &workdir,
+                        &prompt,
+                        &config.agent.command,
+                        &config.prompt.role,
+                        &report,
+                    ) {
                         if !cli.quiet {
                             eprintln!("share failed: {err}");
                         }
@@ -297,7 +303,7 @@ pub(crate) async fn cmd_run(
             roko_cli::run_inline::run_once_inline(&workdir, &config, &prompt, external_hub).await?;
 
         // Share the run transcript when --share is active.
-        if serve {
+        if share {
             let elapsed = start.elapsed().as_secs_f64();
             match roko_cli::share::share_run(
                 &workdir,
