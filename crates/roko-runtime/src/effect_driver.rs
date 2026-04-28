@@ -144,9 +144,10 @@ impl EffectDriver {
                     cost_usd: response.usage.cost_usd,
                 });
 
+                let files_changed = count_changed_files(&self.workdir).await;
                 PipelineInput::AgentCompleted {
                     output: response.content,
-                    files_changed: 0, // TODO(arch): detect from git diff once file tracking lands.
+                    files_changed,
                 }
             }
             Err(err) => {
@@ -303,6 +304,27 @@ impl EffectDriver {
 fn duration_millis(start: Instant) -> u64 {
     let millis = start.elapsed().as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+/// Count the number of files changed in the working directory via `git diff --name-only`.
+///
+/// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+/// enrichment, not a gate.
+async fn count_changed_files(workdir: &std::path::Path) -> u32 {
+    let result = tokio::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(workdir)
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            u32::try_from(stdout.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(u32::MAX)
+        }
+        _ => 0,
+    }
 }
 
 /// Generate a short unique ID for agent instances.
