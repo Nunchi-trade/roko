@@ -58,6 +58,35 @@ pub fn intro(title: &str) {
     println!("{} {}", symbols::START, bold(title));
 }
 
+/// Print the agent identity block at the start of a run.
+///
+/// Prints:
+/// ```text
+/// ◆  <agent>
+/// │  model    <model>
+/// │  routing  <routing>
+/// ```
+///
+/// `agent` is the agent name (e.g., `"researcher"`).
+/// `model` is the resolved model string (e.g., `"claude-sonnet-4-6-20251001"`).
+/// `routing` is a human-readable routing decision string such as
+/// `"cascade-router → claude-sonnet-4-6-20251001"` or `"direct"`.
+pub fn print_identity(agent: &str, model: &str, routing: &str) {
+    intro(agent);
+    bar(&format!("{}  {}", dim(&format!("{:<8}", "model")), cyan(model)));
+
+    let routing_display = if let Some((before, after)) = routing.split_once(" → ") {
+        format!("{} {} {}", magenta(before), symbols::ARROW, cyan(after))
+    } else {
+        routing.to_string()
+    };
+    bar(&format!(
+        "{}  {}",
+        dim(&format!("{:<8}", "routing")),
+        routing_display
+    ));
+}
+
 /// Print a step line: `◇  <label>` with an optional value.
 pub fn step(label: &str, value: &str) {
     if value.is_empty() {
@@ -105,4 +134,21 @@ pub fn branch(text: &str) {
 /// Print an end line: `└  <text>`.
 pub fn end(text: &str) {
     println!("{}  {}", symbols::END, text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_split_on_arrow() {
+        // Smoke test: just ensure the function doesn't panic with typical inputs.
+        // (We can't assert on exact output because ANSI codes vary.)
+        print_identity(
+            "researcher",
+            "claude-sonnet-4-6",
+            "cascade-router → claude-sonnet-4-6",
+        );
+        print_identity("coder", "gpt-4o", "direct");
+    }
 }
