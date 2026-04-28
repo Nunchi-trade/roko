@@ -6,8 +6,10 @@
 use async_trait::async_trait;
 use roko_core::foundation::{PromptAssembler, PromptSpec};
 use roko_core::{AgentRole, Result};
+use roko_learn::episode_logger::{Episode, EpisodeLogger};
+use roko_learn::playbook::{PlaybookStore, QueryContext};
 use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::conventions::detect_conventions;
@@ -32,6 +34,10 @@ pub struct PromptAssemblyService {
     domain_context: Option<String>,
     /// Durable knowledge source injected into layer 3 when relevant.
     knowledge_store: Option<Arc<KnowledgeStore>>,
+    /// Path to append-only episode history used for recent execution context.
+    episodes_path: Option<PathBuf>,
+    /// Learned playbook source used for relevant technique injection.
+    playbook_store: Option<Arc<PlaybookStore>>,
     /// Tool usage guidance injected into layer 5.
     tool_instructions: Option<String>,
     /// Optional token cap passed through to the system prompt builder.
@@ -46,6 +52,8 @@ impl PromptAssemblyService {
             default_conventions: None,
             domain_context: None,
             knowledge_store: None,
+            episodes_path: None,
+            playbook_store: None,
             tool_instructions: None,
             token_budget: None,
         }
@@ -69,6 +77,20 @@ impl PromptAssemblyService {
     #[must_use]
     pub fn with_knowledge_store(mut self, store: Arc<KnowledgeStore>) -> Self {
         self.knowledge_store = Some(store);
+        self
+    }
+
+    /// Add recent episode history for layer 3b context.
+    #[must_use]
+    pub fn with_episode_context(mut self, episodes_path: PathBuf) -> Self {
+        self.episodes_path = Some(episodes_path);
+        self
+    }
+
+    /// Add a learned playbook store for layer 6 relevant techniques.
+    #[must_use]
+    pub fn with_playbook_context(mut self, store: Arc<PlaybookStore>) -> Self {
+        self.playbook_store = Some(store);
         self
     }
 
@@ -108,6 +130,33 @@ impl PromptAssembler for PromptAssemblyService {
             builder = builder.with_conventions(conventions);
         }
 
+        let mut context_blocks = Vec::new();
+        if let Some(ref episodes_path) = self.episodes_path {
+            if let Ok(episodes) = EpisodeLogger::read_all(episodes_path).await {
+                let recent = episodes.into_iter().rev().take(5).collect::<Vec<_>>();
+                if !recent.is_empty() {
+                    context_blocks.push(format_episode_context(&recent));
+                }
+            }
+        }
+
+        if let Some(ref store) = self.playbook_store {
+            let task_text = spec.task.as_deref().unwrap_or("");
+            let ctx = QueryContext {
+                task_id: String::new(),
+                task_title: task_text.to_string(),
+                task_body: String::new(),
+                role: spec.role.clone().unwrap_or_default(),
+                recent_episodes: 0,
+                max_results: 3,
+            };
+            if let Ok(playbooks) = store.query(&ctx).await {
+                if !playbooks.is_empty() {
+                    builder = builder.with_playbooks(&playbooks);
+                }
+            }
+        }
+
         if let Some(domain) = domain_context_for_spec(
             &spec,
             self.domain_context.as_deref(),
@@ -117,7 +166,11 @@ impl PromptAssembler for PromptAssemblyService {
         }
 
         if let Some(workspace_map) = workspace_map_for_spec(&spec) {
-            builder = builder.with_context(workspace_map);
+            context_blocks.push(workspace_map);
+        }
+
+        if !context_blocks.is_empty() {
+            builder = builder.with_context(context_blocks.join("\n\n"));
         }
 
         if let Some(task) = spec.task {
@@ -247,6 +300,48 @@ fn workspace_map_from_file_listing(file_listing: &[String]) -> Option<String> {
         .join("\n");
 
     Some(format!("## Workspace Map\n{lines}"))
+}
+
+fn format_episode_context(episodes: &[Episode]) -> String {
+    let lines = episodes
+        .iter()
+        .map(|episode| {
+            let status = if episode.success { "SUCCESS" } else { "FAILED" };
+            let task = if episode.task_id.trim().is_empty() {
+                "-"
+            } else {
+                episode.task_id.trim()
+            };
+            let model = if episode.model.trim().is_empty() {
+                "-"
+            } else {
+                episode.model.trim()
+            };
+            let tokens = episode.tokens_used.max(
+                episode
+                    .usage
+                    .input_tokens
+                    .saturating_add(episode.usage.output_tokens),
+            );
+            let failed_gate = episode
+                .gate_verdicts
+                .iter()
+                .find(|verdict| !verdict.passed && !verdict.gate.trim().is_empty())
+                .map(|verdict| verdict.gate.trim());
+
+            let mut line = format!(
+                "- [{status}] task={task} model={model} duration={:.1}s tokens={tokens}",
+                episode.duration_secs
+            );
+            if let Some(gate) = failed_gate {
+                line.push_str(&format!(" gate={gate}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("## Recent Execution History (last 5 runs)\n{lines}")
 }
 
 fn detect_workdir_conventions(workdir: &Path) -> Option<String> {
@@ -481,6 +576,72 @@ mod tests {
             .unwrap();
 
         assert!(!prompt.contains("Low confidence limiter advice should stay out."));
+    }
+
+    #[tokio::test]
+    async fn assembly_includes_episode_context() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let episodes_path = tempdir.path().join("episodes.jsonl");
+        let logger = EpisodeLogger::new(&episodes_path);
+
+        for index in 0..3 {
+            let mut episode = Episode::new("implementer", format!("T-04{index}"));
+            episode.success = index != 1;
+            episode.model = "sonnet".into();
+            episode.duration_secs = 12.0 + f64::from(index);
+            episode.usage = roko_learn::episode_logger::Usage::tokens(1_000, 500);
+            if !episode.success {
+                episode
+                    .gate_verdicts
+                    .push(roko_learn::episode_logger::GateVerdict::new(
+                        "compile", false,
+                    ));
+            }
+            logger.append(&episode).await.unwrap();
+        }
+
+        let svc = PromptAssemblyService::new().with_episode_context(episodes_path);
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Fix recent regressions".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("Recent Execution History"));
+        assert!(prompt.contains("gate=compile"));
+    }
+
+    #[tokio::test]
+    async fn assembly_includes_playbook_context() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = Arc::new(PlaybookStore::new(tempdir.path().join("playbooks")));
+        let mut playbook =
+            roko_learn::playbook::Playbook::new("fix-compile", "Fix Rust compile failures");
+        playbook.success_count = 2;
+        playbook.steps.push(roko_learn::playbook::PlaybookStep::new(
+            0,
+            "Run cargo check and address the first compiler diagnostic",
+            "run_command",
+            vec!["compile_ok".into()],
+        ));
+        store.save(&playbook).await.unwrap();
+
+        let svc = PromptAssemblyService::new().with_playbook_context(Arc::clone(&store));
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Fix compile failures in the Rust crate".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(!prompt.is_empty());
+        assert!(prompt.contains("Relevant Techniques"));
+        assert!(prompt.contains("Fix Rust compile failures"));
     }
 
     #[tokio::test]
