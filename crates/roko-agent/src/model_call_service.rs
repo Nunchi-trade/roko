@@ -452,6 +452,7 @@ impl ModelCaller for ModelCallService {
             model,
             usage,
             stop_reason: Some("end_turn".to_string()),
+            request_id: None,
         })
     }
 }
@@ -474,6 +475,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
     }
@@ -488,6 +492,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
     }
@@ -505,6 +512,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: Some("reviewer".to_string()),
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
         assert_eq!(svc.resolve_model(&req), "router-selected-model");
@@ -520,6 +530,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         let model = svc.resolve_model(&req);
         let config = svc.config_for_model(&model);
@@ -547,6 +560,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
         assert_eq!(svc.resolve_model(&req), "claude");
@@ -576,6 +592,9 @@ mod tests {
             max_tokens: None,
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
         let estimate = svc.cost_predict(&req);
@@ -607,6 +626,9 @@ mod tests {
             max_tokens: Some(2048),
             temperature: None,
             role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
         let estimate = svc.cost_predict(&req);

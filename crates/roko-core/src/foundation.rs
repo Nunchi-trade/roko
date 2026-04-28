@@ -8,15 +8,15 @@
 //! - `EventConsumer` - observe runtime events (implemented by adapters)
 //! - `EffectExecutor` - execute side-effects (implemented by roko-runtime)
 
-use crate::Result;
 use crate::runtime_event::RuntimeEvent;
+use crate::{Result, RokoError};
 use async_trait::async_trait;
 use std::path::PathBuf;
 
 // -- ModelCaller --
 
 /// Request to call an LLM model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelCallRequest {
     /// Model identifier (e.g., "claude-sonnet-4-20250514").
     pub model: String,
@@ -30,6 +30,70 @@ pub struct ModelCallRequest {
     pub temperature: Option<f32>,
     /// Role for model routing.
     pub role: Option<String>,
+    /// Caller surface that originated this request.
+    pub caller: Option<CallerIdentity>,
+    /// Per-call token and cost budget.
+    pub budget: Option<TokenBudget>,
+    /// Cache behavior for this request.
+    pub cache_policy: CachePolicy,
+}
+
+/// Who originated this model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CallerIdentity {
+    Cli,
+    Acp,
+    Serve,
+    Research,
+    Dreams,
+    Test,
+}
+
+/// Cache behaviour for this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CachePolicy {
+    /// Use the default L1 cache behaviour.
+    #[default]
+    Default,
+    /// Skip cache lookup but still store the result.
+    Bypass,
+    /// Skip cache lookup AND discard any prior cached result for this key.
+    ForceRefresh,
+}
+
+/// Token and cost budget for a single model call.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TokenBudget {
+    /// Maximum input tokens the gateway should accept.
+    pub max_input: Option<u64>,
+    /// Maximum output tokens requested from the provider.
+    pub max_output: Option<u64>,
+    /// Maximum cost in USD for this single call.
+    pub max_cost_usd: Option<f64>,
+}
+
+/// Errors specific to the gateway pipeline (not provider errors).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GatewayError {
+    #[error("provider error: {0}")]
+    ProviderError(String),
+    #[error("budget exceeded: {detail}")]
+    BudgetExceeded { detail: String },
+    #[error("rate limited: retry after {retry_after_ms:?} ms")]
+    RateLimited { retry_after_ms: Option<u64> },
+    #[error("cache error: {0}")]
+    CacheError(String),
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("convergence detected after {consecutive} identical outputs")]
+    ConvergenceDetected { consecutive: u32 },
+}
+
+impl From<GatewayError> for RokoError {
+    fn from(error: GatewayError) -> Self {
+        // TODO(converge): Map to RokoError::Other once that variant exists in roko-core.
+        RokoError::invalid(error.to_string())
+    }
 }
 
 /// A single chat message.
@@ -54,6 +118,8 @@ pub struct ModelCallResponse {
     pub model: String,
     pub usage: TokenUsage,
     pub stop_reason: Option<String>,
+    /// Gateway request id, set by ModelCallService when the call flows through the gateway.
+    pub request_id: Option<String>,
 }
 
 /// Token usage and cost from a model call.
