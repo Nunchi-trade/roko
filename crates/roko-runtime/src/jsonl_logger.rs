@@ -3,21 +3,12 @@
 //! Each event is serialized as a single JSON line with a timestamp, enabling
 //! replay and state reconstruction.
 
-use crate::effect_driver::RuntimeEvent;
 use chrono::Utc;
+pub use roko_core::foundation::EventConsumer;
+use roko_core::RuntimeEvent;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-
-// TODO(arch): Replace this local compatibility trait with
-// `roko_core::foundation::EventConsumer` once the manifest dependency direction
-// permits `roko-runtime -> roko-core`. This checkout currently has
-// `roko-core -> roko-runtime`, and this batch cannot modify Cargo.toml.
-/// Consume RuntimeEvents for side effects such as logging or UI updates.
-pub trait EventConsumer: Send + Sync {
-    /// Called for each event emitted by the workflow engine.
-    fn consume(&self, event: &RuntimeEvent);
-}
 
 /// Logger that writes RuntimeEvents as JSONL (one JSON object per line).
 pub struct JsonlLogger {
