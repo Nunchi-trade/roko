@@ -322,6 +322,48 @@ pub fn print_agent_table(agents: &[(&str, &str, &str, &str)]) {
     )));
 }
 
+/// Print a timeline of replay events.
+///
+/// Each tuple is `(timestamp, kind, summary)`.
+/// `timestamp` is a display string (caller formats it).
+/// `kind` is the event category (e.g., `"signal"`, `"gate"`).
+pub fn print_replay_timeline(events: &[(&str, &str, &str)]) {
+    intro("Replay");
+    divider();
+    for (timestamp, kind, summary) in events {
+        let kind_display = match *kind {
+            "signal" | "dispatch" => cyan(&format!("{:<10}", kind)),
+            "compose" => magenta(&format!("{:<10}", kind)),
+            "response" => green(&format!("{:<10}", kind)),
+            "gate" => {
+                if summary.contains('\u{2716}') || summary.contains("fail") {
+                    red(&format!("{:<10}", kind))
+                } else {
+                    green(&format!("{:<10}", kind))
+                }
+            }
+            _ => dim(&format!("{:<10}", kind)),
+        };
+        bar(&format!(
+            "  {}  {}{}",
+            dim(timestamp),
+            kind_display,
+            summary
+        ));
+    }
+    divider();
+    if let (Some(first), Some(last)) = (events.first(), events.last()) {
+        end(&dim(&format!(
+            "{} events \u{00B7} {} \u{2192} {}",
+            events.len(),
+            first.0,
+            last.0
+        )));
+    } else {
+        end(&dim("no events"));
+    }
+}
+
 /// Print an end line: `└  <text>`.
 pub fn end(text: &str) {
     println!("{}  {}", symbols::END, text);
@@ -437,5 +479,21 @@ mod tests {
     #[test]
     fn agent_table_empty_no_panic() {
         print_agent_table(&[]);
+    }
+
+    #[test]
+    fn replay_timeline_no_panic() {
+        print_replay_timeline(&[
+            ("14:32:01", "signal", "prompt received"),
+            ("14:32:02", "dispatch", "agent spawned"),
+            ("14:32:08", "gate", "compile pass"),
+            ("14:32:09", "gate", "test fail"),
+            ("14:32:09", "persist", "episode written"),
+        ]);
+    }
+
+    #[test]
+    fn replay_timeline_empty_no_panic() {
+        print_replay_timeline(&[]);
     }
 }
