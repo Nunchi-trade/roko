@@ -403,8 +403,7 @@ mod tests {
 
     #[test]
     fn express_pipeline_skips_strategy_and_review() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Express, "fix the bug".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Express, "fix the bug".into(), 2);
         let action = state.step(PipelineEvent::Start);
         assert!(matches!(action, PipelineAction::SpawnImplementer { .. }));
         assert_eq!(state.phase, PipelinePhase::Implementing);
@@ -423,8 +422,7 @@ mod tests {
 
     #[test]
     fn standard_pipeline_includes_review() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Standard, "add auth".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Standard, "add auth".into(), 2);
         state.step(PipelineEvent::Start);
         state.step(PipelineEvent::AgentCompleted {
             output: "done".into(),
@@ -437,8 +435,7 @@ mod tests {
 
     #[test]
     fn full_pipeline_starts_with_strategist() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Full, "build feature".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Full, "build feature".into(), 2);
         let action = state.step(PipelineEvent::Start);
         assert!(matches!(action, PipelineAction::SpawnStrategist { .. }));
         assert_eq!(state.phase, PipelinePhase::Strategizing);
@@ -451,8 +448,7 @@ mod tests {
 
     #[test]
     fn gate_failure_triggers_autofix() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Standard, "fix".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Standard, "fix".into(), 2);
         state.step(PipelineEvent::Start);
         state.step(PipelineEvent::AgentCompleted {
             output: "done".into(),
@@ -468,8 +464,7 @@ mod tests {
 
     #[test]
     fn review_revise_retries_implementation() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Standard, "add feature".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Standard, "add feature".into(), 2);
         state.step(PipelineEvent::Start);
         state.step(PipelineEvent::AgentCompleted {
             output: "done".into(),
@@ -485,8 +480,7 @@ mod tests {
 
     #[test]
     fn user_cancel_from_any_phase() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Standard, "work".into(), 2);
+        let mut state = PipelineState::new(WorkflowTemplate::Standard, "work".into(), 2);
         state.step(PipelineEvent::Start);
         let action = state.step(PipelineEvent::UserCancel);
         assert!(matches!(action, PipelineAction::Halt { .. }));
@@ -495,8 +489,7 @@ mod tests {
 
     #[test]
     fn max_iterations_halts_on_gate_failure() {
-        let mut state =
-            PipelineState::new(WorkflowTemplate::Express, "fix".into(), 1);
+        let mut state = PipelineState::new(WorkflowTemplate::Express, "fix".into(), 1);
         state.step(PipelineEvent::Start);
         state.step(PipelineEvent::AgentCompleted {
             output: "done".into(),

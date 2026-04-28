@@ -3,15 +3,15 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout},
-    sync::{oneshot, Mutex as AsyncMutex},
+    sync::{Mutex as AsyncMutex, oneshot},
 };
 use tracing::warn;
 
@@ -189,9 +189,9 @@ where
             return Err(error);
         }
 
-        receiver.await.map_err(|_| TransportError::ResponseChannelClosed {
-            request_id,
-        })
+        receiver
+            .await
+            .map_err(|_| TransportError::ResponseChannelClosed { request_id })
     }
 
     /// Routes an incoming JSON-RPC response to the matching pending outbound request.

@@ -15,18 +15,21 @@ use crate::{
     transport::{StdioTransport, TransportError},
     types::{
         ACP_PROTOCOL_VERSION, ACP_SPEC_VERSION, AgentCapabilities, AgentInfo, ConfigUpdateParams,
-        ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcMessage,
-        JsonRpcId, JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities,
-        PARSE_ERROR,
-        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams,
-        SessionLoadParams, SessionNewParams, SessionPromptParams, SessionSetModeParams,
+        ConfigUpdateResult, InitializeParams, InitializeResult, JsonRpcId, JsonRpcMessage,
+        JsonRpcNotification, JsonRpcRequest, METHOD_NOT_FOUND, McpCapabilities, PARSE_ERROR,
+        PromptCapabilities, SESSION_NOT_FOUND, SessionCancelParams, SessionLoadParams,
+        SessionNewParams, SessionPromptParams, SessionSetModeParams,
     },
 };
 
 /// Runs the ACP stdio server until stdin reaches EOF or a fatal transport error occurs.
 pub async fn run_acp_server(config: AcpConfig) -> Result<()> {
-    let _guard = setup_file_logging(config.log_file())
-        .with_context(|| format!("failed to initialize ACP logging at {}", config.log_file().display()))?;
+    let _guard = setup_file_logging(config.log_file()).with_context(|| {
+        format!(
+            "failed to initialize ACP logging at {}",
+            config.log_file().display()
+        )
+    })?;
     let mut transport = StdioTransport::new();
     run_acp_server_with_transport(config, &mut transport).await
 }
@@ -93,10 +96,7 @@ async fn handle_request(
     request: JsonRpcRequest,
 ) -> Result<()> {
     let JsonRpcRequest {
-        id,
-        method,
-        params,
-        ..
+        id, method, params, ..
     } = request;
     debug!(method = %method, request_id = ?id, "handling ACP request");
 
@@ -185,15 +185,18 @@ async fn handle_request(
                 Err(error) => return send_error_response(transport, id, error).await,
             };
             let session_id_for_persist = params.session_id.clone();
-            let result = match handle_session_prompt(transport, session, params, &workdir, &roko_config).await {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Some(rpc_error) = error.rpc_error() {
-                        return send_error_response(transport, id, rpc_error).await;
+            let result =
+                match handle_session_prompt(transport, session, params, &workdir, &roko_config)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(rpc_error) = error.rpc_error() {
+                            return send_error_response(transport, id, rpc_error).await;
+                        }
+                        return Err(error).context("failed to handle ACP session prompt");
                     }
-                    return Err(error).context("failed to handle ACP session prompt");
-                }
-            };
+                };
             // Persist session after prompt completes.
             sessions.persist_session(&session_id_for_persist);
             send_success(transport, id, result).await
@@ -245,10 +248,7 @@ async fn handle_request(
     }
 }
 
-fn handle_notification(
-    sessions: &mut SessionManager,
-    notification: JsonRpcNotification,
-) {
+fn handle_notification(sessions: &mut SessionManager, notification: JsonRpcNotification) {
     debug!(method = %notification.method, "handling ACP notification");
 
     match notification.method.as_str() {
@@ -269,7 +269,9 @@ fn handle_notification(
 
             match sessions.get_session_mut(&params.session_id) {
                 Some(session) => session.cancel(),
-                None => warn!(session_id = %params.session_id, "received cancel for unknown ACP session"),
+                None => {
+                    warn!(session_id = %params.session_id, "received cancel for unknown ACP session")
+                }
             }
         }
         _ => warn!(method = %notification.method, "ignoring unsupported ACP notification"),
@@ -339,9 +341,8 @@ async fn send_error_response(
 
 fn setup_file_logging(log_file: &Path) -> Result<WorkerGuard> {
     if let Some(parent) = log_file.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create ACP log directory {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create ACP log directory {}", parent.display()))?;
     }
 
     let file_name = log_file

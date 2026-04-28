@@ -897,7 +897,9 @@ fn build_config_options(
                 ConfigOptionValue {
                     value: "full".to_owned(),
                     name: "Full".to_owned(),
-                    description: Some("Strategy → implement → gate → multi-review → commit".to_owned()),
+                    description: Some(
+                        "Strategy → implement → gate → multi-review → commit".to_owned(),
+                    ),
                 },
                 ConfigOptionValue {
                     value: "auto".to_owned(),
@@ -1271,7 +1273,8 @@ pub fn build_slash_commands() -> Vec<SlashCommand> {
         },
         SlashCommand {
             name: "full".to_owned(),
-            description: "Run full pipeline: strategy → implement → gate → multi-review → commit".to_owned(),
+            description: "Run full pipeline: strategy → implement → gate → multi-review → commit"
+                .to_owned(),
             input: Some(CommandInput {
                 hint: Some("prompt text".to_owned()),
             }),
@@ -1423,7 +1426,11 @@ mod tests {
     #[test]
     fn system_prompt_for_mode_returns_correct_prompts() {
         let mut session = AcpSession::new(session_params("prompts"));
-        assert!(session.system_prompt_for_mode().contains("code implementer"));
+        assert!(
+            session
+                .system_prompt_for_mode()
+                .contains("code implementer")
+        );
 
         session.set_mode("plan".into());
         assert!(session.system_prompt_for_mode().contains("architect"));

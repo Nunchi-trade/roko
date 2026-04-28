@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use roko_agent::streaming::parse_sse_line;
 use roko_agent::StreamChunk;
+use roko_agent::streaming::parse_sse_line;
 use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::RokoConfig;
 use serde::Deserialize;
@@ -131,9 +131,7 @@ impl BridgeEventsError {
                 SESSION_BUSY,
                 format!("session '{session_id}' already has an active prompt"),
             )),
-            Self::Serialize(_) | Self::Transport(_) | Self::TaskJoin(_) | Self::Pipeline(_) => {
-                None
-            }
+            Self::Serialize(_) | Self::Transport(_) | Self::TaskJoin(_) | Self::Pipeline(_) => None,
         }
     }
 }
@@ -163,9 +161,7 @@ pub enum CognitiveEvent {
         content: Vec<ContentBlock>,
     },
     /// A plan update with structured entries (shown as progress in editor).
-    PlanUpdate {
-        entries: Vec<PlanEntry>,
-    },
+    PlanUpdate { entries: Vec<PlanEntry> },
     /// Prompt execution completed normally.
     Complete {
         stop_reason: StopReason,
@@ -216,13 +212,18 @@ where
             StreamAction::Cancelled => {
                 debug!(session_id, "ACP prompt cancelled while streaming events");
                 return Ok(StreamResult {
-                    prompt_result: SessionPromptResult { stop_reason: StopReason::Cancelled },
+                    prompt_result: SessionPromptResult {
+                        stop_reason: StopReason::Cancelled,
+                    },
                     assistant_text,
                 });
             }
             StreamAction::Event(maybe_event) => {
                 let Some(event) = maybe_event else {
-                    warn!(session_id, "ACP event stream closed without an explicit completion event");
+                    warn!(
+                        session_id,
+                        "ACP event stream closed without an explicit completion event"
+                    );
                     let stop_reason = if cancel_token.is_cancelled() {
                         StopReason::Cancelled
                     } else {
@@ -243,7 +244,9 @@ where
                     }
                     CognitiveEvent::MaxTokens => {
                         return Ok(StreamResult {
-                            prompt_result: SessionPromptResult { stop_reason: StopReason::MaxTokens },
+                            prompt_result: SessionPromptResult {
+                                stop_reason: StopReason::MaxTokens,
+                            },
                             assistant_text,
                         });
                     }
@@ -296,9 +299,14 @@ where
                     );
                 }
                 None => {
-                    warn!(session_id, "ACP client disconnected while prompt was active");
+                    warn!(
+                        session_id,
+                        "ACP client disconnected while prompt was active"
+                    );
                     return Ok(StreamResult {
-                        prompt_result: SessionPromptResult { stop_reason: StopReason::Cancelled },
+                        prompt_result: SessionPromptResult {
+                            stop_reason: StopReason::Cancelled,
+                        },
                         assistant_text,
                     });
                 }
@@ -1001,10 +1009,16 @@ async fn run_slash_command(
         ($cmd:expr, $hint:expr) => {
             if args.is_empty() {
                 let _ = event_sender
-                    .send(CognitiveEvent::TokenChunk(format!("Usage: /{} {}", $cmd, $hint)))
+                    .send(CognitiveEvent::TokenChunk(format!(
+                        "Usage: /{} {}",
+                        $cmd, $hint
+                    )))
                     .await;
                 let _ = event_sender
-                    .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                    .send(CognitiveEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: None,
+                    })
                     .await;
                 return Ok(());
             }
@@ -1079,27 +1093,43 @@ async fn run_slash_command(
         // ── Verification & Gates ──
         "build" => {
             return run_shell_command(
-                session_id, "cargo build --workspace", workdir,
-                cancel_token, event_sender,
-            ).await;
+                session_id,
+                "cargo build --workspace",
+                workdir,
+                cancel_token,
+                event_sender,
+            )
+            .await;
         }
         "test" => {
             return run_shell_command(
-                session_id, "cargo test --workspace", workdir,
-                cancel_token, event_sender,
-            ).await;
+                session_id,
+                "cargo test --workspace",
+                workdir,
+                cancel_token,
+                event_sender,
+            )
+            .await;
         }
         "clippy" => {
             return run_shell_command(
-                session_id, "cargo clippy --workspace --no-deps -- -D warnings", workdir,
-                cancel_token, event_sender,
-            ).await;
+                session_id,
+                "cargo clippy --workspace --no-deps -- -D warnings",
+                workdir,
+                cancel_token,
+                event_sender,
+            )
+            .await;
         }
         "fmt" => {
             return run_shell_command(
-                session_id, "cargo +nightly fmt --all --check", workdir,
-                cancel_token, event_sender,
-            ).await;
+                session_id,
+                "cargo +nightly fmt --all --check",
+                workdir,
+                cancel_token,
+                event_sender,
+            )
+            .await;
         }
         "gate" => {
             // Run the full gate pipeline sequentially.
@@ -1157,7 +1187,13 @@ async fn run_slash_command(
             } else {
                 args
             };
-            vec!["plan".into(), "run".into(), "plans/".into(), "--resume".into(), path.into()]
+            vec![
+                "plan".into(),
+                "run".into(),
+                "plans/".into(),
+                "--resume".into(),
+                path.into(),
+            ]
         }
         "analyze" => vec!["research".into(), "analyze".into()],
         "review" => {
@@ -1212,11 +1248,15 @@ Use the Workflow dropdown in the status bar to select, or:
                         }
                         "cancel" => "No active workflow to cancel.".to_string(),
                         "resume" => "No halted workflow to resume.".to_string(),
-                        _ => "Unknown workflow subcommand. Use: list, status, cancel, resume".to_string(),
+                        _ => "Unknown workflow subcommand. Use: list, status, cancel, resume"
+                            .to_string(),
                     };
                     let _ = event_sender.send(CognitiveEvent::TokenChunk(msg)).await;
                     let _ = event_sender
-                        .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                        .send(CognitiveEvent::Complete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: None,
+                        })
                         .await;
                     return Ok(());
                 }
@@ -1227,7 +1267,10 @@ Use the Workflow dropdown in the status bar to select, or:
                         )))
                         .await;
                     let _ = event_sender
-                        .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                        .send(CognitiveEvent::Complete {
+                            stop_reason: StopReason::EndTurn,
+                            usage: None,
+                        })
                         .await;
                     return Ok(());
                 }
@@ -1272,10 +1315,8 @@ Use the Workflow dropdown in the status bar to select, or:
             .await?);
         }
         "review-this" => {
-            return run_shell_command(
-                session_id, "git diff", workdir,
-                cancel_token, event_sender,
-            ).await;
+            return run_shell_command(session_id, "git diff", workdir, cancel_token, event_sender)
+                .await;
         }
         "pipeline" => {
             require_args!("pipeline", "<name>");
@@ -1285,7 +1326,10 @@ Use the Workflow dropdown in the status bar to select, or:
                 )))
                 .await;
             let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
                 .await;
             return Ok(());
         }
@@ -1371,9 +1415,14 @@ Available commands (organized by Will's core loop):
     /audit             Plugin security audit
 
   /help               This message";
-            let _ = event_sender.send(CognitiveEvent::TokenChunk(help_text.into())).await;
             let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                .send(CognitiveEvent::TokenChunk(help_text.into()))
+                .await;
+            let _ = event_sender
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
                 .await;
             return Ok(());
         }
@@ -1385,7 +1434,10 @@ Available commands (organized by Will's core loop):
                 )))
                 .await;
             let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
                 .await;
             return Ok(());
         }
@@ -1474,9 +1526,7 @@ Available commands (organized by Will's core loop):
         output = format!("/{command} completed (no output)");
     }
 
-    let _ = event_sender
-        .send(CognitiveEvent::TokenChunk(output))
-        .await;
+    let _ = event_sender.send(CognitiveEvent::TokenChunk(output)).await;
     let _ = event_sender
         .send(CognitiveEvent::Complete {
             stop_reason: StopReason::EndTurn,
@@ -1508,10 +1558,15 @@ async fn run_shell_command(
         Ok(c) => c,
         Err(e) => {
             let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!("Failed to run `{shell_cmd}`: {e}")))
+                .send(CognitiveEvent::TokenChunk(format!(
+                    "Failed to run `{shell_cmd}`: {e}"
+                )))
                 .await;
             let _ = event_sender
-                .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+                .send(CognitiveEvent::Complete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
                 .await;
             return Ok(());
         }
@@ -1550,7 +1605,9 @@ async fn run_shell_command(
         let mut stderr_buf = String::new();
         let mut stderr_reader = tokio::io::BufReader::new(stderr);
         while let Ok(n) = stderr_reader.read_line(&mut stderr_buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
         }
         let stderr_trimmed = stderr_buf.trim();
         if !stderr_trimmed.is_empty() {
@@ -1571,7 +1628,10 @@ async fn run_shell_command(
 
     let _ = event_sender.send(CognitiveEvent::TokenChunk(output)).await;
     let _ = event_sender
-        .send(CognitiveEvent::Complete { stop_reason: StopReason::EndTurn, usage: None })
+        .send(CognitiveEvent::Complete {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        })
         .await;
 
     Ok(())
@@ -1675,7 +1735,9 @@ fn extract_resource_uris(prompt: &[ContentBlock]) -> Vec<String> {
 /// Validates that paths stay within the workdir for security.
 fn read_file_context(uris: &[String], workdir: &Path) -> String {
     let mut context = String::new();
-    let workdir_canonical = workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf());
+    let workdir_canonical = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
 
     for uri in uris {
         let path_str = uri.strip_prefix("file://").unwrap_or(uri);

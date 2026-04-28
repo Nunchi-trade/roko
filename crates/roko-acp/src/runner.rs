@@ -11,8 +11,7 @@ use std::path::Path;
 use roko_core::{Body, Context, Engram, Kind, Verify};
 use roko_gate::{
     AdaptiveThresholds, ClippyGate, CompileGate, GatePayload, TestGate,
-    parse_structured_review_verdict,
-    review_verdict::ReviewVerdictContext,
+    parse_structured_review_verdict, review_verdict::ReviewVerdictContext,
 };
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -50,7 +49,11 @@ pub async fn run_workflow_pipeline(
     event_sender: mpsc::Sender<CognitiveEvent>,
     shared_run: SharedWorkflowRun,
 ) -> anyhow::Result<()> {
-    let mut run = WorkflowRun::new(config.template.clone(), prompt.to_owned(), config.max_iterations);
+    let mut run = WorkflowRun::new(
+        config.template.clone(),
+        prompt.to_owned(),
+        config.max_iterations,
+    );
 
     info!(
         run_id = %run.run_id,
@@ -94,9 +97,9 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match result {
-                    Ok(output) => run.pipeline.step(PipelineEvent::StrategyComplete {
-                        brief: output,
-                    }),
+                    Ok(output) => run
+                        .pipeline
+                        .step(PipelineEvent::StrategyComplete { brief: output }),
                     Err(e) => run.pipeline.step(PipelineEvent::AgentFailed {
                         error: e.to_string(),
                     }),
@@ -140,9 +143,8 @@ pub async fn run_workflow_pipeline(
 
             PipelineAction::SpawnAutoFixer { ref error_output } => {
                 run.agents_spawned += 1;
-                let fix_prompt = format!(
-                    "Fix the following errors. Make minimal changes:\n\n{error_output}"
-                );
+                let fix_prompt =
+                    format!("Fix the following errors. Make minimal changes:\n\n{error_output}");
                 let result = run_agent_phase(
                     session_id,
                     "AutoFixer",
@@ -226,7 +228,9 @@ pub async fn run_workflow_pipeline(
                 )
                 .await;
                 action = match commit_result {
-                    Ok(msg) => run.pipeline.step(PipelineEvent::CommitDone { message: msg }),
+                    Ok(msg) => run
+                        .pipeline
+                        .step(PipelineEvent::CommitDone { message: msg }),
                     Err(e) => {
                         error!(error = %e, "commit failed");
                         // Still mark as done — user can commit manually.
@@ -253,9 +257,7 @@ pub async fn run_workflow_pipeline(
                     run.pipeline.iteration,
                     run.pipeline.max_iterations,
                 );
-                let _ = event_sender
-                    .send(CognitiveEvent::TokenChunk(summary))
-                    .await;
+                let _ = event_sender.send(CognitiveEvent::TokenChunk(summary)).await;
                 let _ = event_sender
                     .send(CognitiveEvent::Complete {
                         stop_reason: StopReason::EndTurn,
@@ -271,9 +273,7 @@ pub async fn run_workflow_pipeline(
                 emit_plan_update(&run, &event_sender).await;
 
                 let msg = format!("\n\n---\nWorkflow halted: {reason}");
-                let _ = event_sender
-                    .send(CognitiveEvent::TokenChunk(msg))
-                    .await;
+                let _ = event_sender.send(CognitiveEvent::TokenChunk(msg)).await;
                 let _ = event_sender
                     .send(CognitiveEvent::Complete {
                         stop_reason: StopReason::EndTurn,
@@ -296,9 +296,7 @@ async fn sync_shared_run(shared: &SharedWorkflowRun, run: &WorkflowRun) {
 async fn emit_plan_update(run: &WorkflowRun, sender: &mpsc::Sender<CognitiveEvent>) {
     let entries = build_plan_entries(run);
     if !entries.is_empty() {
-        let _ = sender
-            .send(CognitiveEvent::PlanUpdate { entries })
-            .await;
+        let _ = sender.send(CognitiveEvent::PlanUpdate { entries }).await;
     }
 }
 
@@ -475,7 +473,8 @@ async fn run_single_review(
     event_sender: &mpsc::Sender<CognitiveEvent>,
 ) -> PipelineAction {
     run.agents_spawned += 1;
-    let review_prompt = build_review_prompt(&config.review_strictness, &run.pipeline.original_prompt);
+    let review_prompt =
+        build_review_prompt(&config.review_strictness, &run.pipeline.original_prompt);
     let review_result = run_agent_phase(
         session_id,
         "Reviewer",
@@ -490,12 +489,10 @@ async fn run_single_review(
             let (approved, findings) =
                 parse_review_output(&output, run, session_id, &config.review_strictness);
             if approved {
-                run.pipeline.step(PipelineEvent::ReviewApproved {
-                    summary: output,
-                })
-            } else {
                 run.pipeline
-                    .step(PipelineEvent::ReviewRevise { findings })
+                    .step(PipelineEvent::ReviewApproved { summary: output })
+            } else {
+                run.pipeline.step(PipelineEvent::ReviewRevise { findings })
             }
         }
         Err(e) => {
@@ -596,8 +593,9 @@ async fn run_multi_role_review(
             summary: "Both architect and auditor approved".into(),
         })
     } else {
-        run.pipeline
-            .step(PipelineEvent::ReviewRevise { findings: all_findings })
+        run.pipeline.step(PipelineEvent::ReviewRevise {
+            findings: all_findings,
+        })
     }
 }
 
