@@ -4,6 +4,7 @@
 //! current state for each run_id. Used for resume and dashboard views.
 
 use crate::effect_driver::Result;
+use roko_core::runtime_event::{RuntimeEvent, RuntimeEventEnvelope};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -65,19 +66,18 @@ impl RuntimeProjection {
                 continue;
             }
 
-            let value: serde_json::Value = match serde_json::from_str(line) {
-                Ok(value) => value,
+            let envelope: RuntimeEventEnvelope = match serde_json::from_str(line) {
+                Ok(envelope) => envelope,
                 Err(_) => continue,
             };
 
-            let run_id = value["run_id"].as_str().unwrap_or("unknown").to_string();
-            let kind = value["kind"].as_str().unwrap_or_default();
+            let run_id = envelope.run_id.clone();
             let summary = runs.entry(run_id.clone()).or_insert_with(|| RunSummary {
                 run_id: run_id.clone(),
                 ..Default::default()
             });
 
-            apply_event(summary, kind, &value);
+            apply_event(summary, &envelope.payload);
         }
 
         Ok(runs)
@@ -94,130 +94,67 @@ impl RuntimeProjection {
     }
 }
 
-fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value) {
-    match kind {
-        "workflow_started" => {
-            summary.template = event_field(value, "template");
-            summary.prompt = event_field(value, "prompt");
+fn apply_event(summary: &mut RunSummary, event: &RuntimeEvent) {
+    match event {
+        RuntimeEvent::WorkflowStarted {
+            template, prompt, ..
+        } => {
+            summary.template = Some(template.clone());
+            summary.prompt = Some(prompt.clone());
         }
-        "phase_transition" => {
-            if let Some(to) = event_field(value, "to") {
-                summary.current_phase = Some(to.clone());
-                summary.phases_visited.push(to);
-            }
+        RuntimeEvent::PhaseTransition { to, .. } => {
+            summary.current_phase = Some(to.clone());
+            summary.phases_visited.push(to.clone());
         }
-        "gate_passed" => {
-            if let Some(name) = event_field(value, "gate_name") {
-                summary.gates_passed.push(name);
-            }
+        RuntimeEvent::GatePassed { gate_name, .. } => {
+            summary.gates_passed.push(gate_name.clone());
         }
-        "gate_failed" => {
-            if let Some(name) = event_field(value, "gate_name") {
-                summary.gates_failed.push(name);
-            }
+        RuntimeEvent::GateFailed { gate_name, .. } => {
+            summary.gates_failed.push(gate_name.clone());
         }
-        "agent_spawned" => {
+        RuntimeEvent::AgentSpawned { .. } => {
             summary.agents_spawned += 1;
         }
-        "workflow_completed" => {
+        RuntimeEvent::WorkflowCompleted { outcome, .. } => {
             summary.is_complete = true;
-            summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
+            summary.outcome = Some(outcome.to_string());
         }
-        "agent_completed" => {
+        RuntimeEvent::AgentCompleted {
+            tokens_used,
+            cost_usd,
+            ..
+        } => {
             summary.agents_completed += 1;
-            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
-                if let Ok(tokens) = tokens_str.parse::<u64>() {
-                    summary.total_tokens += tokens;
-                }
-            }
-            if let Some(cost_str) = event_scalar(value, "cost_usd") {
-                if let Ok(cost) = cost_str.parse::<f64>() {
-                    summary.total_cost_usd += cost;
-                }
-            }
+            summary.total_tokens += tokens_used;
+            summary.total_cost_usd += cost_usd;
         }
-        "agent_failed" => {
+        RuntimeEvent::AgentFailed { error, .. } => {
             summary.agents_failed += 1;
-            if let Some(error) = event_field(value, "error") {
-                summary.agent_errors.push(error);
-            }
+            summary.agent_errors.push(error.clone());
         }
-        "feedback_recorded" => {
+        RuntimeEvent::FeedbackRecorded { .. } => {
             summary.feedback_count += 1;
         }
-        "state_checkpointed" => {
-            summary.last_checkpoint = event_field(value, "path");
+        RuntimeEvent::StateCheckpointed { path, .. } => {
+            summary.last_checkpoint = Some(path.clone());
         }
-        "agent_output" => {
+        RuntimeEvent::AgentOutput { .. } => {
             // AgentOutput is a streaming event; no aggregate RunSummary field yet.
         }
-        "gate_started" => {
+        RuntimeEvent::GateStarted { .. } => {
             // GateStarted is informational; pass/fail events update gate summary fields.
         }
-        _ => {}
-    }
-}
-
-fn event_field(value: &serde_json::Value, field: &str) -> Option<String> {
-    value
-        .get("event")
-        .and_then(|event| event.get(field))
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            value
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|event| debug_field(event, field))
-        })
-}
-
-fn debug_field(event: &str, field: &str) -> Option<String> {
-    let needle = format!("{field}: \"");
-    let start = event.find(&needle)? + needle.len();
-    let rest = &event[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
-    value
-        .get("event")
-        .and_then(|event| event.get(field))
-        .map(|value| match value {
-            serde_json::Value::String(value) => value.clone(),
-            other => other.to_string(),
-        })
-        .or_else(|| {
-            value
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|event| debug_scalar(event, field))
-        })
-}
-
-fn debug_scalar(event: &str, field: &str) -> Option<String> {
-    let needle = format!("{field}: ");
-    let start = event.find(&needle)? + needle.len();
-    let rest = event[start..].trim_start();
-
-    if let Some(rest) = rest.strip_prefix('"') {
-        let end = rest.find('"')?;
-        return Some(rest[..end].to_string());
-    }
-
-    let end = rest.find([',', '}']).unwrap_or(rest.len());
-    let value = rest[..end].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event_line(seq: u64, event: RuntimeEvent) -> String {
+        let run_id = event.run_id().to_string();
+        serde_json::to_string(&RuntimeEventEnvelope::new(run_id, seq, "test", event)).unwrap()
+    }
 
     #[test]
     fn parses_empty_file() {
@@ -240,11 +177,40 @@ mod tests {
     fn reconstructs_run_summary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let lines = [
-            r#"{"kind":"workflow_started","run_id":"r1","event":"WorkflowStarted { run_id: \"r1\", template: \"express\", prompt: \"fix\" }"}"#,
-            r#"{"kind":"phase_transition","run_id":"r1","event":"PhaseTransition { run_id: \"r1\", from: \"plan\", to: \"implement\" }"}"#,
-            r#"{"kind":"agent_spawned","run_id":"r1","event":"AgentSpawned { run_id: \"r1\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
-            r#"{"kind":"gate_passed","run_id":"r1","event":"GatePassed { run_id: \"r1\", gate_name: \"compile\", duration_ms: 100 }"}"#,
+        let lines = vec![
+            event_line(
+                0,
+                RuntimeEvent::WorkflowStarted {
+                    run_id: "r1".into(),
+                    template: "express".into(),
+                    prompt: "fix".into(),
+                },
+            ),
+            event_line(
+                1,
+                RuntimeEvent::PhaseTransition {
+                    run_id: "r1".into(),
+                    from: "plan".into(),
+                    to: "implement".into(),
+                },
+            ),
+            event_line(
+                2,
+                RuntimeEvent::AgentSpawned {
+                    run_id: "r1".into(),
+                    agent_id: "a1".into(),
+                    role: "implementer".into(),
+                    model: "m".into(),
+                },
+            ),
+            event_line(
+                3,
+                RuntimeEvent::GatePassed {
+                    run_id: "r1".into(),
+                    gate_name: "compile".into(),
+                    duration_ms: 100,
+                },
+            ),
         ]
         .join("\n");
         std::fs::write(&path, lines).unwrap();
@@ -261,10 +227,34 @@ mod tests {
     fn tracks_agent_completed_and_costs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let lines = [
-            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
-            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
-            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
+        let lines = vec![
+            event_line(
+                0,
+                RuntimeEvent::WorkflowStarted {
+                    run_id: "r2".into(),
+                    template: "express".into(),
+                    prompt: "test".into(),
+                },
+            ),
+            event_line(
+                1,
+                RuntimeEvent::AgentSpawned {
+                    run_id: "r2".into(),
+                    agent_id: "a1".into(),
+                    role: "implementer".into(),
+                    model: "m".into(),
+                },
+            ),
+            event_line(
+                2,
+                RuntimeEvent::AgentCompleted {
+                    run_id: "r2".into(),
+                    agent_id: "a1".into(),
+                    output: "done".into(),
+                    tokens_used: 500,
+                    cost_usd: 0.01,
+                },
+            ),
         ]
         .join("\n");
         std::fs::write(&path, lines).unwrap();
@@ -280,12 +270,46 @@ mod tests {
     fn tracks_failures_feedback_and_checkpoints() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let lines = [
-            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
-            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
-            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
-            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
-            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
+        let lines = vec![
+            event_line(
+                0,
+                RuntimeEvent::AgentOutput {
+                    run_id: "r3".into(),
+                    agent_id: "a1".into(),
+                    chunk: "partial".into(),
+                },
+            ),
+            event_line(
+                1,
+                RuntimeEvent::AgentFailed {
+                    run_id: "r3".into(),
+                    agent_id: "a1".into(),
+                    error: "compile failed".into(),
+                },
+            ),
+            event_line(
+                2,
+                RuntimeEvent::GateStarted {
+                    run_id: "r3".into(),
+                    gate_name: "compile".into(),
+                    rung: 1,
+                },
+            ),
+            event_line(
+                3,
+                RuntimeEvent::FeedbackRecorded {
+                    run_id: "r3".into(),
+                    kind: "gate".into(),
+                    summary: "compile failed".into(),
+                },
+            ),
+            event_line(
+                4,
+                RuntimeEvent::StateCheckpointed {
+                    run_id: "r3".into(),
+                    path: "/tmp/state.json".into(),
+                },
+            ),
         ]
         .join("\n");
         std::fs::write(&path, lines).unwrap();

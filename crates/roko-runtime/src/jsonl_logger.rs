@@ -3,16 +3,18 @@
 //! Each event is serialized as a single JSON line with a timestamp, enabling
 //! replay and state reconstruction.
 
-use chrono::Utc;
 use roko_core::RuntimeEvent;
 pub use roko_core::foundation::EventConsumer;
+use roko_core::runtime_event::RuntimeEventEnvelope;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Logger that writes RuntimeEvents as JSONL (one JSON object per line).
 pub struct JsonlLogger {
     path: PathBuf,
+    seq: AtomicU64,
     writer: Mutex<Option<std::io::BufWriter<std::fs::File>>>,
 }
 
@@ -21,6 +23,7 @@ impl JsonlLogger {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
+            seq: AtomicU64::new(0),
             writer: Mutex::new(None),
         }
     }
@@ -56,41 +59,36 @@ impl JsonlLogger {
         Ok(())
     }
 
-    fn write_event(&self, event: &RuntimeEvent) {
-        if self.ensure_writer().is_err() {
-            return;
-        }
+    fn write_event(&self, event: &RuntimeEvent) -> std::io::Result<()> {
+        self.ensure_writer()?;
 
-        let json = serde_json::json!({
-            "ts": Utc::now().to_rfc3339(),
-            "kind": event_kind(event),
-            "run_id": event_run_id(event),
-            "event": format!("{event:?}"),
-        });
+        let envelope = RuntimeEventEnvelope::new(
+            event.run_id(),
+            self.seq.fetch_add(1, Ordering::Relaxed),
+            "jsonl_logger",
+            event.clone(),
+        );
+
+        let json = serde_json::to_string(&envelope)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
         let mut writer = self
             .writer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut w) = *writer {
-            let _ = writeln!(w, "{json}");
-            let _ = w.flush();
+            writeln!(w, "{json}")?;
+            w.flush()?;
         }
+
+        Ok(())
     }
 }
 
 impl EventConsumer for JsonlLogger {
     fn consume(&self, event: &RuntimeEvent) {
-        self.write_event(event);
+        let _ = self.write_event(event);
     }
-}
-
-fn event_kind(event: &RuntimeEvent) -> &'static str {
-    event.kind()
-}
-
-fn event_run_id(event: &RuntimeEvent) -> &str {
-    event.run_id()
 }
 
 #[cfg(test)]
@@ -119,7 +117,10 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("agent_spawned"));
-        assert!(lines[1].contains("gate_passed"));
+
+        let first: RuntimeEventEnvelope = serde_json::from_str(lines[0]).unwrap();
+        let second: RuntimeEventEnvelope = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first.payload.kind(), "agent_spawned");
+        assert_eq!(second.payload.kind(), "gate_passed");
     }
 }
