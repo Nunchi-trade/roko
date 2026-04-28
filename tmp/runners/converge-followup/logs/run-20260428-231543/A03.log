@@ -45400,3 +45400,3742 @@ index 7c5d565c9fe3d9bff96c4828abb407cc12c30c26..264fbb277c461a7832d76eb341755c8d
          })
          .await;
 
+exec
+/bin/zsh -lc "sed -n '60,130p' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A03
+ succeeded in 0ms:
+    ///
+    /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+    /// that should be fed back into the state machine.
+    #[allow(clippy::too_many_lines)]
+    pub async fn spawn_agent(
+        &self,
+        role: &str,
+        user_prompt: &str,
+        context: Option<&str>,
+    ) -> PipelineInput {
+        let agent_id = format!("{role}_{}", uuid_short());
+
+        let mut modulation = DispatchModulation::default();
+        if let Some(ref affect) = self.services.affect_policy {
+            let policy = affect.lock().await;
+            let _ctx = policy.pre_dispatch(&agent_id, role);
+            policy.modulate_dispatch(role, &mut modulation);
+        }
+
+        let system_prompt = match self
+            .services
+            .prompt_assembler
+            .assemble(PromptSpec {
+                role: Some(role.to_string()),
+                task: Some(user_prompt.to_string()),
+                workdir: Some(self.workdir.clone()),
+                gate_feedback: Vec::new(),
+                anti_patterns: Vec::new(),
+            })
+            .await
+        {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                return PipelineInput::AgentFailed {
+                    error: format!("Failed to assemble prompt: {err}"),
+                };
+            }
+        };
+
+        let user_content = context.map_or_else(
+            || user_prompt.to_string(),
+            |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+        );
+
+        emit_runtime_event(RuntimeEvent::AgentSpawned {
+            run_id: self.run_id.clone(),
+            agent_id: agent_id.clone(),
+            role: role.to_string(),
+            model: String::new(),
+        });
+
+        let start = Instant::now();
+        let result = self
+            .services
+            .model_caller
+            .call(ModelCallRequest {
+                model: String::new(),
+                system: Some(system_prompt),
+                messages: vec![ChatMessage {
+                    role: MessageRole::User,
+                    content: user_content,
+                }],
+                max_tokens: None,
+                temperature: None,
+                role: Some(role.to_string()),
+                caller: None,
+                run_id: None,
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
+                budget: None,
+                budget_remaining: None,
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..df9f1665f4b694a4cb47be67e995053fc02ecbcf
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -486,6 +486,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "model_call",
+             "run_id": run_id,
+@@ -496,6 +502,12 @@
+             "cost_usd": cost_usd,
+             "latency_ms": latency_ms,
+             "success": success,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::GateResult {
+@@ -503,12 +515,26 @@
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "gate_result",
+             "run_id": run_id,
+             "gate_name": gate_name,
+             "passed": passed,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
+@@ -517,6 +543,13 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "workflow_complete",
+             "run_id": run_id,
+@@ -524,6 +557,13 @@
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+     }
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 5b7d8d558a1dd0429faeca565bcb36941f735f86..a5cc696742daf57cc7f1a98cd0229dc68d95a0ac
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -426,14 +426,20 @@
+         };
+ 
+         sink.record(FeedbackEvent::ModelCall {
+-            run_id: self.run_id.clone(),
+-            model: model.to_string(),
++            run_id: Some(self.run_id.clone()),
++            model: Some(model.to_string()),
+             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+             input_tokens: usage.input_tokens,
+             output_tokens: usage.output_tokens,
+             cost_usd: usage.cost_usd,
+             latency_ms,
+             success,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+     }
+@@ -1350,7 +1356,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         }
+     }
+@@ -1369,7 +1380,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+@@ -1386,7 +1402,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+@@ -1406,7 +1427,12 @@
+             temperature: None,
+             role: Some("reviewer".to_string()),
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1481,7 +1507,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         let model = svc.resolve_model(&req);
+@@ -1511,7 +1542,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1543,7 +1579,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1577,7 +1618,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+diff --git a/crates/roko-cli/src/dispatch_direct.rs b/crates/roko-cli/src/dispatch_direct.rs
+index 4d349b560324343bcb03f6de36e5133648820a87..fa566414f09afda5762718c90ee837d7262855ea
+--- a/crates/roko-cli/src/dispatch_direct.rs
++++ b/crates/roko-cli/src/dispatch_direct.rs
+@@ -114,7 +114,7 @@
+             content: prompt.to_string(),
+         }],
+         max_tokens: None,
+-        caller: Some(CallerIdentity::Cli),
++        caller: Some(CallerIdentity::Cli.to_string()),
+         ..Default::default()
+     };
+ 
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..9a95454652c9b4fef79b432291b262483adb0d64
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -333,8 +333,13 @@
+         max_tokens: req.max_tokens,
+         temperature: req.temperature,
+         role: req.role,
+-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
++        caller: Some(roko_core::foundation::CallerIdentity::Cli.to_string()),
++        run_id: req.run_id,
++        prompt_section_ids: req.prompt_section_ids,
++        knowledge_ids: req.knowledge_ids,
+         budget: req.budget,
++        budget_remaining: req.budget_remaining,
++        routing_hints: req.routing_hints,
+         cache_policy: req.cache_policy,
+     }
+ }
+@@ -350,6 +355,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::ModelCall {
+             run_id,
+             model,
+@@ -359,17 +370,37 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::WorkflowComplete {
+             run_id,
+@@ -377,12 +408,26 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::WorkflowComplete {
+             run_id,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+     }
+ }
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..6c21484fb65430ba5955f0c50b2940d1c8286f22
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -11,12 +11,14 @@
+ use crate::runtime_event::RuntimeEvent;
+ use crate::{Result, RokoError};
+ use async_trait::async_trait;
++use serde::{Deserialize, Serialize};
++use std::fmt;
+ use std::path::PathBuf;
+ 
+ // -- ModelCaller --
+ 
+ /// Request to call an LLM model.
+-#[derive(Debug, Clone, Default)]
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ pub struct ModelCallRequest {
+     /// Model identifier (e.g., "claude-sonnet-4-20250514").
+     pub model: String,
+@@ -29,11 +31,28 @@
+     /// Temperature (0.0-1.0).
+     pub temperature: Option<f32>,
+     /// Role for model routing.
++    #[serde(default)]
+     pub role: Option<String>,
+     /// Caller surface that originated this request.
+-    pub caller: Option<CallerIdentity>,
++    #[serde(default)]
++    pub caller: Option<String>,
++    /// Workflow run identifier associated with this request.
++    #[serde(default)]
++    pub run_id: Option<String>,
++    /// Prompt section ids included in the assembled prompt.
++    #[serde(default)]
++    pub prompt_section_ids: Vec<String>,
++    /// Knowledge entry ids included in the request context.
++    #[serde(default)]
++    pub knowledge_ids: Vec<String>,
+     /// Per-call token and cost budget.
+     pub budget: Option<TokenBudget>,
++    /// Remaining budget when this request was created.
++    #[serde(default)]
++    pub budget_remaining: Option<f64>,
++    /// Routing hints for the model gateway.
++    #[serde(default)]
++    pub routing_hints: Vec<String>,
+     /// Cache behavior for this request.
+     pub cache_policy: CachePolicy,
+ }
+@@ -49,8 +68,28 @@
+     Test,
+ }
+ 
++impl CallerIdentity {
++    #[must_use]
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Cli => "cli",
++            Self::Acp => "acp",
++            Self::Serve => "serve",
++            Self::Research => "research",
++            Self::Dreams => "dreams",
++            Self::Test => "test",
++        }
++    }
++}
++
++impl fmt::Display for CallerIdentity {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str((*self).as_str())
++    }
++}
++
+ /// Cache behaviour for this request.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+ pub enum CachePolicy {
+     /// Use the default L1 cache behaviour.
+     #[default]
+@@ -97,14 +136,14 @@
+ }
+ 
+ /// A single chat message.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ChatMessage {
+     pub role: MessageRole,
+     pub content: String,
+ }
+ 
+ /// Message role in a conversation.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum MessageRole {
+     System,
+     User,
+@@ -165,33 +204,77 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+-        run_id: String,
+-        model: String,
++        #[serde(default)]
++        run_id: Option<String>,
++        #[serde(default)]
++        model: Option<String>,
+         role: String,
+         input_tokens: u64,
+         output_tokens: u64,
+         cost_usd: f64,
+         latency_ms: u64,
+         success: bool,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a gate execution.
+     GateResult {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         gate_name: String,
+         passed: bool,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+ }
+ 
+diff --git a/crates/roko-dreams/src/runner.rs b/crates/roko-dreams/src/runner.rs
+index 00dce06816dcd5380fd3139445dc9921b099adc1..0c881b8e915842916acdf413b06a46037c219979
+--- a/crates/roko-dreams/src/runner.rs
++++ b/crates/roko-dreams/src/runner.rs
+@@ -1318,8 +1318,13 @@
+                     max_tokens: None,
+                     temperature: None,
+                     role: Some("dream-review".to_string()),
+-                    caller: Some(CallerIdentity::Dreams),
++                    caller: Some(CallerIdentity::Dreams.to_string()),
++                    run_id: None,
++                    prompt_section_ids: Vec::new(),
++                    knowledge_ids: Vec::new(),
+                     budget: None,
++                    budget_remaining: None,
++                    routing_hints: Vec::new(),
+                     cache_policy: CachePolicy::Default,
+                 };
+ 
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..0d4b1189075d2c1d7ba17270a5043e5e3a42f82b
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -122,6 +122,12 @@
+                     cost_usd,
+                     latency_ms,
+                     success,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "model_call",
+                     "run_id": run_id,
+@@ -132,6 +138,12 @@
+                     "cost_usd": cost_usd,
+                     "latency_ms": latency_ms,
+                     "success": success,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::GateResult {
+@@ -139,12 +151,26 @@
+                     gate_name,
+                     passed,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "gate_result",
+                     "run_id": run_id,
+                     "gate_name": gate_name,
+                     "passed": passed,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
+@@ -153,6 +179,13 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "workflow_complete",
+                     "run_id": run_id,
+@@ -160,6 +193,13 @@
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+             };
+@@ -318,8 +358,10 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
++                    let run_id = run_id.as_deref()?;
+                     Some(build_episode_from_workflow(
+                         run_id,
+                         outcome,
+@@ -361,7 +403,9 @@
+             ..
+         } = event
+         {
+-            self.observe_model_call(model, success, role, latency_ms);
++            if let Some(model) = model.as_deref() {
++                self.observe_model_call(model, success, role, latency_ms);
++            }
+         }
+ 
+         let should_flush = {
+@@ -445,14 +489,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -470,10 +520,17 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::GateResult {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             gate_name: "compile".into(),
+             passed: true,
+             duration_ms: 3000,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -492,11 +549,18 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+             duration_ms: 2500,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -576,14 +640,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -604,14 +674,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -627,14 +703,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "unknown-model".into(),
++            run_id: Some("r1".into()),
++            model: Some("unknown-model".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+diff --git a/crates/roko-neuro/src/episode_completion.rs b/crates/roko-neuro/src/episode_completion.rs
+index b853bbb74491c79027a734ffea55539efbf1492f..b93a8d194d12fc9dd21a7f93d2b2895dbb9a4da7
+--- a/crates/roko-neuro/src/episode_completion.rs
++++ b/crates/roko-neuro/src/episode_completion.rs
+@@ -111,8 +111,13 @@
+                 max_tokens: None,
+                 temperature: None,
+                 role: Some("episode-distiller".to_string()),
+-                caller: Some(CallerIdentity::Research),
++                caller: Some(CallerIdentity::Research.to_string()),
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..7cd955e13449858ee02a60c6a8b4ac6605de9903
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -123,7 +123,12 @@
+                 temperature: None,
+                 role: Some(role.to_string()),
+                 caller: None,
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await;
+@@ -145,14 +150,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: response.model.clone(),
++                        run_id: Some(self.run_id.clone()),
++                        model: Some(response.model.clone()),
+                         role: role.to_string(),
+                         input_tokens: response.usage.input_tokens,
+                         output_tokens: response.usage.output_tokens,
+                         cost_usd: response.usage.cost_usd,
+                         latency_ms,
+                         success: true,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -181,14 +192,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        run_id: Some(self.run_id.clone()),
++                        model: None,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+                         cost_usd: 0.0,
+                         latency_ms,
+                         success: false,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -383,10 +400,17 @@
+             .services
+             .feedback_sink
+             .record(FeedbackEvent::GateResult {
+-                run_id: self.run_id.clone(),
++                run_id: Some(self.run_id.clone()),
+                 gate_name: verdict.gate_name.clone(),
+                 passed: verdict.passed,
+                 duration_ms: verdict.duration_ms,
++                request_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
++                model: None,
++                provider: None,
++                token_usage: None,
++                cost: None,
+             })
+             .await;
+     }
+diff --git a/crates/roko-serve/src/routes/gateway.rs b/crates/roko-serve/src/routes/gateway.rs
+index bcd049b33bb363dbe95e6a02f21110f2763edd1c..68c072cf7d991051d69931396afcc61e5d0beb8e
+--- a/crates/roko-serve/src/routes/gateway.rs
++++ b/crates/roko-serve/src/routes/gateway.rs
+@@ -688,8 +688,13 @@
+         max_tokens,
+         temperature: temperature.map(|t| t as f32),
+         role,
+-        caller: Some(CallerIdentity::Serve),
++        caller: Some(CallerIdentity::Serve.to_string()),
++        run_id: None,
++        prompt_section_ids: Vec::new(),
++        knowledge_ids: Vec::new(),
+         budget: None,
++        budget_remaining: None,
++        routing_hints: Vec::new(),
+         cache_policy: CachePolicy::Default,
+     }
+ }
+@@ -1056,7 +1061,10 @@
+         assert_eq!(request.max_tokens, Some(1024));
+         assert_eq!(request.temperature, Some(0.7));
+         assert_eq!(request.role.as_deref(), Some("agent-1"));
+-        assert_eq!(request.caller, Some(CallerIdentity::Serve));
++        assert_eq!(
++            request.caller.as_deref(),
++            Some(CallerIdentity::Serve.as_str())
++        );
+         assert_eq!(request.cache_policy, CachePolicy::Default);
+         assert_eq!(request.messages[0].role, CoreMessageRole::System);
+         assert_eq!(request.messages[1].role, CoreMessageRole::User);
+diff --git a/crates/roko-std/src/tool/builtin/web_search.rs b/crates/roko-std/src/tool/builtin/web_search.rs
+index 7c5d565c9fe3d9bff96c4828abb407cc12c30c26..264fbb277c461a7832d76eb341755c8d714b3860
+--- a/crates/roko-std/src/tool/builtin/web_search.rs
++++ b/crates/roko-std/src/tool/builtin/web_search.rs
+@@ -194,8 +194,13 @@
+             max_tokens: None,
+             temperature: None,
+             role: Some("web-search".to_string()),
+-            caller: Some(CallerIdentity::Cli),
++            caller: Some(CallerIdentity::Cli.to_string()),
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: CachePolicy::Default,
+         })
+         .await;
+
+codex
+`FeedbackEvent::ModelCall` now uses `Option<String>` for the actual model, so the failed effect-driver path records `None` instead of an empty model string. I’m checking compilation now because this type tightening touches all feedback consumers.
+exec
+/bin/zsh -lc 'cargo check -p roko-agent -p roko-runtime -p roko-learn -p roko-cli -p roko-acp -p roko-serve -p roko-neuro -p roko-std -p roko-dreams' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A03
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..df9f1665f4b694a4cb47be67e995053fc02ecbcf
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -486,6 +486,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "model_call",
+             "run_id": run_id,
+@@ -496,6 +502,12 @@
+             "cost_usd": cost_usd,
+             "latency_ms": latency_ms,
+             "success": success,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::GateResult {
+@@ -503,12 +515,26 @@
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "gate_result",
+             "run_id": run_id,
+             "gate_name": gate_name,
+             "passed": passed,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
+@@ -517,6 +543,13 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "workflow_complete",
+             "run_id": run_id,
+@@ -524,6 +557,13 @@
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+     }
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 5b7d8d558a1dd0429faeca565bcb36941f735f86..a5cc696742daf57cc7f1a98cd0229dc68d95a0ac
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -426,14 +426,20 @@
+         };
+ 
+         sink.record(FeedbackEvent::ModelCall {
+-            run_id: self.run_id.clone(),
+-            model: model.to_string(),
++            run_id: Some(self.run_id.clone()),
++            model: Some(model.to_string()),
+             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+             input_tokens: usage.input_tokens,
+             output_tokens: usage.output_tokens,
+             cost_usd: usage.cost_usd,
+             latency_ms,
+             success,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+     }
+@@ -1350,7 +1356,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         }
+     }
+@@ -1369,7 +1380,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+@@ -1386,7 +1402,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+@@ -1406,7 +1427,12 @@
+             temperature: None,
+             role: Some("reviewer".to_string()),
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1481,7 +1507,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         let model = svc.resolve_model(&req);
+@@ -1511,7 +1542,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1543,7 +1579,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1577,7 +1618,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+diff --git a/crates/roko-cli/src/dispatch_direct.rs b/crates/roko-cli/src/dispatch_direct.rs
+index 4d349b560324343bcb03f6de36e5133648820a87..fa566414f09afda5762718c90ee837d7262855ea
+--- a/crates/roko-cli/src/dispatch_direct.rs
++++ b/crates/roko-cli/src/dispatch_direct.rs
+@@ -114,7 +114,7 @@
+             content: prompt.to_string(),
+         }],
+         max_tokens: None,
+-        caller: Some(CallerIdentity::Cli),
++        caller: Some(CallerIdentity::Cli.to_string()),
+         ..Default::default()
+     };
+ 
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..9a95454652c9b4fef79b432291b262483adb0d64
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -333,8 +333,13 @@
+         max_tokens: req.max_tokens,
+         temperature: req.temperature,
+         role: req.role,
+-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
++        caller: Some(roko_core::foundation::CallerIdentity::Cli.to_string()),
++        run_id: req.run_id,
++        prompt_section_ids: req.prompt_section_ids,
++        knowledge_ids: req.knowledge_ids,
+         budget: req.budget,
++        budget_remaining: req.budget_remaining,
++        routing_hints: req.routing_hints,
+         cache_policy: req.cache_policy,
+     }
+ }
+@@ -350,6 +355,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::ModelCall {
+             run_id,
+             model,
+@@ -359,17 +370,37 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::WorkflowComplete {
+             run_id,
+@@ -377,12 +408,26 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::WorkflowComplete {
+             run_id,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+     }
+ }
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..6c21484fb65430ba5955f0c50b2940d1c8286f22
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -11,12 +11,14 @@
+ use crate::runtime_event::RuntimeEvent;
+ use crate::{Result, RokoError};
+ use async_trait::async_trait;
++use serde::{Deserialize, Serialize};
++use std::fmt;
+ use std::path::PathBuf;
+ 
+ // -- ModelCaller --
+ 
+ /// Request to call an LLM model.
+-#[derive(Debug, Clone, Default)]
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ pub struct ModelCallRequest {
+     /// Model identifier (e.g., "claude-sonnet-4-20250514").
+     pub model: String,
+@@ -29,11 +31,28 @@
+     /// Temperature (0.0-1.0).
+     pub temperature: Option<f32>,
+     /// Role for model routing.
++    #[serde(default)]
+     pub role: Option<String>,
+     /// Caller surface that originated this request.
+-    pub caller: Option<CallerIdentity>,
++    #[serde(default)]
++    pub caller: Option<String>,
++    /// Workflow run identifier associated with this request.
++    #[serde(default)]
++    pub run_id: Option<String>,
++    /// Prompt section ids included in the assembled prompt.
++    #[serde(default)]
++    pub prompt_section_ids: Vec<String>,
++    /// Knowledge entry ids included in the request context.
++    #[serde(default)]
++    pub knowledge_ids: Vec<String>,
+     /// Per-call token and cost budget.
+     pub budget: Option<TokenBudget>,
++    /// Remaining budget when this request was created.
++    #[serde(default)]
++    pub budget_remaining: Option<f64>,
++    /// Routing hints for the model gateway.
++    #[serde(default)]
++    pub routing_hints: Vec<String>,
+     /// Cache behavior for this request.
+     pub cache_policy: CachePolicy,
+ }
+@@ -49,8 +68,28 @@
+     Test,
+ }
+ 
++impl CallerIdentity {
++    #[must_use]
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Cli => "cli",
++            Self::Acp => "acp",
++            Self::Serve => "serve",
++            Self::Research => "research",
++            Self::Dreams => "dreams",
++            Self::Test => "test",
++        }
++    }
++}
++
++impl fmt::Display for CallerIdentity {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str((*self).as_str())
++    }
++}
++
+ /// Cache behaviour for this request.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+ pub enum CachePolicy {
+     /// Use the default L1 cache behaviour.
+     #[default]
+@@ -97,14 +136,14 @@
+ }
+ 
+ /// A single chat message.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ChatMessage {
+     pub role: MessageRole,
+     pub content: String,
+ }
+ 
+ /// Message role in a conversation.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum MessageRole {
+     System,
+     User,
+@@ -165,33 +204,77 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+-        run_id: String,
+-        model: String,
++        #[serde(default)]
++        run_id: Option<String>,
++        #[serde(default)]
++        model: Option<String>,
+         role: String,
+         input_tokens: u64,
+         output_tokens: u64,
+         cost_usd: f64,
+         latency_ms: u64,
+         success: bool,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a gate execution.
+     GateResult {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         gate_name: String,
+         passed: bool,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+ }
+ 
+diff --git a/crates/roko-dreams/src/runner.rs b/crates/roko-dreams/src/runner.rs
+index 00dce06816dcd5380fd3139445dc9921b099adc1..0c881b8e915842916acdf413b06a46037c219979
+--- a/crates/roko-dreams/src/runner.rs
++++ b/crates/roko-dreams/src/runner.rs
+@@ -1318,8 +1318,13 @@
+                     max_tokens: None,
+                     temperature: None,
+                     role: Some("dream-review".to_string()),
+-                    caller: Some(CallerIdentity::Dreams),
++                    caller: Some(CallerIdentity::Dreams.to_string()),
++                    run_id: None,
++                    prompt_section_ids: Vec::new(),
++                    knowledge_ids: Vec::new(),
+                     budget: None,
++                    budget_remaining: None,
++                    routing_hints: Vec::new(),
+                     cache_policy: CachePolicy::Default,
+                 };
+ 
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..0d4b1189075d2c1d7ba17270a5043e5e3a42f82b
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -122,6 +122,12 @@
+                     cost_usd,
+                     latency_ms,
+                     success,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "model_call",
+                     "run_id": run_id,
+@@ -132,6 +138,12 @@
+                     "cost_usd": cost_usd,
+                     "latency_ms": latency_ms,
+                     "success": success,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::GateResult {
+@@ -139,12 +151,26 @@
+                     gate_name,
+                     passed,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "gate_result",
+                     "run_id": run_id,
+                     "gate_name": gate_name,
+                     "passed": passed,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
+@@ -153,6 +179,13 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "workflow_complete",
+                     "run_id": run_id,
+@@ -160,6 +193,13 @@
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+             };
+@@ -318,8 +358,10 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
++                    let run_id = run_id.as_deref()?;
+                     Some(build_episode_from_workflow(
+                         run_id,
+                         outcome,
+@@ -361,7 +403,9 @@
+             ..
+         } = event
+         {
+-            self.observe_model_call(model, success, role, latency_ms);
++            if let Some(model) = model.as_deref() {
++                self.observe_model_call(model, success, role, latency_ms);
++            }
+         }
+ 
+         let should_flush = {
+@@ -445,14 +489,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -470,10 +520,17 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::GateResult {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             gate_name: "compile".into(),
+             passed: true,
+             duration_ms: 3000,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -492,11 +549,18 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+             duration_ms: 2500,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -576,14 +640,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -604,14 +674,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -627,14 +703,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "unknown-model".into(),
++            run_id: Some("r1".into()),
++            model: Some("unknown-model".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+diff --git a/crates/roko-neuro/src/episode_completion.rs b/crates/roko-neuro/src/episode_completion.rs
+index b853bbb74491c79027a734ffea55539efbf1492f..b93a8d194d12fc9dd21a7f93d2b2895dbb9a4da7
+--- a/crates/roko-neuro/src/episode_completion.rs
++++ b/crates/roko-neuro/src/episode_completion.rs
+@@ -111,8 +111,13 @@
+                 max_tokens: None,
+                 temperature: None,
+                 role: Some("episode-distiller".to_string()),
+-                caller: Some(CallerIdentity::Research),
++                caller: Some(CallerIdentity::Research.to_string()),
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..7cd955e13449858ee02a60c6a8b4ac6605de9903
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -123,7 +123,12 @@
+                 temperature: None,
+                 role: Some(role.to_string()),
+                 caller: None,
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await;
+@@ -145,14 +150,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: response.model.clone(),
++                        run_id: Some(self.run_id.clone()),
++                        model: Some(response.model.clone()),
+                         role: role.to_string(),
+                         input_tokens: response.usage.input_tokens,
+                         output_tokens: response.usage.output_tokens,
+                         cost_usd: response.usage.cost_usd,
+                         latency_ms,
+                         success: true,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -181,14 +192,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        run_id: Some(self.run_id.clone()),
++                        model: None,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+                         cost_usd: 0.0,
+                         latency_ms,
+                         success: false,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -383,10 +400,17 @@
+             .services
+             .feedback_sink
+             .record(FeedbackEvent::GateResult {
+-                run_id: self.run_id.clone(),
++                run_id: Some(self.run_id.clone()),
+                 gate_name: verdict.gate_name.clone(),
+                 passed: verdict.passed,
+                 duration_ms: verdict.duration_ms,
++                request_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
++                model: None,
++                provider: None,
++                token_usage: None,
++                cost: None,
+             })
+             .await;
+     }
+diff --git a/crates/roko-serve/src/routes/gateway.rs b/crates/roko-serve/src/routes/gateway.rs
+index bcd049b33bb363dbe95e6a02f21110f2763edd1c..68c072cf7d991051d69931396afcc61e5d0beb8e
+--- a/crates/roko-serve/src/routes/gateway.rs
++++ b/crates/roko-serve/src/routes/gateway.rs
+@@ -688,8 +688,13 @@
+         max_tokens,
+         temperature: temperature.map(|t| t as f32),
+         role,
+-        caller: Some(CallerIdentity::Serve),
++        caller: Some(CallerIdentity::Serve.to_string()),
++        run_id: None,
++        prompt_section_ids: Vec::new(),
++        knowledge_ids: Vec::new(),
+         budget: None,
++        budget_remaining: None,
++        routing_hints: Vec::new(),
+         cache_policy: CachePolicy::Default,
+     }
+ }
+@@ -1056,7 +1061,10 @@
+         assert_eq!(request.max_tokens, Some(1024));
+         assert_eq!(request.temperature, Some(0.7));
+         assert_eq!(request.role.as_deref(), Some("agent-1"));
+-        assert_eq!(request.caller, Some(CallerIdentity::Serve));
++        assert_eq!(
++            request.caller.as_deref(),
++            Some(CallerIdentity::Serve.as_str())
++        );
+         assert_eq!(request.cache_policy, CachePolicy::Default);
+         assert_eq!(request.messages[0].role, CoreMessageRole::System);
+         assert_eq!(request.messages[1].role, CoreMessageRole::User);
+diff --git a/crates/roko-std/src/tool/builtin/web_search.rs b/crates/roko-std/src/tool/builtin/web_search.rs
+index 7c5d565c9fe3d9bff96c4828abb407cc12c30c26..264fbb277c461a7832d76eb341755c8d714b3860
+--- a/crates/roko-std/src/tool/builtin/web_search.rs
++++ b/crates/roko-std/src/tool/builtin/web_search.rs
+@@ -194,8 +194,13 @@
+             max_tokens: None,
+             temperature: None,
+             role: Some("web-search".to_string()),
+-            caller: Some(CallerIdentity::Cli),
++            caller: Some(CallerIdentity::Cli.to_string()),
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: CachePolicy::Default,
+         })
+         .await;
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..df9f1665f4b694a4cb47be67e995053fc02ecbcf
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -486,6 +486,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "model_call",
+             "run_id": run_id,
+@@ -496,6 +502,12 @@
+             "cost_usd": cost_usd,
+             "latency_ms": latency_ms,
+             "success": success,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::GateResult {
+@@ -503,12 +515,26 @@
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "gate_result",
+             "run_id": run_id,
+             "gate_name": gate_name,
+             "passed": passed,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
+@@ -517,6 +543,13 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "workflow_complete",
+             "run_id": run_id,
+@@ -524,6 +557,13 @@
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+     }
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 5b7d8d558a1dd0429faeca565bcb36941f735f86..a5cc696742daf57cc7f1a98cd0229dc68d95a0ac
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -426,14 +426,20 @@
+         };
+ 
+         sink.record(FeedbackEvent::ModelCall {
+-            run_id: self.run_id.clone(),
+-            model: model.to_string(),
++            run_id: Some(self.run_id.clone()),
++            model: Some(model.to_string()),
+             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+             input_tokens: usage.input_tokens,
+             output_tokens: usage.output_tokens,
+             cost_usd: usage.cost_usd,
+             latency_ms,
+             success,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+     }
+@@ -1350,7 +1356,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         }
+     }
+@@ -1369,7 +1380,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+@@ -1386,7 +1402,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+@@ -1406,7 +1427,12 @@
+             temperature: None,
+             role: Some("reviewer".to_string()),
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1481,7 +1507,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         let model = svc.resolve_model(&req);
+@@ -1511,7 +1542,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1543,7 +1579,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1577,7 +1618,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+diff --git a/crates/roko-cli/src/dispatch_direct.rs b/crates/roko-cli/src/dispatch_direct.rs
+index 4d349b560324343bcb03f6de36e5133648820a87..fa566414f09afda5762718c90ee837d7262855ea
+--- a/crates/roko-cli/src/dispatch_direct.rs
++++ b/crates/roko-cli/src/dispatch_direct.rs
+@@ -114,7 +114,7 @@
+             content: prompt.to_string(),
+         }],
+         max_tokens: None,
+-        caller: Some(CallerIdentity::Cli),
++        caller: Some(CallerIdentity::Cli.to_string()),
+         ..Default::default()
+     };
+ 
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..9a95454652c9b4fef79b432291b262483adb0d64
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -333,8 +333,13 @@
+         max_tokens: req.max_tokens,
+         temperature: req.temperature,
+         role: req.role,
+-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
++        caller: Some(roko_core::foundation::CallerIdentity::Cli.to_string()),
++        run_id: req.run_id,
++        prompt_section_ids: req.prompt_section_ids,
++        knowledge_ids: req.knowledge_ids,
+         budget: req.budget,
++        budget_remaining: req.budget_remaining,
++        routing_hints: req.routing_hints,
+         cache_policy: req.cache_policy,
+     }
+ }
+@@ -350,6 +355,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::ModelCall {
+             run_id,
+             model,
+@@ -359,17 +370,37 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::WorkflowComplete {
+             run_id,
+@@ -377,12 +408,26 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::WorkflowComplete {
+             run_id,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+     }
+ }
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..6c21484fb65430ba5955f0c50b2940d1c8286f22
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -11,12 +11,14 @@
+ use crate::runtime_event::RuntimeEvent;
+ use crate::{Result, RokoError};
+ use async_trait::async_trait;
++use serde::{Deserialize, Serialize};
++use std::fmt;
+ use std::path::PathBuf;
+ 
+ // -- ModelCaller --
+ 
+ /// Request to call an LLM model.
+-#[derive(Debug, Clone, Default)]
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ pub struct ModelCallRequest {
+     /// Model identifier (e.g., "claude-sonnet-4-20250514").
+     pub model: String,
+@@ -29,11 +31,28 @@
+     /// Temperature (0.0-1.0).
+     pub temperature: Option<f32>,
+     /// Role for model routing.
++    #[serde(default)]
+     pub role: Option<String>,
+     /// Caller surface that originated this request.
+-    pub caller: Option<CallerIdentity>,
++    #[serde(default)]
++    pub caller: Option<String>,
++    /// Workflow run identifier associated with this request.
++    #[serde(default)]
++    pub run_id: Option<String>,
++    /// Prompt section ids included in the assembled prompt.
++    #[serde(default)]
++    pub prompt_section_ids: Vec<String>,
++    /// Knowledge entry ids included in the request context.
++    #[serde(default)]
++    pub knowledge_ids: Vec<String>,
+     /// Per-call token and cost budget.
+     pub budget: Option<TokenBudget>,
++    /// Remaining budget when this request was created.
++    #[serde(default)]
++    pub budget_remaining: Option<f64>,
++    /// Routing hints for the model gateway.
++    #[serde(default)]
++    pub routing_hints: Vec<String>,
+     /// Cache behavior for this request.
+     pub cache_policy: CachePolicy,
+ }
+@@ -49,8 +68,28 @@
+     Test,
+ }
+ 
++impl CallerIdentity {
++    #[must_use]
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Cli => "cli",
++            Self::Acp => "acp",
++            Self::Serve => "serve",
++            Self::Research => "research",
++            Self::Dreams => "dreams",
++            Self::Test => "test",
++        }
++    }
++}
++
++impl fmt::Display for CallerIdentity {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str((*self).as_str())
++    }
++}
++
+ /// Cache behaviour for this request.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+ pub enum CachePolicy {
+     /// Use the default L1 cache behaviour.
+     #[default]
+@@ -97,14 +136,14 @@
+ }
+ 
+ /// A single chat message.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ChatMessage {
+     pub role: MessageRole,
+     pub content: String,
+ }
+ 
+ /// Message role in a conversation.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum MessageRole {
+     System,
+     User,
+@@ -165,33 +204,77 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+-        run_id: String,
+-        model: String,
++        #[serde(default)]
++        run_id: Option<String>,
++        #[serde(default)]
++        model: Option<String>,
+         role: String,
+         input_tokens: u64,
+         output_tokens: u64,
+         cost_usd: f64,
+         latency_ms: u64,
+         success: bool,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a gate execution.
+     GateResult {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         gate_name: String,
+         passed: bool,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+ }
+ 
+diff --git a/crates/roko-dreams/src/runner.rs b/crates/roko-dreams/src/runner.rs
+index 00dce06816dcd5380fd3139445dc9921b099adc1..0c881b8e915842916acdf413b06a46037c219979
+--- a/crates/roko-dreams/src/runner.rs
++++ b/crates/roko-dreams/src/runner.rs
+@@ -1318,8 +1318,13 @@
+                     max_tokens: None,
+                     temperature: None,
+                     role: Some("dream-review".to_string()),
+-                    caller: Some(CallerIdentity::Dreams),
++                    caller: Some(CallerIdentity::Dreams.to_string()),
++                    run_id: None,
++                    prompt_section_ids: Vec::new(),
++                    knowledge_ids: Vec::new(),
+                     budget: None,
++                    budget_remaining: None,
++                    routing_hints: Vec::new(),
+                     cache_policy: CachePolicy::Default,
+                 };
+ 
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..0d4b1189075d2c1d7ba17270a5043e5e3a42f82b
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -122,6 +122,12 @@
+                     cost_usd,
+                     latency_ms,
+                     success,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "model_call",
+                     "run_id": run_id,
+@@ -132,6 +138,12 @@
+                     "cost_usd": cost_usd,
+                     "latency_ms": latency_ms,
+                     "success": success,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::GateResult {
+@@ -139,12 +151,26 @@
+                     gate_name,
+                     passed,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "gate_result",
+                     "run_id": run_id,
+                     "gate_name": gate_name,
+                     "passed": passed,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
+@@ -153,6 +179,13 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "workflow_complete",
+                     "run_id": run_id,
+@@ -160,6 +193,13 @@
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+             };
+@@ -318,8 +358,10 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
++                    let run_id = run_id.as_deref()?;
+                     Some(build_episode_from_workflow(
+                         run_id,
+                         outcome,
+@@ -361,7 +403,9 @@
+             ..
+         } = event
+         {
+-            self.observe_model_call(model, success, role, latency_ms);
++            if let Some(model) = model.as_deref() {
++                self.observe_model_call(model, success, role, latency_ms);
++            }
+         }
+ 
+         let should_flush = {
+@@ -445,14 +489,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -470,10 +520,17 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::GateResult {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             gate_name: "compile".into(),
+             passed: true,
+             duration_ms: 3000,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -492,11 +549,18 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+             duration_ms: 2500,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -576,14 +640,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -604,14 +674,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -627,14 +703,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "unknown-model".into(),
++            run_id: Some("r1".into()),
++            model: Some("unknown-model".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+diff --git a/crates/roko-neuro/src/episode_completion.rs b/crates/roko-neuro/src/episode_completion.rs
+index b853bbb74491c79027a734ffea55539efbf1492f..b93a8d194d12fc9dd21a7f93d2b2895dbb9a4da7
+--- a/crates/roko-neuro/src/episode_completion.rs
++++ b/crates/roko-neuro/src/episode_completion.rs
+@@ -111,8 +111,13 @@
+                 max_tokens: None,
+                 temperature: None,
+                 role: Some("episode-distiller".to_string()),
+-                caller: Some(CallerIdentity::Research),
++                caller: Some(CallerIdentity::Research.to_string()),
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..7cd955e13449858ee02a60c6a8b4ac6605de9903
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -123,7 +123,12 @@
+                 temperature: None,
+                 role: Some(role.to_string()),
+                 caller: None,
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await;
+@@ -145,14 +150,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: response.model.clone(),
++                        run_id: Some(self.run_id.clone()),
++                        model: Some(response.model.clone()),
+                         role: role.to_string(),
+                         input_tokens: response.usage.input_tokens,
+                         output_tokens: response.usage.output_tokens,
+                         cost_usd: response.usage.cost_usd,
+                         latency_ms,
+                         success: true,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -181,14 +192,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        run_id: Some(self.run_id.clone()),
++                        model: None,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+                         cost_usd: 0.0,
+                         latency_ms,
+                         success: false,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -383,10 +400,17 @@
+             .services
+             .feedback_sink
+             .record(FeedbackEvent::GateResult {
+-                run_id: self.run_id.clone(),
++                run_id: Some(self.run_id.clone()),
+                 gate_name: verdict.gate_name.clone(),
+                 passed: verdict.passed,
+                 duration_ms: verdict.duration_ms,
++                request_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
++                model: None,
++                provider: None,
++                token_usage: None,
++                cost: None,
+             })
+             .await;
+     }
+diff --git a/crates/roko-serve/src/routes/gateway.rs b/crates/roko-serve/src/routes/gateway.rs
+index bcd049b33bb363dbe95e6a02f21110f2763edd1c..68c072cf7d991051d69931396afcc61e5d0beb8e
+--- a/crates/roko-serve/src/routes/gateway.rs
++++ b/crates/roko-serve/src/routes/gateway.rs
+@@ -688,8 +688,13 @@
+         max_tokens,
+         temperature: temperature.map(|t| t as f32),
+         role,
+-        caller: Some(CallerIdentity::Serve),
++        caller: Some(CallerIdentity::Serve.to_string()),
++        run_id: None,
++        prompt_section_ids: Vec::new(),
++        knowledge_ids: Vec::new(),
+         budget: None,
++        budget_remaining: None,
++        routing_hints: Vec::new(),
+         cache_policy: CachePolicy::Default,
+     }
+ }
+@@ -1056,7 +1061,10 @@
+         assert_eq!(request.max_tokens, Some(1024));
+         assert_eq!(request.temperature, Some(0.7));
+         assert_eq!(request.role.as_deref(), Some("agent-1"));
+-        assert_eq!(request.caller, Some(CallerIdentity::Serve));
++        assert_eq!(
++            request.caller.as_deref(),
++            Some(CallerIdentity::Serve.as_str())
++        );
+         assert_eq!(request.cache_policy, CachePolicy::Default);
+         assert_eq!(request.messages[0].role, CoreMessageRole::System);
+         assert_eq!(request.messages[1].role, CoreMessageRole::User);
+diff --git a/crates/roko-std/src/tool/builtin/web_search.rs b/crates/roko-std/src/tool/builtin/web_search.rs
+index 7c5d565c9fe3d9bff96c4828abb407cc12c30c26..264fbb277c461a7832d76eb341755c8d714b3860
+--- a/crates/roko-std/src/tool/builtin/web_search.rs
++++ b/crates/roko-std/src/tool/builtin/web_search.rs
+@@ -194,8 +194,13 @@
+             max_tokens: None,
+             temperature: None,
+             role: Some("web-search".to_string()),
+-            caller: Some(CallerIdentity::Cli),
++            caller: Some(CallerIdentity::Cli.to_string()),
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: CachePolicy::Default,
+         })
+         .await;
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..df9f1665f4b694a4cb47be67e995053fc02ecbcf
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -486,6 +486,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "model_call",
+             "run_id": run_id,
+@@ -496,6 +502,12 @@
+             "cost_usd": cost_usd,
+             "latency_ms": latency_ms,
+             "success": success,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::GateResult {
+@@ -503,12 +515,26 @@
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "gate_result",
+             "run_id": run_id,
+             "gate_name": gate_name,
+             "passed": passed,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
+@@ -517,6 +543,13 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => serde_json::json!({
+             "kind": "workflow_complete",
+             "run_id": run_id,
+@@ -524,6 +557,13 @@
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+             "duration_ms": duration_ms,
++            "request_id": request_id,
++            "prompt_section_ids": prompt_section_ids,
++            "knowledge_ids": knowledge_ids,
++            "model": model,
++            "provider": provider,
++            "token_usage": token_usage,
++            "cost": cost,
+             "ts": ts,
+         }),
+     }
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 5b7d8d558a1dd0429faeca565bcb36941f735f86..a5cc696742daf57cc7f1a98cd0229dc68d95a0ac
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -426,14 +426,20 @@
+         };
+ 
+         sink.record(FeedbackEvent::ModelCall {
+-            run_id: self.run_id.clone(),
+-            model: model.to_string(),
++            run_id: Some(self.run_id.clone()),
++            model: Some(model.to_string()),
+             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+             input_tokens: usage.input_tokens,
+             output_tokens: usage.output_tokens,
+             cost_usd: usage.cost_usd,
+             latency_ms,
+             success,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+     }
+@@ -1350,7 +1356,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         }
+     }
+@@ -1369,7 +1380,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+@@ -1386,7 +1402,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+@@ -1406,7 +1427,12 @@
+             temperature: None,
+             role: Some("reviewer".to_string()),
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1481,7 +1507,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+         let model = svc.resolve_model(&req);
+@@ -1511,7 +1542,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1543,7 +1579,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+@@ -1577,7 +1618,12 @@
+             temperature: None,
+             role: None,
+             caller: None,
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: roko_core::foundation::CachePolicy::Default,
+         };
+ 
+diff --git a/crates/roko-cli/src/dispatch_direct.rs b/crates/roko-cli/src/dispatch_direct.rs
+index 4d349b560324343bcb03f6de36e5133648820a87..fa566414f09afda5762718c90ee837d7262855ea
+--- a/crates/roko-cli/src/dispatch_direct.rs
++++ b/crates/roko-cli/src/dispatch_direct.rs
+@@ -114,7 +114,7 @@
+             content: prompt.to_string(),
+         }],
+         max_tokens: None,
+-        caller: Some(CallerIdentity::Cli),
++        caller: Some(CallerIdentity::Cli.to_string()),
+         ..Default::default()
+     };
+ 
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..9a95454652c9b4fef79b432291b262483adb0d64
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -333,8 +333,13 @@
+         max_tokens: req.max_tokens,
+         temperature: req.temperature,
+         role: req.role,
+-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
++        caller: Some(roko_core::foundation::CallerIdentity::Cli.to_string()),
++        run_id: req.run_id,
++        prompt_section_ids: req.prompt_section_ids,
++        knowledge_ids: req.knowledge_ids,
+         budget: req.budget,
++        budget_remaining: req.budget_remaining,
++        routing_hints: req.routing_hints,
+         cache_policy: req.cache_policy,
+     }
+ }
+@@ -350,6 +355,12 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::ModelCall {
+             run_id,
+             model,
+@@ -359,17 +370,37 @@
+             cost_usd,
+             latency_ms,
+             success,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::GateResult {
+             run_id,
+             gate_name,
+             passed,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+         RuntimeFeedbackEvent::WorkflowComplete {
+             run_id,
+@@ -377,12 +408,26 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         } => CoreFeedbackEvent::WorkflowComplete {
+             run_id,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
++            request_id,
++            prompt_section_ids,
++            knowledge_ids,
++            model,
++            provider,
++            token_usage,
++            cost,
+         },
+     }
+ }
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..6c21484fb65430ba5955f0c50b2940d1c8286f22
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -11,12 +11,14 @@
+ use crate::runtime_event::RuntimeEvent;
+ use crate::{Result, RokoError};
+ use async_trait::async_trait;
++use serde::{Deserialize, Serialize};
++use std::fmt;
+ use std::path::PathBuf;
+ 
+ // -- ModelCaller --
+ 
+ /// Request to call an LLM model.
+-#[derive(Debug, Clone, Default)]
++#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+ pub struct ModelCallRequest {
+     /// Model identifier (e.g., "claude-sonnet-4-20250514").
+     pub model: String,
+@@ -29,11 +31,28 @@
+     /// Temperature (0.0-1.0).
+     pub temperature: Option<f32>,
+     /// Role for model routing.
++    #[serde(default)]
+     pub role: Option<String>,
+     /// Caller surface that originated this request.
+-    pub caller: Option<CallerIdentity>,
++    #[serde(default)]
++    pub caller: Option<String>,
++    /// Workflow run identifier associated with this request.
++    #[serde(default)]
++    pub run_id: Option<String>,
++    /// Prompt section ids included in the assembled prompt.
++    #[serde(default)]
++    pub prompt_section_ids: Vec<String>,
++    /// Knowledge entry ids included in the request context.
++    #[serde(default)]
++    pub knowledge_ids: Vec<String>,
+     /// Per-call token and cost budget.
+     pub budget: Option<TokenBudget>,
++    /// Remaining budget when this request was created.
++    #[serde(default)]
++    pub budget_remaining: Option<f64>,
++    /// Routing hints for the model gateway.
++    #[serde(default)]
++    pub routing_hints: Vec<String>,
+     /// Cache behavior for this request.
+     pub cache_policy: CachePolicy,
+ }
+@@ -49,8 +68,28 @@
+     Test,
+ }
+ 
++impl CallerIdentity {
++    #[must_use]
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Cli => "cli",
++            Self::Acp => "acp",
++            Self::Serve => "serve",
++            Self::Research => "research",
++            Self::Dreams => "dreams",
++            Self::Test => "test",
++        }
++    }
++}
++
++impl fmt::Display for CallerIdentity {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str((*self).as_str())
++    }
++}
++
+ /// Cache behaviour for this request.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+ pub enum CachePolicy {
+     /// Use the default L1 cache behaviour.
+     #[default]
+@@ -97,14 +136,14 @@
+ }
+ 
+ /// A single chat message.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ChatMessage {
+     pub role: MessageRole,
+     pub content: String,
+ }
+ 
+ /// Message role in a conversation.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum MessageRole {
+     System,
+     User,
+@@ -165,33 +204,77 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+-        run_id: String,
+-        model: String,
++        #[serde(default)]
++        run_id: Option<String>,
++        #[serde(default)]
++        model: Option<String>,
+         role: String,
+         input_tokens: u64,
+         output_tokens: u64,
+         cost_usd: f64,
+         latency_ms: u64,
+         success: bool,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a gate execution.
+     GateResult {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         gate_name: String,
+         passed: bool,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
+-        run_id: String,
++        #[serde(default)]
++        run_id: Option<String>,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+         duration_ms: u64,
++        #[serde(default)]
++        request_id: Option<String>,
++        #[serde(default)]
++        prompt_section_ids: Vec<String>,
++        #[serde(default)]
++        knowledge_ids: Vec<String>,
++        #[serde(default)]
++        model: Option<String>,
++        #[serde(default)]
++        provider: Option<String>,
++        #[serde(default)]
++        token_usage: Option<u64>,
++        #[serde(default)]
++        cost: Option<f64>,
+     },
+ }
+ 
+diff --git a/crates/roko-dreams/src/runner.rs b/crates/roko-dreams/src/runner.rs
+index 00dce06816dcd5380fd3139445dc9921b099adc1..0c881b8e915842916acdf413b06a46037c219979
+--- a/crates/roko-dreams/src/runner.rs
++++ b/crates/roko-dreams/src/runner.rs
+@@ -1318,8 +1318,13 @@
+                     max_tokens: None,
+                     temperature: None,
+                     role: Some("dream-review".to_string()),
+-                    caller: Some(CallerIdentity::Dreams),
++                    caller: Some(CallerIdentity::Dreams.to_string()),
++                    run_id: None,
++                    prompt_section_ids: Vec::new(),
++                    knowledge_ids: Vec::new(),
+                     budget: None,
++                    budget_remaining: None,
++                    routing_hints: Vec::new(),
+                     cache_policy: CachePolicy::Default,
+                 };
+ 
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..0d4b1189075d2c1d7ba17270a5043e5e3a42f82b
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -122,6 +122,12 @@
+                     cost_usd,
+                     latency_ms,
+                     success,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "model_call",
+                     "run_id": run_id,
+@@ -132,6 +138,12 @@
+                     "cost_usd": cost_usd,
+                     "latency_ms": latency_ms,
+                     "success": success,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::GateResult {
+@@ -139,12 +151,26 @@
+                     gate_name,
+                     passed,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "gate_result",
+                     "run_id": run_id,
+                     "gate_name": gate_name,
+                     "passed": passed,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
+@@ -153,6 +179,13 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    request_id,
++                    prompt_section_ids,
++                    knowledge_ids,
++                    model,
++                    provider,
++                    token_usage,
++                    cost,
+                 } => serde_json::json!({
+                     "kind": "workflow_complete",
+                     "run_id": run_id,
+@@ -160,6 +193,13 @@
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+                     "duration_ms": duration_ms,
++                    "request_id": request_id,
++                    "prompt_section_ids": prompt_section_ids,
++                    "knowledge_ids": knowledge_ids,
++                    "model": model,
++                    "provider": provider,
++                    "token_usage": token_usage,
++                    "cost": cost,
+                     "ts": ts,
+                 }),
+             };
+@@ -318,8 +358,10 @@
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
++                    let run_id = run_id.as_deref()?;
+                     Some(build_episode_from_workflow(
+                         run_id,
+                         outcome,
+@@ -361,7 +403,9 @@
+             ..
+         } = event
+         {
+-            self.observe_model_call(model, success, role, latency_ms);
++            if let Some(model) = model.as_deref() {
++                self.observe_model_call(model, success, role, latency_ms);
++            }
+         }
+ 
+         let should_flush = {
+@@ -445,14 +489,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -470,10 +520,17 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::GateResult {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             gate_name: "compile".into(),
+             passed: true,
+             duration_ms: 3000,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -492,11 +549,18 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
+-            run_id: "r1".into(),
++            run_id: Some("r1".into()),
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+             duration_ms: 2500,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            model: None,
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -576,14 +640,20 @@
+         let svc = FeedbackService::new(dir.path().to_path_buf());
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -604,14 +674,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "sonnet".into(),
++            run_id: Some("r1".into()),
++            model: Some("sonnet".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+@@ -627,14 +703,20 @@
+             FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+ 
+         svc.record(FeedbackEvent::ModelCall {
+-            run_id: "r1".into(),
+-            model: "unknown-model".into(),
++            run_id: Some("r1".into()),
++            model: Some("unknown-model".into()),
+             role: "implementer".into(),
+             input_tokens: 1000,
+             output_tokens: 500,
+             cost_usd: 0.01,
+             latency_ms: 2000,
+             success: true,
++            request_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
++            provider: None,
++            token_usage: None,
++            cost: None,
+         })
+         .await
+         .unwrap();
+diff --git a/crates/roko-neuro/src/episode_completion.rs b/crates/roko-neuro/src/episode_completion.rs
+index b853bbb74491c79027a734ffea55539efbf1492f..b93a8d194d12fc9dd21a7f93d2b2895dbb9a4da7
+--- a/crates/roko-neuro/src/episode_completion.rs
++++ b/crates/roko-neuro/src/episode_completion.rs
+@@ -111,8 +111,13 @@
+                 max_tokens: None,
+                 temperature: None,
+                 role: Some("episode-distiller".to_string()),
+-                caller: Some(CallerIdentity::Research),
++                caller: Some(CallerIdentity::Research.to_string()),
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..7cd955e13449858ee02a60c6a8b4ac6605de9903
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -123,7 +123,12 @@
+                 temperature: None,
+                 role: Some(role.to_string()),
+                 caller: None,
++                run_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
+                 budget: None,
++                budget_remaining: None,
++                routing_hints: Vec::new(),
+                 cache_policy: CachePolicy::Default,
+             })
+             .await;
+@@ -145,14 +150,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: response.model.clone(),
++                        run_id: Some(self.run_id.clone()),
++                        model: Some(response.model.clone()),
+                         role: role.to_string(),
+                         input_tokens: response.usage.input_tokens,
+                         output_tokens: response.usage.output_tokens,
+                         cost_usd: response.usage.cost_usd,
+                         latency_ms,
+                         success: true,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -181,14 +192,20 @@
+                     .services
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+-                        run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        run_id: Some(self.run_id.clone()),
++                        model: None,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+                         cost_usd: 0.0,
+                         latency_ms,
+                         success: false,
++                        request_id: None,
++                        prompt_section_ids: Vec::new(),
++                        knowledge_ids: Vec::new(),
++                        provider: None,
++                        token_usage: None,
++                        cost: None,
+                     })
+                     .await;
+ 
+@@ -383,10 +400,17 @@
+             .services
+             .feedback_sink
+             .record(FeedbackEvent::GateResult {
+-                run_id: self.run_id.clone(),
++                run_id: Some(self.run_id.clone()),
+                 gate_name: verdict.gate_name.clone(),
+                 passed: verdict.passed,
+                 duration_ms: verdict.duration_ms,
++                request_id: None,
++                prompt_section_ids: Vec::new(),
++                knowledge_ids: Vec::new(),
++                model: None,
++                provider: None,
++                token_usage: None,
++                cost: None,
+             })
+             .await;
+     }
+diff --git a/crates/roko-serve/src/routes/gateway.rs b/crates/roko-serve/src/routes/gateway.rs
+index bcd049b33bb363dbe95e6a02f21110f2763edd1c..68c072cf7d991051d69931396afcc61e5d0beb8e
+--- a/crates/roko-serve/src/routes/gateway.rs
++++ b/crates/roko-serve/src/routes/gateway.rs
+@@ -688,8 +688,13 @@
+         max_tokens,
+         temperature: temperature.map(|t| t as f32),
+         role,
+-        caller: Some(CallerIdentity::Serve),
++        caller: Some(CallerIdentity::Serve.to_string()),
++        run_id: None,
++        prompt_section_ids: Vec::new(),
++        knowledge_ids: Vec::new(),
+         budget: None,
++        budget_remaining: None,
++        routing_hints: Vec::new(),
+         cache_policy: CachePolicy::Default,
+     }
+ }
+@@ -1056,7 +1061,10 @@
+         assert_eq!(request.max_tokens, Some(1024));
+         assert_eq!(request.temperature, Some(0.7));
+         assert_eq!(request.role.as_deref(), Some("agent-1"));
+-        assert_eq!(request.caller, Some(CallerIdentity::Serve));
++        assert_eq!(
++            request.caller.as_deref(),
++            Some(CallerIdentity::Serve.as_str())
++        );
+         assert_eq!(request.cache_policy, CachePolicy::Default);
+         assert_eq!(request.messages[0].role, CoreMessageRole::System);
+         assert_eq!(request.messages[1].role, CoreMessageRole::User);
+diff --git a/crates/roko-std/src/tool/builtin/web_search.rs b/crates/roko-std/src/tool/builtin/web_search.rs
+index 7c5d565c9fe3d9bff96c4828abb407cc12c30c26..264fbb277c461a7832d76eb341755c8d714b3860
+--- a/crates/roko-std/src/tool/builtin/web_search.rs
++++ b/crates/roko-std/src/tool/builtin/web_search.rs
+@@ -194,8 +194,13 @@
+             max_tokens: None,
+             temperature: None,
+             role: Some("web-search".to_string()),
+-            caller: Some(CallerIdentity::Cli),
++            caller: Some(CallerIdentity::Cli.to_string()),
++            run_id: None,
++            prompt_section_ids: Vec::new(),
++            knowledge_ids: Vec::new(),
+             budget: None,
++            budget_remaining: None,
++            routing_hints: Vec::new(),
+             cache_policy: CachePolicy::Default,
+         })
+         .await;
+
