@@ -536,6 +536,15 @@ fn truncate(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::process::Command;
+
+    use parking_lot::Mutex;
+    use roko_core::foundation::{
+        FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, ModelCallRequest,
+        ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec, TokenUsage,
+    };
 
     #[test]
     fn truncate_respects_char_boundaries() {
@@ -555,5 +564,198 @@ mod tests {
         };
 
         assert_eq!(commit_message(&config), "fix: short prompt");
+    }
+
+    struct MockModelCaller;
+
+    impl ModelCaller for MockModelCaller {
+        fn call<'life0, 'async_trait>(
+            &'life0 self,
+            _req: ModelCallRequest,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Ok(ModelCallResponse {
+                    content: "done".into(),
+                    model: "mock".into(),
+                    usage: TokenUsage::default(),
+                    stop_reason: None,
+                })
+            })
+        }
+    }
+
+    struct MockPromptAssembler;
+
+    impl PromptAssembler for MockPromptAssembler {
+        fn assemble<'life0, 'async_trait>(
+            &'life0 self,
+            _spec: PromptSpec,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok("system prompt".to_string()) })
+        }
+    }
+
+    struct MockFeedbackSink;
+
+    impl FeedbackSink for MockFeedbackSink {
+        fn record<'life0, 'async_trait>(
+            &'life0 self,
+            _event: FeedbackEvent,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct MockGateRunner;
+
+    impl GateRunner for MockGateRunner {
+        fn run_gates<'life0, 'async_trait>(
+            &'life0 self,
+            _config: GateConfig,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Ok(GateReport {
+                    verdicts: Vec::new(),
+                })
+            })
+        }
+    }
+
+    struct RecordingConsumer {
+        events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    }
+
+    impl EventConsumer for RecordingConsumer {
+        fn consume(&self, event: &RuntimeEvent) {
+            self.events.lock().push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_express_completes_with_success() {
+        let (config, _tempdir) = workflow_config();
+        let engine = WorkflowEngine::new(mock_services());
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => panic!("workflow should complete successfully: {err}"),
+        };
+        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
+        assert_eq!(result.iterations, 1);
+        assert!(result.run_id.starts_with("run_"));
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_express_emits_lifecycle_events() {
+        let (config, _tempdir) = workflow_config();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = WorkflowEngine::new(mock_services());
+        engine.add_consumer(Arc::new(RecordingConsumer {
+            events: Arc::clone(&events),
+        }));
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let events = events.lock().clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::WorkflowStarted { template, .. } if template == "express"
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::PhaseTransition { .. }))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::WorkflowCompleted {
+                        outcome: roko_core::runtime_event::WorkflowOutcome::Success { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    fn mock_services() -> EffectServices {
+        EffectServices {
+            model_caller: Arc::new(MockModelCaller),
+            prompt_assembler: Arc::new(MockPromptAssembler),
+            feedback_sink: Arc::new(MockFeedbackSink),
+            gate_runner: Arc::new(MockGateRunner),
+        }
+    }
+
+    fn workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+        let tempdir = isolated_git_workdir();
+        let config = WorkflowRunConfig {
+            prompt: "fix the bug".into(),
+            workdir: tempdir.path().to_path_buf(),
+            workflow: WorkflowConfig::express(),
+            enabled_gates: Vec::new(),
+            commit_prefix: None,
+        };
+        (config, tempdir)
+    }
+
+    fn isolated_git_workdir() -> tempfile::TempDir {
+        let tempdir = match tempfile::tempdir() {
+            Ok(tempdir) => tempdir,
+            Err(err) => panic!("create temp dir: {err}"),
+        };
+        let workdir = tempdir.path();
+
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.email", "test@example.com"]);
+        run_git(workdir, &["config", "user.name", "Roko Test"]);
+
+        if let Err(err) = std::fs::write(workdir.join("change.txt"), "change\n") {
+            panic!("write test change: {err}");
+        }
+        tempdir
+    }
+
+    fn run_git(workdir: &std::path::Path, args: &[&str]) {
+        let output = match Command::new("git").args(args).current_dir(workdir).output() {
+            Ok(output) => output,
+            Err(err) => panic!("run git command: {err}"),
+        };
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
