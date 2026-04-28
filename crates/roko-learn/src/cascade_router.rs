@@ -516,6 +516,68 @@ impl CascadeRouter {
         self.retarget_route_primary(route, candidates, primary)
     }
 
+    fn apply_knowledge_to_route(
+        &self,
+        ctx: &RoutingContext,
+        route: CascadeModel,
+        candidates: &[String],
+        knowledge: Option<&KnowledgeRoutingAdvice>,
+    ) -> CascadeModel {
+        let Some(knowledge) = knowledge else {
+            return route;
+        };
+        if !knowledge.has_signal {
+            return route;
+        }
+
+        let _primary_hint = knowledge.hint_for(&route.primary.slug);
+        let frontier = self.current_pareto_frontier();
+        let linucb_scores: HashMap<_, _> = self
+            .ucb_scores(ctx, candidates, frontier.as_deref())
+            .into_iter()
+            .collect();
+
+        let adjusted_score = |slug: &str| {
+            let base = linucb_scores
+                .get(slug)
+                .copied()
+                .filter(|score| score.is_finite())
+                .unwrap_or(0.0);
+            base + knowledge.score_for(slug)
+        };
+
+        let current_score = adjusted_score(&route.primary.slug);
+        let best = candidates
+            .iter()
+            .map(|slug| (slug, adjusted_score(slug)))
+            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
+                left_score
+                    .total_cmp(right_score)
+                    .then_with(|| right_slug.cmp(left_slug))
+            });
+
+        let mut swapped = false;
+        let route = if let Some((best_slug, best_score)) = best {
+            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
+                swapped = true;
+                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
+            } else {
+                route
+            }
+        } else {
+            route
+        };
+
+        tracing::debug!(
+            primary = %route.primary.slug,
+            knowledge_hints = ?knowledge.hints.len(),
+            swapped = %swapped,
+            "knowledge-aware routing applied"
+        );
+
+        route
+    }
+
     /// Return the index of `slug` in the router's model list.
     #[must_use]
     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
@@ -762,6 +824,18 @@ impl CascadeRouter {
         }
     }
 
+    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
+    pub fn route_with_knowledge(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+        knowledge: Option<&KnowledgeRoutingAdvice>,
+    ) -> CascadeModel {
+        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
+        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
+    }
+
     /// Route a context through the cascade over a candidate subset.
     pub fn route_with_cfactor_among(
         &self,
@@ -783,6 +857,24 @@ impl CascadeRouter {
             }
             CascadeStage::Ucb => self.route_ucb_among(ctx, candidates, cfactor, agent_id),
         }
+    }
+
+    /// Route a context through the cascade over a candidate subset with knowledge hints.
+    pub fn route_with_knowledge_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+        knowledge: Option<&KnowledgeRoutingAdvice>,
+    ) -> CascadeModel {
+        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
+        let candidates = if candidates.is_empty() {
+            &self.model_slugs
+        } else {
+            candidates
+        };
+        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
     }
 
     /// Explain a routing decision over the supplied candidate set.
