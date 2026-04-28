@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 // roko-core currently depends on roko-runtime, so importing roko-core here
 // would create a circular dependency and Cargo.toml edits are out of scope.
 /// Outcome of a completed workflow run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowOutcome {
     /// Workflow completed successfully, optionally with a commit hash.
     Success {
@@ -369,7 +369,7 @@ fn config_parse_error(
 }
 
 /// Current phase of the pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     /// Pipeline has been created but not started.
     Pending,
@@ -521,7 +521,7 @@ pub enum PipelineOutput {
 }
 
 /// Pure state machine for workflow pipelines.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStateV2 {
     /// Current pipeline phase.
     pub phase: Phase,
@@ -560,6 +560,33 @@ impl PipelineStateV2 {
             files_changed: 0,
             commit_hash: None,
         }
+    }
+
+    /// Serialize the current pipeline state to a JSON string.
+    ///
+    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
+    /// state -- including phase, iteration count, and accumulated findings -- so a
+    /// workflow can resume after a process restart.
+    ///
+    /// Returns an error only if serde_json serialization fails (in practice, never
+    /// for this struct).
+    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
+    /// [`checkpoint`].
+    ///
+    /// After restoring, call [`step`] with the next input as if the workflow is
+    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
+    /// `Cancelled`) are valid checkpoint states -- callers should check
+    /// `phase.is_terminal()` before resuming.
+    ///
+    /// Returns an error if the JSON is malformed or missing required fields.
+    pub fn from_checkpoint(
+        json: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(serde_json::from_str(json)?)
     }
 
     /// Feed an event into the state machine, get an action back.
@@ -911,5 +938,70 @@ role = "implementer"
         assert!(cfg.has_strategy);
         assert!(!cfg.has_review);
         assert_eq!(cfg.max_iterations, 4);
+    }
+
+    #[test]
+    fn checkpoint_round_trip_implementing() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
+        sm.step(PipelineInput::Start);
+
+        let json = sm.checkpoint().unwrap();
+        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+        assert_eq!(restored.phase, Phase::Implementing);
+        assert_eq!(restored.iteration, 1);
+        assert_eq!(restored.original_prompt, "add feature");
+    }
+
+    #[test]
+    fn checkpoint_preserves_review_findings() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
+        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
+        sm.iteration = 2;
+        sm.phase = Phase::Implementing;
+
+        let json = sm.checkpoint().unwrap();
+        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+        assert_eq!(
+            restored.review_findings,
+            vec!["needs error handling", "add docs"]
+        );
+        assert_eq!(restored.iteration, 2);
+    }
+
+    #[test]
+    fn checkpoint_halted_phase() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
+        sm.phase = Phase::Halted {
+            reason: "compile failed".into(),
+        };
+
+        let json = sm.checkpoint().unwrap();
+        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+        assert!(restored.phase.is_terminal());
+        assert!(
+            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
+        );
+    }
+
+    #[test]
+    fn checkpoint_full_config() {
+        let config = WorkflowConfig::full();
+        let sm = PipelineStateV2::new(config, "complex".into());
+
+        let json = sm.checkpoint().unwrap();
+        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+        assert!(restored.config.has_strategy);
+        assert!(restored.config.has_review);
+        assert_eq!(restored.config.max_iterations, 3);
+    }
+
+    #[test]
+    fn from_checkpoint_rejects_invalid_json() {
+        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
+        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
     }
 }
