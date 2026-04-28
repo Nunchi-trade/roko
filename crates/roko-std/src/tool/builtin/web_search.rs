@@ -194,8 +194,13 @@ async fn call_gateway(model_caller: Arc<dyn ModelCaller>, query: &str) -> ToolRe
             max_tokens: None,
             temperature: None,
             role: Some("web-search".to_string()),
-            caller: Some(CallerIdentity::Cli),
+            caller: Some(CallerIdentity::Cli.into()),
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: CachePolicy::Default,
         })
         .await;

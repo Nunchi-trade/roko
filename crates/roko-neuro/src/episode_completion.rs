@@ -111,8 +111,13 @@ impl DistillationBackend for GatewayDistillationBackend {
                 max_tokens: None,
                 temperature: None,
                 role: Some("episode-distiller".to_string()),
-                caller: Some(CallerIdentity::Research),
+                caller: Some(CallerIdentity::Research.into()),
+                run_id: None,
+                prompt_section_ids: Vec::new(),
+                knowledge_ids: Vec::new(),
                 budget: None,
+                budget_remaining: None,
+                routing_hints: Vec::new(),
                 cache_policy: CachePolicy::Default,
             })
             .await

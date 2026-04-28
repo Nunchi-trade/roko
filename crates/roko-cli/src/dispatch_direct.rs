@@ -114,7 +114,7 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> Result<DispatchRes
             content: prompt.to_string(),
         }],
         max_tokens: None,
-        caller: Some(CallerIdentity::Cli),
+        caller: Some(CallerIdentity::Cli.into()),
         ..Default::default()
     };
 

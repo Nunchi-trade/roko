@@ -688,8 +688,13 @@ fn model_call_request(
         max_tokens,
         temperature: temperature.map(|t| t as f32),
         role,
-        caller: Some(CallerIdentity::Serve),
+        caller: Some(CallerIdentity::Serve.into()),
+        run_id: None,
+        prompt_section_ids: Vec::new(),
+        knowledge_ids: Vec::new(),
         budget: None,
+        budget_remaining: None,
+        routing_hints: Vec::new(),
         cache_policy: CachePolicy::Default,
     }
 }
@@ -1056,7 +1061,7 @@ mod tests {
         assert_eq!(request.max_tokens, Some(1024));
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.role.as_deref(), Some("agent-1"));
-        assert_eq!(request.caller, Some(CallerIdentity::Serve));
+        assert_eq!(request.caller.as_deref(), Some(CallerIdentity::Serve.as_str()));
         assert_eq!(request.cache_policy, CachePolicy::Default);
         assert_eq!(request.messages[0].role, CoreMessageRole::System);
         assert_eq!(request.messages[1].role, CoreMessageRole::User);

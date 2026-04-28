@@ -426,8 +426,14 @@ impl ModelCallService {
         };
 
         sink.record(FeedbackEvent::ModelCall {
-            run_id: self.run_id.clone(),
-            model: model.to_string(),
+            run_id: req.run_id.clone().or_else(|| Some(self.run_id.clone())),
+            request_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
+            model: Some(model.to_string()),
+            provider: None,
+            token_usage: None,
+            cost: None,
             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -1350,7 +1356,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         }
     }
@@ -1369,7 +1380,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
@@ -1386,7 +1402,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
@@ -1406,7 +1427,12 @@ mod tests {
             temperature: None,
             role: Some("reviewer".to_string()),
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1481,7 +1507,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         let model = svc.resolve_model(&req);
@@ -1511,7 +1542,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1543,7 +1579,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1577,7 +1618,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
