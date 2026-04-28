@@ -10,6 +10,7 @@ use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Json, Response},
 };
+use roko_core::runtime_event::{RuntimeEvent, RuntimeEventEnvelope, WorkflowOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -86,21 +87,8 @@ pub async fn create_share(State(state): State<Arc<AppState>>, Path(id): Path<Str
         )
             .into_response();
     }
-    let transcript = RunTranscript {
-        id: token.clone(),
-        agent: String::new(),
-        role: String::new(),
-        prompt: String::new(),
-        success: false,
-        gates: vec![],
-        output: None,
-        cost_usd: None,
-        input_tokens: None,
-        output_tokens: None,
-        model: None,
-        duration_s: None,
-        episode_id: Some(id),
-        timestamp: chrono::Utc::now().to_rfc3339(),
+    let Some(transcript) = transcript_from_runtime_events(&state, &id, &token) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     let path = shared_dir.join(format!("{token}.json"));
     match serde_json::to_string_pretty(&transcript) {
@@ -143,6 +131,139 @@ fn load_transcript(state: &AppState, id: &str) -> Option<RunTranscript> {
         .join(format!("{id}.json"));
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+fn transcript_from_runtime_events(
+    state: &AppState,
+    run_id: &str,
+    token: &str,
+) -> Option<RunTranscript> {
+    let path = state.layout.root().join("runtime-events.jsonl");
+    let data = std::fs::read_to_string(path).ok()?;
+
+    let mut agent = None;
+    let mut role = None;
+    let mut prompt = None;
+    let mut output = None;
+    let mut model = None;
+    let mut success = None;
+    let mut gates = Vec::new();
+    let mut cost_usd = 0.0;
+    let mut saw_cost = false;
+    let mut first_ts = None;
+    let mut last_ts = None;
+
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let envelope: RuntimeEventEnvelope = match serde_json::from_str(line) {
+            Ok(envelope) => envelope,
+            Err(_) => continue,
+        };
+        if envelope.run_id != run_id {
+            continue;
+        }
+
+        first_ts.get_or_insert(envelope.ts);
+        last_ts = Some(envelope.ts);
+
+        match envelope.payload {
+            RuntimeEvent::WorkflowStarted {
+                prompt: event_prompt,
+                ..
+            } => {
+                if let Some(value) = non_empty_owned(event_prompt) {
+                    prompt = Some(value);
+                }
+            }
+            RuntimeEvent::AgentSpawned {
+                agent_id,
+                role: event_role,
+                model: event_model,
+                ..
+            } => {
+                if agent.is_none() {
+                    agent = non_empty_owned(agent_id);
+                }
+                if role.is_none() {
+                    role = non_empty_owned(event_role);
+                }
+                if model.is_none() {
+                    model = non_empty_owned(event_model);
+                }
+            }
+            RuntimeEvent::AgentCompleted {
+                agent_id,
+                output: event_output,
+                cost_usd: event_cost,
+                ..
+            } => {
+                if agent.is_none() {
+                    agent = non_empty_owned(agent_id);
+                }
+                if let Some(value) = non_empty_owned(event_output) {
+                    output = Some(value);
+                }
+                cost_usd += event_cost;
+                saw_cost = true;
+            }
+            RuntimeEvent::AgentFailed {
+                agent_id, error, ..
+            } => {
+                if agent.is_none() {
+                    agent = non_empty_owned(agent_id);
+                }
+                if let Some(value) = non_empty_owned(error) {
+                    output = Some(value);
+                }
+            }
+            RuntimeEvent::GatePassed { gate_name, .. } => {
+                if let Some(name) = non_empty_owned(gate_name) {
+                    gates.push((name, true));
+                }
+            }
+            RuntimeEvent::GateFailed { gate_name, .. } => {
+                if let Some(name) = non_empty_owned(gate_name) {
+                    gates.push((name, false));
+                }
+            }
+            RuntimeEvent::WorkflowCompleted {
+                outcome: event_outcome,
+                ..
+            } => {
+                success = Some(matches!(event_outcome, WorkflowOutcome::Success { .. }));
+            }
+            _ => {}
+        }
+    }
+
+    let started_at = first_ts?;
+    let finished_at = last_ts.unwrap_or(started_at);
+    let duration_s = finished_at
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0) as f64
+        / 1000.0;
+
+    Some(RunTranscript {
+        id: token.to_string(),
+        agent: agent?,
+        role: role?,
+        prompt: prompt?,
+        success: success.unwrap_or(false),
+        gates,
+        output,
+        cost_usd: saw_cost.then_some(cost_usd),
+        input_tokens: None,
+        output_tokens: None,
+        model,
+        duration_s: Some(duration_s),
+        episode_id: Some(run_id.to_string()),
+        timestamp: started_at.to_rfc3339(),
+    })
+}
+
+fn non_empty_owned(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn render_html(t: &RunTranscript) -> String {

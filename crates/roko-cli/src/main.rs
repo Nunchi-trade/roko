@@ -1990,7 +1990,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             serve,
             share,
             engine,
-        } => commands::util::cmd_run(cli, workdir, prompt, serve || share, engine).await,
+        } => commands::util::cmd_run(cli, workdir, prompt, serve, share, engine).await,
         Command::Status {
             workdir,
             cfactor,

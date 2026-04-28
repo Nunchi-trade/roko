@@ -76,24 +76,44 @@ impl RunReport {
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
     let token = roko_core::generate_share_token();
+    let transcript = roko_serve::routes::shared_runs::RunTranscript {
+        id: token.clone(),
+        agent: "unknown".to_string(),
+        role: "unknown".to_string(),
+        prompt: report.prompt_id.clone(),
+        success: report.overall_success(),
+        gates: report.gate_verdicts.clone(),
+        output: report.output_text.clone(),
+        cost_usd: None,
+        input_tokens: None,
+        output_tokens: None,
+        model: None,
+        duration_s: None,
+        episode_id: Some(report.episode_id.clone()),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    write_shared_transcript(workdir, &transcript)
+}
+
+pub fn write_shared_workflow_run(
+    workdir: &std::path::Path,
+    prompt: &str,
+    agent: &str,
+    role: &str,
+    report: &WorkflowRunReport,
+) -> anyhow::Result<String> {
+    let token = roko_core::generate_share_token();
+    let transcript = workflow_report_as_run_transcript(token.clone(), prompt, agent, role, report);
+    write_shared_transcript(workdir, &transcript)
+}
+
+fn write_shared_transcript(
+    workdir: &std::path::Path,
+    transcript: &roko_serve::routes::shared_runs::RunTranscript,
+) -> anyhow::Result<String> {
+    let token = transcript.id.clone();
     let dir = workdir.join(".roko").join("shared");
     std::fs::create_dir_all(&dir)?;
-    let transcript = serde_json::json!({
-        "id": &token,
-        "agent": "unknown",
-        "role": "unknown",
-        "prompt": &report.prompt_id,
-        "success": report.overall_success(),
-        "gates": &report.gate_verdicts,
-        "output": &report.output_text,
-        "cost_usd": null,
-        "input_tokens": null,
-        "output_tokens": null,
-        "model": null,
-        "duration_s": null,
-        "episode_id": &report.episode_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
     std::fs::write(
         dir.join(format!("{token}.json")),
         serde_json::to_string_pretty(&transcript)?,
@@ -174,6 +194,15 @@ fn truncate(text: &str, max_chars: usize) -> &str {
     text.char_indices()
         .nth(max_chars)
         .map_or(text, |(idx, _)| &text[..idx])
+}
+
+fn non_empty(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn non_empty_or(text: &str, fallback: &str) -> String {
+    non_empty(text).unwrap_or(fallback).to_string()
 }
 
 /// Format a duration for human display: "3.2s", "1m 42s", "0.8s".
@@ -431,6 +460,35 @@ pub fn workflow_report_as_run_report(report: &WorkflowRunReport) -> RunReport {
             .collect(),
         total_signals: report.events.len(),
         output_text: Some(report.output.clone()),
+    }
+}
+
+pub fn workflow_report_as_run_transcript(
+    token: String,
+    prompt: &str,
+    agent: &str,
+    role: &str,
+    report: &WorkflowRunReport,
+) -> roko_serve::routes::shared_runs::RunTranscript {
+    roko_serve::routes::shared_runs::RunTranscript {
+        id: token,
+        agent: non_empty_or(agent, "unconfigured"),
+        role: non_empty_or(role, "unconfigured"),
+        prompt: prompt.to_string(),
+        success: report.success,
+        gates: report
+            .gates
+            .iter()
+            .map(|gate| (gate.name.clone(), gate.passed))
+            .collect(),
+        output: non_empty(&report.output).map(ToOwned::to_owned),
+        cost_usd: report.cost,
+        input_tokens: None,
+        output_tokens: None,
+        model: Some(non_empty_or(&report.model, "unconfigured")),
+        duration_s: Some(report.duration_secs),
+        episode_id: Some(report.run_id.clone()),
+        timestamp: chrono::Utc::now().to_rfc3339(),
     }
 }
 
