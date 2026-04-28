@@ -51,6 +51,27 @@
     clippy::unwrap_or_default,
     clippy::io_other_error
 )]
+#![allow(hidden_glob_reexports)]
+
+extern crate roko_core as roko_core_crate;
+extern crate self as roko_core;
+
+pub use roko_core_crate::*;
+
+// TODO(converge): remove this compatibility layer once roko-core re-exports
+// StateHub and SharedStateHub from its crate root again.
+pub mod dashboard_snapshot {
+    pub use crate::roko_core_crate::dashboard_snapshot::*;
+}
+
+#[path = "../../roko-core/src/state_hub.rs"]
+pub mod state_hub_compat;
+
+pub mod state_hub {
+    pub use crate::state_hub_compat::*;
+}
+
+pub use state_hub_compat::{SharedStateHub, StateHub};
 
 pub mod adapters;
 pub mod config_watcher;
@@ -87,8 +108,9 @@ pub use crate::sanitize::sanitize_agent_content;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as AnyhowContext, Result};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -100,6 +122,8 @@ use roko_core::config::schema::RokoConfig;
 use roko_core::connector::{ConnectorHealth, ConnectorInfo, ConnectorKind, ConnectorStatus};
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::feed::{FeedAccess, FeedInfo, FeedKind};
+use roko_core::foundation::EventConsumer;
+use roko_core::{RuntimeEvent, WorkflowOutcome};
 use roko_plugin::{CronEventSource, EventSource, FileWatchEventSource};
 
 use crate::events::{ExecutionEvent, ServerEvent};
@@ -414,6 +438,141 @@ pub async fn start_server_background(
 #[doc(hidden)]
 pub fn start_prd_publish_orchestrator(state: Arc<AppState>) -> JoinHandle<()> {
     routes::start_prd_publish_subscriber(state)
+}
+
+/// Bridges WorkflowEngine RuntimeEvents to SharedStateHub as DashboardEvents.
+struct DashboardEventBridge {
+    state_hub: SharedStateHub,
+}
+
+impl DashboardEventBridge {
+    fn new(state_hub: SharedStateHub) -> Self {
+        Self { state_hub }
+    }
+}
+
+impl EventConsumer for DashboardEventBridge {
+    fn consume(&self, event: &RuntimeEvent) {
+        let events = match event {
+            RuntimeEvent::WorkflowStarted { run_id, prompt, .. } => {
+                let plan_id = workflow_plan_id(run_id);
+                let task_id = workflow_task_id(run_id);
+                vec![
+                    DashboardEvent::PlanStarted {
+                        plan_id: plan_id.clone(),
+                    },
+                    DashboardEvent::TaskStarted {
+                        plan_id,
+                        task_id,
+                        title: prompt.clone(),
+                        phase: "workflow".into(),
+                    },
+                ]
+            }
+            RuntimeEvent::AgentSpawned {
+                agent_id,
+                role,
+                model,
+                ..
+            } => vec![DashboardEvent::AgentSpawned {
+                agent_id: agent_id.clone(),
+                role: role.clone(),
+                model: dashboard_model_label(model, agent_id),
+            }],
+            RuntimeEvent::AgentOutput {
+                agent_id, chunk, ..
+            } => vec![DashboardEvent::AgentOutput {
+                agent_id: agent_id.clone(),
+                content: chunk.clone(),
+            }],
+            RuntimeEvent::GatePassed {
+                run_id,
+                gate_name,
+                duration_ms,
+            } => vec![workflow_gate_log_entry(
+                run_id,
+                gate_name,
+                *duration_ms,
+                true,
+            )],
+            RuntimeEvent::GateFailed {
+                run_id,
+                gate_name,
+                duration_ms,
+                ..
+            } => vec![workflow_gate_log_entry(
+                run_id,
+                gate_name,
+                *duration_ms,
+                false,
+            )],
+            RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+                vec![DashboardEvent::TaskCompleted {
+                    plan_id: workflow_plan_id(run_id),
+                    task_id: workflow_task_id(run_id),
+                    outcome: workflow_outcome_label(outcome),
+                }]
+            }
+            _ => Vec::new(),
+        };
+
+        if !events.is_empty() {
+            self.state_hub.publish_batch(events);
+        }
+    }
+}
+
+/// Create a DashboardEventBridge for attaching to WorkflowEngine instances.
+#[must_use]
+pub fn dashboard_event_bridge(state: &Arc<AppState>) -> Arc<dyn EventConsumer> {
+    Arc::new(DashboardEventBridge::new(state.state_hub.clone()))
+}
+
+fn workflow_plan_id(run_id: &str) -> String {
+    format!("wf-{}", run_id.chars().take(8).collect::<String>())
+}
+
+fn workflow_task_id(run_id: &str) -> String {
+    format!("workflow-{}", run_id.chars().take(8).collect::<String>())
+}
+
+fn workflow_gate_log_entry(
+    run_id: &str,
+    gate_name: &str,
+    duration_ms: u64,
+    passed: bool,
+) -> DashboardEvent {
+    DashboardEvent::EventLogEntry {
+        timestamp_ms: now_millis(),
+        event_type: "gate_result".into(),
+        plan_id: workflow_plan_id(run_id),
+        task_id: gate_name.to_string(),
+        message: format!(
+            "{} {} ({}ms)",
+            if passed { "PASS" } else { "FAIL" },
+            gate_name,
+            duration_ms
+        ),
+    }
+}
+
+fn workflow_outcome_label(outcome: &WorkflowOutcome) -> String {
+    match outcome {
+        WorkflowOutcome::Success { commit_hash } => commit_hash
+            .as_ref()
+            .map_or_else(|| "success".to_string(), |hash| format!("success ({hash})")),
+        WorkflowOutcome::Halted { reason } => format!("halted: {reason}"),
+        WorkflowOutcome::Cancelled => "cancelled".to_string(),
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 /// Run the HTTP server against an already constructed [`AppState`].
