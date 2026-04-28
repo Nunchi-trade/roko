@@ -24,6 +24,12 @@ use std::time::Instant;
 
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
 
+/// Records explicit model override outcomes for cascade-router learning.
+pub trait ForceBackendOverrideRecorder: Send + Sync {
+    /// Record the outcome for a forced model slug.
+    fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool;
+}
+
 /// Predicted cost for a model call before it is executed.
 #[derive(Debug, Clone)]
 pub struct CostEstimate {
@@ -57,6 +63,12 @@ pub struct ModelCallService {
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
     /// Optional model router used when requests omit an explicit model.
     model_router: Option<Arc<ModelRouter>>,
+    /// Optional cascade router callback for recording forced model observations.
+    ///
+    /// This is trait-typed to avoid adding a production `roko-agent` ->
+    /// `roko-learn` dependency edge; `CascadeRouter` implements the trait in
+    /// `roko-learn`.
+    cascade_router: Option<Arc<dyn ForceBackendOverrideRecorder>>,
     /// Service-scoped environment entries passed into provider construction.
     env: Vec<(String, String)>,
     /// Optional base URL for OpenAI-compatible providers.
@@ -86,6 +98,7 @@ impl ModelCallService {
             event_consumers: Vec::new(),
             feedback_sink: None,
             model_router: None,
+            cascade_router: None,
             env: Vec::new(),
             openai_base_url: None,
             mcp_config: None,
@@ -125,13 +138,23 @@ impl ModelCallService {
         self
     }
 
-    /// Attach a CascadeRouter-compatible callback for model selection.
+    /// Attach a model-selection callback used when requests omit an explicit model.
     #[must_use]
-    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
+    pub fn with_model_router<F>(mut self, router_fn: F) -> Self
     where
         F: Fn(Option<&str>) -> String + Send + Sync + 'static,
     {
         self.model_router = Some(Arc::new(router_fn));
+        self
+    }
+
+    /// Attach a CascadeRouter for force_backend learning (UX34).
+    #[must_use]
+    pub fn with_cascade_router<R>(mut self, router: Arc<R>) -> Self
+    where
+        R: ForceBackendOverrideRecorder + 'static,
+    {
+        self.cascade_router = Some(router);
         self
     }
 
@@ -390,6 +413,30 @@ impl ModelCallService {
             success,
         })
         .await
+    }
+
+    fn record_force_backend_override(
+        &self,
+        requested_model: &str,
+        model_used: &str,
+        success: bool,
+    ) {
+        if requested_model.is_empty() {
+            return;
+        }
+
+        let Some(router) = &self.cascade_router else {
+            return;
+        };
+
+        if !router.record_override_outcome(model_used, success) {
+            tracing::debug!(
+                requested_model,
+                model_used,
+                success,
+                "force_backend override outcome was not accepted by cascade router"
+            );
+        }
     }
 }
 
@@ -1026,6 +1073,7 @@ impl ModelCaller for ModelCallService {
                     agent_id,
                     error: message.clone(),
                 });
+                self.record_force_backend_override(&req.model, &model, false);
                 self.record_feedback(&req, &model, &usage, latency_ms, false)
                     .await?;
                 return Err(RokoError::Agent {
@@ -1045,6 +1093,7 @@ impl ModelCaller for ModelCallService {
                 agent_id: format!("model-call:{}", output.model_used),
                 error: error.to_string(),
             });
+            self.record_force_backend_override(&req.model, &output.model_used, false);
             self.record_feedback(&req, &output.model_used, &usage, latency_ms, false)
                 .await?;
             return Err(RokoError::from(error));
@@ -1070,6 +1119,7 @@ impl ModelCaller for ModelCallService {
             tokens_used: usage.total_tokens,
             cost_usd: usage.cost_usd,
         });
+        self.record_force_backend_override(&req.model, &output.model_used, true);
         self.record_feedback(&req, &output.model_used, &usage, output.latency_ms, true)
             .await?;
 
@@ -1087,6 +1137,37 @@ impl ModelCaller for ModelCallService {
 mod tests {
     use super::*;
     use crate::task_runner::ModelPricing;
+    use roko_learn::cascade_router::CascadeRouter;
+    use roko_learn::model_router::RoutingContext;
+    use tempfile::tempdir;
+
+    struct TestCascadeRecorder {
+        router: Arc<CascadeRouter>,
+    }
+
+    impl ForceBackendOverrideRecorder for TestCascadeRecorder {
+        fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool {
+            self.router
+                .record_override_outcome(model_slug, &RoutingContext::default(), success)
+        }
+    }
+
+    fn user_request(model: impl Into<String>, content: impl Into<String>) -> ModelCallRequest {
+        ModelCallRequest {
+            model: model.into(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: content.into(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+            caller: None,
+            budget: None,
+            cache_policy: roko_core::foundation::CachePolicy::Default,
+        }
+    }
 
     #[tokio::test]
     async fn default_model_resolution() {
@@ -1127,7 +1208,7 @@ mod tests {
 
     #[tokio::test]
     async fn cascade_router_selects_model_when_request_is_empty() {
-        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
+        let svc = ModelCallService::new("default".into()).with_model_router(|role| {
             assert_eq!(role, Some("reviewer"));
             "router-selected-model".to_string()
         });
@@ -1144,6 +1225,63 @@ mod tests {
         };
 
         assert_eq!(svc.resolve_model(&req), "router-selected-model");
+    }
+
+    #[tokio::test]
+    async fn force_backend_records_when_router_present() {
+        let dir = tempdir().expect("tempdir");
+        let model = "ux34-model";
+        let router = Arc::new(CascadeRouter::load_or_new(
+            &dir.path().join("cascade.json"),
+            vec![model.to_string()],
+        ));
+        let svc = ModelCallService::new("default".into()).with_cascade_router(Arc::new(
+            TestCascadeRecorder {
+                router: Arc::clone(&router),
+            },
+        ));
+
+        let response = svc
+            .call(user_request(model, "learn this override"))
+            .await
+            .expect("model call should succeed");
+
+        assert_eq!(response.model, model);
+        assert_eq!(router.confidence_snapshot().get(model), Some(&(1, 1)));
+    }
+
+    #[tokio::test]
+    async fn force_backend_noop_when_no_router() {
+        let svc = ModelCallService::new("default".into());
+
+        let response = svc
+            .call(user_request("ux34-model", "no router attached"))
+            .await
+            .expect("model call should succeed without router");
+
+        assert_eq!(response.model, "ux34-model");
+    }
+
+    #[tokio::test]
+    async fn force_backend_records_failure_when_router_present() {
+        let dir = tempdir().expect("tempdir");
+        let model = "ux34-failing-model";
+        let router = Arc::new(CascadeRouter::load_or_new(
+            &dir.path().join("cascade.json"),
+            vec![model.to_string()],
+        ));
+        let mut config = RokoConfig::default();
+        config.agent.command = Some("false".to_string());
+        let svc = ModelCallService::new("default".into())
+            .with_config(config)
+            .with_cascade_router(Arc::new(TestCascadeRecorder {
+                router: Arc::clone(&router),
+            }));
+
+        let result = svc.call(user_request(model, "this should fail")).await;
+
+        assert!(result.is_err());
+        assert_eq!(router.confidence_snapshot().get(model), Some(&(1, 0)));
     }
 
     #[tokio::test]

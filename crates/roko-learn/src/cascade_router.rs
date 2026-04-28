@@ -27,7 +27,7 @@ use roko_core::OperatingFrequency;
 use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
 use roko_core::config::schema::RewardWeights;
-use roko_core::task::TaskCategory;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -104,6 +104,40 @@ impl roko_core::Cell for CascadeRouter {
     }
     fn protocols(&self) -> &[&str] {
         &["Route"]
+    }
+}
+
+impl Default for RoutingContext {
+    fn default() -> Self {
+        Self {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 1,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            conductor_load: 0.0,
+            active_agents: 0,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
+            daimon_policy: Default::default(),
+            thinking_level: None,
+            temperament: None,
+            previous_model: None,
+            plan_context_tokens: None,
+            tier_thresholds: None,
+        }
+    }
+}
+
+impl roko_agent::model_call_service::ForceBackendOverrideRecorder for CascadeRouter {
+    fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool {
+        CascadeRouter::record_override_outcome(
+            self,
+            model_slug,
+            &RoutingContext::default(),
+            success,
+        )
     }
 }
 
