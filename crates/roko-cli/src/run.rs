@@ -40,11 +40,7 @@ use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
-use roko_runtime::effect_driver::{
-    AffectContext as RuntimeAffectContext, AffectPolicy as RuntimeAffectPolicy,
-    BoxFuture as RuntimeBoxFuture, DispatchModulation as RuntimeDispatchModulation, EffectServices,
-    Result as RuntimeResult,
-};
+use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
 use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
 use roko_runtime::{
@@ -316,94 +312,6 @@ impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
     }
 }
 
-/// Adapts a `roko_core::foundation::AffectPolicy` to the runtime's local trait.
-struct RuntimeAffectPolicyAdapter {
-    inner: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>,
-}
-
-impl RuntimeAffectPolicyAdapter {
-    fn new(policy: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>) -> Self {
-        Self { inner: policy }
-    }
-}
-
-impl RuntimeAffectPolicy for RuntimeAffectPolicyAdapter {
-    fn pre_dispatch(&self, task_id: &str, role: &str) -> RuntimeAffectContext {
-        if let Ok(policy) = self.inner.lock() {
-            let ctx = policy.pre_dispatch(task_id, role);
-            RuntimeAffectContext {
-                behavioral_state: format!("{:?}", ctx.behavioral_state),
-                pad: ctx.pad,
-                emotional_tag: ctx.emotional_tag,
-            }
-        } else {
-            RuntimeAffectContext {
-                behavioral_state: "Engaged".to_string(),
-                pad: [0.0, 0.0, 0.0],
-                emotional_tag: None,
-            }
-        }
-    }
-
-    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64) {
-        if let Ok(mut policy) = self.inner.lock() {
-            policy.on_task_outcome(task_id, succeeded, tokens_used, cost_usd);
-        }
-    }
-
-    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64) {
-        if let Ok(mut policy) = self.inner.lock() {
-            policy.on_gate_result(gate_name, passed, rung, confidence);
-        }
-    }
-
-    fn modulate_dispatch(&self, role: &str, params: &mut RuntimeDispatchModulation) {
-        if let Ok(policy) = self.inner.lock() {
-            let mut core_params = roko_core::foundation::DispatchModulation {
-                tier_bias: params.tier_bias,
-                turn_limit_factor: params.turn_limit_factor,
-                exploration_rate: params.exploration_rate,
-            };
-            policy.modulate_dispatch(role, &mut core_params);
-            params.tier_bias = core_params.tier_bias;
-            params.turn_limit_factor = core_params.turn_limit_factor;
-            params.exploration_rate = core_params.exploration_rate;
-        }
-    }
-
-    fn behavioral_state_label(&self) -> String {
-        if let Ok(policy) = self.inner.lock() {
-            format!("{:?}", policy.behavioral_state())
-        } else {
-            "Engaged".to_string()
-        }
-    }
-
-    fn persist(&self) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            // Use spawn_blocking to avoid calling block_on inside a tokio context,
-            // which would panic with "Cannot start a runtime from within a runtime".
-            let result = tokio::task::spawn_blocking(move || {
-                if let Ok(policy) = inner.lock() {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(policy.persist())
-                } else {
-                    tracing::warn!("affect policy lock poisoned; skipping persist");
-                    Ok(())
-                }
-            })
-            .await;
-            match result {
-                Ok(Err(e)) => tracing::warn!(%e, "affect policy persist failed"),
-                Err(e) => tracing::warn!(%e, "affect policy persist task panicked"),
-                _ => {}
-            }
-            Ok(())
-        })
-    }
-}
-
 fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest {
     CoreModelCallRequest {
         model: req.model,
@@ -528,13 +436,11 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
     // through PromptSpec for per-call assembly.
     let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
-    let affect_policy: Option<Arc<tokio::sync::Mutex<dyn RuntimeAffectPolicy>>> = {
+    let affect_policy: Option<Arc<tokio::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>> = {
         let daimon_state_path = workdir.join(".roko/state/daimon.json");
-        let core_policy: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>> =
-            Arc::new(std::sync::Mutex::new(DaimonPolicy::new(daimon_state_path)));
-        Some(Arc::new(tokio::sync::Mutex::new(
-            RuntimeAffectPolicyAdapter::new(core_policy),
-        )))
+        Some(Arc::new(tokio::sync::Mutex::new(DaimonPolicy::new(
+            daimon_state_path,
+        ))))
     };
 
     Ok(EffectServices {

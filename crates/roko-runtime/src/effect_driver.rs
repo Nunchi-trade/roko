@@ -6,17 +6,17 @@
 //! machine.
 
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use roko_core::RuntimeEvent;
-use roko_core::foundation::{
-    CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict,
-    ModelCallRequest, ModelCaller, PromptAssembler, PromptSpec,
-};
 pub use roko_core::foundation::{
-    ChatMessage, GateReport, MessageRole, ModelCallResponse, TokenUsage,
+    AffectPolicy, ChatMessage, DispatchModulation, GateReport, MessageRole, ModelCallRequest,
+    ModelCallResponse, TokenUsage,
+};
+use roko_core::foundation::{
+    CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+    PromptAssembler, PromptSpec,
 };
 
 use crate::event_bus::emit_runtime_event;
@@ -24,67 +24,6 @@ use crate::pipeline_state::PipelineInput;
 
 /// Fallible result type used by the effect driver.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// Boxed future (kept for internal use).
-pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-
-// -- AffectPolicy --
-
-/// Affect context snapshot for pre-dispatch modulation.
-#[derive(Debug, Clone)]
-pub struct AffectContext {
-    /// Current behavioral state label.
-    pub behavioral_state: String,
-    /// PAD vector: [Pleasure, Arousal, Dominance].
-    pub pad: [f32; 3],
-    /// Emotional tag label, if available.
-    pub emotional_tag: Option<String>,
-}
-
-/// Dispatch modulation parameters from the affect policy.
-#[derive(Debug, Clone)]
-pub struct DispatchModulation {
-    /// Tier bias: -1.0 (cheapest) to +1.0 (most capable).
-    pub tier_bias: f32,
-    /// Turn limit multiplier (1.0 = no change).
-    pub turn_limit_factor: f32,
-    /// Exploration rate [0.0, 1.0].
-    pub exploration_rate: f32,
-}
-
-impl Default for DispatchModulation {
-    fn default() -> Self {
-        Self {
-            tier_bias: 0.0,
-            turn_limit_factor: 1.0,
-            exploration_rate: 0.0,
-        }
-    }
-}
-
-/// Behavioral affect modulation policy for workflow dispatch.
-///
-/// When wired, the effect driver calls these methods at lifecycle points.
-/// The trait uses `BoxFuture` for persist to match the local async pattern.
-pub trait AffectPolicy: Send + Sync {
-    /// Called before dispatching a task.
-    fn pre_dispatch(&self, task_id: &str, role: &str) -> AffectContext;
-
-    /// Called after task completion.
-    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64);
-
-    /// Called after gate verdict.
-    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64);
-
-    /// Modulate dispatch parameters based on current affect state.
-    fn modulate_dispatch(&self, role: &str, params: &mut DispatchModulation);
-
-    /// Current behavioral state label for logging.
-    fn behavioral_state_label(&self) -> String;
-
-    /// Persist state to disk.
-    fn persist(&self) -> BoxFuture<'_, Result<()>>;
-}
 
 /// Services required by the `EffectDriver`.
 pub struct EffectServices {
@@ -289,13 +228,14 @@ impl EffectDriver {
                     }
                 }
 
-                report.first_failure().map_or(
-                    PipelineInput::GatesPassed,
-                    |failure| PipelineInput::GateFailed {
-                        gate: failure.gate_name.clone(),
-                        output: report.failure_summary(),
-                    },
-                )
+                report
+                    .first_failure()
+                    .map_or(PipelineInput::GatesPassed, |failure| {
+                        PipelineInput::GateFailed {
+                            gate: failure.gate_name.clone(),
+                            output: report.failure_summary(),
+                        }
+                    })
             }
             Err(err) => PipelineInput::GateFailed {
                 gate: "gate_runner".to_string(),
