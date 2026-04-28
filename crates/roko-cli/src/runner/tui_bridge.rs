@@ -3,8 +3,8 @@
 //! Wraps `StateHubSender` with convenience methods that publish
 //! `DashboardEvent` variants for each significant runner event.
 
-use roko_core::dashboard_snapshot::DashboardEvent;
 use crate::state_hub::StateHubSender;
+use roko_core::dashboard_snapshot::DashboardEvent;
 
 use super::types::RunnerEvent;
 

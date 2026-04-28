@@ -17,8 +17,8 @@ use crate::inline::styled;
 use crate::inline::symbols;
 use crate::inline::terminal::{InlineTerminal, should_use_inline};
 use crate::run::{RunReport, run_once};
-use crate::tui::Theme;
 use crate::state_hub::StateHub;
+use crate::tui::Theme;
 
 /// Run the universal loop with inline terminal output.
 ///

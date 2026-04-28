@@ -504,7 +504,10 @@ impl App {
 
     /// Build a new app connected to a shared `StateHub`.
     #[must_use]
-    pub fn new_connected(root: impl AsRef<Path>, state_hub: &crate::state_hub::SharedStateHub) -> Self {
+    pub fn new_connected(
+        root: impl AsRef<Path>,
+        state_hub: &crate::state_hub::SharedStateHub,
+    ) -> Self {
         Self::new_connected_with_page(root, None, state_hub)
     }
 

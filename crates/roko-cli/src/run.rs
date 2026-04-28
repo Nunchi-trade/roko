@@ -13,7 +13,7 @@ use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
-use crate::state_hub::StateHub;
+use crate::state_hub::{StateHub, StateHubSender};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
@@ -23,11 +23,11 @@ use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, Ta
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::foundation::{
-    ChatMessage as CoreChatMessage, FeedbackEvent as CoreFeedbackEvent,
-    FeedbackSink as CoreFeedbackSink, GateConfig as CoreGateConfig, GateRunner as CoreGateRunner,
-    MessageRole as CoreMessageRole, ModelCallRequest as CoreModelCallRequest,
-    ModelCaller as CoreModelCaller, PromptAssembler as CorePromptAssembler,
-    PromptSpec as CorePromptSpec,
+    ChatMessage as CoreChatMessage, EventConsumer as WorkflowEventConsumer,
+    FeedbackEvent as CoreFeedbackEvent, FeedbackSink as CoreFeedbackSink,
+    GateConfig as CoreGateConfig, GateRunner as CoreGateRunner, MessageRole as CoreMessageRole,
+    ModelCallRequest as CoreModelCallRequest, ModelCaller as CoreModelCaller,
+    PromptAssembler as CorePromptAssembler, PromptSpec as CorePromptSpec,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
@@ -97,6 +97,60 @@ pub struct PlanWorkflowReport {
     pub failed: usize,
     /// Per-task outcomes: `(task_id, success, message)`.
     pub outcomes: Vec<(String, bool, String)>,
+}
+
+/// Bridges WorkflowEngine lifecycle events to the StateHub for TUI/SSE/WS
+/// consumption.
+struct StateHubBridge {
+    sender: StateHubSender,
+}
+
+impl WorkflowEventConsumer for StateHubBridge {
+    fn consume(&self, event: &roko_core::RuntimeEvent) {
+        match event {
+            roko_core::RuntimeEvent::WorkflowStarted {
+                run_id,
+                template,
+                prompt,
+            } => {
+                self.sender.publish(DashboardEvent::PlanStarted {
+                    plan_id: run_id.clone(),
+                });
+                self.sender.publish(DashboardEvent::TaskStarted {
+                    plan_id: run_id.clone(),
+                    task_id: "workflow".to_string(),
+                    title: truncate(prompt, 60).to_string(),
+                    phase: format!("starting ({template})"),
+                });
+            }
+            roko_core::RuntimeEvent::PhaseTransition { run_id, from, to } => {
+                self.sender.publish(DashboardEvent::PhaseTransition {
+                    plan_id: run_id.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+            roko_core::RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+                let success = matches!(outcome, roko_core::WorkflowOutcome::Success { .. });
+                self.sender.publish(DashboardEvent::TaskCompleted {
+                    plan_id: run_id.clone(),
+                    task_id: "workflow".to_string(),
+                    outcome: format!("{outcome:?}"),
+                });
+                self.sender.publish(DashboardEvent::PlanCompleted {
+                    plan_id: run_id.clone(),
+                    success,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn truncate(text: &str, max_chars: usize) -> &str {
+    text.char_indices()
+        .nth(max_chars)
+        .map_or(text, |(idx, _)| &text[..idx])
 }
 
 struct RuntimeModelCallerAdapter {
@@ -365,6 +419,18 @@ pub async fn run_with_workflow_engine(
     workflow_template: &str,
     enabled_gates: Vec<String>,
 ) -> anyhow::Result<()> {
+    run_with_workflow_engine_with_hub(prompt, workdir, workflow_template, enabled_gates, None).await
+}
+
+/// Execute a prompt via the new WorkflowEngine and optionally publish lifecycle
+/// events to an existing StateHub.
+pub async fn run_with_workflow_engine_with_hub(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    external_hub: Option<&StateHub>,
+) -> anyhow::Result<()> {
     use roko_runtime::effect_driver::RuntimeEvent;
     use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
 
@@ -394,6 +460,14 @@ pub async fn run_with_workflow_engine(
     let logger = JsonlLogger::from_roko_dir(&roko_dir);
     let consumer = Arc::new(JsonlWorkflowConsumer { logger });
     engine.add_consumer(consumer);
+
+    // Bridge workflow events to the StateHub for TUI/SSE/WS consumers.
+    if let Some(hub) = external_hub {
+        let bridge = Arc::new(StateHubBridge {
+            sender: hub.sender(),
+        });
+        engine.add_consumer(bridge);
+    }
 
     let result = engine
         .run(config)
@@ -528,13 +602,13 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
                     continue;
                 }
 
-                let deps_ready = task
-                    .depends_on
-                    .iter()
-                    .all(|dependency| match index_by_id.get(dependency) {
-                        Some(dependency_index) => emitted[*dependency_index],
-                        None => true,
-                    });
+                let deps_ready =
+                    task.depends_on
+                        .iter()
+                        .all(|dependency| match index_by_id.get(dependency) {
+                            Some(dependency_index) => emitted[*dependency_index],
+                            None => true,
+                        });
                 if deps_ready {
                     emitted[index] = true;
                     ordered.push(task.clone());

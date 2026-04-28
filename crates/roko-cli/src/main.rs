@@ -2076,15 +2076,9 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
                     roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
                 // TODO(converge): pass server's SharedStateHub once roko-core
                 // re-exports StateHub to unify the duplicated #[path] types.
-                let tui_result = commands::dashboard::cmd_dashboard(
-                    cli,
-                    Some(wd),
-                    None,
-                    false,
-                    false,
-                    None,
-                )
-                .await;
+                let tui_result =
+                    commands::dashboard::cmd_dashboard(cli, Some(wd), None, false, false, None)
+                        .await;
                 state.cancel.cancel();
                 match server_handle.await {
                     Ok(Ok(())) => {}
@@ -2702,8 +2696,7 @@ mod tests {
 
     #[test]
     fn cli_parses_engine_v2_flag() {
-        let cli =
-            Cli::try_parse_from(["roko", "run", "do something", "--engine", "v2"]).unwrap();
+        let cli = Cli::try_parse_from(["roko", "run", "do something", "--engine", "v2"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Run {
