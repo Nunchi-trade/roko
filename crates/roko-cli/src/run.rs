@@ -154,6 +154,18 @@ fn truncate(text: &str, max_chars: usize) -> &str {
         .map_or(text, |(idx, _)| &text[..idx])
 }
 
+/// Format a duration for human display: "3.2s", "1m 42s", "0.8s".
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        let mins = secs as u64 / 60;
+        let remaining = secs as u64 % 60;
+        format!("{mins}m {remaining}s")
+    }
+}
+
 struct RuntimeModelCallerAdapter {
     inner: Arc<dyn CoreModelCaller>,
 }
@@ -432,6 +444,8 @@ pub async fn run_with_workflow_engine_with_hub(
     enabled_gates: Vec<String>,
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<()> {
+    let start_time = std::time::Instant::now();
+
     use roko_runtime::effect_driver::RuntimeEvent;
     use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
 
@@ -446,6 +460,7 @@ pub async fn run_with_workflow_engine_with_hub(
     }
 
     let services = build_workflow_effect_services(workdir)?;
+    let gates_summary = (!enabled_gates.is_empty()).then(|| enabled_gates.join(", "));
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
@@ -501,6 +516,25 @@ pub async fn run_with_workflow_engine_with_hub(
         WorkflowOutcome::Cancelled => {
             output_format::warning("workflow cancelled");
         }
+    }
+
+    // Efficiency summary.
+    let elapsed = start_time.elapsed();
+    output_format::divider();
+    output_format::step("Summary", "");
+    output_format::branch(&format!(
+        "duration   {}",
+        output_format::cyan(&format_duration(elapsed)),
+    ));
+    output_format::branch(&format!(
+        "iterations {}",
+        output_format::cyan(&result.iterations.to_string()),
+    ));
+    if let Some(gates_summary) = gates_summary {
+        output_format::branch(&format!(
+            "gates      {}",
+            output_format::dim(&gates_summary),
+        ));
     }
     output_format::end(&output_format::dim(&result.run_id));
 
