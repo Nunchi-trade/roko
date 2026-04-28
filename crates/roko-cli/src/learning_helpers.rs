@@ -308,7 +308,7 @@ pub(crate) async fn load_or_create_playbook_store(path: &Path) -> Result<Playboo
 // ─── Experiment overrides ────────────────────────────────────────────────
 
 pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, workdir: &Path) {
-    let overrides_path = super::orchestrate::static_overrides_path(workdir);
+    let overrides_path = crate::config_helpers::static_overrides_path(workdir);
     let winners = {
         let store = learning.experiment_store().lock();
         let winners = store.concluded_winners();

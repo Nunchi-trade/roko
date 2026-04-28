@@ -58,6 +58,7 @@ pub mod daemon;
 pub mod demo_cmd;
 pub mod deployment;
 pub mod dispatch;
+#[cfg(feature = "legacy-orchestrate")]
 pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
