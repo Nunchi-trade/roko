@@ -13,6 +13,7 @@ use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use crate::output_format;
+#[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
 use crate::state_hub::{StateHub, StateHubSender};
 use anyhow::{Context as _, Result, anyhow};
@@ -20,6 +21,7 @@ use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
 use roko_agent::{AgentResult, OllamaLlmBackend};
+#[cfg(feature = "legacy-orchestrate")]
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
@@ -74,6 +76,7 @@ impl RunReport {
 }
 
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
+#[cfg(feature = "legacy-orchestrate")]
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
     let token = roko_core::generate_share_token();
     let transcript = roko_serve::routes::shared_runs::RunTranscript {
@@ -104,7 +107,38 @@ pub fn write_shared_workflow_run(
     report: &WorkflowRunReport,
 ) -> anyhow::Result<String> {
     let token = roko_core::generate_share_token();
-    let transcript = workflow_report_as_run_transcript(token.clone(), prompt, agent, role, report);
+    let (report_agent, report_role) = workflow_report_agent_role(report);
+    let transcript = roko_serve::routes::shared_runs::RunTranscript {
+        id: token.clone(),
+        agent: non_empty(agent)
+            .map(ToOwned::to_owned)
+            .or(report_agent)
+            .unwrap_or_else(|| "workflow".to_string()),
+        role: non_empty(role)
+            .map(ToOwned::to_owned)
+            .or(report_role)
+            .unwrap_or_else(|| "workflow".to_string()),
+        prompt: prompt.to_string(),
+        success: report.success,
+        gates: report
+            .gates
+            .iter()
+            .map(|gate| (gate.name.clone(), gate.passed))
+            .collect(),
+        output: non_empty(&report.output).map(ToOwned::to_owned),
+        cost_usd: report.cost,
+        input_tokens: None,
+        output_tokens: None,
+        model: non_empty(&report.model).map(ToOwned::to_owned),
+        duration_s: Some(report.duration_secs),
+        episode_id: Some(report.run_id.clone()),
+        transcript: report.events.clone(),
+        timestamp: report
+            .events
+            .first()
+            .map(|event| event.ts.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    };
     write_shared_transcript(workdir, &transcript)
 }
 
@@ -226,6 +260,20 @@ fn non_empty(text: &str) -> Option<&str> {
 
 fn non_empty_or(text: &str, fallback: &str) -> String {
     non_empty(text).unwrap_or(fallback).to_string()
+}
+
+fn workflow_report_agent_role(report: &WorkflowRunReport) -> (Option<String>, Option<String>) {
+    let mut first = None;
+    for envelope in &report.events {
+        if let roko_core::RuntimeEvent::AgentSpawned { agent_id, role, .. } = &envelope.payload {
+            let values = (Some(agent_id.clone()), Some(role.clone()));
+            if role == "implementer" {
+                return values;
+            }
+            first.get_or_insert(values);
+        }
+    }
+    first.unwrap_or((None, None))
 }
 
 /// Format a duration for human display: "3.2s", "1m 42s", "0.8s".
@@ -468,52 +516,6 @@ pub fn print_workflow_run_report(
         }
     }
     output_format::end(&output_format::dim(&report.run_id));
-}
-
-pub fn workflow_report_as_run_report(report: &WorkflowRunReport) -> RunReport {
-    RunReport {
-        episode_id: report.run_id.clone(),
-        prompt_id: report.prompt_summary.clone(),
-        agent_output_id: report.run_id.clone(),
-        agent_success: report.success,
-        gate_verdicts: report
-            .gates
-            .iter()
-            .map(|gate| (gate.name.clone(), gate.passed))
-            .collect(),
-        total_signals: report.events.len(),
-        output_text: Some(report.output.clone()),
-    }
-}
-
-pub fn workflow_report_as_run_transcript(
-    token: String,
-    prompt: &str,
-    agent: &str,
-    role: &str,
-    report: &WorkflowRunReport,
-) -> roko_serve::routes::shared_runs::RunTranscript {
-    roko_serve::routes::shared_runs::RunTranscript {
-        id: token,
-        agent: non_empty_or(agent, "unconfigured"),
-        role: non_empty_or(role, "unconfigured"),
-        prompt: prompt.to_string(),
-        success: report.success,
-        gates: report
-            .gates
-            .iter()
-            .map(|gate| (gate.name.clone(), gate.passed))
-            .collect(),
-        output: non_empty(&report.output).map(ToOwned::to_owned),
-        cost_usd: report.cost,
-        input_tokens: None,
-        output_tokens: None,
-        model: Some(non_empty_or(&report.model, "unconfigured")),
-        duration_s: Some(report.duration_secs),
-        episode_id: Some(report.run_id.clone()),
-        transcript: report.events.clone(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }
 }
 
 /// Execute a plan's tasks via WorkflowEngine (v2 engine path for `roko plan run`).
@@ -1178,6 +1180,7 @@ pub async fn run_once(
     )
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> String {
     let role = &config.prompt.role;
     let workspace = "Single-shot execution through `roko run`.";
@@ -1224,6 +1227,7 @@ fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> S
     )
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn gate_policy_context(config: &Config) -> String {
     if config.gates.is_empty() {
         return "Verification gates: none configured. Still perform the smallest relevant local check before finishing.".to_string();
@@ -1259,12 +1263,14 @@ fn gate_policy_context(config: &Config) -> String {
     context
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn fallback_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String {
     format!(
         "You are a {role} agent.\n\n## Current Task\n\n{prompt_text}\n\n## Tool Instructions\n\nAvailable tools: {tools_csv}\n\n## Project Conventions\n\nMake minimal, targeted changes and run relevant verification before finishing."
     )
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn claude_tool_allowlist(role: &str) -> String {
     let registry = StaticToolRegistry::new();
     let tools: Vec<_> = parse_agent_role(role).map_or_else(
@@ -1970,7 +1976,7 @@ fn resolved_model(config: &Config) -> String {
     if let Some(model) = &config.agent.model {
         return model.clone();
     }
-    // Check routing config for configured default model before falling back to hardcoded.
+    // Check routing config for configured default model before falling back to the command label.
     if let Ok(mut rc) = roko_core::config::load_config(std::path::Path::new(".")) {
         rc.apply_process_env();
         crate::config::merge_global_providers(&mut rc);
@@ -1978,22 +1984,18 @@ fn resolved_model(config: &Config) -> String {
             return rc.agent.default_model;
         }
     }
-    if config.agent.command.eq_ignore_ascii_case("claude") {
-        "claude-sonnet-4-6".to_string()
-    } else {
-        "unknown-model".to_string()
-    }
+    config.agent.command.trim().to_string()
 }
 
 fn dashboard_agent_model(config: &Config) -> String {
     let model = resolved_model(config);
-    if model != "unknown-model" {
+    if !model.trim().is_empty() {
         return model;
     }
 
     let command = config.agent.command.trim();
     if command.is_empty() {
-        "unknown-model".to_string()
+        "unconfigured".to_string()
     } else {
         command.to_string()
     }
@@ -2087,6 +2089,7 @@ fn split_resume_arg(args: &[String]) -> (Vec<String>, Option<String>) {
     (cleaned, resume)
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Engram> {
     let full_path = if spec.path.is_absolute() {
         spec.path.clone()
@@ -2247,7 +2250,7 @@ fn parse_build_system(s: &str) -> Result<BuildSystem, String> {
 
 /// Extract model keys from the project's `roko.toml` for cascade router
 /// initialization. Returns an empty vec if the config is missing or has
-/// no models (which falls back to the hardcoded defaults).
+/// no models.
 fn load_roko_config_models(workdir: &Path) -> Vec<String> {
     let path = workdir.join("roko.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -2407,6 +2410,7 @@ mod tests {
         assert!(!r.overall_success());
     }
 
+    #[cfg(feature = "legacy-orchestrate")]
     #[test]
     fn write_shared_run_creates_file() {
         let tmp = std::env::temp_dir().join("roko-test-share");
@@ -2512,6 +2516,7 @@ mod tests {
         )));
     }
 
+    #[cfg(feature = "legacy-orchestrate")]
     #[test]
     fn run_system_prompt_contains_composed_layers_and_gates() {
         let mut config = Config::default();
