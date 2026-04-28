@@ -55,6 +55,7 @@ use roko_runtime::{
 };
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -83,6 +84,19 @@ impl RunReport {
     pub fn overall_success(&self) -> bool {
         self.agent_success && self.gate_verdicts.iter().all(|(_, ok)| *ok)
     }
+}
+
+/// Summary of running a plan through the WorkflowEngine.
+#[derive(Debug)]
+pub struct PlanWorkflowReport {
+    /// Total tasks attempted.
+    pub total: usize,
+    /// Tasks that completed successfully.
+    pub passed: usize,
+    /// Tasks that failed.
+    pub failed: usize,
+    /// Per-task outcomes: `(task_id, success, message)`.
+    pub outcomes: Vec<(String, bool, String)>,
 }
 
 struct RuntimeModelCallerAdapter {
@@ -270,20 +284,7 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
     }
 }
 
-/// Execute a prompt via the new WorkflowEngine (event-driven architecture).
-///
-/// This is an alternative to the existing orchestrate.rs path. It uses:
-/// - PipelineStateV2 for state machine decisions
-/// - EffectDriver for side-effect execution
-/// - RuntimeEvent bus for observability
-///
-/// Enable via config or `--engine v2` flag (to be wired).
-pub async fn run_with_workflow_engine(
-    prompt: &str,
-    workdir: &std::path::Path,
-    workflow_template: &str,
-    enabled_gates: Vec<String>,
-) -> anyhow::Result<()> {
+fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
     // Import the concrete service implementations.
     use roko_agent::model_call_service::ModelCallService;
     use roko_compose::prompt_assembly_service::PromptAssemblyService;
@@ -316,7 +317,6 @@ pub async fn run_with_workflow_engine(
         .unwrap_or_else(|| model_config.agent.default_model.clone());
     let model = resolve_model(&model_config, &model_key).slug;
 
-    // Build services.
     let feedback_sink: Arc<dyn CoreFeedbackSink> =
         Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
@@ -334,25 +334,43 @@ pub async fn run_with_workflow_engine(
     let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
 
-    let services = EffectServices {
+    Ok(EffectServices {
         model_caller: Arc::new(RuntimeModelCallerAdapter::new(model_caller)),
         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
         gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
         affect_policy: None,
-    };
+    })
+}
 
-    // Select workflow config.
-    let workflow = match workflow_template {
+fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
+    match workflow_template {
         "express" => WorkflowConfig::express(),
         "full" => WorkflowConfig::full(),
         _ => WorkflowConfig::standard(),
-    };
+    }
+}
+
+/// Execute a prompt via the new WorkflowEngine (event-driven architecture).
+///
+/// This is an alternative to the existing orchestrate.rs path. It uses:
+/// - PipelineStateV2 for state machine decisions
+/// - EffectDriver for side-effect execution
+/// - RuntimeEvent bus for observability
+///
+/// Enable via config or `--engine v2` flag (to be wired).
+pub async fn run_with_workflow_engine(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+) -> anyhow::Result<()> {
+    let services = build_workflow_effect_services(workdir)?;
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
         workdir: workdir.to_path_buf(),
-        workflow,
+        workflow: workflow_config_for_template(workflow_template),
         enabled_gates,
         commit_prefix: Some("feat".to_string()),
     };
@@ -371,6 +389,189 @@ pub async fn run_with_workflow_engine(
     println!("Iterations: {}", result.iterations);
 
     Ok(())
+}
+
+/// Execute a plan's tasks via WorkflowEngine (v2 engine path for `roko plan run`).
+///
+/// Iterates over discovered task prompts and runs each sequentially through
+/// the WorkflowEngine. Skips the 21K-line PlanRunner orchestration path.
+pub async fn run_plan_with_workflow_engine(
+    tasks: &[(String, String)],
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+) -> anyhow::Result<PlanWorkflowReport> {
+    let services = build_workflow_effect_services(workdir)?;
+    let engine = WorkflowEngine::new(services);
+    let workflow = workflow_config_for_template(workflow_template);
+
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut outcomes = Vec::with_capacity(tasks.len());
+
+    for (task_id, prompt) in tasks {
+        let config = WorkflowRunConfig {
+            prompt: prompt.clone(),
+            workdir: workdir.to_path_buf(),
+            workflow: workflow.clone(),
+            enabled_gates: enabled_gates.clone(),
+            commit_prefix: Some("feat".to_string()),
+        };
+
+        match engine.run(config).await {
+            Ok(result) => {
+                let success = matches!(
+                    &result.outcome,
+                    roko_runtime::workflow_engine::WorkflowOutcome::Success { .. }
+                );
+                let message = format!("{:?} in {} iterations", result.outcome, result.iterations);
+                println!("[{task_id}] {message}");
+                tracing::info!(
+                    task_id,
+                    outcome = ?result.outcome,
+                    iterations = result.iterations,
+                    "v2 workflow task complete"
+                );
+                if success {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+                outcomes.push((task_id.clone(), success, message));
+            }
+            Err(error) => {
+                let message = error.to_string();
+                println!("[{task_id}] failed: {message}");
+                tracing::warn!(task_id, error = %message, "v2 workflow task failed");
+                failed += 1;
+                outcomes.push((task_id.clone(), false, message));
+            }
+        }
+    }
+
+    Ok(PlanWorkflowReport {
+        total: tasks.len(),
+        passed,
+        failed,
+        outcomes,
+    })
+}
+
+/// Discover task (id, prompt) pairs from a plans directory.
+///
+/// Reads `tasks.toml` files under `plans_dir/*/tasks.toml` and extracts each
+/// task's `id` and `prompt` fields. Returns them in dependency order if
+/// `depends_on` is present, otherwise in declaration order.
+pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<(String, String)>> {
+    #[derive(serde::Deserialize)]
+    struct TasksToml {
+        #[serde(default, rename = "task")]
+        tasks: Vec<TaskEntry>,
+    }
+
+    #[derive(Clone, serde::Deserialize)]
+    struct TaskEntry {
+        id: String,
+        #[serde(default)]
+        prompt: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        depends_on: Vec<String>,
+    }
+
+    fn task_prompt(task: &TaskEntry) -> String {
+        if !task.prompt.trim().is_empty() {
+            task.prompt.clone()
+        } else if let Some(description) = task
+            .description
+            .as_ref()
+            .filter(|description| !description.trim().is_empty())
+        {
+            description.clone()
+        } else {
+            task.id.clone()
+        }
+    }
+
+    fn dependency_ordered_tasks(tasks: Vec<TaskEntry>) -> Vec<TaskEntry> {
+        let mut index_by_id = HashMap::with_capacity(tasks.len());
+        for (index, task) in tasks.iter().enumerate() {
+            index_by_id.entry(task.id.clone()).or_insert(index);
+        }
+
+        let mut emitted = vec![false; tasks.len()];
+        let mut ordered = Vec::with_capacity(tasks.len());
+
+        loop {
+            let mut progressed = false;
+            for (index, task) in tasks.iter().enumerate() {
+                if emitted[index] {
+                    continue;
+                }
+
+                let deps_ready = task
+                    .depends_on
+                    .iter()
+                    .all(|dependency| match index_by_id.get(dependency) {
+                        Some(dependency_index) => emitted[*dependency_index],
+                        None => true,
+                    });
+                if deps_ready {
+                    emitted[index] = true;
+                    ordered.push(task.clone());
+                    progressed = true;
+                }
+            }
+
+            if ordered.len() == tasks.len() {
+                break;
+            }
+            if !progressed {
+                for (index, task) in tasks.iter().enumerate() {
+                    if !emitted[index] {
+                        ordered.push(task.clone());
+                    }
+                }
+                break;
+            }
+        }
+
+        ordered
+    }
+
+    let mut task_files = Vec::new();
+    if plans_dir.join("tasks.toml").is_file() {
+        task_files.push(plans_dir.join("tasks.toml"));
+    } else {
+        for entry in
+            std::fs::read_dir(plans_dir).with_context(|| format!("read {}", plans_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let tasks_path = path.join("tasks.toml");
+            if path.is_dir() && tasks_path.is_file() {
+                task_files.push(tasks_path);
+            }
+        }
+        task_files.sort();
+    }
+
+    let mut prompts = Vec::new();
+    for tasks_path in task_files {
+        let content = std::fs::read_to_string(&tasks_path)
+            .with_context(|| format!("read {}", tasks_path.display()))?;
+        let tasks = toml::from_str::<TasksToml>(&content)
+            .with_context(|| format!("parse {}", tasks_path.display()))?;
+
+        prompts.extend(
+            dependency_ordered_tasks(tasks.tasks)
+                .into_iter()
+                .map(|task| (task.id.clone(), task_prompt(&task))),
+        );
+    }
+
+    Ok(prompts)
 }
 
 /// Run the universal loop once for `prompt_text` under `workdir`.

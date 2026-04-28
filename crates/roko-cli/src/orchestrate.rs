@@ -7500,7 +7500,46 @@ impl PlanRunner {
     /// This is the documented runtime entrypoint used by `roko plan run`.
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     pub async fn run(&mut self, path: &Path) -> Result<OrchestrationReport> {
+        // V2 engine path: iterate tasks through WorkflowEngine instead of
+        // the full 14-phase executor state machine.
+        if std::env::var("ROKO_ENGINE").as_deref() == Ok("v2") {
+            return self.run_with_v2_engine(path).await;
+        }
+
         self.run_task_plans(path).await
+    }
+
+    async fn run_with_v2_engine(&self, path: &Path) -> Result<OrchestrationReport> {
+        let tasks = crate::run::discover_task_prompts(path)?;
+        let enabled_gates: Vec<String> = self
+            .config
+            .gates
+            .iter()
+            .map(|gate| match gate {
+                crate::config::GateConfig::Compile { .. } => "compile".to_string(),
+                crate::config::GateConfig::Clippy { .. } => "clippy".to_string(),
+                crate::config::GateConfig::Test { .. } => "test".to_string(),
+                crate::config::GateConfig::Shell { .. } => "shell".to_string(),
+            })
+            .collect();
+
+        let report = crate::run::run_plan_with_workflow_engine(
+            &tasks,
+            &self.workdir,
+            "standard",
+            enabled_gates,
+        )
+        .await
+        .map_err(|e| anyhow!("v2 engine plan run failed: {e}"))?;
+
+        tracing::info!(
+            total = report.total,
+            passed = report.passed,
+            failed = report.failed,
+            "v2 engine plan run complete"
+        );
+
+        Ok(self.current_report())
     }
 
     /// Run plans using tasks.toml files, routing through the full 14-phase
