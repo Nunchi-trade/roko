@@ -3,18 +3,17 @@
 //! Ties together `PipelineStateV2` (decisions) and `EffectDriver` (effects)
 //! into a run loop. This is the shared entry point for CLI, ACP, and HTTP.
 //!
-//! TODO(arch): Replace the local workflow event and consumer contracts with
-//! `roko_core::runtime_event::RuntimeEvent` and `roko_core::foundation::EventConsumer`
-//! once the manifest dependency direction allows `roko-runtime -> roko-core`.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use roko_core::RuntimeEvent;
+use roko_core::foundation::EventConsumer;
+
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
 use crate::event_bus::emit_runtime_event;
-use crate::pipeline_state::{PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig};
 pub use crate::pipeline_state::WorkflowOutcome;
+use crate::pipeline_state::{PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig};
 
 /// Configuration for a workflow run.
 #[derive(Debug, Clone)]
@@ -42,42 +41,6 @@ pub struct WorkflowResult {
     pub iterations: u32,
 }
 
-/// Runtime lifecycle events emitted directly by the workflow engine.
-#[derive(Debug, Clone)]
-pub enum WorkflowEvent {
-    /// Workflow execution has started.
-    WorkflowStarted {
-        /// Workflow run id.
-        run_id: String,
-        /// Workflow template label.
-        template: String,
-        /// Original user prompt.
-        prompt: String,
-    },
-    /// Pipeline phase changed.
-    PhaseTransition {
-        /// Workflow run id.
-        run_id: String,
-        /// Previous phase label.
-        from: String,
-        /// New phase label.
-        to: String,
-    },
-    /// Workflow execution has completed.
-    WorkflowCompleted {
-        /// Workflow run id.
-        run_id: String,
-        /// Final workflow outcome.
-        outcome: WorkflowOutcome,
-    },
-}
-
-/// Consume workflow lifecycle events for side effects such as logging or UI updates.
-pub trait WorkflowEventConsumer: Send + Sync {
-    /// Called synchronously when the workflow engine emits an event.
-    fn consume(&self, event: &WorkflowEvent);
-}
-
 /// The top-level workflow execution engine.
 ///
 /// Usage:
@@ -88,7 +51,7 @@ pub trait WorkflowEventConsumer: Send + Sync {
 pub struct WorkflowEngine {
     services: EffectServices,
     /// Optional event consumers to notify.
-    consumers: Vec<Arc<dyn WorkflowEventConsumer>>,
+    consumers: Vec<Arc<dyn EventConsumer>>,
 }
 
 impl WorkflowEngine {
@@ -101,7 +64,7 @@ impl WorkflowEngine {
     }
 
     /// Add an event consumer that will be notified of workflow lifecycle events.
-    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>) {
+    pub fn add_consumer(&mut self, consumer: Arc<dyn EventConsumer>) {
         self.consumers.push(consumer);
     }
 
@@ -115,8 +78,7 @@ impl WorkflowEngine {
     pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult> {
         let run_id = generate_run_id();
 
-        let mut pipeline =
-            PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+        let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
 
         let driver = EffectDriver::new(
             EffectServices {
@@ -129,7 +91,7 @@ impl WorkflowEngine {
             config.workdir.clone(),
         );
 
-        self.emit(WorkflowEvent::WorkflowStarted {
+        self.emit(RuntimeEvent::WorkflowStarted {
             run_id: run_id.clone(),
             template: template_name(&config.workflow).to_string(),
             prompt: config.prompt.clone(),
@@ -154,22 +116,20 @@ impl WorkflowEngine {
                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
                         .await
                 }
-                PipelineOutput::SpawnReviewer { diff_context } => {
-                    reviewer_input(
-                        driver
-                            .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
-                            .await,
-                    )
-                }
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input(
+                    driver
+                        .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                        .await,
+                ),
                 PipelineOutput::RunGates => driver.run_gates(&config.enabled_gates).await,
                 PipelineOutput::Commit => {
                     let message = commit_message(&config);
                     driver.commit(&message).await
                 }
                 PipelineOutput::Done { outcome } => {
-                    self.emit(WorkflowEvent::WorkflowCompleted {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
                         run_id: run_id.clone(),
-                        outcome: outcome.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
                     });
 
                     // TODO(arch): Record final workflow feedback once the local
@@ -184,9 +144,9 @@ impl WorkflowEngine {
                     let outcome = WorkflowOutcome::Halted {
                         reason: reason.clone(),
                     };
-                    self.emit(WorkflowEvent::WorkflowCompleted {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
                         run_id: run_id.clone(),
-                        outcome: outcome.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
                     });
 
                     // TODO(arch): Record final workflow feedback once the local
@@ -203,7 +163,7 @@ impl WorkflowEngine {
             let new_phase = pipeline.phase.label();
 
             if old_phase != new_phase {
-                self.emit(WorkflowEvent::PhaseTransition {
+                self.emit(RuntimeEvent::PhaseTransition {
                     run_id: run_id.clone(),
                     from: old_phase.to_string(),
                     to: new_phase.to_string(),
@@ -212,12 +172,30 @@ impl WorkflowEngine {
         }
     }
 
-    fn emit(&self, event: WorkflowEvent) {
+    fn emit(&self, event: RuntimeEvent) {
         for consumer in &self.consumers {
             consumer.consume(&event);
         }
 
         emit_runtime_event(event);
+    }
+}
+
+fn runtime_workflow_outcome(
+    outcome: &WorkflowOutcome,
+) -> roko_core::runtime_event::WorkflowOutcome {
+    // TODO(converge): Remove this adapter once PipelineStateV2 uses
+    // roko_core::runtime_event::WorkflowOutcome directly.
+    match outcome {
+        WorkflowOutcome::Success { commit_hash } => {
+            roko_core::runtime_event::WorkflowOutcome::Success {
+                commit_hash: commit_hash.clone(),
+            }
+        }
+        WorkflowOutcome::Halted { reason } => roko_core::runtime_event::WorkflowOutcome::Halted {
+            reason: reason.clone(),
+        },
+        WorkflowOutcome::Cancelled => roko_core::runtime_event::WorkflowOutcome::Cancelled,
     }
 }
 
@@ -243,10 +221,10 @@ fn reviewer_input(input: PipelineInput) -> PipelineInput {
 
 fn commit_message(config: &WorkflowRunConfig) -> String {
     let prompt = truncate(&config.prompt, 60);
-    config
-        .commit_prefix
-        .as_deref()
-        .map_or_else(|| format!("feat: {prompt}"), |prefix| format!("{prefix}: {prompt}"))
+    config.commit_prefix.as_deref().map_or_else(
+        || format!("feat: {prompt}"),
+        |prefix| format!("{prefix}: {prompt}"),
+    )
 }
 
 fn template_name(config: &WorkflowConfig) -> &'static str {

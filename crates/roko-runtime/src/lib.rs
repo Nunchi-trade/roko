@@ -54,8 +54,8 @@ pub mod jsonl_logger;
 pub mod lifecycle;
 pub mod metrics;
 pub mod pipeline_state;
-pub mod projection;
 pub mod process;
+pub mod projection;
 pub mod resource;
 pub mod task_scheduler;
 pub mod theta_consumer;
@@ -63,13 +63,7 @@ pub mod workflow_engine;
 
 pub use effect_driver::{EffectDriver, EffectServices};
 // Foundation types re-exported from roko-core for backwards compatibility
-pub use roko_core::foundation::{
-    ChatMessage, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, GateVerdict,
-    MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
-    TokenUsage,
-};
-pub use roko_core::RuntimeEvent;
-pub use jsonl_logger::{EventConsumer, JsonlLogger};
+pub use jsonl_logger::JsonlLogger;
 pub use lifecycle::{
     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
     GitOpsRetryPolicy, HealthProbeConfig, HookSpec, LifecycleHooks, LifecycleTransition,
@@ -81,7 +75,11 @@ pub use pipeline_state::{
     Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
 };
 pub use projection::{RunSummary, RuntimeProjection};
-pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
-pub use workflow_engine::{
-    WorkflowEngine, WorkflowEvent, WorkflowEventConsumer, WorkflowRunConfig, WorkflowResult,
+pub use roko_core::RuntimeEvent;
+pub use roko_core::foundation::{
+    ChatMessage, EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner,
+    GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
+    PromptSpec, TokenUsage,
 };
+pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
+pub use workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
