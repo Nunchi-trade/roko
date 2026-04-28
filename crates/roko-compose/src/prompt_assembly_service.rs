@@ -9,6 +9,7 @@ use roko_core::{AgentRole, Result};
 use roko_learn::episode_logger::{Episode, EpisodeLogger};
 use roko_learn::playbook::{PlaybookStore, QueryContext};
 use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -42,6 +43,8 @@ pub struct PromptAssemblyService {
     tool_instructions: Option<String>,
     /// Optional token cap passed through to the system prompt builder.
     token_budget: Option<usize>,
+    /// Per-section effectiveness scores used to skip low-value sections and scale budget.
+    section_effectiveness: Option<HashMap<String, f64>>,
 }
 
 impl PromptAssemblyService {
@@ -56,6 +59,7 @@ impl PromptAssemblyService {
             playbook_store: None,
             tool_instructions: None,
             token_budget: None,
+            section_effectiveness: None,
         }
     }
 
@@ -107,6 +111,55 @@ impl PromptAssemblyService {
         self.token_budget = Some(budget);
         self
     }
+
+    /// Set per-section effectiveness scores.
+    ///
+    /// Keys are section names matching the 9 builder layers:
+    /// `"identity"`, `"conventions"`, `"domain"`, `"context"`, `"task"`,
+    /// `"gate_feedback"`, `"tools"`, `"playbooks"`, `"anti_patterns"`.
+    ///
+    /// Values are effectiveness scores in `[0.0, 1.0]`. Sections with
+    /// score < 0.1 are skipped entirely. Scores are used to scale the
+    /// section's share of the token budget.
+    #[must_use]
+    pub fn with_section_effectiveness(mut self, scores: HashMap<String, f64>) -> Self {
+        self.section_effectiveness = Some(scores);
+        self
+    }
+
+    fn should_include(&self, section: &str) -> bool {
+        self.section_effectiveness
+            .as_ref()
+            .and_then(|scores| scores.get(section))
+            .map_or(true, |&score| score >= 0.1)
+    }
+
+    /// Returns (sum of included section scores, total section count).
+    fn effective_budget_ratio(&self) -> (f64, f64) {
+        let sections = [
+            "identity",
+            "conventions",
+            "domain",
+            "context",
+            "task",
+            "gate_feedback",
+            "tools",
+            "playbooks",
+            "anti_patterns",
+        ];
+        let total = sections.len() as f64;
+        let included = sections
+            .iter()
+            .filter(|section| self.should_include(section))
+            .map(|section| {
+                self.section_effectiveness
+                    .as_ref()
+                    .and_then(|scores| scores.get(*section).copied())
+                    .unwrap_or(1.0)
+            })
+            .sum();
+        (included, total)
+    }
 }
 
 impl Default for PromptAssemblyService {
@@ -125,13 +178,17 @@ impl PromptAssembler for PromptAssemblyService {
         builder = builder.with_cache_markers();
         // SystemPromptBuilder's current API is no-arg; this is equivalent to with_cache_markers(true).
 
-        if let Some(conventions) = conventions_for_spec(&spec, self.default_conventions.as_deref())
+        if self.should_include("conventions")
+            && let Some(conventions) =
+                conventions_for_spec(&spec, self.default_conventions.as_deref())
         {
             builder = builder.with_conventions(conventions);
         }
 
         let mut context_blocks = Vec::new();
-        if let Some(ref episodes_path) = self.episodes_path {
+        if self.should_include("context")
+            && let Some(ref episodes_path) = self.episodes_path
+        {
             if let Ok(episodes) = EpisodeLogger::read_all(episodes_path).await {
                 let recent = episodes.into_iter().rev().take(5).collect::<Vec<_>>();
                 if !recent.is_empty() {
@@ -140,7 +197,9 @@ impl PromptAssembler for PromptAssemblyService {
             }
         }
 
-        if let Some(ref store) = self.playbook_store {
+        if self.should_include("playbooks")
+            && let Some(ref store) = self.playbook_store
+        {
             let task_text = spec.task.as_deref().unwrap_or("");
             let ctx = QueryContext {
                 task_id: String::new(),
@@ -157,40 +216,52 @@ impl PromptAssembler for PromptAssemblyService {
             }
         }
 
-        if let Some(domain) = domain_context_for_spec(
-            &spec,
-            self.domain_context.as_deref(),
-            self.knowledge_store.as_deref(),
-        ) {
-            builder = builder.with_domain(domain);
+        if self.should_include("domain") {
+            if let Some(domain) = domain_context_for_spec(
+                &spec,
+                self.domain_context.as_deref(),
+                self.knowledge_store.as_deref(),
+            ) {
+                builder = builder.with_domain(domain);
+            }
         }
 
-        if let Some(workspace_map) = workspace_map_for_spec(&spec) {
+        if self.should_include("context")
+            && let Some(workspace_map) = workspace_map_for_spec(&spec)
+        {
             context_blocks.push(workspace_map);
         }
 
-        if !context_blocks.is_empty() {
+        if self.should_include("context") && !context_blocks.is_empty() {
             builder = builder.with_context(context_blocks.join("\n\n"));
         }
 
-        if let Some(task) = spec.task {
+        if self.should_include("task")
+            && let Some(task) = spec.task
+        {
             builder = builder.with_task(task);
         }
 
-        if let Some(tools) = &self.tool_instructions {
+        if self.should_include("tools")
+            && let Some(tools) = &self.tool_instructions
+        {
             builder = builder.with_tools(tools.clone());
         }
 
-        for feedback in spec.gate_feedback {
-            builder = builder.with_gate_feedback_text(feedback);
+        if self.should_include("gate_feedback") {
+            for feedback in spec.gate_feedback {
+                builder = builder.with_gate_feedback_text(feedback);
+            }
         }
 
-        if !spec.anti_patterns.is_empty() {
+        if self.should_include("anti_patterns") && !spec.anti_patterns.is_empty() {
             builder = builder.with_anti_patterns(spec.anti_patterns);
         }
 
-        if let Some(budget) = self.token_budget {
-            builder = builder.with_token_budget(budget);
+        if let Some(base_budget) = self.token_budget {
+            let (included_weight, total) = self.effective_budget_ratio();
+            let scaled = ((base_budget as f64) * (included_weight / total)).ceil() as usize;
+            builder = builder.with_token_budget(scaled.max(256));
             let counter = TokenCounter::Heuristic {
                 chars_per_token: 4.0,
             };
@@ -659,6 +730,63 @@ mod tests {
 
         assert!(prompt.contains("## Tool Instructions"));
         assert!(prompt.contains("Use cargo check for Rust verification"));
+    }
+
+    #[tokio::test]
+    async fn effectiveness_skips_low_scoring_sections() {
+        let scores = HashMap::from([
+            ("conventions".to_string(), 0.05),
+            ("anti_patterns".to_string(), 0.0),
+        ]);
+        let svc = PromptAssemblyService::new()
+            .with_conventions("VISIBLE_CONVENTIONS".into())
+            .with_section_effectiveness(scores);
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                anti_patterns: vec!["VISIBLE_ANTI_PATTERN".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(!prompt.contains("VISIBLE_CONVENTIONS"));
+        assert!(!prompt.contains("VISIBLE_ANTI_PATTERN"));
+        assert!(prompt.contains("You are the Implementer"));
+    }
+
+    #[tokio::test]
+    async fn effectiveness_includes_high_scoring_sections() {
+        let scores = HashMap::from([("task".to_string(), 0.9)]);
+        let svc = PromptAssemblyService::new().with_section_effectiveness(scores);
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("BUILD_THE_FEATURE".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("BUILD_THE_FEATURE"));
+    }
+
+    #[tokio::test]
+    async fn no_effectiveness_includes_everything() {
+        let svc = PromptAssemblyService::new().with_conventions("VISIBLE_CONVENTIONS".into());
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("BUILD_THE_FEATURE".into()),
+                anti_patterns: vec!["VISIBLE_ANTI_PATTERN".into()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("VISIBLE_CONVENTIONS"));
+        assert!(prompt.contains("BUILD_THE_FEATURE"));
+        assert!(prompt.contains("VISIBLE_ANTI_PATTERN"));
     }
 
     #[test]
