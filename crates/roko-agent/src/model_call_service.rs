@@ -182,21 +182,17 @@ impl ModelCaller for ModelCallService {
         let (message_system, user_content) = request_prompt(&req.messages);
         let system_prompt = req.system.clone().or(message_system);
 
-        let mut options = AgentOptions {
+        let options = AgentOptions {
             system_prompt,
             name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
             ..AgentOptions::default()
         };
-        if let Some(max_tokens) = req.max_tokens {
-            options
-                .extra_args
-                .push(format!("max_tokens={max_tokens}"));
-        }
-        if let Some(temperature) = req.temperature {
-            options
-                .extra_args
-                .push(format!("temperature={temperature}"));
-        }
+        // TODO(converge): Thread per-request generation settings through
+        // AgentOptions/provider adapters. The Anthropic and OpenAI-compatible
+        // adapters derive max tokens from ModelProfile::max_output and do not
+        // parse "max_tokens=..." or "temperature=..." extra_args.
+        // TODO(converge): Thread req-level MCP config here in S05 once
+        // ModelCallRequest carries it.
 
         let agent = create_agent_for_model(&self.config, &model, options).map_err(|err| {
             RokoError::Agent {
