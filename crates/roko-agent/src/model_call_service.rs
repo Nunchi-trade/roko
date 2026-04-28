@@ -20,6 +20,19 @@ use std::time::Instant;
 
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
 
+/// Predicted cost for a model call before it is executed.
+#[derive(Debug, Clone)]
+pub struct CostEstimate {
+    /// Model that would be used.
+    pub model: String,
+    /// Estimated input token count (prompt length heuristic: 4 chars/token).
+    pub estimated_input_tokens: u64,
+    /// Worst-case output tokens (from max_tokens, or a default of 2048).
+    pub max_output_tokens: u64,
+    /// Predicted cost in USD, or 0.0 if the model has no pricing entry.
+    pub predicted_cost_usd: f64,
+}
+
 /// Service that calls LLM models via the existing provider infrastructure.
 ///
 /// This is the canonical way to call models in the workflow engine. It:
@@ -133,6 +146,36 @@ impl ModelCallService {
             self.default_model.clone()
         } else {
             req.model.clone()
+        }
+    }
+
+    /// Predict the cost of a model call before executing it.
+    #[must_use]
+    pub fn cost_predict(&self, req: &ModelCallRequest) -> CostEstimate {
+        let model = self.resolve_model(req);
+        let total_chars = req
+            .system
+            .as_deref()
+            .map_or(0_u64, |system| system.chars().count() as u64)
+            + req
+                .messages
+                .iter()
+                .map(|message| message.content.chars().count() as u64)
+                .sum::<u64>();
+        let estimated_input_tokens = total_chars / 4;
+        let max_output_tokens = u64::from(req.max_tokens.unwrap_or(2048));
+        let usage_estimate = Usage {
+            input_tokens: estimated_input_tokens.min(u64::from(u32::MAX)) as u32,
+            output_tokens: max_output_tokens.min(u64::from(u32::MAX)) as u32,
+            ..Usage::zero()
+        };
+        let predicted_cost_usd = self.cost_table.calculate(&model, &usage_estimate);
+
+        CostEstimate {
+            model,
+            estimated_input_tokens,
+            max_output_tokens,
+            predicted_cost_usd,
         }
     }
 
@@ -383,6 +426,7 @@ impl ModelCaller for ModelCallService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task_runner::ModelPricing;
 
     #[tokio::test]
     async fn default_model_resolution() {
@@ -458,5 +502,59 @@ mod tests {
         let profile = config.models.get("claude-haiku-4").expect("model profile");
         assert_eq!(profile.provider, "anthropic");
         assert_eq!(profile.slug, "claude-haiku-4");
+    }
+
+    #[test]
+    fn cost_predict_returns_zero_for_unknown_model() {
+        let svc = ModelCallService::new("default".into());
+        let req = ModelCallRequest {
+            model: "unknown-model".into(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: "hello".into(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+
+        let estimate = svc.cost_predict(&req);
+
+        assert_eq!(estimate.model, "unknown-model");
+        assert_eq!(estimate.predicted_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn cost_predict_estimates_cost_for_known_model() {
+        let mut cost_table = CostTable::default();
+        cost_table.insert(
+            "known-model",
+            ModelPricing {
+                input_per_m: 3.0,
+                output_per_m: 15.0,
+                cache_read_per_m: 0.0,
+                cache_write_per_m: 0.0,
+            },
+        );
+        let svc = ModelCallService::new("default".into()).with_cost_table(cost_table);
+        let req = ModelCallRequest {
+            model: "known-model".into(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: "x".repeat(1000),
+            }],
+            max_tokens: Some(2048),
+            temperature: None,
+            role: None,
+        };
+
+        let estimate = svc.cost_predict(&req);
+
+        assert_eq!(estimate.model, "known-model");
+        assert_eq!(estimate.estimated_input_tokens, 250);
+        assert_eq!(estimate.max_output_tokens, 2048);
+        assert!(estimate.predicted_cost_usd > 0.0);
     }
 }
