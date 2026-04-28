@@ -19,6 +19,7 @@ use roko_gate::{
     parse_structured_review_verdict, review_verdict::ReviewVerdictContext,
 };
 use roko_orchestrator::{ServiceConfig, ServiceFactory};
+use roko_runtime::JsonlLogger;
 use roko_runtime::effect_driver::RuntimeEvent as RuntimeDriverEvent;
 use roko_runtime::event_bus::runtime_event_bus;
 use roko_runtime::pipeline_state::WorkflowConfig;
@@ -91,6 +92,7 @@ pub async fn run_with_workflow_engine(
     };
 
     let mut engine = WorkflowEngine::new(services);
+    engine.add_consumer(Arc::new(JsonlLogger::from_roko_dir(&workdir.join(".roko"))));
     engine.add_consumer(Arc::new(AcpWorkflowEventConsumer::new(
         session_id.to_string(),
         Arc::clone(&runtime_run_id),

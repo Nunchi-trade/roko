@@ -90,6 +90,7 @@ pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow
         model: None,
         duration_s: None,
         episode_id: Some(report.episode_id.clone()),
+        transcript: Vec::new(),
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     write_shared_transcript(workdir, &transcript)
@@ -510,6 +511,7 @@ pub fn workflow_report_as_run_transcript(
         model: Some(non_empty_or(&report.model, "unconfigured")),
         duration_s: Some(report.duration_secs),
         episode_id: Some(report.run_id.clone()),
+        transcript: report.events.clone(),
         timestamp: chrono::Utc::now().to_rfc3339(),
     }
 }
