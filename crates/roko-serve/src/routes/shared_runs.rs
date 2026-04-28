@@ -331,3 +331,99 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
         .route("/runs/{id}", axum::routing::get(get_run_html))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_and_retrieve_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_dir = dir.path().join(".roko").join("shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+
+        let transcript = RunTranscript {
+            id: "test_run_abc123".to_string(),
+            agent: "implementer".to_string(),
+            role: "implementer".to_string(),
+            prompt: "fix the bug".to_string(),
+            success: true,
+            gates: vec![
+                ("compile".to_string(), true),
+                ("test".to_string(), true),
+            ],
+            output: Some("Fixed the null pointer dereference.".to_string()),
+            cost_usd: Some(0.0042),
+            input_tokens: Some(1500),
+            output_tokens: Some(350),
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            duration_s: Some(3.2),
+            episode_id: Some("ep_001".to_string()),
+            timestamp: "2026-04-28T12:00:00Z".to_string(),
+        };
+
+        let json = serde_json::to_string(&transcript).unwrap();
+        let path = shared_dir.join("test_run_abc123.json");
+        std::fs::write(&path, &json).unwrap();
+
+        let loaded: RunTranscript =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(loaded.id, "test_run_abc123");
+        assert_eq!(loaded.agent, "implementer");
+        assert!(loaded.success);
+        assert_eq!(loaded.gates.len(), 2);
+        assert_eq!(
+            loaded.output.as_deref(),
+            Some("Fixed the null pointer dereference.")
+        );
+        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retrieve_share_renders_html() {
+        let transcript = RunTranscript {
+            id: "run_html_test".to_string(),
+            agent: "reviewer".to_string(),
+            role: "reviewer".to_string(),
+            prompt: "review the changes".to_string(),
+            success: false,
+            gates: vec![("clippy".to_string(), false)],
+            output: Some("Found 3 lint warnings.".to_string()),
+            cost_usd: Some(0.0018),
+            input_tokens: Some(800),
+            output_tokens: Some(200),
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            duration_s: Some(1.5),
+            episode_id: Some("ep_002".to_string()),
+            timestamp: "2026-04-28T13:00:00Z".to_string(),
+        };
+
+        let html = render_html(&transcript);
+
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("run_html_test"));
+        assert!(html.contains("reviewer"));
+        assert!(html.contains("review the changes"));
+        assert!(html.contains("clippy"));
+        assert!(html.contains("Found 3 lint warnings."));
+        assert!(html.contains("failed"));
+    }
+
+    #[test]
+    fn unknown_share_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_dir = dir.path().join(".roko").join("shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+
+        let path = shared_dir.join("nonexistent_run.json");
+        let data = std::fs::read_to_string(path);
+        assert!(data.is_err());
+
+        let bad_path = shared_dir.join("bad_run.json");
+        std::fs::write(&bad_path, "not valid json").unwrap();
+        let result: Result<RunTranscript, _> =
+            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
+        assert!(result.is_err());
+    }
+}
