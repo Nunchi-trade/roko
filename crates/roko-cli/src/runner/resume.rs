@@ -59,9 +59,17 @@ pub struct RecoveredFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JsonlRecoveryReport {
-    Clean { lines: usize },
-    TruncatedTrailing { valid_lines: usize, truncated_bytes: u64 },
-    DroppedInvalid { valid_lines: usize, dropped_lines: usize },
+    Clean {
+        lines: usize,
+    },
+    TruncatedTrailing {
+        valid_lines: usize,
+        truncated_bytes: u64,
+    },
+    DroppedInvalid {
+        valid_lines: usize,
+        dropped_lines: usize,
+    },
 }
 
 impl From<JsonlRecovery> for JsonlRecoveryReport {

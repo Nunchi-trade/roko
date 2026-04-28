@@ -45,7 +45,9 @@ pub struct DispatchResult {
 pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<DispatchResult> {
     match auth {
         AuthMethod::ClaudeCli => dispatch_claude_cli(prompt).await,
-        AuthMethod::AnthropicApi { key, model } => dispatch_anthropic_api(key, model.as_deref(), prompt).await,
+        AuthMethod::AnthropicApi { key, model } => {
+            dispatch_anthropic_api(key, model.as_deref(), prompt).await
+        }
         AuthMethod::OpenAiCompat {
             key,
             base_url,
@@ -115,7 +117,8 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
                         } else {
                             content.to_string()
                         };
-                        let tool_name = event.get("tool").and_then(|t| t.as_str()).map(String::from);
+                        let tool_name =
+                            event.get("tool").and_then(|t| t.as_str()).map(String::from);
                         tool_outputs.push(ToolOutput {
                             tool_name,
                             content: truncated,
@@ -203,7 +206,11 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
 // Anthropic Messages API
 // ---------------------------------------------------------------------------
 
-async fn dispatch_anthropic_api(api_key: &str, model: Option<&str>, prompt: &str) -> Result<DispatchResult> {
+async fn dispatch_anthropic_api(
+    api_key: &str,
+    model: Option<&str>,
+    prompt: &str,
+) -> Result<DispatchResult> {
     let client = reqwest::Client::new();
     let model_id = model.unwrap_or("claude-sonnet-4-6-20250514");
 

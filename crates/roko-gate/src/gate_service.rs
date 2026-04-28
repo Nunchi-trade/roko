@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn unknown_gate_produces_failure_mapping() {
         let svc = GateService::new();
-        assert!(svc.gate_for_name("nonexistent", BuildSystem::Cargo).is_none());
+        assert!(
+            svc.gate_for_name("nonexistent", BuildSystem::Cargo)
+                .is_none()
+        );
         assert!(svc.gate_for_name("compile", BuildSystem::Cargo).is_some());
     }
 

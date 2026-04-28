@@ -235,9 +235,21 @@ async fn test_session_list() -> Result<()> {
         .as_array()
         .ok_or_else(|| anyhow!("session/list result did not include sessions: {response}"))?;
 
-    assert!(sessions.len() >= 2, "expected at least 2 sessions, got {}", sessions.len());
-    assert!(sessions.iter().any(|session| session["sessionId"] == json!(first)));
-    assert!(sessions.iter().any(|session| session["sessionId"] == json!(second)));
+    assert!(
+        sessions.len() >= 2,
+        "expected at least 2 sessions, got {}",
+        sessions.len()
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session["sessionId"] == json!(first))
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session["sessionId"] == json!(second))
+    );
 
     harness.shutdown().await
 }
@@ -264,7 +276,10 @@ async fn test_session_prompt_basic() -> Result<()> {
     loop {
         let (method, params) = harness.client.read_notification().await?;
         assert_eq!(method, "session/update");
-        assert!(params["sessionId"].is_string(), "notification must include sessionId");
+        assert!(
+            params["sessionId"].is_string(),
+            "notification must include sessionId"
+        );
         let update = &params["update"];
         let update_type = update["sessionUpdate"]
             .as_str()
@@ -278,9 +293,7 @@ async fn test_session_prompt_basic() -> Result<()> {
 
     let response = harness.client.read_response(request_id).await?;
     let result = response_result(&response);
-    let stop = result["stopReason"]
-        .as_str()
-        .expect("must have stopReason");
+    let stop = result["stopReason"].as_str().expect("must have stopReason");
     assert!(
         stop == "end_turn" || stop == "cancelled",
         "unexpected stopReason: {stop}"
@@ -331,9 +344,7 @@ async fn test_session_cancel() -> Result<()> {
 
     let response = harness.client.read_response(request_id).await?;
     let result = response_result(&response);
-    let stop = result["stopReason"]
-        .as_str()
-        .expect("must have stopReason");
+    let stop = result["stopReason"].as_str().expect("must have stopReason");
     // The prompt may finish before the cancel is processed, so accept either.
     assert!(
         stop == "cancelled" || stop == "end_turn",

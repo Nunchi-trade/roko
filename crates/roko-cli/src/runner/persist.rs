@@ -369,10 +369,7 @@ fn canonical_task_payload(task: &crate::task_parser::TaskDef) -> String {
         .as_ref()
         .map(|d| d.label().to_string())
         .unwrap_or_default();
-    let max_loc = task
-        .max_loc
-        .map(|n| n.to_string())
-        .unwrap_or_default();
+    let max_loc = task.max_loc.map(|n| n.to_string()).unwrap_or_default();
     format!(
         "id={};title={};role={};tier={};domain={};depends_on={};depends_on_plan={};verify={};acceptance={};max_loc={};max_retries={};timeout_secs={}",
         task.id,

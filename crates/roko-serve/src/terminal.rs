@@ -59,8 +59,12 @@ pub struct CreateSessionRequest {
     pub workdir: Option<String>,
 }
 
-fn default_cols() -> u16 { 80 }
-fn default_rows() -> u16 { 24 }
+fn default_cols() -> u16 {
+    80
+}
+fn default_rows() -> u16 {
+    24
+}
 
 /// Request to send input to a terminal session.
 #[derive(Debug, Deserialize)]
@@ -93,7 +97,12 @@ impl SessionManager {
         workdir: Option<&str>,
     ) -> anyhow::Result<(String, Box<dyn Read + Send>)> {
         let pty_system = NativePtySystem::default();
-        let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
 
         let pair = pty_system
             .openpty(size)
@@ -134,18 +143,24 @@ impl SessionManager {
 
         let id = Uuid::new_v4().to_string()[..8].to_string();
 
-        self.session_info.lock().insert(id.clone(), SessionInfo {
-            id: id.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            cols,
-            rows,
-        });
+        self.session_info.lock().insert(
+            id.clone(),
+            SessionInfo {
+                id: id.clone(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                cols,
+                rows,
+            },
+        );
 
-        self.sessions.lock().insert(id.clone(), PtySession {
-            writer,
-            master: pair.master,
-            _child: child,
-        });
+        self.sessions.lock().insert(
+            id.clone(),
+            PtySession {
+                writer,
+                master: pair.master,
+                _child: child,
+            },
+        );
 
         Ok((id, reader))
     }
@@ -169,7 +184,12 @@ impl SessionManager {
             .ok_or_else(|| anyhow::anyhow!("session not found: {id}"))?;
         session
             .master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| anyhow::anyhow!("resize: {e}"))?;
         // Update stored info
         drop(sessions);
@@ -199,16 +219,25 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     match state.terminal_sessions.create_session(
-        req.cols, req.rows, req.command.as_deref(), req.workdir.as_deref(),
+        req.cols,
+        req.rows,
+        req.command.as_deref(),
+        req.workdir.as_deref(),
     ) {
         Ok((id, _reader)) => {
-            let info = state.terminal_sessions.session_info.lock().get(&id).cloned();
+            let info = state
+                .terminal_sessions
+                .session_info
+                .lock()
+                .get(&id)
+                .cloned();
             Json(serde_json::json!({ "id": id, "session": info })).into_response()
         }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -229,12 +258,16 @@ pub async fn send_input(
     Path(id): Path<String>,
     Json(req): Json<SendInputRequest>,
 ) -> impl IntoResponse {
-    match state.terminal_sessions.send_input(&id, req.input.as_bytes()) {
+    match state
+        .terminal_sessions
+        .send_input(&id, req.input.as_bytes())
+    {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -341,9 +374,18 @@ async fn handle_ws(
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route("/api/terminal/sessions", axum::routing::post(create_session))
+        .route(
+            "/api/terminal/sessions",
+            axum::routing::post(create_session),
+        )
         .route("/api/terminal/sessions", axum::routing::get(list_sessions))
-        .route("/api/terminal/sessions/{id}", axum::routing::delete(destroy_session))
-        .route("/api/terminal/sessions/{id}/input", axum::routing::post(send_input))
+        .route(
+            "/api/terminal/sessions/{id}",
+            axum::routing::delete(destroy_session),
+        )
+        .route(
+            "/api/terminal/sessions/{id}/input",
+            axum::routing::post(send_input),
+        )
         .route("/ws/terminal/{id}", axum::routing::get(ws_terminal))
 }

@@ -1675,8 +1675,8 @@ fn main() {
         && !cli.headless
         && cli.prompt.is_none()
         && std::io::stdin().is_terminal();
-    let tui_mode = unified_chat_mode
-        || matches!(&cli.command, Some(Command::Serve { tui: true, .. }));
+    let tui_mode =
+        unified_chat_mode || matches!(&cli.command, Some(Command::Serve { tui: true, .. }));
 
     // ── Color mode ──────────────────────────────────────────────────
     let use_color = cli.color.should_color();

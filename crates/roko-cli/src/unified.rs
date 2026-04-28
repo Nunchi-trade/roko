@@ -97,7 +97,10 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
     // Show tool outputs before the response text
     for tool_output in &result.tool_outputs {
         let label = tool_output.tool_name.as_deref().unwrap_or("tool");
-        eprintln!("[{label}] {}", tool_output.content.lines().next().unwrap_or(""));
+        eprintln!(
+            "[{label}] {}",
+            tool_output.content.lines().next().unwrap_or("")
+        );
     }
 
     println!("{}", result.text);
@@ -124,16 +127,8 @@ async fn spawn_background_serve(
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<(Arc<roko_serve::state::AppState>, JoinHandle<Result<()>>)> {
-    let runtime =
-        RokoCliRuntime::new(config.clone(), RepoRegistry::default()).into_arc();
-    match roko_serve::start_server_background(
-        workdir.to_path_buf(),
-        runtime,
-        None,
-        None,
-    )
-    .await
-    {
+    let runtime = RokoCliRuntime::new(config.clone(), RepoRegistry::default()).into_arc();
+    match roko_serve::start_server_background(workdir.to_path_buf(), runtime, None, None).await {
         Ok(pair) => Some(pair),
         Err(e) => {
             tracing::warn!("background serve failed to start: {e:#}");

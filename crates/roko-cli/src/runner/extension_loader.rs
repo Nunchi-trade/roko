@@ -159,7 +159,7 @@ pub fn load_extensions(
                 meta: ExtensionMeta {
                     name: name.clone(),
                     layer: ExtensionLayer::Cognition, // default layer for plugin extensions
-                    optional: true, // plugins should never be fatal
+                    optional: true,                   // plugins should never be fatal
                     depends_on: plugin
                         .manifest
                         .dependencies
@@ -188,7 +188,10 @@ pub fn load_extensions(
 
     if loaded > 0 {
         chain.sort_by_layer();
-        info!(count = loaded, "extension chain populated from discovered plugins");
+        info!(
+            count = loaded,
+            "extension chain populated from discovered plugins"
+        );
     } else {
         debug!("no plugin extensions discovered");
     }
@@ -203,8 +206,7 @@ mod tests {
     #[test]
     fn load_from_nonexistent_dirs_returns_zero() {
         let mut chain = ExtensionChain::new();
-        let count =
-            load_extensions(Path::new("/nonexistent/workspace"), &[], &mut chain);
+        let count = load_extensions(Path::new("/nonexistent/workspace"), &[], &mut chain);
         assert_eq!(count, 0);
         assert!(chain.is_empty());
     }
@@ -280,11 +282,7 @@ version = "0.1.0"
         .unwrap();
 
         let mut chain = ExtensionChain::new();
-        let count = load_extensions(
-            tmp.path(),
-            &["allowed-ext".to_string()],
-            &mut chain,
-        );
+        let count = load_extensions(tmp.path(), &["allowed-ext".to_string()], &mut chain);
         assert_eq!(count, 1);
         assert_eq!(chain.metadata()[0].name, "allowed-ext");
     }

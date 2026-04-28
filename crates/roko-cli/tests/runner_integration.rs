@@ -112,7 +112,9 @@ async fn end_to_end_dag_merge_projection_pipeline() {
     let mut config = PlanMergerConfig::new(workdir.path().to_path_buf(), Duration::from_secs(30));
     let stub_gate: Arc<dyn RegressionGate> = Arc::new(StubFailingGate);
     let stub_merge: Arc<dyn MergeBackend> = Arc::new(StubPassingMerge);
-    config = config.with_regression_gate(stub_gate).with_merge_backend(stub_merge);
+    config = config
+        .with_regression_gate(stub_gate)
+        .with_merge_backend(stub_merge);
 
     let queue = MergeQueue::default();
     let merger = PlanMerger::new(queue, config);

@@ -88,11 +88,7 @@ impl RuntimeProjection {
         let runs = Self::from_file(path)?;
         Ok(runs.into_iter().find_map(
             |(id, summary)| {
-                if id == run_id {
-                    Some(summary)
-                } else {
-                    None
-                }
+                if id == run_id { Some(summary) } else { None }
             },
         ))
     }

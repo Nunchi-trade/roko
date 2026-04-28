@@ -783,19 +783,15 @@ async fn dispatch_agent(
         let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let (extra_args, resume_from_args) = split_resume_arg(&config.agent.args);
         let optional_resume = optional_resume_session_id(config, resume_from_args);
-        let model = config
-            .agent
-            .model
-            .clone()
-            .unwrap_or_else(|| {
-                // Prefer the routing config's default_model (from roko.toml or global config)
-                // over hardcoded Claude. This ensures ZAI_API_KEY / glm-5.1 setups work.
-                if !routing_config.agent.default_model.is_empty() {
-                    routing_config.agent.default_model.clone()
-                } else {
-                    "claude-sonnet-4-6".to_string()
-                }
-            });
+        let model = config.agent.model.clone().unwrap_or_else(|| {
+            // Prefer the routing config's default_model (from roko.toml or global config)
+            // over hardcoded Claude. This ensures ZAI_API_KEY / glm-5.1 setups work.
+            if !routing_config.agent.default_model.is_empty() {
+                routing_config.agent.default_model.clone()
+            } else {
+                "claude-sonnet-4-6".to_string()
+            }
+        });
         let synthesized_config = synthesize_claude_cli_config(&config.agent.command, &model);
 
         let mut synthetic_extra_args = extra_args;

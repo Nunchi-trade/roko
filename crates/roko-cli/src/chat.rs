@@ -466,9 +466,7 @@ pub fn extract_clean_text(raw: &str) -> String {
                     let content = obj
                         .get("content")
                         .and_then(serde_json::Value::as_str)
-                        .or_else(|| {
-                            obj.get("output").and_then(serde_json::Value::as_str)
-                        });
+                        .or_else(|| obj.get("output").and_then(serde_json::Value::as_str));
                     if let Some(content) = content.filter(|s| !s.is_empty()) {
                         let tool_name = obj
                             .get("tool")

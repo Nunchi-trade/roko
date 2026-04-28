@@ -99,8 +99,8 @@ pub mod feedback;
 /// Forensic causal chain reconstruction from content-addressed artifacts (GATE-07).
 pub mod forensic;
 pub mod gate_pipeline;
-pub mod generated;
 pub mod gate_service;
+pub mod generated;
 pub mod generated_test_gate;
 /// Multi-gate joint anomaly detection via Hotelling's T-squared (GATE-08).
 pub mod hotelling;
@@ -158,8 +158,8 @@ pub use forensic::{
     ArtifactMetadata, CausalChain, ForensicError, ForensicReplayBuilder, TurnRecord,
 };
 pub use gate_pipeline::{ComposedGatePipeline, GateComposition, GatePipeline};
-pub use generated::{GateError, GateGenerator, GeneratedCheck};
 pub use gate_service::GateService;
+pub use generated::{GateError, GateGenerator, GeneratedCheck};
 pub use hotelling::{HotellingDetector, JointAnomalyResult};
 pub use payload::{BuildSystem, GatePayload, TestSelector};
 pub use process_reward::{

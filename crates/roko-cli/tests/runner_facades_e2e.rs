@@ -17,12 +17,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use roko_cli::runner::projection::{Projection, RawRuntimeEvent};
 use roko_cli::runner::types::{
-    EventCategory, GateCompletion, GateCompletionKind, PlanOutcome, RunnerEvent,
-    RunnerFailureKind, TaskAttemptOutcome, TaskAttemptRef,
+    EventCategory, GateCompletion, GateCompletionKind, PlanOutcome, RunnerEvent, RunnerFailureKind,
+    TaskAttemptOutcome, TaskAttemptRef,
 };
-use roko_cli::runtime_feedback::{
-    FeedbackEvent, FeedbackFacade, FeedbackSink,
-};
+use roko_cli::runtime_feedback::{FeedbackEvent, FeedbackFacade, FeedbackSink};
 
 /// In-process sink that records every event it receives so the test can
 /// assert what landed on the facade.
@@ -86,7 +84,8 @@ async fn run_config_facades_receive_runner_events() {
         duration_ms: 4321,
     };
     let gate_completed = RunnerEvent::gate_completed("e2e-runner", attempt.clone(), &completion);
-    let plan_completed = RunnerEvent::plan_completed("e2e-runner", "p-e2e", PlanOutcome::Succeeded, None);
+    let plan_completed =
+        RunnerEvent::plan_completed("e2e-runner", "p-e2e", PlanOutcome::Succeeded, None);
 
     for event in [&task_completed, &gate_completed, &plan_completed] {
         projection

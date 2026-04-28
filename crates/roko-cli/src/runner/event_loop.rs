@@ -167,7 +167,9 @@ pub async fn run(
                     use super::resume::JsonlRecoveryReport;
                     match &f.recovery {
                         JsonlRecoveryReport::Clean { .. } => {}
-                        JsonlRecoveryReport::TruncatedTrailing { truncated_bytes, .. } => {
+                        JsonlRecoveryReport::TruncatedTrailing {
+                            truncated_bytes, ..
+                        } => {
                             warn!(file = %f.path, truncated_bytes, "recovered partial JSONL");
                         }
                         JsonlRecoveryReport::DroppedInvalid { dropped_lines, .. } => {
@@ -1427,11 +1429,7 @@ fn save_snapshot(
     let run_state = persist::RunStateSnapshot {
         schema_version: persist::RUN_STATE_SCHEMA_VERSION,
         run_id: state.run_id().to_string(),
-        started_at_ms: state
-            .started_at
-            .elapsed()
-            .as_millis()
-            .saturating_sub(0) as u64,
+        started_at_ms: state.started_at.elapsed().as_millis().saturating_sub(0) as u64,
         timestamp_ms,
         tasks_total: state.tasks_total,
         tasks_completed: state.tasks_completed,
@@ -2893,10 +2891,30 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
             );
             pb.name = "Minimal Edit".to_string();
             pb.steps = vec![
-                PlaybookStep::new(0, "Search codebase for the relevant function/type", "search", vec!["file_found".into()]),
-                PlaybookStep::new(1, "Read the target file to understand context", "read_file", vec!["context_loaded".into()]),
-                PlaybookStep::new(2, "Make the minimal edit that satisfies the requirement", "edit_file", vec!["file_modified".into()]),
-                PlaybookStep::new(3, "Verify the change compiles", "run_command", vec!["compile_success".into()]),
+                PlaybookStep::new(
+                    0,
+                    "Search codebase for the relevant function/type",
+                    "search",
+                    vec!["file_found".into()],
+                ),
+                PlaybookStep::new(
+                    1,
+                    "Read the target file to understand context",
+                    "read_file",
+                    vec!["context_loaded".into()],
+                ),
+                PlaybookStep::new(
+                    2,
+                    "Make the minimal edit that satisfies the requirement",
+                    "edit_file",
+                    vec!["file_modified".into()],
+                ),
+                PlaybookStep::new(
+                    3,
+                    "Verify the change compiles",
+                    "run_command",
+                    vec!["compile_success".into()],
+                ),
             ];
             pb
         },
@@ -2907,10 +2925,30 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
             );
             pb.name = "Test First".to_string();
             pb.steps = vec![
-                PlaybookStep::new(0, "Identify the test file for the target module", "search", vec!["test_file_found".into()]),
-                PlaybookStep::new(1, "Write a failing test that captures the requirement", "edit_file", vec!["test_added".into()]),
-                PlaybookStep::new(2, "Implement the code to make the test pass", "edit_file", vec!["implementation_done".into()]),
-                PlaybookStep::new(3, "Run the test suite and verify all tests pass", "run_command", vec!["tests_pass".into()]),
+                PlaybookStep::new(
+                    0,
+                    "Identify the test file for the target module",
+                    "search",
+                    vec!["test_file_found".into()],
+                ),
+                PlaybookStep::new(
+                    1,
+                    "Write a failing test that captures the requirement",
+                    "edit_file",
+                    vec!["test_added".into()],
+                ),
+                PlaybookStep::new(
+                    2,
+                    "Implement the code to make the test pass",
+                    "edit_file",
+                    vec!["implementation_done".into()],
+                ),
+                PlaybookStep::new(
+                    3,
+                    "Run the test suite and verify all tests pass",
+                    "run_command",
+                    vec!["tests_pass".into()],
+                ),
             ];
             pb
         },
@@ -2921,10 +2959,30 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
             );
             pb.name = "Grep Before Write".to_string();
             pb.steps = vec![
-                PlaybookStep::new(0, "Search for existing implementations of the target", "search", vec!["search_complete".into()]),
-                PlaybookStep::new(1, "If found, extend or modify rather than duplicate", "read_file", vec!["existing_found".into()]),
-                PlaybookStep::new(2, "Implement changes in the existing location", "edit_file", vec!["change_applied".into()]),
-                PlaybookStep::new(3, "Verify no duplicate definitions introduced", "search", vec!["no_duplicates".into()]),
+                PlaybookStep::new(
+                    0,
+                    "Search for existing implementations of the target",
+                    "search",
+                    vec!["search_complete".into()],
+                ),
+                PlaybookStep::new(
+                    1,
+                    "If found, extend or modify rather than duplicate",
+                    "read_file",
+                    vec!["existing_found".into()],
+                ),
+                PlaybookStep::new(
+                    2,
+                    "Implement changes in the existing location",
+                    "edit_file",
+                    vec!["change_applied".into()],
+                ),
+                PlaybookStep::new(
+                    3,
+                    "Verify no duplicate definitions introduced",
+                    "search",
+                    vec!["no_duplicates".into()],
+                ),
             ];
             pb
         },
@@ -2935,10 +2993,30 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
             );
             pb.name = "Wire Not Build".to_string();
             pb.steps = vec![
-                PlaybookStep::new(0, "Search for the target struct/function in the codebase", "search", vec!["target_found".into()]),
-                PlaybookStep::new(1, "Trace the call chain to find where it should be wired", "read_file", vec!["call_site_found".into()]),
-                PlaybookStep::new(2, "Add the function call or import at the correct call site", "edit_file", vec!["wired".into()]),
-                PlaybookStep::new(3, "Verify the feature is accessible via CLI or API", "run_command", vec!["feature_reachable".into()]),
+                PlaybookStep::new(
+                    0,
+                    "Search for the target struct/function in the codebase",
+                    "search",
+                    vec!["target_found".into()],
+                ),
+                PlaybookStep::new(
+                    1,
+                    "Trace the call chain to find where it should be wired",
+                    "read_file",
+                    vec!["call_site_found".into()],
+                ),
+                PlaybookStep::new(
+                    2,
+                    "Add the function call or import at the correct call site",
+                    "edit_file",
+                    vec!["wired".into()],
+                ),
+                PlaybookStep::new(
+                    3,
+                    "Verify the feature is accessible via CLI or API",
+                    "run_command",
+                    vec!["feature_reachable".into()],
+                ),
             ];
             pb
         },
@@ -2949,10 +3027,30 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
             );
             pb.name = "Compile Check Loop".to_string();
             pb.steps = vec![
-                PlaybookStep::new(0, "Make a single logical change", "edit_file", vec!["change_made".into()]),
-                PlaybookStep::new(1, "Run cargo check to verify compilation", "run_command", vec!["compile_success".into()]),
-                PlaybookStep::new(2, "If errors, fix them before proceeding", "edit_file", vec!["errors_fixed".into()]),
-                PlaybookStep::new(3, "Repeat until all changes are applied and compiling", "run_command", vec!["all_clean".into()]),
+                PlaybookStep::new(
+                    0,
+                    "Make a single logical change",
+                    "edit_file",
+                    vec!["change_made".into()],
+                ),
+                PlaybookStep::new(
+                    1,
+                    "Run cargo check to verify compilation",
+                    "run_command",
+                    vec!["compile_success".into()],
+                ),
+                PlaybookStep::new(
+                    2,
+                    "If errors, fix them before proceeding",
+                    "edit_file",
+                    vec!["errors_fixed".into()],
+                ),
+                PlaybookStep::new(
+                    3,
+                    "Repeat until all changes are applied and compiling",
+                    "run_command",
+                    vec!["all_clean".into()],
+                ),
             ];
             pb
         },
@@ -2966,7 +3064,10 @@ async fn seed_playbooks_if_empty(workdir: &Path) {
         }
     }
 
-    info!(count = seeds.len(), "playbook store seeded with starter templates");
+    info!(
+        count = seeds.len(),
+        "playbook store seeded with starter templates"
+    );
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

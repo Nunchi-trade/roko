@@ -246,8 +246,14 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
                 run_uuid.clone(),
             ));
             let episodes_path = wd.join(".roko").join("episodes.jsonl");
-            let knowledge_path = wd.join(".roko").join("learn").join("knowledge_candidates.jsonl");
-            let conductor_path = wd.join(".roko").join("conductor").join("observations.jsonl");
+            let knowledge_path = wd
+                .join(".roko")
+                .join("learn")
+                .join("knowledge_candidates.jsonl");
+            let conductor_path = wd
+                .join(".roko")
+                .join("conductor")
+                .join("observations.jsonl");
             let dream_path = wd.join(".roko").join("learn").join("dream_triggers.jsonl");
             // Best-effort directory creation — the sinks' own
             // `create_dir_all` will retry on first append.

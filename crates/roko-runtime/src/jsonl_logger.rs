@@ -4,8 +4,8 @@
 //! replay and state reconstruction.
 
 use chrono::Utc;
-pub use roko_core::foundation::EventConsumer;
 use roko_core::RuntimeEvent;
+pub use roko_core::foundation::EventConsumer;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,7 +36,10 @@ impl JsonlLogger {
     }
 
     fn ensure_writer(&self) -> std::io::Result<()> {
-        let mut writer = self.writer.lock().expect("jsonl logger writer lock poisoned");
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("jsonl logger writer lock poisoned");
         if writer.is_none() {
             if let Some(parent) = self.path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -64,7 +67,10 @@ impl JsonlLogger {
             "event": format!("{event:?}"),
         });
 
-        let mut writer = self.writer.lock().expect("jsonl logger writer lock poisoned");
+        let mut writer = self
+            .writer
+            .lock()
+            .expect("jsonl logger writer lock poisoned");
         if let Some(ref mut w) = *writer {
             let _ = writeln!(w, "{json}");
             let _ = w.flush();

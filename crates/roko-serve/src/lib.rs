@@ -57,6 +57,7 @@ pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
 pub mod dreams;
+pub mod embedded;
 pub mod error;
 pub mod event_bus;
 pub mod events;
@@ -78,7 +79,6 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod templates;
-pub mod embedded;
 pub mod terminal;
 pub mod truth_map;
 
@@ -279,21 +279,17 @@ impl ServerBuilder {
                     .unwrap_or_else(|| std::path::PathBuf::from("roko-chain-watcher"));
 
                 // Open log file for subprocess output (fall back to /dev/null).
-                let (stdout_target, stderr_target) = if let Ok(f) =
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&log_path)
+                let (stdout_target, stderr_target) = if let Ok(f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
                 {
-                    let f2 = f.try_clone().unwrap_or_else(|_| {
-                        std::fs::File::open("/dev/null").expect("/dev/null")
-                    });
+                    let f2 = f
+                        .try_clone()
+                        .unwrap_or_else(|_| std::fs::File::open("/dev/null").expect("/dev/null"));
                     (std::process::Stdio::from(f), std::process::Stdio::from(f2))
                 } else {
-                    (
-                        std::process::Stdio::null(),
-                        std::process::Stdio::null(),
-                    )
+                    (std::process::Stdio::null(), std::process::Stdio::null())
                 };
 
                 match tokio::process::Command::new(&watcher)

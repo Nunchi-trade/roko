@@ -99,18 +99,13 @@ fn full_resume_cycle_validates_fingerprints_and_recovers_jsonl() {
     // Simulate a crash: events.jsonl ends with a partial line.
     let valid_line = "{\"type\":\"plan.started\",\"plan_id\":\"p1\"}\n";
     let partial_line = "{\"type\":\"plan.compl"; // missing closing + newline
-    fs::write(
-        &paths.events_jsonl,
-        format!("{valid_line}{partial_line}"),
-    )
-    .unwrap();
+    fs::write(&paths.events_jsonl, format!("{valid_line}{partial_line}")).unwrap();
 
     // Call prepare_resume against the same plan set. Validator should
     // succeed and the partial line should be truncated.
     let mut plans = HashMap::new();
     plans.insert("p1".to_string(), vec![task_a.clone(), task_b.clone()]);
-    let report =
-        prepare_resume(&paths, &plans, &[fp_a.clone(), fp_b.clone()]).expect("validates");
+    let report = prepare_resume(&paths, &plans, &[fp_a.clone(), fp_b.clone()]).expect("validates");
 
     assert!(report.resumed);
     assert_eq!(report.prior_run_id.as_deref(), Some("prior-run"));
@@ -215,11 +210,7 @@ fn jsonl_recovery_helper_returns_clean_for_consistent_file() {
     // Direct test of the recover_jsonl helper (sanity for the mod).
     let dir = tempdir().unwrap();
     let path = dir.path().join("events.jsonl");
-    fs::write(
-        &path,
-        "{\"a\":1}\n{\"b\":2}\n",
-    )
-    .unwrap();
+    fs::write(&path, "{\"a\":1}\n{\"b\":2}\n").unwrap();
     let outcome = roko_cli::runner::persist::recover_jsonl(&path, |line: &str| {
         serde_json::from_str::<serde_json::Value>(line)
     })
