@@ -10,6 +10,11 @@ description = "The `roko` binary: minimal CLI that drives the universal loop (pr
 [lints]
 workspace = true
 
+[features]
+## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
+## NOT included in default features — opt-in only.
+legacy-orchestrate = []
+
 [[bin]]
 name = "roko"
 path = "src/main.rs"
