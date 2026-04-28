@@ -1068,8 +1068,7 @@ mod tests {
 
     /// Safety layer with a permissive contract for tests that check allow behavior.
     fn permissive_layer() -> SafetyLayer {
-        SafetyLayer::with_defaults()
-            .with_contract(AgentContract::permissive("test"))
+        SafetyLayer::with_defaults().with_contract(AgentContract::permissive("test"))
     }
 
     #[test]
@@ -1305,12 +1304,11 @@ mod tests {
 
     #[test]
     fn safety_budget_blocks_after_limit_is_spent() {
-        let layer = permissive_layer().with_safety_budget(SafetyBudgetTracker::new(
-            risk::SafetyBudget {
+        let layer =
+            permissive_layer().with_safety_budget(SafetyBudgetTracker::new(risk::SafetyBudget {
                 footprint_limit: 1,
                 ..risk::SafetyBudget::default()
-            },
-        ));
+            }));
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());

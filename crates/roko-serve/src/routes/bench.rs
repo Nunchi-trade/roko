@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
@@ -17,8 +17,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::bench::{
-    self, BenchConfigOverrides, BenchRun, BenchRunIndexEntry, BenchRunKind,
-    BenchRunStatus, BenchRunSummary, BenchSuite, BenchTaskResult,
+    self, BenchConfigOverrides, BenchRun, BenchRunIndexEntry, BenchRunKind, BenchRunStatus,
+    BenchRunSummary, BenchSuite, BenchTaskResult,
 };
 use crate::error::ApiError;
 use crate::events::ServerEvent;
@@ -146,11 +146,13 @@ async fn start_bench_run(
         body.label,
     ));
 
-    state
-        .active_bench_runs
-        .write()
-        .await
-        .insert(run_id.clone(), BenchRunHandle { id: run_id.clone(), handle });
+    state.active_bench_runs.write().await.insert(
+        run_id.clone(),
+        BenchRunHandle {
+            id: run_id.clone(),
+            handle,
+        },
+    );
 
     Ok((
         axum::http::StatusCode::ACCEPTED,
@@ -393,7 +395,11 @@ async fn list_bench_runs(
     entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
     let total = entries.len();
-    let page: Vec<_> = entries.into_iter().skip(query.offset).take(query.limit).collect();
+    let page: Vec<_> = entries
+        .into_iter()
+        .skip(query.offset)
+        .take(query.limit)
+        .collect();
 
     Json(json!({
         "total": total,
@@ -460,7 +466,9 @@ async fn upload_suite(
     Json(suite): Json<BenchSuite>,
 ) -> Result<impl IntoResponse, ApiError> {
     if suite.id.is_empty() || suite.tasks.is_empty() {
-        return Err(ApiError::bad_request("suite must have an id and at least one task"));
+        return Err(ApiError::bad_request(
+            "suite must have an id and at least one task",
+        ));
     }
     bench::save_suite(&state.workdir, &suite)
         .await

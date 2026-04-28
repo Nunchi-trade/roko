@@ -242,7 +242,7 @@ pub(crate) async fn cmd_run(
         let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);
         let shell_gates = roko_cli::run::workflow_shell_gate_commands(&config.gates);
 
-        let result = roko_cli::run::run_with_workflow_engine_with_hub(
+        let result = roko_cli::run::run_workflow_engine_report_with_hub(
             &prompt,
             &workdir,
             template,
@@ -259,7 +259,28 @@ pub(crate) async fn cmd_run(
         }
 
         return match result {
-            Ok(()) => Ok(EXIT_SUCCESS),
+            Ok(report) => {
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else if !cli.quiet {
+                    roko_cli::run::print_workflow_run_report(&prompt, template, &report);
+                }
+
+                if serve {
+                    let legacy_report = roko_cli::run::workflow_report_as_run_report(&report);
+                    if let Err(err) = roko_cli::run::write_shared_run(&workdir, &legacy_report) {
+                        if !cli.quiet {
+                            eprintln!("share failed: {err}");
+                        }
+                    }
+                }
+
+                if report.success {
+                    Ok(EXIT_SUCCESS)
+                } else {
+                    Ok(EXIT_AGENT_FAILURE)
+                }
+            }
             Err(e) => {
                 if !cli.quiet {
                     eprintln!("workflow engine error: {e:#}");

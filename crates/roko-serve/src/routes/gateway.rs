@@ -1061,7 +1061,10 @@ mod tests {
         assert_eq!(request.max_tokens, Some(1024));
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.role.as_deref(), Some("agent-1"));
-        assert_eq!(request.caller.as_deref(), Some(CallerIdentity::Serve.as_str()));
+        assert_eq!(
+            request.caller.as_deref(),
+            Some(CallerIdentity::Serve.as_str())
+        );
         assert_eq!(request.cache_policy, CachePolicy::Default);
         assert_eq!(request.messages[0].role, CoreMessageRole::System);
         assert_eq!(request.messages[1].role, CoreMessageRole::User);

@@ -349,10 +349,7 @@ pub async fn delete_bench_run(workdir: &Path, run_id: &str) -> anyhow::Result<()
 }
 
 /// Append an index entry to the JSONL index file.
-pub async fn append_index_entry(
-    workdir: &Path,
-    entry: &BenchRunIndexEntry,
-) -> anyhow::Result<()> {
+pub async fn append_index_entry(workdir: &Path, entry: &BenchRunIndexEntry) -> anyhow::Result<()> {
     let dir = bench_dir(workdir);
     tokio::fs::create_dir_all(&dir).await?;
     let path = index_path(workdir);
@@ -369,10 +366,7 @@ pub async fn append_index_entry(
 }
 
 /// Update an existing index entry (rewrite the full file).
-pub async fn update_index_entry(
-    workdir: &Path,
-    entry: &BenchRunIndexEntry,
-) -> anyhow::Result<()> {
+pub async fn update_index_entry(workdir: &Path, entry: &BenchRunIndexEntry) -> anyhow::Result<()> {
     let path = index_path(workdir);
     let mut entries = load_index_entries(workdir).await;
     if let Some(existing) = entries.iter_mut().find(|e| e.id == entry.id) {

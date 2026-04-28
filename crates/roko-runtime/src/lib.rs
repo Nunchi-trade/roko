@@ -83,7 +83,9 @@ pub use roko_core::foundation::{
     PromptSpec, ShellGateCommand, TokenUsage,
 };
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
-pub use workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
+pub use workflow_engine::{
+    GateOutcome, WorkflowEngine, WorkflowResult, WorkflowRunConfig, WorkflowRunReport,
+};
 
 #[cfg(test)]
 mod contract_guards {

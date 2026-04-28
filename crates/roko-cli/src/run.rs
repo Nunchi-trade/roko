@@ -39,7 +39,7 @@ use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig, WorkflowRunReport};
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::collections::HashMap;
@@ -275,7 +275,7 @@ pub async fn run_with_workflow_engine(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<WorkflowRunReport> {
     run_with_workflow_engine_with_hub(
         prompt,
         workdir,
@@ -296,9 +296,28 @@ pub async fn run_with_workflow_engine_with_hub(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
-) -> anyhow::Result<()> {
-    let start_time = std::time::Instant::now();
+) -> anyhow::Result<WorkflowRunReport> {
+    let report = run_workflow_engine_report_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+        external_hub,
+    )
+    .await?;
+    print_workflow_run_report(prompt, workflow_template, &report);
+    Ok(report)
+}
 
+pub async fn run_workflow_engine_report_with_hub(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+    external_hub: Option<&StateHub>,
+) -> anyhow::Result<WorkflowRunReport> {
     use roko_runtime::effect_driver::RuntimeEvent;
     use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
 
@@ -313,7 +332,6 @@ pub async fn run_with_workflow_engine_with_hub(
     }
 
     let services = build_workflow_effect_services(workdir)?;
-    let gates_summary = (!enabled_gates.is_empty()).then(|| enabled_gates.join(", "));
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
@@ -324,15 +342,6 @@ pub async fn run_with_workflow_engine_with_hub(
         commit_prefix: Some("feat".to_string()),
     };
 
-    output_format::intro("roko run");
-    output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
-    output_format::step("workflow", workflow_template);
-    output_format::step("model", "claude-sonnet-4-20250514");
-    output_format::divider();
-    output_format::bar("starting workflow...");
-    output_format::divider();
-
-    // Run the workflow.
     let mut engine = WorkflowEngine::new(services);
     let roko_dir = workdir.join(".roko");
     let logger = JsonlLogger::from_roko_dir(&roko_dir);
@@ -352,47 +361,77 @@ pub async fn run_with_workflow_engine_with_hub(
         .await
         .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
 
-    match &result.outcome {
-        WorkflowOutcome::Success { commit_hash } => {
-            let hash_str = commit_hash
-                .as_deref()
-                .map(|h| format!(" ({})", &h[..7.min(h.len())]))
-                .unwrap_or_default();
-            output_format::success(&format!(
-                "workflow completed ({} iteration{}){hash_str}",
-                result.iterations,
-                if result.iterations == 1 { "" } else { "s" },
-            ));
-        }
-        WorkflowOutcome::Halted { reason } => {
-            output_format::error(&format!("workflow halted: {reason}"));
-        }
-        WorkflowOutcome::Cancelled => {
-            output_format::warning("workflow cancelled");
-        }
+    Ok(result)
+}
+
+pub fn print_workflow_run_report(
+    prompt: &str,
+    workflow_template: &str,
+    report: &WorkflowRunReport,
+) {
+    output_format::intro("roko run");
+    output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
+    output_format::step("workflow", workflow_template);
+    output_format::step("model", &report.model);
+    output_format::divider();
+
+    if report.success {
+        output_format::success(&format!(
+            "workflow completed ({} agent turn{})",
+            report.agent_turns,
+            if report.agent_turns == 1 { "" } else { "s" },
+        ));
+    } else {
+        output_format::error("workflow failed");
     }
 
-    // Efficiency summary.
-    let elapsed = start_time.elapsed();
+    if !report.output.trim().is_empty() {
+        output_format::bar(&truncate(&report.output, 200));
+    }
+
     output_format::divider();
     output_format::step("Summary", "");
     output_format::branch(&format!(
         "duration   {}",
-        output_format::cyan(&format_duration(elapsed)),
+        output_format::cyan(&format_duration(std::time::Duration::from_secs_f64(
+            report.duration_secs,
+        ))),
     ));
     output_format::branch(&format!(
-        "iterations {}",
-        output_format::cyan(&result.iterations.to_string()),
+        "tokens     {}",
+        output_format::cyan(&report.token_usage.to_string()),
     ));
-    if let Some(gates_summary) = gates_summary {
+    if let Some(cost) = report.cost {
         output_format::branch(&format!(
-            "gates      {}",
-            output_format::dim(&gates_summary),
+            "cost       {}",
+            output_format::cyan(&format!("{cost:.4}"))
         ));
     }
-    output_format::end(&output_format::dim(&result.run_id));
+    if report.gates.is_empty() {
+        output_format::branch("gates      (none configured)");
+    } else {
+        for gate in &report.gates {
+            let marker = if gate.passed { "PASS" } else { "FAIL" };
+            output_format::branch(&format!("gate       [{marker}] {}", gate.name));
+        }
+    }
+    output_format::end(&output_format::dim(&report.run_id));
+}
 
-    Ok(())
+pub fn workflow_report_as_run_report(report: &WorkflowRunReport) -> RunReport {
+    RunReport {
+        episode_id: report.run_id.clone(),
+        prompt_id: report.prompt_summary.clone(),
+        agent_output_id: report.run_id.clone(),
+        agent_success: report.success,
+        gate_verdicts: report
+            .gates
+            .iter()
+            .map(|gate| (gate.name.clone(), gate.passed))
+            .collect(),
+        total_signals: report.events.len(),
+        output_text: Some(report.output.clone()),
+    }
 }
 
 /// Execute a plan's tasks via WorkflowEngine (v2 engine path for `roko plan run`).
@@ -426,16 +465,18 @@ pub async fn run_plan_with_workflow_engine(
 
         match engine.run(config).await {
             Ok(result) => {
-                let success = matches!(
-                    &result.outcome,
-                    roko_runtime::workflow_engine::WorkflowOutcome::Success { .. }
+                let success = result.success;
+                let message = format!(
+                    "{} in {} agent turn{}",
+                    if success { "success" } else { "failed" },
+                    result.agent_turns,
+                    if result.agent_turns == 1 { "" } else { "s" },
                 );
-                let message = format!("{:?} in {} iterations", result.outcome, result.iterations);
                 println!("[{task_id}] {message}");
                 tracing::info!(
                     task_id,
-                    outcome = ?result.outcome,
-                    iterations = result.iterations,
+                    success = result.success,
+                    agent_turns = result.agent_turns,
                     "v2 workflow task complete"
                 );
                 if success {

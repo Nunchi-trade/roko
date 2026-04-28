@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use roko_core::RuntimeEvent;
 use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
 use roko_core::runtime_event::RuntimeEventEnvelope;
+use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
@@ -47,6 +49,31 @@ pub struct WorkflowResult {
     pub iterations: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateOutcome {
+    pub name: String,
+    pub passed: bool,
+    pub output: Option<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRunReport {
+    pub run_id: String,
+    pub success: bool,
+    pub model: String,
+    pub provider: Option<String>,
+    pub prompt_summary: String,
+    pub output: String,
+    pub agent_turns: u32,
+    pub token_usage: u64,
+    pub cost: Option<f64>,
+    pub duration_secs: f64,
+    pub gates: Vec<GateOutcome>,
+    pub events: Vec<RuntimeEventEnvelope>,
+    pub checkpoint_path: Option<String>,
+}
+
 /// The top-level workflow execution engine.
 ///
 /// Usage:
@@ -81,7 +108,7 @@ impl WorkflowEngine {
     /// 2. Creates an `EffectDriver` from the services.
     /// 3. Runs the state machine loop: step -> execute -> feed back -> repeat.
     /// 4. Returns the outcome.
-    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult> {
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowRunReport> {
         self.run_with_cancel(config, CancelToken::new()).await
     }
 
@@ -100,9 +127,10 @@ impl WorkflowEngine {
         &self,
         config: WorkflowRunConfig,
         token: CancelToken,
-    ) -> Result<WorkflowResult> {
+    ) -> Result<WorkflowRunReport> {
         let run_id = generate_run_id();
         let started_at = Instant::now();
+        let event_start_seq = crate::event_bus::runtime_event_bus::<RuntimeEvent>().total_emitted();
 
         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
 
@@ -138,11 +166,13 @@ impl WorkflowEngine {
                     self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
                         .await?;
                     self.persist_affect_policy().await;
-                    return Ok(WorkflowResult {
-                        run_id,
-                        outcome,
-                        iterations: pipeline.iteration,
-                    });
+                    return Ok(self.build_run_report(
+                        &config,
+                        &run_id,
+                        &outcome,
+                        started_at,
+                        event_start_seq,
+                    ));
                 }
             }
 
@@ -190,11 +220,13 @@ impl WorkflowEngine {
                     self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
                         .await?;
                     self.persist_affect_policy().await;
-                    return Ok(WorkflowResult {
-                        run_id,
-                        outcome: outcome.clone(),
-                        iterations: pipeline.iteration,
-                    });
+                    return Ok(self.build_run_report(
+                        &config,
+                        &run_id,
+                        outcome,
+                        started_at,
+                        event_start_seq,
+                    ));
                 }
                 PipelineOutput::Halt { reason } => {
                     let outcome = WorkflowOutcome::Halted {
@@ -208,11 +240,13 @@ impl WorkflowEngine {
                     self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
                         .await?;
                     self.persist_affect_policy().await;
-                    return Ok(WorkflowResult {
-                        run_id,
-                        outcome,
-                        iterations: pipeline.iteration,
-                    });
+                    return Ok(self.build_run_report(
+                        &config,
+                        &run_id,
+                        &outcome,
+                        started_at,
+                        event_start_seq,
+                    ));
                 }
             };
 
@@ -400,6 +434,25 @@ impl WorkflowEngine {
         emit_runtime_event(envelope);
     }
 
+    fn build_run_report(
+        &self,
+        config: &WorkflowRunConfig,
+        run_id: &str,
+        outcome: &WorkflowOutcome,
+        started_at: Instant,
+        event_start_seq: u64,
+    ) -> WorkflowRunReport {
+        let events = collect_run_events(run_id, event_start_seq);
+        report_from_events(
+            run_id,
+            matches!(outcome, WorkflowOutcome::Success { .. }),
+            &self.services.model,
+            &config.prompt,
+            started_at.elapsed().as_secs_f64(),
+            events,
+        )
+    }
+
     async fn persist_affect_policy(&self) {
         if let Some(ref affect) = self.services.affect_policy {
             let policy = affect.lock().await;
@@ -438,6 +491,158 @@ impl WorkflowEngine {
             .await?;
         self.services.feedback_sink.flush().await?;
         Ok(())
+    }
+}
+
+fn collect_run_events(run_id: &str, event_start_seq: u64) -> Vec<RuntimeEventEnvelope> {
+    crate::event_bus::runtime_event_bus::<RuntimeEvent>()
+        .replay_from(event_start_seq)
+        .into_iter()
+        .filter(|envelope| envelope.payload.run_id() == run_id)
+        .map(|envelope| RuntimeEventEnvelope {
+            run_id: run_id.to_string(),
+            seq: envelope.seq,
+            ts: event_timestamp(envelope.ts_millis),
+            schema_version: 1,
+            source: event_source(&envelope.payload).to_string(),
+            payload: envelope.payload,
+        })
+        .collect()
+}
+
+fn report_from_events(
+    run_id: &str,
+    success: bool,
+    default_model: &str,
+    prompt: &str,
+    duration_secs: f64,
+    events: Vec<RuntimeEventEnvelope>,
+) -> WorkflowRunReport {
+    let mut model = non_empty(default_model).map(ToOwned::to_owned);
+    let mut implementer_model = None;
+    let mut output = None;
+    let mut agent_turns = 0_u32;
+    let mut token_usage = 0_u64;
+    let mut cost_total = 0.0_f64;
+    let mut saw_cost = false;
+    let mut gates = Vec::new();
+    let mut checkpoint_path = None;
+
+    for envelope in &events {
+        match &envelope.payload {
+            RuntimeEvent::AgentSpawned {
+                role,
+                model: event_model,
+                ..
+            } => {
+                if let Some(event_model) = non_empty(event_model) {
+                    if role == "implementer" {
+                        implementer_model = Some(event_model.to_string());
+                    }
+                    model = Some(event_model.to_string());
+                }
+            }
+            RuntimeEvent::AgentCompleted {
+                output: event_output,
+                tokens_used,
+                cost_usd,
+                ..
+            } => {
+                agent_turns = agent_turns.saturating_add(1);
+                output = Some(event_output.clone());
+                token_usage = token_usage.saturating_add(*tokens_used);
+                cost_total += *cost_usd;
+                saw_cost = true;
+            }
+            RuntimeEvent::AgentFailed { error, .. } => {
+                agent_turns = agent_turns.saturating_add(1);
+                if output.is_none() {
+                    output = Some(error.clone());
+                }
+            }
+            RuntimeEvent::GatePassed {
+                gate_name,
+                duration_ms,
+                ..
+            } => gates.push(GateOutcome {
+                name: gate_name.clone(),
+                passed: true,
+                output: None,
+                duration_ms: *duration_ms,
+            }),
+            RuntimeEvent::GateFailed {
+                gate_name,
+                output: gate_output,
+                duration_ms,
+                ..
+            } => gates.push(GateOutcome {
+                name: gate_name.clone(),
+                passed: false,
+                output: Some(gate_output.clone()),
+                duration_ms: *duration_ms,
+            }),
+            RuntimeEvent::StateCheckpointed { path, .. } => {
+                checkpoint_path = Some(path.clone());
+            }
+            _ => {}
+        }
+    }
+
+    WorkflowRunReport {
+        run_id: run_id.to_string(),
+        success,
+        model: implementer_model
+            .or(model)
+            .unwrap_or_else(|| "unconfigured".to_string()),
+        provider: None,
+        prompt_summary: summarize_text(prompt, 120),
+        output: output.unwrap_or_else(|| {
+            if success {
+                "success".to_string()
+            } else {
+                "workflow did not produce agent output".to_string()
+            }
+        }),
+        agent_turns,
+        token_usage,
+        cost: saw_cost.then_some(cost_total),
+        duration_secs,
+        gates,
+        events,
+        checkpoint_path,
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn summarize_text(text: &str, max_chars: usize) -> String {
+    text.char_indices()
+        .nth(max_chars)
+        .map_or_else(|| text.to_string(), |(idx, _)| text[..idx].to_string())
+}
+
+fn event_timestamp(ts_millis: u64) -> DateTime<Utc> {
+    let ts_millis = i64::try_from(ts_millis).unwrap_or(i64::MAX);
+    DateTime::<Utc>::from_timestamp_millis(ts_millis).unwrap_or_else(Utc::now)
+}
+
+fn event_source(event: &RuntimeEvent) -> &'static str {
+    match event {
+        RuntimeEvent::WorkflowStarted { .. }
+        | RuntimeEvent::PhaseTransition { .. }
+        | RuntimeEvent::WorkflowCompleted { .. }
+        | RuntimeEvent::GateStarted { .. } => "workflow_engine",
+        RuntimeEvent::AgentSpawned { .. }
+        | RuntimeEvent::AgentOutput { .. }
+        | RuntimeEvent::AgentCompleted { .. }
+        | RuntimeEvent::AgentFailed { .. }
+        | RuntimeEvent::GatePassed { .. }
+        | RuntimeEvent::GateFailed { .. }
+        | RuntimeEvent::FeedbackRecorded { .. }
+        | RuntimeEvent::StateCheckpointed { .. } => "effect_driver",
     }
 }
 
@@ -854,8 +1059,9 @@ mod tests {
             Ok(result) => result,
             Err(err) => panic!("workflow should complete successfully: {err}"),
         };
-        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
-        assert_eq!(result.iterations, 1);
+        assert!(result.success);
+        assert_eq!(result.agent_turns, 1);
+        assert_eq!(result.model, "mock");
         assert!(result.run_id.starts_with("run_"));
     }
 
@@ -914,8 +1120,8 @@ mod tests {
             Ok(result) => result,
             Err(err) => panic!("workflow should complete successfully: {err}"),
         };
-        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
-        assert_eq!(result.iterations, 1);
+        assert!(result.success);
+        assert_eq!(result.agent_turns, 2);
     }
 
     #[tokio::test]

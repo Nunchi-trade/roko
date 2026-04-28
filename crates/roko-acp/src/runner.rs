@@ -22,7 +22,7 @@ use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::effect_driver::RuntimeEvent as RuntimeDriverEvent;
 use roko_runtime::event_bus::runtime_event_bus;
 use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig, WorkflowRunReport};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -59,7 +59,7 @@ pub async fn run_with_workflow_engine(
     workdir: &Path,
     template: &str,
     event_sender: mpsc::Sender<CognitiveEvent>,
-) -> anyhow::Result<WorkflowResult> {
+) -> anyhow::Result<WorkflowRunReport> {
     let runtime_run_id = Arc::new(Mutex::new(None));
     let roko_config = roko_core::config::load_config(workdir).unwrap_or_default();
     let services = ServiceFactory::build(ServiceConfig {
