@@ -88,23 +88,11 @@ impl EventConsumer for JsonlLogger {
 }
 
 fn event_kind(event: &RuntimeEvent) -> &'static str {
-    match event {
-        RuntimeEvent::AgentSpawned { .. } => "agent_spawned",
-        RuntimeEvent::AgentCompleted { .. } => "agent_completed",
-        RuntimeEvent::AgentFailed { .. } => "agent_failed",
-        RuntimeEvent::GatePassed { .. } => "gate_passed",
-        RuntimeEvent::GateFailed { .. } => "gate_failed",
-    }
+    event.kind()
 }
 
 fn event_run_id(event: &RuntimeEvent) -> &str {
-    match event {
-        RuntimeEvent::AgentSpawned { run_id, .. }
-        | RuntimeEvent::AgentCompleted { run_id, .. }
-        | RuntimeEvent::AgentFailed { run_id, .. }
-        | RuntimeEvent::GatePassed { run_id, .. }
-        | RuntimeEvent::GateFailed { run_id, .. } => run_id,
-    }
+    event.run_id()
 }
 
 #[cfg(test)]

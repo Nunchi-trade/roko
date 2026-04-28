@@ -68,6 +68,7 @@ pub use roko_core::foundation::{
     MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
     TokenUsage,
 };
+pub use roko_core::RuntimeEvent;
 pub use jsonl_logger::{EventConsumer, JsonlLogger};
 pub use lifecycle::{
     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
