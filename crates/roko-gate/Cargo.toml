@@ -24,3 +24,6 @@ toml = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 roko-std = { path = "../roko-std" }
+
+[package.metadata.roko]
+layer = 3

@@ -34,3 +34,6 @@ roko-std = { path = "../roko-std" }
 tokio = { workspace = true, features = ["full", "macros", "test-util"] }
 tempfile = { workspace = true }
 insta = "1.43.2"
+
+[package.metadata.roko]
+layer = 2

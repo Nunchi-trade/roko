@@ -24,3 +24,6 @@ roko-gate = { path = "../roko-gate" }
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.roko]
+layer = 4

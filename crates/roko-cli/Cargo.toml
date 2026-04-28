@@ -81,3 +81,6 @@ agent-relay = { path = "../../apps/agent-relay" }
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+
+[package.metadata.roko]
+layer = 4

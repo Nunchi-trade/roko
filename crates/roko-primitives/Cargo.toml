@@ -30,3 +30,6 @@ serde_json = { workspace = true }
 [[bench]]
 name = "hdc_bench"
 harness = false
+
+[package.metadata.roko]
+layer = 0

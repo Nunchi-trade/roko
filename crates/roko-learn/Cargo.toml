@@ -32,3 +32,6 @@ toml = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+
+[package.metadata.roko]
+layer = 2

@@ -76,3 +76,6 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tower = { workspace = true, features = ["util"] }
+
+[package.metadata.roko]
+layer = 4

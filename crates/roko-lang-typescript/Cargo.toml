@@ -14,3 +14,6 @@ workspace = true
 roko-core = { path = "../roko-core" }
 
 [dev-dependencies]
+
+[package.metadata.roko]
+layer = 2

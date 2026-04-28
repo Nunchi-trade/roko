@@ -19,3 +19,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 roko-mcp-stdio = { path = "../roko-mcp-stdio" }
+
+[package.metadata.roko]
+layer = 2

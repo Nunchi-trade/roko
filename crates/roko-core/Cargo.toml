@@ -39,3 +39,6 @@ tracing-subscriber = { workspace = true }
 [[bench]]
 name = "engram_bench"
 harness = false
+
+[package.metadata.roko]
+layer = 1

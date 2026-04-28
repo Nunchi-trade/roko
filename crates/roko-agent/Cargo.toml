@@ -42,3 +42,6 @@ roko-std = { path = "../roko-std" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 wiremock = "0.6"
+
+[package.metadata.roko]
+layer = 2
