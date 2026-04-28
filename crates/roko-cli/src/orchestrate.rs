@@ -1934,6 +1934,61 @@ impl OrchestrationReport {
     }
 }
 
+fn plan_workflow_report_as_orchestration(
+    report: crate::run::PlanWorkflowReport,
+) -> OrchestrationReport {
+    #[derive(Default)]
+    struct PlanAccumulator {
+        task_count: usize,
+        failed_tasks: usize,
+        agent_calls: usize,
+        gate_results: Vec<(String, bool)>,
+    }
+
+    let mut plans_by_id: BTreeMap<String, PlanAccumulator> = BTreeMap::new();
+    let mut total_agent_calls = 0usize;
+    let mut total_gate_runs = 0usize;
+
+    for task_report in report.task_reports {
+        let plan = plans_by_id.entry(task_report.plan_id).or_default();
+        plan.task_count += 1;
+        if !task_report.report.success {
+            plan.failed_tasks += 1;
+        }
+        let agent_turns = usize::try_from(task_report.report.agent_turns).unwrap_or(usize::MAX);
+        plan.agent_calls = plan.agent_calls.saturating_add(agent_turns);
+        total_agent_calls = total_agent_calls.saturating_add(agent_turns);
+
+        for gate in task_report.report.gates {
+            total_gate_runs = total_gate_runs.saturating_add(1);
+            plan.gate_results.push((gate.name, gate.passed));
+        }
+    }
+
+    for task_error in report.task_errors {
+        let plan = plans_by_id.entry(task_error.plan_id).or_default();
+        plan.task_count += 1;
+        plan.failed_tasks += 1;
+    }
+
+    let plans = plans_by_id
+        .into_iter()
+        .map(|(plan_id, plan)| PlanRunReport {
+            plan_id,
+            succeeded: plan.task_count > 0 && plan.failed_tasks == 0,
+            agent_calls: plan.agent_calls,
+            gate_results: plan.gate_results,
+        })
+        .collect();
+
+    OrchestrationReport {
+        plans,
+        total_agent_calls,
+        total_gate_runs,
+        fleet_cfactor: None,
+    }
+}
+
 /// Health probe that checks if a CLI command is findable on PATH.
 struct CliProbe {
     command: String,
@@ -7500,34 +7555,20 @@ impl PlanRunner {
     /// This is the documented runtime entrypoint used by `roko plan run`.
     #[instrument(skip_all, fields(plan_dir = %path.display()))]
     pub async fn run(&mut self, path: &Path) -> Result<OrchestrationReport> {
-        // V2 engine path: iterate tasks through WorkflowEngine instead of
-        // the full 14-phase executor state machine.
-        if std::env::var("ROKO_ENGINE").as_deref() == Ok("v2") {
-            return self.run_with_v2_engine(path).await;
-        }
-
-        self.run_task_plans(path).await
+        self.run_with_v2_engine(path).await
     }
 
     async fn run_with_v2_engine(&self, path: &Path) -> Result<OrchestrationReport> {
-        let tasks = crate::run::discover_task_prompts(path)?;
-        let enabled_gates: Vec<String> = self
-            .config
-            .gates
-            .iter()
-            .map(|gate| match gate {
-                crate::config::GateConfig::Compile { .. } => "compile".to_string(),
-                crate::config::GateConfig::Clippy { .. } => "clippy".to_string(),
-                crate::config::GateConfig::Test { .. } => "test".to_string(),
-                crate::config::GateConfig::Shell { .. } => "shell".to_string(),
-            })
-            .collect();
+        let tasks = crate::run::discover_plan_workflow_tasks(path)?;
+        let enabled_gates = crate::run::workflow_enabled_gate_names(&self.config.gates);
+        let shell_gates = crate::run::workflow_shell_gate_commands(&self.config.gates);
 
-        let report = crate::run::run_plan_with_workflow_engine(
+        let report = crate::run::run_plan_tasks_with_workflow_engine(
             &tasks,
             &self.workdir,
             "standard",
             enabled_gates,
+            shell_gates,
         )
         .await
         .map_err(|e| anyhow!("v2 engine plan run failed: {e}"))?;
@@ -7539,7 +7580,7 @@ impl PlanRunner {
             "v2 engine plan run complete"
         );
 
-        Ok(self.current_report())
+        Ok(plan_workflow_report_as_orchestration(report))
     }
 
     /// Run plans using tasks.toml files, routing through the full 14-phase
@@ -20096,6 +20137,12 @@ depends_on = []
             .await
             .unwrap_err();
         assert!(err.to_string().contains("circuit breaker tripped"));
+
+        for summary in local_hub.current_snapshot().diagnoses.iter().cloned() {
+            state
+                .state_hub
+                .publish(roko_core::DashboardEvent::Diagnosis { summary });
+        }
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {

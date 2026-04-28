@@ -58,6 +58,7 @@ pub mod daemon;
 pub mod demo_cmd;
 pub mod deployment;
 pub mod dispatch;
+#[cfg(feature = "legacy-orchestrate")]
 pub mod dispatch_direct;
 pub(crate) mod dispatch_helpers;
 pub mod dispatch_v2;
@@ -71,9 +72,11 @@ pub mod index;
 pub mod inject;
 pub mod inline;
 pub(crate) mod knowledge_helpers;
+#[path = "../../../scripts/layer_check.rs"]
 pub mod layer_check;
 pub(crate) mod learning_helpers;
 pub mod oneshot;
+#[cfg(feature = "legacy-orchestrate")]
 pub mod orchestrate;
 pub mod output_format;
 pub mod pipe;
@@ -123,6 +126,7 @@ pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use layer_check::LayerViolation;
 pub use oneshot::{OneshotMode, OneshotResult};
+#[cfg(feature = "legacy-orchestrate")]
 pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
 pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};

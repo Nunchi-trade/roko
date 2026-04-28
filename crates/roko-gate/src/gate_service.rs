@@ -4,7 +4,7 @@
 //! and runs them according to `GateConfig`.
 
 use async_trait::async_trait;
-use roko_core::foundation::{GateConfig, GateReport, GateRunner, GateVerdict};
+use roko_core::foundation::{GateConfig, GateReport, GateRunner, GateVerdict, ShellGateCommand};
 use roko_core::{Body, Context, Engram, Kind, Result, RokoError, Verdict, Verify};
 use std::sync::{Arc, Mutex};
 
@@ -54,7 +54,7 @@ impl GateService {
             "test" | "test:cargo" => Some(2),
             "diff" | "diff:git" => Some(3),
             "fmt" | "fmt:cargo" | "format" => Some(4),
-            "custom" | "custom:shell" => Some(5),
+            "custom" | "custom:shell" | "shell" => Some(5),
             "judge" | "llm-judge" => Some(6),
             _ => None,
         }
@@ -71,13 +71,22 @@ impl GateService {
                 ShellGate::new("git", vec!["diff".into(), "--stat".into()]).with_timeout_ms(30_000),
             )),
             "fmt" | "fmt:cargo" | "format" => Some(Box::new(FormatCheckGate::cargo())),
-            "custom" | "custom:shell" => {
-                // TODO(converge): read custom command from GateConfig once it supports a custom_command field.
-                Some(Box::new(ShellGate::new("true", vec![])))
-            }
             "judge" | "llm-judge" => Some(Box::new(StubJudgeGate)),
             _ => None,
         }
+    }
+
+    fn shell_gate_for_config(command: &ShellGateCommand) -> Result<Box<dyn Verify>> {
+        if command.program.trim().is_empty() {
+            return Err(RokoError::Invalid(
+                "shell gate requires a non-empty program".to_string(),
+            ));
+        }
+
+        Ok(Box::new(
+            ShellGate::new(command.program.clone(), command.args.clone())
+                .with_timeout_ms(command.timeout_ms),
+        ))
     }
 
     fn ordered_gate_names(config: &GateConfig) -> Vec<String> {
@@ -183,7 +192,10 @@ impl roko_core::Cell for StubJudgeGate {
 #[async_trait]
 impl Verify for StubJudgeGate {
     async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
-        Verdict::fail("stub-llm-judge", "LLM judge gate not yet implemented — enable a real judge or remove from enabled_gates")
+        Verdict::fail(
+            "stub-llm-judge",
+            "LLM judge gate not yet implemented — enable a real judge or remove from enabled_gates",
+        )
     }
 
     fn name(&self) -> &str {
@@ -208,6 +220,7 @@ impl GateRunner for GateService {
         let build_system = BuildSystem::detect(&config.workdir);
 
         let mut verdicts = Vec::new();
+        let mut shell_gates = config.shell_gates.iter();
 
         for gate_name in Self::ordered_gate_names(&config) {
             let rung = Self::rung_for_name(&gate_name);
@@ -224,14 +237,32 @@ impl GateRunner for GateService {
                 }
             }
 
-            let Some(gate) = self.gate_for_name(&gate_name, build_system) else {
-                verdicts.push(GateVerdict {
-                    gate_name: gate_name.clone(),
-                    passed: false,
-                    output: format!("Unknown gate: {gate_name}"),
-                    duration_ms: 0,
-                });
-                break;
+            let gate = match gate_name.as_str() {
+                "custom" => {
+                    return Err(RokoError::Invalid(
+                        "custom gate requires explicit command configuration".to_string(),
+                    ));
+                }
+                "shell" | "custom:shell" => {
+                    let Some(command) = shell_gates.next() else {
+                        return Err(RokoError::Invalid(format!(
+                            "{gate_name} gate requires explicit command configuration"
+                        )));
+                    };
+                    Self::shell_gate_for_config(command)?
+                }
+                _ => {
+                    let Some(gate) = self.gate_for_name(&gate_name, build_system) else {
+                        verdicts.push(GateVerdict {
+                            gate_name: gate_name.clone(),
+                            passed: false,
+                            output: format!("Unknown gate: {gate_name}"),
+                            duration_ms: 0,
+                        });
+                        break;
+                    };
+                    gate
+                }
             };
 
             let verdict = gate.verify(&signal, &ctx).await;
@@ -280,12 +311,14 @@ mod tests {
         assert_eq!(GateService::rung_for_name("diff"), Some(3));
         assert_eq!(GateService::rung_for_name("fmt"), Some(4));
         assert_eq!(GateService::rung_for_name("custom"), Some(5));
+        assert_eq!(GateService::rung_for_name("shell"), Some(5));
+        assert_eq!(GateService::rung_for_name("custom:shell"), Some(5));
         assert_eq!(GateService::rung_for_name("judge"), Some(6));
         assert_eq!(GateService::rung_for_name("nonexistent"), None);
     }
 
     #[test]
-    fn gate_for_name_returns_gates_for_all_rungs() {
+    fn gate_for_name_returns_static_gates() {
         let svc = GateService::new();
         let bs = BuildSystem::Cargo;
         assert!(svc.gate_for_name("compile", bs).is_some());
@@ -293,7 +326,8 @@ mod tests {
         assert!(svc.gate_for_name("test", bs).is_some());
         assert!(svc.gate_for_name("diff", bs).is_some());
         assert!(svc.gate_for_name("fmt", bs).is_some());
-        assert!(svc.gate_for_name("custom", bs).is_some());
+        assert!(svc.gate_for_name("custom", bs).is_none());
+        assert!(svc.gate_for_name("shell", bs).is_none());
         assert!(svc.gate_for_name("judge", bs).is_some());
         assert!(svc.gate_for_name("nonexistent", bs).is_none());
     }
@@ -311,6 +345,7 @@ mod tests {
                 "custom".into(),
                 "clippy".into(),
             ],
+            shell_gates: Vec::new(),
             max_rung: None,
         };
         assert_eq!(
@@ -334,6 +369,7 @@ mod tests {
                 "custom".into(),
                 "judge".into(),
             ],
+            shell_gates: Vec::new(),
             max_rung: Some(3),
         };
         assert_eq!(
@@ -350,6 +386,7 @@ mod tests {
                 .is_none()
         );
         assert!(svc.gate_for_name("compile", BuildSystem::Cargo).is_some());
+        assert!(svc.gate_for_name("custom", BuildSystem::Cargo).is_none());
     }
 
     #[test]
@@ -357,6 +394,7 @@ mod tests {
         let config = GateConfig {
             workdir: ".".into(),
             enabled_gates: vec!["test".into(), "compile".into(), "clippy".into()],
+            shell_gates: Vec::new(),
             max_rung: None,
         };
 
@@ -375,6 +413,7 @@ mod tests {
         let config = GateConfig {
             workdir: ".".into(),
             enabled_gates: vec!["compile".into(), "clippy".into(), "test".into()],
+            shell_gates: Vec::new(),
             max_rung: Some(1),
         };
 
@@ -397,6 +436,7 @@ mod tests {
         let config = GateConfig {
             workdir: ".".into(),
             enabled_gates: vec!["compile".into(), "clippy".into()],
+            shell_gates: Vec::new(),
             max_rung: None,
         };
 
@@ -466,6 +506,7 @@ mod tests {
                 "custom".into(),
                 "judge".into(),
             ],
+            shell_gates: Vec::new(),
             max_rung: None,
         };
 

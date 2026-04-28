@@ -80,7 +80,153 @@ pub use roko_core::RuntimeEvent;
 pub use roko_core::foundation::{
     ChatMessage, EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner,
     GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
-    PromptSpec, TokenUsage,
+    PromptSpec, ShellGateCommand, TokenUsage,
 };
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
-pub use workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
+pub use workflow_engine::{
+    GateOutcome, WorkflowEngine, WorkflowResult, WorkflowRunConfig, WorkflowRunReport,
+};
+
+#[cfg(test)]
+mod contract_guards {
+    use roko_core::RuntimeEvent;
+    use roko_core::runtime_event::{RuntimeEventEnvelope, WorkflowOutcome};
+    use std::path::{Path, PathBuf};
+
+    fn runtime_src_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn rust_source_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(rust_source_files(&path));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    fn runtime_source() -> String {
+        rust_source_files(&runtime_src_dir())
+            .into_iter()
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn runtime_does_not_define_duplicate_foundation_contracts() {
+        let source = runtime_source();
+        let trait_prefix = "pub trait ";
+        let struct_prefix = "pub struct ";
+
+        for forbidden in [
+            [trait_prefix, "AffectPolicy"].concat(),
+            [trait_prefix, "DispatchModulation"].concat(),
+            [struct_prefix, "DispatchModulation"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "runtime must import foundation contract `{forbidden}` from roko-core"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonl_logger_does_not_serialize_events_as_debug_strings() {
+        let source = std::fs::read_to_string(runtime_src_dir().join("jsonl_logger.rs")).unwrap();
+        let debug_format = ["format!(\"", "{:", "?}", "\""].concat();
+        let captured_debug = ["{", "event", ":", "?", "}"].concat();
+
+        assert!(
+            !source.contains(&debug_format),
+            "jsonl logger must serialize events with serde_json, not Debug formatting"
+        );
+        assert!(
+            !source.contains(&captured_debug),
+            "jsonl logger must not use captured Debug formatting as an event contract"
+        );
+    }
+
+    #[test]
+    fn runtime_event_envelopes_round_trip_as_json() {
+        let events = vec![
+            RuntimeEvent::WorkflowStarted {
+                run_id: "run-1".into(),
+                template: "express".into(),
+                prompt: "fix bug".into(),
+            },
+            RuntimeEvent::PhaseTransition {
+                run_id: "run-1".into(),
+                from: "plan".into(),
+                to: "execute".into(),
+            },
+            RuntimeEvent::AgentSpawned {
+                run_id: "run-1".into(),
+                agent_id: "agent-1".into(),
+                role: "implementer".into(),
+                model: "model-1".into(),
+            },
+            RuntimeEvent::AgentOutput {
+                run_id: "run-1".into(),
+                agent_id: "agent-1".into(),
+                chunk: "partial".into(),
+            },
+            RuntimeEvent::AgentCompleted {
+                run_id: "run-1".into(),
+                agent_id: "agent-1".into(),
+                output: "done".into(),
+                tokens_used: 42,
+                cost_usd: 0.12,
+            },
+            RuntimeEvent::AgentFailed {
+                run_id: "run-1".into(),
+                agent_id: "agent-2".into(),
+                error: "failed".into(),
+            },
+            RuntimeEvent::GateStarted {
+                run_id: "run-1".into(),
+                gate_name: "compile".into(),
+                rung: 1,
+            },
+            RuntimeEvent::GatePassed {
+                run_id: "run-1".into(),
+                gate_name: "compile".into(),
+                duration_ms: 250,
+            },
+            RuntimeEvent::GateFailed {
+                run_id: "run-1".into(),
+                gate_name: "test".into(),
+                output: "failure".into(),
+                duration_ms: 500,
+            },
+            RuntimeEvent::FeedbackRecorded {
+                run_id: "run-1".into(),
+                kind: "model_call".into(),
+                summary: "recorded".into(),
+            },
+            RuntimeEvent::StateCheckpointed {
+                run_id: "run-1".into(),
+                path: ".roko/checkpoint.json".into(),
+            },
+            RuntimeEvent::WorkflowCompleted {
+                run_id: "run-1".into(),
+                outcome: WorkflowOutcome::Success {
+                    commit_hash: Some("abc123".into()),
+                },
+            },
+        ];
+
+        for (seq, event) in events.into_iter().enumerate() {
+            let run_id = event.run_id().to_string();
+            let envelope = RuntimeEventEnvelope::new(run_id, seq as u64, "test", event);
+            let json = serde_json::to_string(&envelope).unwrap();
+            let round_tripped: RuntimeEventEnvelope = serde_json::from_str(&json).unwrap();
+            assert_eq!(round_tripped, envelope);
+        }
+    }
+}

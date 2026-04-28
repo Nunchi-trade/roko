@@ -487,33 +487,56 @@ impl EventConsumer for DashboardEventBridge {
                 agent_id: agent_id.clone(),
                 content: chunk.clone(),
             }],
+            RuntimeEvent::AgentCompleted { agent_id, .. } => {
+                vec![DashboardEvent::AgentCompleted {
+                    agent_id: agent_id.clone(),
+                }]
+            }
+            RuntimeEvent::PhaseTransition { run_id, from, to } => {
+                vec![DashboardEvent::PhaseTransition {
+                    plan_id: workflow_plan_id(run_id),
+                    from: from.clone(),
+                    to: to.clone(),
+                }]
+            }
             RuntimeEvent::GatePassed {
                 run_id,
                 gate_name,
                 duration_ms,
-            } => vec![workflow_gate_log_entry(
-                run_id,
-                gate_name,
-                *duration_ms,
-                true,
-            )],
+            } => vec![
+                DashboardEvent::GateResult {
+                    plan_id: workflow_plan_id(run_id),
+                    task_id: workflow_task_id(run_id),
+                    gate: gate_name.clone(),
+                    passed: true,
+                },
+                workflow_gate_log_entry(run_id, gate_name, *duration_ms, true),
+            ],
             RuntimeEvent::GateFailed {
                 run_id,
                 gate_name,
                 duration_ms,
                 ..
-            } => vec![workflow_gate_log_entry(
-                run_id,
-                gate_name,
-                *duration_ms,
-                false,
-            )],
-            RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
-                vec![DashboardEvent::TaskCompleted {
+            } => vec![
+                DashboardEvent::GateResult {
                     plan_id: workflow_plan_id(run_id),
                     task_id: workflow_task_id(run_id),
-                    outcome: workflow_outcome_label(outcome),
-                }]
+                    gate: gate_name.clone(),
+                    passed: false,
+                },
+                workflow_gate_log_entry(run_id, gate_name, *duration_ms, false),
+            ],
+            RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+                let plan_id = workflow_plan_id(run_id);
+                let success = matches!(outcome, WorkflowOutcome::Success { .. });
+                vec![
+                    DashboardEvent::TaskCompleted {
+                        plan_id: plan_id.clone(),
+                        task_id: workflow_task_id(run_id),
+                        outcome: workflow_outcome_label(outcome),
+                    },
+                    DashboardEvent::PlanCompleted { plan_id, success },
+                ]
             }
             _ => Vec::new(),
         };

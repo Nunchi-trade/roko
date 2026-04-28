@@ -45,6 +45,8 @@ pub mod repair;
 pub mod replan;
 pub mod runtime_snapshot;
 pub mod safety;
+/// Shared construction path for workflow services used by surfaces.
+pub mod service_factory;
 pub mod worktree;
 
 pub use coordination::{
@@ -99,6 +101,7 @@ pub use runtime_snapshot::{
     ORCHESTRATOR_SNAPSHOT_SCHEMA_VERSION, OrchestratorSnapshot,
     orchestrator_snapshot_schema_version,
 };
+pub use service_factory::{ServiceBundle, ServiceConfig, ServiceFactory};
 pub use worktree::{
     WorktreeConfig, WorktreeError, WorktreeHandle, WorktreeHealth, WorktreeIsolationStatus,
     WorktreeManager, WorktreeSnapshot, format_branch_name,

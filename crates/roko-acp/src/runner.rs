@@ -6,15 +6,10 @@
 //! 3. Feeding results back as events
 //! 4. Emitting ACP session updates (plan entries, tool calls) through the event channel
 
-use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use roko_core::foundation::{
-    EventConsumer as CoreEventConsumer, FeedbackEvent, FeedbackSink, GateRunner as CoreGateRunner,
-    ModelCaller as CoreModelCaller, PromptAssembler, PromptSpec,
-};
+use roko_core::foundation::EventConsumer as CoreEventConsumer;
 use roko_core::{
     Body, Context, Engram, Kind, RuntimeEvent as CoreRuntimeEvent, Verify,
     WorkflowOutcome as CoreWorkflowOutcome,
@@ -23,11 +18,12 @@ use roko_gate::{
     AdaptiveThresholds, ClippyGate, CompileGate, GatePayload, TestGate,
     parse_structured_review_verdict, review_verdict::ReviewVerdictContext,
 };
-use roko_runtime::effect_driver::{EffectServices, RuntimeEvent as RuntimeDriverEvent};
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
+use roko_runtime::JsonlLogger;
+use roko_runtime::effect_driver::RuntimeEvent as RuntimeDriverEvent;
 use roko_runtime::event_bus::runtime_event_bus;
 use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
-use tokio::io::AsyncWriteExt as _;
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig, WorkflowRunReport};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -64,27 +60,21 @@ pub async fn run_with_workflow_engine(
     workdir: &Path,
     template: &str,
     event_sender: mpsc::Sender<CognitiveEvent>,
-) -> anyhow::Result<WorkflowResult> {
-    use roko_agent::model_call_service::ModelCallService;
-    use roko_gate::gate_service::GateService;
-
+) -> anyhow::Result<WorkflowRunReport> {
     let runtime_run_id = Arc::new(Mutex::new(None));
     let roko_config = roko_core::config::load_config(workdir).unwrap_or_default();
-    let model_key =
-        std::env::var("ROKO_MODEL").unwrap_or_else(|_| roko_config.agent.default_model.clone());
-    let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
-
-    let model_caller: Arc<dyn CoreModelCaller> =
-        Arc::new(ModelCallService::new(model).with_config(roko_config));
-    let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
-
-    let services = EffectServices {
-        model_caller,
-        prompt_assembler: Arc::new(AcpPromptAssembler),
-        feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
-        gate_runner,
-        affect_policy: None,
-    };
+    let services = ServiceFactory::build(ServiceConfig {
+        workdir: workdir.to_path_buf(),
+        roko_dir: workdir.join(".roko"),
+        workspace_config: roko_config,
+        model_key: std::env::var("ROKO_MODEL").ok(),
+        mcp_config: None,
+        feedback_enabled: true,
+        affect_enabled: false,
+        run_id: Some(format!("acp_workflow_{session_id}")),
+    })
+    .map_err(|error| anyhow::anyhow!("build workflow services: {error}"))?
+    .effect_services();
 
     let workflow = match template {
         "express" => WorkflowConfig::express(),
@@ -97,10 +87,12 @@ pub async fn run_with_workflow_engine(
         workdir: workdir.to_path_buf(),
         workflow,
         enabled_gates: vec!["compile".into(), "test".into()],
+        shell_gates: Vec::new(),
         commit_prefix: Some("feat".to_string()),
     };
 
     let mut engine = WorkflowEngine::new(services);
+    engine.add_consumer(Arc::new(JsonlLogger::from_roko_dir(&workdir.join(".roko"))));
     engine.add_consumer(Arc::new(AcpWorkflowEventConsumer::new(
         session_id.to_string(),
         Arc::clone(&runtime_run_id),
@@ -119,81 +111,6 @@ pub async fn run_with_workflow_engine(
     bridge_task.abort();
 
     result
-}
-
-struct AcpPromptAssembler;
-
-impl PromptAssembler for AcpPromptAssembler {
-    fn assemble<'life0, 'async_trait>(
-        &'life0 self,
-        spec: PromptSpec,
-    ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        Box::pin(async move {
-            // TODO(arch): Replace this bridge with PromptAssemblyService once
-            // roko-acp declares roko-compose in its manifest scope.
-            let mut sections = Vec::new();
-            if let Some(role) = spec.role.filter(|role| !role.trim().is_empty()) {
-                sections.push(format!("Role: {role}"));
-            }
-            if let Some(task) = spec.task.filter(|task| !task.trim().is_empty()) {
-                sections.push(format!("Task: {task}"));
-            }
-            for feedback in spec.gate_feedback {
-                sections.push(format!("Gate feedback: {feedback}"));
-            }
-            if !spec.anti_patterns.is_empty() {
-                sections.push(format!("Anti-patterns: {}", spec.anti_patterns.join("; ")));
-            }
-
-            if sections.is_empty() {
-                Ok("Complete the requested workflow using repository conventions.".to_string())
-            } else {
-                Ok(sections.join("\n\n"))
-            }
-        })
-    }
-}
-
-struct AcpFeedbackSink {
-    data_dir: PathBuf,
-}
-
-impl AcpFeedbackSink {
-    fn from_roko_dir(roko_dir: &Path) -> Self {
-        Self {
-            data_dir: roko_dir.join("learn"),
-        }
-    }
-}
-
-impl FeedbackSink for AcpFeedbackSink {
-    fn record<'life0, 'async_trait>(
-        &'life0 self,
-        event: FeedbackEvent,
-    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        Self: 'async_trait,
-    {
-        let data_dir = self.data_dir.clone();
-        Box::pin(async move {
-            tokio::fs::create_dir_all(&data_dir).await?;
-            let path = data_dir.join("efficiency.jsonl");
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await?;
-            let line = feedback_json(event).to_string();
-            file.write_all(line.as_bytes()).await?;
-            file.write_all(b"\n").await?;
-            Ok(())
-        })
-    }
 }
 
 struct AcpWorkflowEventConsumer {
@@ -470,61 +387,6 @@ fn stop_reason_for_core_outcome(outcome: &CoreWorkflowOutcome) -> StopReason {
         CoreWorkflowOutcome::Success { .. } | CoreWorkflowOutcome::Halted { .. } => {
             StopReason::EndTurn
         }
-    }
-}
-
-fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
-    let ts = chrono::Utc::now().to_rfc3339();
-    match event {
-        FeedbackEvent::ModelCall {
-            run_id,
-            model,
-            role,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            latency_ms,
-            success,
-        } => serde_json::json!({
-            "kind": "model_call",
-            "run_id": run_id,
-            "model": model,
-            "role": role,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd": cost_usd,
-            "latency_ms": latency_ms,
-            "success": success,
-            "ts": ts,
-        }),
-        FeedbackEvent::GateResult {
-            run_id,
-            gate_name,
-            passed,
-            duration_ms,
-        } => serde_json::json!({
-            "kind": "gate_result",
-            "run_id": run_id,
-            "gate_name": gate_name,
-            "passed": passed,
-            "duration_ms": duration_ms,
-            "ts": ts,
-        }),
-        FeedbackEvent::WorkflowComplete {
-            run_id,
-            outcome,
-            total_cost_usd,
-            total_tokens,
-            duration_ms,
-        } => serde_json::json!({
-            "kind": "workflow_complete",
-            "run_id": run_id,
-            "outcome": outcome,
-            "total_cost_usd": total_cost_usd,
-            "total_tokens": total_tokens,
-            "duration_ms": duration_ms,
-            "ts": ts,
-        }),
     }
 }
 

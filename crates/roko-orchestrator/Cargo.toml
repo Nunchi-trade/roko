@@ -12,7 +12,14 @@ workspace = true
 
 [dependencies]
 roko-core = { path = "../roko-core" }
+roko-agent = { path = "../roko-agent" }
+roko-compose = { path = "../roko-compose" }
 roko-conductor = { path = "../roko-conductor" }
+roko-daimon = { path = "../roko-daimon" }
+roko-gate = { path = "../roko-gate" }
+roko-learn = { path = "../roko-learn" }
+roko-neuro = { path = "../roko-neuro" }
+roko-runtime = { path = "../roko-runtime" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -392,10 +392,7 @@ pub enum Phase {
 impl Phase {
     /// Returns true when no further state transitions should be accepted.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Complete | Self::Halted { .. } | Self::Cancelled
-        )
+        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
     }
 
     /// Stable lowercase label for logs, events, and UI adapters.
@@ -453,6 +450,16 @@ pub enum PipelineInput {
         /// Review summary supplied by the reviewer.
         summary: String,
     },
+    /// Review rejected the implementation.
+    ReviewRejected {
+        /// Rejection reason supplied by the reviewer.
+        reason: String,
+    },
+    /// Review outcome was ambiguous.
+    ReviewUnclear {
+        /// Ambiguous review summary supplied by the reviewer.
+        summary: String,
+    },
     /// Review requests revisions.
     ReviewRevise {
         /// Findings that should guide the next implementation pass.
@@ -462,6 +469,11 @@ pub enum PipelineInput {
     CommitDone {
         /// Commit hash created by the effect driver.
         hash: String,
+    },
+    /// Commit failed.
+    CommitFailed {
+        /// Commit failure details from the effect driver.
+        error: String,
     },
     /// User cancelled.
     UserCancel,
@@ -702,20 +714,13 @@ impl PipelineStateV2 {
                 PipelineOutput::Commit
             }
             (Phase::Reviewing, PipelineInput::ReviewRevise { findings }) => {
-                self.review_findings.extend(findings);
-                if self.iteration < self.config.max_iterations {
-                    self.iteration += 1;
-                    self.autofix_attempts = 0;
-                    self.phase = Phase::Implementing;
-                    let feedback = self.review_findings.join("\n- ");
-                    PipelineOutput::SpawnImplementer {
-                        prompt: self.original_prompt.clone(),
-                        context: Some(format!("Review findings:\n- {feedback}")),
-                    }
-                } else {
-                    self.phase = Phase::Committing;
-                    PipelineOutput::Commit
-                }
+                self.request_review_revision(findings)
+            }
+            (Phase::Reviewing, PipelineInput::ReviewRejected { reason }) => {
+                self.request_review_revision(vec![reason])
+            }
+            (Phase::Reviewing, PipelineInput::ReviewUnclear { summary }) => {
+                self.request_review_revision(vec![format!("Unclear review outcome: {summary}")])
             }
 
             (Phase::Committing, PipelineInput::CommitDone { hash }) => {
@@ -726,6 +731,12 @@ impl PipelineStateV2 {
                         commit_hash: Some(hash),
                     },
                 }
+            }
+            (Phase::Committing, PipelineInput::CommitFailed { error }) => {
+                self.phase = Phase::Halted {
+                    reason: error.clone(),
+                };
+                PipelineOutput::Halt { reason: error }
             }
 
             (_, PipelineInput::UserCancel) => {
@@ -752,6 +763,23 @@ impl PipelineStateV2 {
                 };
                 PipelineOutput::Halt { reason }
             }
+        }
+    }
+
+    fn request_review_revision(&mut self, findings: Vec<String>) -> PipelineOutput {
+        self.review_findings.extend(findings);
+        if self.iteration < self.config.max_iterations {
+            self.iteration += 1;
+            self.autofix_attempts = 0;
+            self.phase = Phase::Implementing;
+            let feedback = self.review_findings.join("\n- ");
+            PipelineOutput::SpawnImplementer {
+                prompt: self.original_prompt.clone(),
+                context: Some(format!("Review findings:\n- {feedback}")),
+            }
+        } else {
+            self.phase = Phase::Committing;
+            PipelineOutput::Commit
         }
     }
 }

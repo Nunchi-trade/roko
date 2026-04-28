@@ -356,7 +356,8 @@ async fn delete_bench_run(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Abort if running.
-    if let Some(handle) = state.active_bench_runs.write().await.remove(&id) {
+    let handle = state.active_bench_runs.write().await.remove(&id);
+    if let Some(handle) = handle {
         handle.handle.abort();
     }
     // Mark as cancelled on disk if still running.
@@ -392,7 +393,7 @@ async fn list_bench_runs(
     }
 
     // Reverse chronological.
-    entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
 
     let total = entries.len();
     let page: Vec<_> = entries

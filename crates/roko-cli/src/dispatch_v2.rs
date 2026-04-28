@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::{Context as _, Result as AnyhowResult};
 use roko_agent::AgentRuntimeEvent;
 use roko_agent::provider::{AgentOptions, ProviderSemaphores};
 use roko_agent::{Agent, AgentResult, create_agent_for_model};
@@ -18,6 +19,107 @@ use roko_core::agent::{ProviderKind, resolve_model};
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::{Body, Context, Engram, Kind};
 use serde::{Deserialize, Serialize};
+
+/// A single tool execution output captured from a dispatch response.
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    /// Tool name (e.g. "Read", "Bash", "Edit"), if available.
+    pub tool_name: Option<String>,
+    /// The tool's output content (file contents, bash stdout, etc.).
+    pub content: String,
+}
+
+/// Result of dispatching a prompt to an LLM backend.
+#[derive(Debug, Clone)]
+pub struct DispatchResult {
+    /// The model's text response.
+    pub text: String,
+    /// Which model answered.
+    pub model: String,
+    /// Approximate input tokens.
+    pub input_tokens: u64,
+    /// Approximate output tokens.
+    pub output_tokens: u64,
+    /// Tool execution outputs captured from the agent's tool calls.
+    pub tool_outputs: Vec<ToolOutput>,
+    /// Session ID for conversation resume, when provided by the backend.
+    pub session_id: Option<String>,
+}
+
+/// Dispatch a prompt through ModelCallService (v2 path).
+///
+/// Uses the ModelCaller trait that WorkflowEngine uses, preserving routing,
+/// budget, cache, gateway event, and feedback behavior.
+pub async fn dispatch_via_model_call_service(prompt: &str) -> AnyhowResult<DispatchResult> {
+    use roko_agent::model_call_service::ModelCallService;
+    use roko_core::agent::resolve_model;
+    use roko_core::config::schema::RokoConfig;
+    use roko_core::foundation::{
+        CallerIdentity, ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller,
+    };
+    use roko_learn::feedback_service::FeedbackService;
+
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = crate::config::load_layered(&workdir)
+        .map(|r| r.config)
+        .unwrap_or_default();
+
+    let mut model_config = RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.command = Some(config.agent.command.clone());
+    model_config.agent.args = Some(config.agent.args.clone());
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.env = Some(config.agent.env.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    let model_key = config
+        .agent
+        .model
+        .clone()
+        .unwrap_or_else(|| model_config.agent.default_model.clone());
+    let model = resolve_model(&model_config, &model_key).slug;
+
+    let feedback_sink: Arc<dyn FeedbackSink> =
+        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
+    let mut service = ModelCallService::new(model.clone())
+        .with_config(model_config)
+        .with_feedback_sink(feedback_sink);
+    if let Some(ref mcp_path) = config.agent.mcp_config {
+        service = service.with_mcp_config(mcp_path.clone());
+    }
+
+    let request = ModelCallRequest {
+        model,
+        system: None,
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: prompt.to_string(),
+        }],
+        max_tokens: None,
+        caller: Some(CallerIdentity::Cli.into()),
+        ..Default::default()
+    };
+
+    let response = service
+        .call(request)
+        .await
+        .context("ModelCallService dispatch failed")?;
+
+    Ok(DispatchResult {
+        text: response.content,
+        model: response.model,
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+        tool_outputs: Vec::new(),
+        session_id: None,
+    })
+}
 
 /// Wire protocol emitted by a supported CLI provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

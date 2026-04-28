@@ -465,7 +465,7 @@ pub async fn compute_pareto_frontier(workdir: &Path) -> Vec<ParetoPoint> {
         .collect();
 
     // Sort by cost ascending.
-    points.sort_by(|a, b| a.total_cost_usd.partial_cmp(&b.total_cost_usd).unwrap());
+    points.sort_by(|a, b| a.total_cost_usd.total_cmp(&b.total_cost_usd));
 
     // Extract pareto frontier: keep points where pass_rate is strictly higher
     // than all cheaper points.
@@ -487,7 +487,7 @@ pub fn list_models_from_config(config: &roko_core::config::schema::RokoConfig) -
     if !default.is_empty() {
         models.push(default.clone());
     }
-    for (slug, _profile) in &config.models {
+    for slug in config.models.keys() {
         if !models.contains(slug) {
             models.push(slug.clone());
         }

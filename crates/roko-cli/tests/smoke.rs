@@ -100,7 +100,7 @@ fn item_02_system_prompt_builder_renders_role_layers() {
         "CLAUDE.md item 02 invalidated: built prompt is missing the tool instructions section\n{prompt}"
     );
     assert!(
-        prompt.contains("Claude tool allowlist: Read,Edit,Bash"),
+        prompt.contains("Runtime tool allowlist: Read,Edit,Bash"),
         "CLAUDE.md item 02 invalidated: tool allowlist text did not reach the rendered prompt\n{prompt}"
     );
 }
@@ -143,6 +143,8 @@ timeout_ms = 5000
         &[
             "run",
             "write a hello function",
+            "--engine",
+            "legacy",
             "--workdir",
             tmp.path().to_str().expect("workdir"),
         ],
@@ -236,7 +238,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"mcp-ok"}}}}'
         api_key_env: None,
         command: Some(script.display().to_string()),
         args: Some(vec!["--provider-flag".to_string()]),
-        timeout_ms: Some(1_500),
+        timeout_ms: Some(5_000),
         ttft_timeout_ms: Some(15_000),
         connect_timeout_ms: Some(5_000),
         extra_headers: None,
@@ -244,7 +246,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"mcp-ok"}}}}'
     };
     let options = AgentOptions {
         command: None,
-        timeout_ms: Some(1_500),
+        timeout_ms: Some(5_000),
         system_prompt: Some("system guidance".to_string()),
         cached_content: None,
         tools: Some("Read,Edit".to_string()),

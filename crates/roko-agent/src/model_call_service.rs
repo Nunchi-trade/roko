@@ -3,9 +3,11 @@
 //! Wraps the existing provider dispatch (`create_agent_for_model`) with model
 //! resolution, cost tracking, event emission, and feedback recording.
 
+use crate::gateway_events::{GatewayEvent, GatewayEventWriter};
 use crate::provider::{AgentOptions, create_agent_for_model};
 use crate::task_runner::CostTable;
 use async_trait::async_trait;
+use chrono::Utc;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
@@ -62,6 +64,8 @@ pub struct ModelCallService {
     event_consumers: Vec<Arc<dyn EventConsumer>>,
     /// Optional sink for model-call feedback.
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    /// Optional durable gateway event writer.
+    gateway_event_writer: Option<Arc<GatewayEventWriter>>,
     /// Optional knowledge store query adapter for knowledge-informed routing.
     ///
     /// TODO(converge): Replace this erased adapter with
@@ -78,6 +82,8 @@ pub struct ModelCallService {
     /// `roko-learn` dependency edge; `CascadeRouter` implements the trait in
     /// `roko-learn`.
     cascade_router: Option<Arc<dyn ForceBackendOverrideRecorder>>,
+    /// Ordered fallback model slugs derived from workspace model config.
+    fallback_models: Vec<String>,
     /// Service-scoped environment entries passed into provider construction.
     env: Vec<(String, String)>,
     /// Optional base URL for OpenAI-compatible providers.
@@ -94,6 +100,8 @@ pub struct ModelCallService {
     convergence: ConvergenceDetectionCell,
     /// Run id used for emitted events and feedback when the request has none.
     run_id: String,
+    /// Per-service sequence for gateway request ids.
+    request_seq: AtomicU64,
 }
 
 impl ModelCallService {
@@ -106,9 +114,11 @@ impl ModelCallService {
             cost_table: CostTable::default(),
             event_consumers: Vec::new(),
             feedback_sink: None,
+            gateway_event_writer: None,
             knowledge_store: None,
             model_router: None,
             cascade_router: None,
+            fallback_models: Vec::new(),
             env: Vec::new(),
             openai_base_url: None,
             mcp_config: None,
@@ -117,12 +127,14 @@ impl ModelCallService {
             thinking_cap: ThinkingCapCell::new(16_384),
             convergence: ConvergenceDetectionCell::new(5, 0.85, 3),
             run_id: "model-call-service".to_string(),
+            request_seq: AtomicU64::new(1),
         }
     }
 
     /// Use an explicit Roko configuration for provider dispatch.
     #[must_use]
     pub fn with_config(mut self, config: RokoConfig) -> Self {
+        self.fallback_models = configured_fallback_models(&config, &self.default_model);
         self.config = config;
         self
     }
@@ -145,6 +157,13 @@ impl ModelCallService {
     #[must_use]
     pub fn with_feedback_sink(mut self, feedback_sink: Arc<dyn FeedbackSink>) -> Self {
         self.feedback_sink = Some(feedback_sink);
+        self
+    }
+
+    /// Attach a durable gateway event writer.
+    #[must_use]
+    pub fn with_gateway_event_writer(mut self, writer: Arc<GatewayEventWriter>) -> Self {
+        self.gateway_event_writer = Some(writer);
         self
     }
 
@@ -413,21 +432,28 @@ impl ModelCallService {
     async fn record_feedback(
         &self,
         req: &ModelCallRequest,
+        request_id: &str,
         model: &str,
+        provider: Option<&str>,
         usage: &TokenUsage,
         latency_ms: u64,
         success: bool,
     ) -> Result<()> {
         let Some(sink) = &self.feedback_sink else {
-            // TODO(arch): Make a FeedbackSink mandatory at workflow construction
-            // time so every model call is recorded without relying on optional
-            // service wiring.
-            return Ok(());
+            return Err(RokoError::invalid(
+                "feedback sink not configured for model call service",
+            ));
         };
 
         sink.record(FeedbackEvent::ModelCall {
-            run_id: self.run_id.clone(),
-            model: model.to_string(),
+            run_id: req.run_id.clone().or_else(|| Some(self.run_id.clone())),
+            request_id: Some(request_id.to_string()),
+            prompt_section_ids: req.prompt_section_ids.clone(),
+            knowledge_ids: req.knowledge_ids.clone(),
+            model: Some(model.to_string()),
+            provider: provider.map(ToOwned::to_owned),
+            token_usage: Some(usage.total_tokens),
+            cost: Some(usage.cost_usd),
             role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -436,6 +462,59 @@ impl ModelCallService {
             success,
         })
         .await
+    }
+
+    fn next_request_id(&self, cache_key: u64) -> String {
+        let seq = self.request_seq.fetch_add(1, Ordering::Relaxed);
+        format!("{}:{seq}:{cache_key:016x}", self.run_id)
+    }
+
+    fn provider_for_model(&self, model: &str) -> Option<String> {
+        let models = self.config.effective_models();
+        models
+            .get(model)
+            .or_else(|| models.values().find(|profile| profile.slug == model))
+            .map(|profile| profile.provider.clone())
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
+    fn write_gateway_event(
+        &self,
+        req: &ModelCallRequest,
+        request_id: &str,
+        model: &str,
+        usage: &TokenUsage,
+        latency_ms: u64,
+        cache_hit: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        let Some(writer) = &self.gateway_event_writer else {
+            return Ok(());
+        };
+
+        let caller = req
+            .caller
+            .clone()
+            .or_else(|| req.role.clone())
+            .unwrap_or_else(|| "model_call".to_string());
+        let provider = self.provider_for_model(model);
+        let success = error.is_none();
+        writer
+            .write(&GatewayEvent {
+                request_id: request_id.to_string(),
+                caller,
+                model: model.to_string(),
+                provider,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cost_usd: usage.cost_usd,
+                latency_ms,
+                cache_hit,
+                success,
+                error,
+                timestamp: Utc::now().to_rfc3339(),
+            })
+            .map_err(|err| RokoError::invalid(format!("write gateway event: {err}")))
     }
 
     fn record_force_backend_override(
@@ -460,6 +539,14 @@ impl ModelCallService {
                 "force_backend override outcome was not accepted by cascade router"
             );
         }
+    }
+
+    fn fallback_models_for_request(&self, model: &str) -> Vec<String> {
+        self.fallback_models
+            .iter()
+            .filter(|fallback| fallback.as_str() != model)
+            .cloned()
+            .collect()
     }
 
     fn build_knowledge_advice(
@@ -489,6 +576,17 @@ impl ModelCallService {
         }
 
         let mut hints = Vec::new();
+        let entry_ids = entries
+            .iter()
+            .filter_map(knowledge_id)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let prompt_facts = entries
+            .iter()
+            .filter(|entry| knowledge_confidence(entry) >= 0.5)
+            .filter_map(knowledge_prompt_fact)
+            .take(3)
+            .collect::<Vec<_>>();
 
         for slug in candidate_slugs {
             let slug_lower = slug.to_lowercase();
@@ -527,7 +625,12 @@ impl ModelCallService {
         }
 
         let has_signal = !hints.is_empty();
-        Some(KnowledgeRoutingAdvice { hints, has_signal })
+        Some(KnowledgeRoutingAdvice {
+            hints,
+            entry_ids,
+            prompt_facts,
+            has_signal,
+        })
     }
 }
 
@@ -542,7 +645,53 @@ struct KnowledgeHint {
 #[derive(Debug, Clone)]
 struct KnowledgeRoutingAdvice {
     hints: Vec<KnowledgeHint>,
+    entry_ids: Vec<String>,
+    prompt_facts: Vec<String>,
     has_signal: bool,
+}
+
+fn apply_knowledge_advice(req: &mut ModelCallRequest, advice: &KnowledgeRoutingAdvice) {
+    for id in &advice.entry_ids {
+        if !id.trim().is_empty() && !req.knowledge_ids.contains(id) {
+            req.knowledge_ids.push(id.clone());
+        }
+    }
+    for hint in &advice.hints {
+        let routing_hint = format!(
+            "knowledge:{}:{:.3}:{}",
+            hint.model_slug, hint.score, hint.supporting_entries
+        );
+        if !req.routing_hints.contains(&routing_hint) {
+            req.routing_hints.push(routing_hint);
+        }
+    }
+}
+
+fn append_knowledge_to_system_prompt(
+    system_prompt: Option<String>,
+    advice: Option<&KnowledgeRoutingAdvice>,
+) -> Option<String> {
+    let Some(advice) = advice else {
+        return system_prompt;
+    };
+    if advice.prompt_facts.is_empty() {
+        return system_prompt;
+    }
+
+    let knowledge = format!(
+        "## Relevant Knowledge\n\n{}",
+        advice
+            .prompt_facts
+            .iter()
+            .map(|fact| format!("- {fact}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    Some(match system_prompt {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{knowledge}"),
+        _ => knowledge,
+    })
 }
 
 fn request_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
@@ -578,6 +727,29 @@ fn knowledge_content(entry: &serde_json::Value) -> &str {
         .get("content")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
+}
+
+fn knowledge_id(entry: &serde_json::Value) -> Option<&str> {
+    entry.get("id").and_then(serde_json::Value::as_str)
+}
+
+fn knowledge_prompt_fact(entry: &serde_json::Value) -> Option<String> {
+    let content = knowledge_content(entry).trim();
+    if content.is_empty() {
+        return None;
+    }
+    let kind = entry
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Knowledge");
+    Some(format!("{kind}: {}", truncate_knowledge_fact(content, 240)))
+}
+
+fn truncate_knowledge_fact(value: &str, max_chars: usize) -> &str {
+    value
+        .char_indices()
+        .nth(max_chars)
+        .map_or(value, |(index, _)| &value[..index])
 }
 
 fn knowledge_source_model(entry: &serde_json::Value) -> Option<&str> {
@@ -634,6 +806,39 @@ fn token_usage(usage: &Usage, cost_usd: f64) -> TokenUsage {
     }
 }
 
+fn configured_fallback_models(config: &RokoConfig, default_model: &str) -> Vec<String> {
+    let mut fallbacks = Vec::new();
+    if let Some(fallback) = config.agent.fallback_model.as_deref() {
+        push_unique_model_slug(config, &mut fallbacks, fallback);
+    }
+
+    let mut tier_models = config.agent.tier_models.values().collect::<Vec<_>>();
+    tier_models.sort();
+    for tier_model in tier_models {
+        push_unique_model_slug(config, &mut fallbacks, tier_model);
+    }
+
+    let mut model_slugs = config
+        .effective_models()
+        .into_values()
+        .map(|profile| profile.slug)
+        .collect::<Vec<_>>();
+    model_slugs.sort();
+    for slug in model_slugs {
+        push_unique_model_slug(config, &mut fallbacks, &slug);
+    }
+
+    fallbacks.retain(|fallback| fallback != default_model);
+    fallbacks
+}
+
+fn push_unique_model_slug(config: &RokoConfig, fallbacks: &mut Vec<String>, model_key: &str) {
+    let slug = roko_core::agent::resolve_model(config, model_key).slug;
+    if !slug.trim().is_empty() && !fallbacks.contains(&slug) {
+        fallbacks.push(slug);
+    }
+}
+
 /// L1 in-memory response cache. Keyed by (model, messages, temperature).
 ///
 /// TODO(gateway): L2 semantic cache.
@@ -664,23 +869,26 @@ impl CacheCell {
     }
 
     /// Compute a cache key from request fields.
-    /// Hash of: model + sorted message contents + temperature (if set).
-    fn cache_key(model: &str, messages: &[ChatMessage], temperature: Option<f32>) -> u64 {
+    /// Hash of: model + system prompt + ordered messages + relevant generation parameters.
+    fn cache_key(
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         model.hash(&mut hasher);
+        system.hash(&mut hasher);
+        messages.len().hash(&mut hasher);
 
-        let mut messages = messages
-            .iter()
-            .map(|message| (message_role_tag(&message.role), message.content.as_str()))
-            .collect::<Vec<_>>();
-        messages.sort_unstable();
-
-        for (role, content) in messages {
-            role.hash(&mut hasher);
-            content.hash(&mut hasher);
+        for message in messages {
+            message_role_tag(&message.role).hash(&mut hasher);
+            message.content.hash(&mut hasher);
         }
 
         temperature.map(f32::to_bits).hash(&mut hasher);
+        max_tokens.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -739,7 +947,8 @@ fn message_role_tag(role: &MessageRole) -> u8 {
     }
 }
 
-/// Tracks cumulative cost across calls within a workflow run and enforces per-call budgets.
+/// Tracks process-local, best-effort cumulative cost across calls and enforces per-call budgets.
+/// This is not durable, reserved, or cross-run budget accounting.
 struct BudgetCell {
     /// Cumulative cost in micro-USD (1e-6 USD) for atomic tracking.
     cumulative_cost_micro_usd: AtomicU64,
@@ -1064,7 +1273,7 @@ impl ProviderCallCell {
                     model_used: attempt_model.to_string(),
                     usage: result.usage,
                     cost_usd,
-                    latency_ms: total_start.elapsed().as_millis() as u64,
+                    latency_ms: (total_start.elapsed().as_millis() as u64).max(1),
                     fallback_used: attempt_index > 0,
                 });
             }
@@ -1130,7 +1339,7 @@ fn is_retryable_provider_message(message: &str) -> bool {
 
 #[async_trait]
 impl ModelCaller for ModelCallService {
-    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse> {
+    async fn call(&self, mut req: ModelCallRequest) -> Result<ModelCallResponse> {
         let mut knowledge_candidates = Vec::new();
         if !req.model.is_empty() {
             knowledge_candidates.push(req.model.clone());
@@ -1138,11 +1347,19 @@ impl ModelCaller for ModelCallService {
         if !self.default_model.is_empty() && !knowledge_candidates.contains(&self.default_model) {
             knowledge_candidates.push(self.default_model.clone());
         }
+        for fallback in &self.fallback_models {
+            if !knowledge_candidates.contains(fallback) {
+                knowledge_candidates.push(fallback.clone());
+            }
+        }
         let knowledge_advice = self.build_knowledge_advice(
             &knowledge_candidates,
             req.role.as_deref(),
             request_task_hint(&req.messages),
         );
+        if let Some(advice) = &knowledge_advice {
+            apply_knowledge_advice(&mut req, advice);
+        }
         if self.knowledge_store.is_some() {
             if let Some(advice) = &knowledge_advice {
                 tracing::debug!(
@@ -1162,17 +1379,46 @@ impl ModelCaller for ModelCallService {
         let model = self.resolve_model(&req);
         let start = Instant::now();
         let agent_id = format!("model-call:{model}");
-        let cache_key = CacheCell::cache_key(&model, &req.messages, req.temperature);
+        let cache_key = CacheCell::cache_key(
+            &model,
+            req.system.as_deref(),
+            &req.messages,
+            req.temperature,
+            req.max_tokens,
+        );
+        let request_id = self.next_request_id(cache_key);
+        let provider = self.provider_for_model(&model);
 
         match req.cache_policy {
             CachePolicy::Default => {
                 if let Some(cached) = self.cache.lookup(cache_key) {
+                    let latency_ms = start.elapsed().as_millis() as u64;
+                    let cached_provider = self.provider_for_model(&cached.model);
+                    self.write_gateway_event(
+                        &req,
+                        &request_id,
+                        &cached.model,
+                        &cached.usage,
+                        latency_ms,
+                        true,
+                        None,
+                    )?;
+                    self.record_feedback(
+                        &req,
+                        &request_id,
+                        &cached.model,
+                        cached_provider.as_deref(),
+                        &cached.usage,
+                        latency_ms,
+                        true,
+                    )
+                    .await?;
                     return Ok(ModelCallResponse {
                         content: cached.content,
                         model: cached.model,
                         usage: cached.usage,
                         stop_reason: cached.stop_reason,
-                        request_id: Some(format!("cache-hit:{cache_key:016x}")),
+                        request_id: Some(request_id),
                     });
                 }
             }
@@ -1219,7 +1465,10 @@ impl ModelCaller for ModelCallService {
         }
 
         let (message_system, user_content) = request_prompt(&req.messages);
-        let system_prompt = req.system.clone().or(message_system);
+        let system_prompt = append_knowledge_to_system_prompt(
+            req.system.clone().or(message_system),
+            knowledge_advice.as_ref(),
+        );
         let config = self.config_for_model(&model);
 
         let mut options = self.build_agent_options(&req, None);
@@ -1234,7 +1483,7 @@ impl ModelCaller for ModelCallService {
         // TODO(converge): Thread req-level MCP config here in S05 once
         // ModelCallRequest carries it.
 
-        let fallback_models: Vec<String> = Vec::new();
+        let fallback_models = self.fallback_models_for_request(&model);
         let cell = ProviderCallCell::new(config, self.cost_table.clone());
         let output = match cell
             .execute(
@@ -1256,9 +1505,26 @@ impl ModelCaller for ModelCallService {
                     agent_id,
                     error: message.clone(),
                 });
+                self.write_gateway_event(
+                    &req,
+                    &request_id,
+                    &model,
+                    &usage,
+                    latency_ms,
+                    false,
+                    Some(message.clone()),
+                )?;
                 self.record_force_backend_override(&req.model, &model, false);
-                self.record_feedback(&req, &model, &usage, latency_ms, false)
-                    .await?;
+                self.record_feedback(
+                    &req,
+                    &request_id,
+                    &model,
+                    provider.as_deref(),
+                    &usage,
+                    latency_ms,
+                    false,
+                )
+                .await?;
                 return Err(RokoError::Agent {
                     backend: model,
                     message,
@@ -1277,8 +1543,26 @@ impl ModelCaller for ModelCallService {
                 error: error.to_string(),
             });
             self.record_force_backend_override(&req.model, &output.model_used, false);
-            self.record_feedback(&req, &output.model_used, &usage, latency_ms, false)
-                .await?;
+            let output_provider = self.provider_for_model(&output.model_used);
+            self.write_gateway_event(
+                &req,
+                &request_id,
+                &output.model_used,
+                &usage,
+                latency_ms,
+                false,
+                Some(error.to_string()),
+            )?;
+            self.record_feedback(
+                &req,
+                &request_id,
+                &output.model_used,
+                output_provider.as_deref(),
+                &usage,
+                latency_ms,
+                false,
+            )
+            .await?;
             return Err(RokoError::from(error));
         }
         self.convergence
@@ -1303,18 +1587,33 @@ impl ModelCaller for ModelCallService {
             cost_usd: usage.cost_usd,
         });
         self.record_force_backend_override(&req.model, &output.model_used, true);
-        self.record_feedback(&req, &output.model_used, &usage, output.latency_ms, true)
-            .await?;
+        let output_provider = self.provider_for_model(&output.model_used);
+        self.write_gateway_event(
+            &req,
+            &request_id,
+            &output.model_used,
+            &usage,
+            output.latency_ms,
+            false,
+            None,
+        )?;
+        self.record_feedback(
+            &req,
+            &request_id,
+            &output.model_used,
+            output_provider.as_deref(),
+            &usage,
+            output.latency_ms,
+            true,
+        )
+        .await?;
 
         Ok(ModelCallResponse {
             content: output.content,
             model: output.model_used,
             usage,
             stop_reason: Some("end_turn".to_string()),
-            request_id: knowledge_advice
-                .as_ref()
-                .filter(|advice| advice.has_signal)
-                .map(|advice| format!("knowledge-routing:{}-hints", advice.hints.len())),
+            request_id: Some(request_id),
         })
     }
 }
@@ -1350,7 +1649,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         }
     }
@@ -1369,7 +1673,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
@@ -1386,7 +1695,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
@@ -1406,7 +1720,12 @@ mod tests {
             temperature: None,
             role: Some("reviewer".to_string()),
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1481,7 +1800,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
         let model = svc.resolve_model(&req);
@@ -1511,7 +1835,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1543,7 +1872,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1577,7 +1911,12 @@ mod tests {
             temperature: None,
             role: None,
             caller: None,
+            run_id: None,
+            prompt_section_ids: Vec::new(),
+            knowledge_ids: Vec::new(),
             budget: None,
+            budget_remaining: None,
+            routing_hints: Vec::new(),
             cache_policy: roko_core::foundation::CachePolicy::Default,
         };
 
@@ -1596,8 +1935,8 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, Some(0.2));
-        let second = CacheCell::cache_key("model-a", &messages, Some(0.2));
+        let first = CacheCell::cache_key("model-a", None, &messages, Some(0.2), Some(1024));
+        let second = CacheCell::cache_key("model-a", None, &messages, Some(0.2), Some(1024));
 
         assert_eq!(first, second);
     }
@@ -1609,8 +1948,8 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, None);
-        let second = CacheCell::cache_key("model-b", &messages, None);
+        let first = CacheCell::cache_key("model-a", None, &messages, None, None);
+        let second = CacheCell::cache_key("model-b", None, &messages, None, None);
 
         assert_ne!(first, second);
     }
@@ -1622,8 +1961,51 @@ mod tests {
             content: "hello".into(),
         }];
 
-        let first = CacheCell::cache_key("model-a", &messages, Some(0.1));
-        let second = CacheCell::cache_key("model-a", &messages, Some(0.9));
+        let first = CacheCell::cache_key("model-a", None, &messages, Some(0.1), None);
+        let second = CacheCell::cache_key("model-a", None, &messages, Some(0.9), None);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_differs_on_max_tokens() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "hello".into(),
+        }];
+
+        let first = CacheCell::cache_key("model-a", None, &messages, None, Some(1024));
+        let second = CacheCell::cache_key("model-a", None, &messages, None, Some(2048));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_preserves_message_order() {
+        let first_messages = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".into(),
+            },
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".into(),
+            },
+        ];
+        let swapped_messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: "second".into(),
+            },
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".into(),
+            },
+        ];
+
+        let first = CacheCell::cache_key("model-a", None, &first_messages, Some(0.2), Some(1024));
+        let second =
+            CacheCell::cache_key("model-a", None, &swapped_messages, Some(0.2), Some(1024));
 
         assert_ne!(first, second);
     }

@@ -93,7 +93,8 @@ demo/.runtime/
 
 # Temporary / work-in-progress (will be refined later) ----------------------
 CLAUDE.md
-scripts/
+scripts/*
+!scripts/layer_check.rs
 
 # Docker volumes (local dev overlays) ----------------------------------------
 docker/.env

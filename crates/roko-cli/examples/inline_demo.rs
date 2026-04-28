@@ -17,7 +17,6 @@ use roko_cli::tui::Theme;
 
 const REVEAL: Duration = Duration::from_millis(25);
 const FAST: Duration = Duration::from_millis(12);
-const BEAT: Duration = Duration::from_millis(300);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut term = InlineTerminal::new()?;

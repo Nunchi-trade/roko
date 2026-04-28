@@ -260,6 +260,7 @@ pub fn run_sample_plan(workdir: &Path) -> Value {
         // Isolate from user's global config / API keys so the mock
         // agent command from roko.toml is used.
         .env("HOME", workdir)
+        .env("ROKO_LOG", "error")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("XDG_CONFIG_HOME")
         .stdout(Stdio::piped())
@@ -286,7 +287,15 @@ pub fn run_sample_plan(workdir: &Path) -> Value {
     let output = child.wait_with_output().expect("read plan run output");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let json_start = stdout.rfind("\n{").map_or(0, |idx| idx + 1);
+    let json_start = stdout
+        .lines()
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .find_map(|(start, line)| line.starts_with('{').then_some(start))
+        .unwrap_or(0);
     serde_json::from_str(&stdout[json_start..]).unwrap_or_else(|err| {
         panic!(
             "parse sample plan JSON stdout: {err}\nstdout: {}\nstderr: {}",

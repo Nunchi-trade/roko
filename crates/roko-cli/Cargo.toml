@@ -12,12 +12,17 @@ workspace = true
 
 [features]
 ## Enable the legacy orchestrate.rs plan runner (the pre-WorkflowEngine path).
-## NOT included in default features — opt-in only.
+## Included in default features for backward compatibility.
+default = ["legacy-orchestrate"]
 legacy-orchestrate = []
 
 [[bin]]
 name = "roko"
 path = "src/main.rs"
+
+[[bin]]
+name = "layer_check"
+path = "../../scripts/layer_check.rs"
 
 [dependencies]
 roko-core = { path = "../roko-core" }

@@ -20,6 +20,9 @@ pub struct GatewayEvent {
     pub caller: String,
     /// Model slug that served the request.
     pub model: String,
+    /// Provider that served the request, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Input tokens consumed.
     pub input_tokens: u64,
     /// Output tokens generated.
@@ -30,6 +33,9 @@ pub struct GatewayEvent {
     pub latency_ms: u64,
     /// Whether a cache hit satisfied this request.
     pub cache_hit: bool,
+    /// Whether the call completed successfully.
+    #[serde(default = "default_success")]
+    pub success: bool,
     /// Error message if the call failed, None on success.
     pub error: Option<String>,
     /// ISO 8601 timestamp.
@@ -81,6 +87,11 @@ impl GatewayEventWriter {
             .open(&self.path)?;
         file.write_all(&line)
     }
+
+    /// Load a projection from this writer's target file.
+    pub fn projection(&self) -> io::Result<GatewayProjection> {
+        GatewayProjection::load(&self.path)
+    }
 }
 
 /// In-memory projection over durable gateway events.
@@ -111,8 +122,11 @@ impl GatewayProjection {
             if raw.trim().is_empty() {
                 continue;
             }
-            let event = serde_json::from_str(raw)
+            let mut event: GatewayEvent = serde_json::from_str(raw)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            if event.error.is_some() {
+                event.success = false;
+            }
             events.push(event);
         }
 
@@ -146,6 +160,18 @@ impl GatewayProjection {
         self.aggregate_by(|event| &event.model)
     }
 
+    /// Aggregate stats grouped by provider.
+    #[must_use]
+    pub fn stats_by_provider(&self) -> HashMap<String, AggregateStats> {
+        let mut stats: HashMap<String, AggregateStats> = HashMap::new();
+        for event in &self.events {
+            let provider = event.provider.as_deref().unwrap_or("unknown");
+            let aggregate = stats.entry(provider.to_string()).or_default();
+            aggregate.record(event);
+        }
+        stats
+    }
+
     /// Total number of events.
     #[must_use]
     pub fn total_events(&self) -> usize {
@@ -171,6 +197,10 @@ impl GatewayProjection {
     }
 }
 
+fn default_success() -> bool {
+    true
+}
+
 /// Aggregated gateway statistics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AggregateStats {
@@ -178,6 +208,7 @@ pub struct AggregateStats {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
+    pub total_latency_ms: u64,
     pub cache_hits: u64,
     pub errors: u64,
 }
@@ -188,6 +219,7 @@ impl AggregateStats {
         self.total_input_tokens += event.input_tokens;
         self.total_output_tokens += event.output_tokens;
         self.total_cost_usd += event.cost_usd;
+        self.total_latency_ms += event.latency_ms;
         if event.cache_hit {
             self.cache_hits += 1;
         }
@@ -211,11 +243,13 @@ mod tests {
             request_id: request_id.to_string(),
             caller: caller.to_string(),
             model: model.to_string(),
+            provider: Some("test-provider".to_string()),
             input_tokens: 10,
             output_tokens: 20,
             cost_usd: 0.03,
             latency_ms: 250,
             cache_hit: false,
+            success: true,
             error: None,
             timestamp: "2026-04-28T00:00:00Z".to_string(),
         }

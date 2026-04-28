@@ -54,6 +54,9 @@ pub struct PromptAssemblyService {
     /// IDs of knowledge entries used in the most recent assembly.
     /// Cleared on each `assemble()` call.
     last_knowledge_ids: Mutex<Vec<String>>,
+    /// Prompt section IDs used in the most recent assembly.
+    /// Cleared on each `assemble()` call.
+    last_prompt_section_ids: Mutex<Vec<String>>,
     /// Path to append-only episode history used for recent execution context.
     episodes_path: Option<PathBuf>,
     /// Learned playbook source used for relevant technique injection.
@@ -75,6 +78,7 @@ impl PromptAssemblyService {
             domain_context: None,
             knowledge_store: None,
             last_knowledge_ids: Mutex::new(Vec::new()),
+            last_prompt_section_ids: Mutex::new(Vec::new()),
             episodes_path: None,
             playbook_store: None,
             tool_instructions: None,
@@ -115,6 +119,14 @@ impl PromptAssemblyService {
             .clone()
     }
 
+    /// Return the prompt section IDs used in the most recent assembly.
+    pub fn last_prompt_section_ids(&self) -> Vec<String> {
+        self.last_prompt_section_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Add recent episode history for layer 3b context.
     #[must_use]
     pub fn with_episode_context(mut self, episodes_path: PathBuf) -> Self {
@@ -122,11 +134,23 @@ impl PromptAssemblyService {
         self
     }
 
+    /// Add recent episode history for layer 3b context.
+    #[must_use]
+    pub fn with_episodes(self, episodes_path: PathBuf) -> Self {
+        self.with_episode_context(episodes_path)
+    }
+
     /// Add a learned playbook store for layer 6 relevant techniques.
     #[must_use]
     pub fn with_playbook_context(mut self, store: Arc<PlaybookStore>) -> Self {
         self.playbook_store = Some(store);
         self
+    }
+
+    /// Add a learned playbook store for layer 6 relevant techniques.
+    #[must_use]
+    pub fn with_playbooks(self, store: Arc<PlaybookStore>) -> Self {
+        self.with_playbook_context(store)
     }
 
     /// Add tool usage instructions for layer 5.
@@ -154,7 +178,7 @@ impl PromptAssemblyService {
     /// section's share of the token budget.
     #[must_use]
     pub fn with_section_effectiveness(mut self, scores: HashMap<String, f64>) -> Self {
-        self.section_effectiveness = Some(scores);
+        self.section_effectiveness = Some(normalize_section_effectiveness_scores(scores));
         self
     }
 
@@ -193,47 +217,42 @@ impl PromptAssemblyService {
     }
 
     /// Query knowledge store for relevant technique insights.
-    fn query_techniques(&self, task: &str) -> Vec<String> {
+    fn query_techniques(&self, task: &str) -> Vec<(String, String)> {
         let Some(store) = self.knowledge_store.as_ref() else {
             return Vec::new();
         };
         let entries = store.query(task, 5);
-        let mut ids = Vec::new();
-        let techniques = entries
+        entries
             .into_iter()
             .filter(|e| e.kind != KnowledgeKind::AntiKnowledge)
             .filter(|e| e.confidence >= 0.3)
-            .map(|e| {
-                ids.push(e.id);
-                e.content
-            })
-            .collect();
-        self.record_knowledge_ids(ids);
-        techniques
+            .map(|e| (e.id, e.content))
+            .collect()
     }
 
     /// Query knowledge store for anti-knowledge warnings.
-    fn query_anti_patterns(&self, task: &str) -> Vec<String> {
+    fn query_anti_patterns(&self, task: &str) -> Vec<(String, String)> {
         let Some(store) = self.knowledge_store.as_ref() else {
             return Vec::new();
         };
         let entries = store.query(&format!("{task} warning anti-pattern"), 5);
-        let mut ids = Vec::new();
-        let warnings = entries
+        entries
             .into_iter()
             .filter(|e| e.kind == KnowledgeKind::AntiKnowledge)
             .filter(|e| e.confidence >= 0.2)
-            .map(|e| {
-                ids.push(e.id);
-                format!("WARNING: {}", e.content)
-            })
-            .collect();
-        self.record_knowledge_ids(ids);
-        warnings
+            .map(|e| (e.id, format!("WARNING: {}", e.content)))
+            .collect()
     }
 
     fn clear_last_knowledge_ids(&self) {
         self.last_knowledge_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    fn clear_last_prompt_section_ids(&self) {
+        self.last_prompt_section_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -254,6 +273,39 @@ impl PromptAssemblyService {
             }
         }
     }
+
+    fn record_prompt_section_id(&self, id: &str) {
+        if id.trim().is_empty() {
+            return;
+        }
+
+        let mut last_ids = self
+            .last_prompt_section_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !last_ids.iter().any(|existing| existing == id) {
+            last_ids.push(id.to_string());
+        }
+    }
+}
+
+fn normalize_section_effectiveness_scores(scores: HashMap<String, f64>) -> HashMap<String, f64> {
+    scores
+        .into_iter()
+        .map(|(section, score)| (canonical_section_key(&section).to_string(), score))
+        .collect()
+}
+
+fn canonical_section_key(section: &str) -> &str {
+    match section {
+        "role_identity" => "identity",
+        "domain_context" => "domain",
+        "context_layer" => "context",
+        "task_context" => "task",
+        "tool_instructions" => "tools",
+        "relevant_techniques" => "playbooks",
+        other => other,
+    }
 }
 
 impl Default for PromptAssemblyService {
@@ -266,12 +318,14 @@ impl Default for PromptAssemblyService {
 impl PromptAssembler for PromptAssemblyService {
     async fn assemble(&self, spec: PromptSpec) -> Result<String> {
         self.clear_last_knowledge_ids();
+        self.clear_last_prompt_section_ids();
 
         let role = resolve_role(spec.role.as_deref());
         let identity = role_identity_for(role);
 
         let mut builder = SystemPromptBuilder::new(identity);
         builder = builder.with_cache_markers();
+        self.record_prompt_section_id("role_identity");
         // SystemPromptBuilder's current API is no-arg; this is equivalent to with_cache_markers(true).
 
         if self.should_include("conventions")
@@ -279,6 +333,7 @@ impl PromptAssembler for PromptAssemblyService {
                 conventions_for_spec(&spec, self.default_conventions.as_deref())
         {
             builder = builder.with_conventions(conventions);
+            self.record_prompt_section_id("conventions");
         }
 
         let mut context_blocks = Vec::new();
@@ -289,6 +344,7 @@ impl PromptAssembler for PromptAssemblyService {
                 let recent = episodes.into_iter().rev().take(5).collect::<Vec<_>>();
                 if !recent.is_empty() {
                     context_blocks.push(format_episode_context(&recent));
+                    self.record_prompt_section_id("context_layer");
                 }
             }
         }
@@ -296,18 +352,25 @@ impl PromptAssembler for PromptAssemblyService {
         if self.should_include("playbooks")
             && let Some(ref store) = self.playbook_store
         {
-            let task_text = spec.task.as_deref().unwrap_or("");
+            let task_text = spec
+                .task
+                .as_deref()
+                .map(str::trim)
+                .filter(|task| !task.is_empty())
+                .unwrap_or_else(|| role.label());
+            let task_id = first_chars(task_text, 80);
             let ctx = QueryContext {
-                task_id: String::new(),
+                task_id: task_id.to_string(),
                 task_title: task_text.to_string(),
-                task_body: String::new(),
-                role: spec.role.clone().unwrap_or_default(),
+                task_body: task_text.to_string(),
+                role: role.label().to_string(),
                 recent_episodes: 0,
                 max_results: 3,
             };
             if let Ok(playbooks) = store.query(&ctx).await {
                 if !playbooks.is_empty() {
                     builder = builder.with_playbooks(&playbooks);
+                    self.record_prompt_section_id("relevant_techniques");
                 }
             }
         }
@@ -320,6 +383,7 @@ impl PromptAssembler for PromptAssemblyService {
             ) {
                 self.record_knowledge_ids(ids);
                 builder = builder.with_domain(domain);
+                self.record_prompt_section_id("domain_context");
             }
         }
 
@@ -327,23 +391,27 @@ impl PromptAssembler for PromptAssemblyService {
             && let Some(workspace_map) = workspace_map_for_spec(&spec)
         {
             context_blocks.push(workspace_map);
+            self.record_prompt_section_id("context_layer");
         }
 
         if self.should_include("task")
             && let Some(task) = spec.task.as_ref()
         {
             builder = builder.with_task(task.clone());
+            self.record_prompt_section_id("task_context");
         }
 
         if self.should_include("tools")
             && let Some(tools) = &self.tool_instructions
         {
             builder = builder.with_tools(tools.clone());
+            self.record_prompt_section_id("tool_instructions");
         }
 
         if self.should_include("gate_feedback") {
             for feedback in &spec.gate_feedback {
                 builder = builder.with_gate_feedback_text(feedback);
+                self.record_prompt_section_id("gate_feedback");
             }
         }
 
@@ -351,13 +419,34 @@ impl PromptAssembler for PromptAssemblyService {
         if self.knowledge_store.is_some()
             && let Some(task_text) = spec.task.as_deref()
         {
-            let techniques = self.query_techniques(task_text);
-            let warnings = self.query_anti_patterns(task_text);
+            let technique_entries = self.query_techniques(task_text);
+            let warning_entries = self.query_anti_patterns(task_text);
+            let techniques = technique_entries
+                .iter()
+                .map(|(_, content)| content.clone())
+                .collect::<Vec<_>>();
+            let warnings = warning_entries
+                .iter()
+                .map(|(_, content)| content.clone())
+                .collect::<Vec<_>>();
 
             if self.should_include("context") && !techniques.is_empty() {
+                self.record_knowledge_ids(
+                    technique_entries
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>(),
+                );
                 context_blocks.push(format_techniques_section(&techniques));
+                self.record_prompt_section_id("context_layer");
             }
-            if self.should_include("anti_patterns") {
+            if self.should_include("anti_patterns") && !warnings.is_empty() {
+                self.record_knowledge_ids(
+                    warning_entries
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>(),
+                );
                 anti_patterns.extend(warnings.clone());
             }
 
@@ -374,6 +463,7 @@ impl PromptAssembler for PromptAssemblyService {
 
         if self.should_include("anti_patterns") && !anti_patterns.is_empty() {
             builder = builder.with_anti_patterns(anti_patterns);
+            self.record_prompt_section_id("anti_patterns");
         }
 
         if let Some(base_budget) = self.token_budget {
@@ -387,6 +477,14 @@ impl PromptAssembler for PromptAssemblyService {
         }
 
         Ok(builder.build())
+    }
+
+    fn last_prompt_section_ids(&self) -> Vec<String> {
+        Self::last_prompt_section_ids(self)
+    }
+
+    fn last_knowledge_ids(&self) -> Vec<String> {
+        Self::last_knowledge_ids(self)
     }
 }
 
@@ -751,6 +849,14 @@ mod tests {
         assert!(prompt.contains("## Domain Context"));
         assert!(prompt.contains("## Relevant Knowledge"));
         assert!(prompt.contains("The rate limiter uses token buckets for burst control."));
+        assert_eq!(
+            svc.last_knowledge_ids(),
+            vec!["k-rate-limit-fact".to_string()]
+        );
+        assert!(
+            svc.last_prompt_section_ids()
+                .contains(&"domain_context".to_string())
+        );
     }
 
     #[tokio::test]
@@ -865,6 +971,10 @@ mod tests {
 
         assert!(prompt.contains("## Tool Instructions"));
         assert!(prompt.contains("Use cargo check for Rust verification"));
+        assert!(
+            svc.last_prompt_section_ids()
+                .contains(&"tool_instructions".to_string())
+        );
     }
 
     #[tokio::test]

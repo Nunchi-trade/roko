@@ -16,25 +16,49 @@ use std::path::PathBuf;
 // -- ModelCaller --
 
 /// Request to call an LLM model.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ModelCallRequest {
     /// Model identifier (e.g., "claude-sonnet-4-20250514").
+    #[serde(default)]
     pub model: String,
     /// System prompt.
+    #[serde(default)]
     pub system: Option<String>,
     /// User messages.
+    #[serde(default)]
     pub messages: Vec<ChatMessage>,
     /// Maximum tokens to generate.
+    #[serde(default)]
     pub max_tokens: Option<u32>,
     /// Temperature (0.0-1.0).
+    #[serde(default)]
     pub temperature: Option<f32>,
     /// Role for model routing.
+    #[serde(default)]
     pub role: Option<String>,
     /// Caller surface that originated this request.
-    pub caller: Option<CallerIdentity>,
+    #[serde(default)]
+    pub caller: Option<String>,
+    /// Workflow run identifier.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Prompt sections included in the assembled prompt.
+    #[serde(default)]
+    pub prompt_section_ids: Vec<String>,
+    /// Knowledge entries included in the prompt or routing decision.
+    #[serde(default)]
+    pub knowledge_ids: Vec<String>,
     /// Per-call token and cost budget.
+    #[serde(default)]
     pub budget: Option<TokenBudget>,
+    /// Remaining budget at call time.
+    #[serde(default)]
+    pub budget_remaining: Option<f64>,
+    /// Hints for model routing.
+    #[serde(default)]
+    pub routing_hints: Vec<String>,
     /// Cache behavior for this request.
+    #[serde(default)]
     pub cache_policy: CachePolicy,
 }
 
@@ -49,8 +73,28 @@ pub enum CallerIdentity {
     Test,
 }
 
+impl CallerIdentity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Acp => "acp",
+            Self::Serve => "serve",
+            Self::Research => "research",
+            Self::Dreams => "dreams",
+            Self::Test => "test",
+        }
+    }
+}
+
+impl From<CallerIdentity> for String {
+    fn from(identity: CallerIdentity) -> Self {
+        identity.as_str().to_string()
+    }
+}
+
 /// Cache behaviour for this request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CachePolicy {
     /// Use the default L1 cache behaviour.
     #[default]
@@ -97,14 +141,14 @@ impl From<GatewayError> for RokoError {
 }
 
 /// A single chat message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
 }
 
 /// Message role in a conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MessageRole {
     System,
     User,
@@ -160,17 +204,37 @@ pub struct PromptSpec {
 pub trait PromptAssembler: Send + Sync {
     /// Build a complete system prompt from the spec.
     async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+
+    /// Prompt section ids included by the most recent assembly.
+    fn last_prompt_section_ids(&self) -> Vec<String>;
+
+    /// Knowledge entry ids included by the most recent assembly.
+    fn last_knowledge_ids(&self) -> Vec<String>;
 }
 
 // -- FeedbackSink --
 
 /// A feedback event to record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum FeedbackEvent {
     /// Feedback from a model call.
     ModelCall {
-        run_id: String,
-        model: String,
+        #[serde(default)]
+        run_id: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        prompt_section_ids: Vec<String>,
+        #[serde(default)]
+        knowledge_ids: Vec<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        token_usage: Option<u64>,
+        #[serde(default)]
+        cost: Option<f64>,
         role: String,
         input_tokens: u64,
         output_tokens: u64,
@@ -187,7 +251,10 @@ pub enum FeedbackEvent {
     },
     /// Feedback from a workflow completion.
     WorkflowComplete {
+        event_type: String,
         run_id: String,
+        model: Option<String>,
+        success: bool,
         outcome: String,
         total_cost_usd: f64,
         total_tokens: u64,
@@ -200,17 +267,33 @@ pub enum FeedbackEvent {
 pub trait FeedbackSink: Send + Sync {
     /// Record a feedback event.
     async fn record(&self, event: FeedbackEvent) -> Result<()>;
+
+    /// Flush any buffered feedback events.
+    async fn flush(&self) -> Result<()>;
 }
 
 // -- GateRunner --
 
 /// Configuration for a gate run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShellGateCommand {
+    /// Program to invoke.
+    pub program: String,
+    /// Args to pass.
+    pub args: Vec<String>,
+    /// Timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// Configuration for a gate run.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GateConfig {
     /// Working directory to verify.
     pub workdir: PathBuf,
     /// Which gates to run (e.g., ["compile", "test", "clippy"]).
     pub enabled_gates: Vec<String>,
+    /// Configured shell commands, consumed by shell/custom:shell gate entries.
+    pub shell_gates: Vec<ShellGateCommand>,
     /// Maximum rung to run (0-6).
     pub max_rung: Option<u8>,
 }

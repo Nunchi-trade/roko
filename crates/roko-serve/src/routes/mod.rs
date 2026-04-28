@@ -66,6 +66,11 @@ pub fn build_router(
     cors_origins: &[String],
     api_auth: ServeAuthConfig,
 ) -> Router {
+    state
+        .sse_adapter
+        .set_state_hub_consumer(crate::dashboard_event_bridge(&state));
+    state.sse_adapter.start_runtime_event_subscription();
+
     let cors = middleware::cors_layer(cors_origins);
 
     let api = Router::new()

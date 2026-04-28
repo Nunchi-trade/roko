@@ -32,6 +32,8 @@ toml = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+roko-compose = { path = "../roko-compose" }
+roko-neuro = { path = "../roko-neuro" }
 
 [package.metadata.roko]
 layer = 2

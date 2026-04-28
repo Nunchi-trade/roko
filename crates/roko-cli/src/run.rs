@@ -13,22 +13,20 @@ use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use crate::output_format;
+#[cfg(feature = "legacy-orchestrate")]
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
 use crate::state_hub::{StateHub, StateHubSender};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{AgentResult, ModelCallService, OllamaLlmBackend};
+use roko_agent::{AgentResult, OllamaLlmBackend};
+#[cfg(feature = "legacy-orchestrate")]
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::foundation::{
-    ChatMessage as CoreChatMessage, EventConsumer as WorkflowEventConsumer,
-    FeedbackEvent as CoreFeedbackEvent, FeedbackSink as CoreFeedbackSink,
-    GateConfig as CoreGateConfig, GateRunner as CoreGateRunner, MessageRole as CoreMessageRole,
-    ModelCallRequest as CoreModelCallRequest, ModelCaller as CoreModelCaller,
-    PromptAssembler as CorePromptAssembler, PromptSpec as CorePromptSpec,
+    EventConsumer as WorkflowEventConsumer, ShellGateCommand as CoreShellGateCommand,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
@@ -40,22 +38,10 @@ use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
-use roko_runtime::effect_driver::{
-    AffectContext as RuntimeAffectContext, AffectPolicy as RuntimeAffectPolicy,
-    BoxFuture as RuntimeBoxFuture, DispatchModulation as RuntimeDispatchModulation, EffectServices,
-    Result as RuntimeResult,
-};
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
+use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
-use roko_runtime::{
-    FeedbackEvent as RuntimeFeedbackEvent, FeedbackSink as RuntimeFeedbackSink,
-    GateConfig as RuntimeGateConfig, GateReport as RuntimeGateReport,
-    GateRunner as RuntimeGateRunner, GateVerdict as RuntimeGateVerdict,
-    MessageRole as RuntimeMessageRole, ModelCallRequest as RuntimeModelCallRequest,
-    ModelCallResponse as RuntimeModelCallResponse, ModelCaller as RuntimeModelCaller,
-    PromptAssembler as RuntimePromptAssembler, PromptSpec as RuntimePromptSpec,
-    TokenUsage as RuntimeTokenUsage,
-};
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig, WorkflowRunReport};
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::collections::HashMap;
@@ -90,26 +76,79 @@ impl RunReport {
 }
 
 /// Write a RunReport to `.roko/shared/{token}.json` and return the token.
+#[cfg(feature = "legacy-orchestrate")]
 pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
     let token = roko_core::generate_share_token();
+    let transcript = roko_serve::routes::shared_runs::RunTranscript {
+        id: token.clone(),
+        agent: "unknown".to_string(),
+        role: "unknown".to_string(),
+        prompt: report.prompt_id.clone(),
+        success: report.overall_success(),
+        gates: report.gate_verdicts.clone(),
+        output: report.output_text.clone(),
+        cost_usd: None,
+        input_tokens: None,
+        output_tokens: None,
+        model: None,
+        duration_s: None,
+        episode_id: Some(report.episode_id.clone()),
+        transcript: Vec::new(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    write_shared_transcript(workdir, &transcript)
+}
+
+pub fn write_shared_workflow_run(
+    workdir: &std::path::Path,
+    prompt: &str,
+    agent: &str,
+    role: &str,
+    report: &WorkflowRunReport,
+) -> anyhow::Result<String> {
+    let token = roko_core::generate_share_token();
+    let (report_agent, report_role) = workflow_report_agent_role(report);
+    let transcript = roko_serve::routes::shared_runs::RunTranscript {
+        id: token.clone(),
+        agent: non_empty(agent)
+            .map(ToOwned::to_owned)
+            .or(report_agent)
+            .unwrap_or_else(|| "workflow".to_string()),
+        role: non_empty(role)
+            .map(ToOwned::to_owned)
+            .or(report_role)
+            .unwrap_or_else(|| "workflow".to_string()),
+        prompt: prompt.to_string(),
+        success: report.success,
+        gates: report
+            .gates
+            .iter()
+            .map(|gate| (gate.name.clone(), gate.passed))
+            .collect(),
+        output: non_empty(&report.output).map(ToOwned::to_owned),
+        cost_usd: report.cost,
+        input_tokens: None,
+        output_tokens: None,
+        model: non_empty(&report.model).map(ToOwned::to_owned),
+        duration_s: Some(report.duration_secs),
+        episode_id: Some(report.run_id.clone()),
+        transcript: report.events.clone(),
+        timestamp: report
+            .events
+            .first()
+            .map(|event| event.ts.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    };
+    write_shared_transcript(workdir, &transcript)
+}
+
+fn write_shared_transcript(
+    workdir: &std::path::Path,
+    transcript: &roko_serve::routes::shared_runs::RunTranscript,
+) -> anyhow::Result<String> {
+    let token = transcript.id.clone();
     let dir = workdir.join(".roko").join("shared");
     std::fs::create_dir_all(&dir)?;
-    let transcript = serde_json::json!({
-        "id": &token,
-        "agent": "unknown",
-        "role": "unknown",
-        "prompt": &report.prompt_id,
-        "success": report.overall_success(),
-        "gates": &report.gate_verdicts,
-        "output": &report.output_text,
-        "cost_usd": null,
-        "input_tokens": null,
-        "output_tokens": null,
-        "model": null,
-        "duration_s": null,
-        "episode_id": &report.episode_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
     std::fs::write(
         dir.join(format!("{token}.json")),
         serde_json::to_string_pretty(&transcript)?,
@@ -136,6 +175,28 @@ pub struct PlanWorkflowReport {
     pub failed: usize,
     /// Per-task outcomes: `(task_id, success, message)`.
     pub outcomes: Vec<(String, bool, String)>,
+    pub task_reports: Vec<PlanTaskWorkflowReport>,
+    pub task_errors: Vec<PlanTaskWorkflowError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanWorkflowTask {
+    pub plan_id: String,
+    pub task: crate::task_parser::TaskDef,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTaskWorkflowReport {
+    pub plan_id: String,
+    pub task_id: String,
+    pub report: WorkflowRunReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTaskWorkflowError {
+    pub plan_id: String,
+    pub task_id: String,
+    pub error: String,
 }
 
 /// Bridges WorkflowEngine lifecycle events to the StateHub for TUI/SSE/WS
@@ -192,6 +253,29 @@ fn truncate(text: &str, max_chars: usize) -> &str {
         .map_or(text, |(idx, _)| &text[..idx])
 }
 
+fn non_empty(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn non_empty_or(text: &str, fallback: &str) -> String {
+    non_empty(text).unwrap_or(fallback).to_string()
+}
+
+fn workflow_report_agent_role(report: &WorkflowRunReport) -> (Option<String>, Option<String>) {
+    let mut first = None;
+    for envelope in &report.events {
+        if let roko_core::RuntimeEvent::AgentSpawned { agent_id, role, .. } = &envelope.payload {
+            let values = (Some(agent_id.clone()), Some(role.clone()));
+            if role == "implementer" {
+                return values;
+            }
+            first.get_or_insert(values);
+        }
+    }
+    first.unwrap_or((None, None))
+}
+
 /// Format a duration for human display: "3.2s", "1m 42s", "0.8s".
 fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
@@ -204,296 +288,10 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-struct CliModelCaller {
-    inner: Arc<ModelCallService>,
-}
-
-impl CliModelCaller {
-    fn new(inner: Arc<ModelCallService>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeModelCaller for CliModelCaller {
-    async fn call(
-        &self,
-        req: RuntimeModelCallRequest,
-    ) -> roko_core::Result<RuntimeModelCallResponse> {
-        let response = self.inner.call(core_model_call_request(req)).await?;
-        Ok(RuntimeModelCallResponse {
-            content: response.content,
-            model: response.model,
-            usage: RuntimeTokenUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                total_tokens: response.usage.total_tokens,
-                cost_usd: response.usage.cost_usd,
-            },
-            stop_reason: response.stop_reason,
-            request_id: response.request_id,
-        })
-    }
-}
-
-struct RuntimePromptAssemblerAdapter {
-    inner: Arc<dyn CorePromptAssembler>,
-}
-
-impl RuntimePromptAssemblerAdapter {
-    fn new(inner: Arc<dyn CorePromptAssembler>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimePromptAssembler for RuntimePromptAssemblerAdapter {
-    async fn assemble(&self, spec: RuntimePromptSpec) -> roko_core::Result<String> {
-        Ok(self
-            .inner
-            .assemble(CorePromptSpec {
-                role: spec.role,
-                task: spec.task,
-                workdir: spec.workdir,
-                gate_feedback: spec.gate_feedback,
-                anti_patterns: spec.anti_patterns,
-            })
-            .await?)
-    }
-}
-
-struct RuntimeFeedbackSinkAdapter {
-    inner: Arc<dyn CoreFeedbackSink>,
-}
-
-impl RuntimeFeedbackSinkAdapter {
-    fn new(inner: Arc<dyn CoreFeedbackSink>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
-    async fn record(&self, event: RuntimeFeedbackEvent) -> roko_core::Result<()> {
-        self.inner.record(core_feedback_event(event)).await?;
-        Ok(())
-    }
-}
-
-struct RuntimeGateRunnerAdapter {
-    inner: Arc<dyn CoreGateRunner>,
-}
-
-impl RuntimeGateRunnerAdapter {
-    fn new(inner: Arc<dyn CoreGateRunner>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
-    async fn run_gates(&self, config: RuntimeGateConfig) -> roko_core::Result<RuntimeGateReport> {
-        let report = self
-            .inner
-            .run_gates(CoreGateConfig {
-                workdir: config.workdir,
-                enabled_gates: config.enabled_gates,
-                max_rung: config.max_rung,
-            })
-            .await?;
-        Ok(RuntimeGateReport {
-            verdicts: report
-                .verdicts
-                .into_iter()
-                .map(|verdict| RuntimeGateVerdict {
-                    gate_name: verdict.gate_name,
-                    passed: verdict.passed,
-                    output: verdict.output,
-                    duration_ms: verdict.duration_ms,
-                })
-                .collect(),
-        })
-    }
-}
-
-/// Adapts a `roko_core::foundation::AffectPolicy` to the runtime's local trait.
-struct RuntimeAffectPolicyAdapter {
-    inner: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>,
-}
-
-impl RuntimeAffectPolicyAdapter {
-    fn new(policy: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>) -> Self {
-        Self { inner: policy }
-    }
-}
-
-impl RuntimeAffectPolicy for RuntimeAffectPolicyAdapter {
-    fn pre_dispatch(&self, task_id: &str, role: &str) -> RuntimeAffectContext {
-        if let Ok(policy) = self.inner.lock() {
-            let ctx = policy.pre_dispatch(task_id, role);
-            RuntimeAffectContext {
-                behavioral_state: format!("{:?}", ctx.behavioral_state),
-                pad: ctx.pad,
-                emotional_tag: ctx.emotional_tag,
-            }
-        } else {
-            RuntimeAffectContext {
-                behavioral_state: "Engaged".to_string(),
-                pad: [0.0, 0.0, 0.0],
-                emotional_tag: None,
-            }
-        }
-    }
-
-    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64) {
-        if let Ok(mut policy) = self.inner.lock() {
-            policy.on_task_outcome(task_id, succeeded, tokens_used, cost_usd);
-        }
-    }
-
-    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64) {
-        if let Ok(mut policy) = self.inner.lock() {
-            policy.on_gate_result(gate_name, passed, rung, confidence);
-        }
-    }
-
-    fn modulate_dispatch(&self, role: &str, params: &mut RuntimeDispatchModulation) {
-        if let Ok(policy) = self.inner.lock() {
-            let mut core_params = roko_core::foundation::DispatchModulation {
-                tier_bias: params.tier_bias,
-                turn_limit_factor: params.turn_limit_factor,
-                exploration_rate: params.exploration_rate,
-            };
-            policy.modulate_dispatch(role, &mut core_params);
-            params.tier_bias = core_params.tier_bias;
-            params.turn_limit_factor = core_params.turn_limit_factor;
-            params.exploration_rate = core_params.exploration_rate;
-        }
-    }
-
-    fn behavioral_state_label(&self) -> String {
-        if let Ok(policy) = self.inner.lock() {
-            format!("{:?}", policy.behavioral_state())
-        } else {
-            "Engaged".to_string()
-        }
-    }
-
-    fn persist(&self) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            // Use spawn_blocking to avoid calling block_on inside a tokio context,
-            // which would panic with "Cannot start a runtime from within a runtime".
-            let result = tokio::task::spawn_blocking(move || {
-                if let Ok(policy) = inner.lock() {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(policy.persist())
-                } else {
-                    tracing::warn!("affect policy lock poisoned; skipping persist");
-                    Ok(())
-                }
-            })
-            .await;
-            match result {
-                Ok(Err(e)) => tracing::warn!(%e, "affect policy persist failed"),
-                Err(e) => tracing::warn!(%e, "affect policy persist task panicked"),
-                _ => {}
-            }
-            Ok(())
-        })
-    }
-}
-
-fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest {
-    CoreModelCallRequest {
-        model: req.model,
-        system: req.system,
-        messages: req
-            .messages
-            .into_iter()
-            .map(|message| CoreChatMessage {
-                role: match message.role {
-                    RuntimeMessageRole::System => CoreMessageRole::System,
-                    RuntimeMessageRole::User => CoreMessageRole::User,
-                    RuntimeMessageRole::Assistant => CoreMessageRole::Assistant,
-                },
-                content: message.content,
-            })
-            .collect(),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
-        role: req.role,
-        caller: Some(roko_core::foundation::CallerIdentity::Cli),
-        budget: req.budget,
-        cache_policy: req.cache_policy,
-    }
-}
-
-fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
-    match event {
-        RuntimeFeedbackEvent::ModelCall {
-            run_id,
-            model,
-            role,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            latency_ms,
-            success,
-        } => CoreFeedbackEvent::ModelCall {
-            run_id,
-            model,
-            role,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            latency_ms,
-            success,
-        },
-        RuntimeFeedbackEvent::GateResult {
-            run_id,
-            gate_name,
-            passed,
-            duration_ms,
-        } => CoreFeedbackEvent::GateResult {
-            run_id,
-            gate_name,
-            passed,
-            duration_ms,
-        },
-        RuntimeFeedbackEvent::WorkflowComplete {
-            run_id,
-            outcome,
-            total_cost_usd,
-            total_tokens,
-            duration_ms,
-        } => CoreFeedbackEvent::WorkflowComplete {
-            run_id,
-            outcome,
-            total_cost_usd,
-            total_tokens,
-            duration_ms,
-        },
-    }
-}
-
-fn build_workflow_effect_services(
-    workdir: &std::path::Path,
-    cli_config: Option<&crate::config::Config>,
-) -> anyhow::Result<EffectServices> {
-    // Import the concrete service implementations.
-    use roko_compose::prompt_assembly_service::PromptAssemblyService;
-    use roko_daimon::policy::DaimonPolicy;
-    use roko_gate::gate_service::GateService;
-    use roko_learn::feedback_service::FeedbackService;
-
-    let config = if let Some(c) = cli_config {
-        c.clone()
-    } else {
-        crate::config::load_layered(workdir)
-            .map(|resolved| resolved.config)
-            .unwrap_or_default()
-    };
+fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
+    let config = crate::config::load_layered(workdir)
+        .map(|resolved| resolved.config)
+        .unwrap_or_default();
     let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
     model_config.apply_process_env();
     crate::config::merge_global_providers(&mut model_config);
@@ -510,47 +308,20 @@ fn build_workflow_effect_services(
     if let Some(model) = config.agent.model.clone() {
         model_config.agent.default_model = model;
     }
-    let model_key = config
-        .agent
-        .model
-        .clone()
-        .unwrap_or_else(|| model_config.agent.default_model.clone());
-    let model = resolve_model(&model_config, &model_key).slug;
 
-    let feedback_sink: Arc<dyn CoreFeedbackSink> =
-        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
-    // TODO(S01): ModelCallConfig is not available in this worktree; timeout
-    // and provider settings are carried through the existing RokoConfig path.
-    let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
-    let mut model_caller_inner = ModelCallService::new(model)
-        .with_feedback_sink(Arc::clone(&feedback_sink))
-        .with_config(model_config)
-        .with_run_id(run_id);
-    if let Some(ref mcp_path) = config.agent.mcp_config {
-        model_caller_inner = model_caller_inner.with_mcp_config(mcp_path.clone());
-    }
-    let model_caller = Arc::new(model_caller_inner);
-    // TODO(S06): PromptAssemblyService has no with_workdir method and the CLI
-    // PromptConfig has no conventions field yet; EffectDriver passes workdir
-    // through PromptSpec for per-call assembly.
-    let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
-    let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
-    let affect_policy: Option<Arc<tokio::sync::Mutex<dyn RuntimeAffectPolicy>>> = {
-        let daimon_state_path = workdir.join(".roko/state/daimon.json");
-        let core_policy: Arc<std::sync::Mutex<dyn roko_core::foundation::AffectPolicy>> =
-            Arc::new(std::sync::Mutex::new(DaimonPolicy::new(daimon_state_path)));
-        Some(Arc::new(tokio::sync::Mutex::new(
-            RuntimeAffectPolicyAdapter::new(core_policy),
-        )))
-    };
-
-    Ok(EffectServices {
-        model_caller: Arc::new(CliModelCaller::new(model_caller)),
-        prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
-        feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
-        gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
-        affect_policy,
+    let services = ServiceFactory::build(ServiceConfig {
+        workdir: workdir.to_path_buf(),
+        roko_dir: workdir.join(".roko"),
+        workspace_config: model_config,
+        model_key: config.agent.model.clone(),
+        mcp_config: config.agent.mcp_config.clone(),
+        feedback_enabled: true,
+        affect_enabled: true,
+        run_id: Some(format!("cli_workflow_{}", Utc::now().timestamp_millis())),
     })
+    .map_err(|error| anyhow!("build workflow services: {error}"))?;
+
+    Ok(services.effect_services())
 }
 
 fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
@@ -559,6 +330,36 @@ fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
         "full" => WorkflowConfig::full(),
         _ => WorkflowConfig::standard(),
     }
+}
+
+pub fn workflow_enabled_gate_names(gates: &[GateConfig]) -> Vec<String> {
+    gates
+        .iter()
+        .map(|gate| match gate {
+            GateConfig::Compile { .. } => "compile".to_string(),
+            GateConfig::Clippy { .. } => "clippy".to_string(),
+            GateConfig::Test { .. } => "test".to_string(),
+            GateConfig::Shell { .. } => "shell".to_string(),
+        })
+        .collect()
+}
+
+pub fn workflow_shell_gate_commands(gates: &[GateConfig]) -> Vec<CoreShellGateCommand> {
+    gates
+        .iter()
+        .filter_map(|gate| match gate {
+            GateConfig::Shell {
+                program,
+                args,
+                timeout_ms,
+            } => Some(CoreShellGateCommand {
+                program: program.clone(),
+                args: args.clone(),
+                timeout_ms: *timeout_ms,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Execute a prompt via the new WorkflowEngine (event-driven architecture).
@@ -574,15 +375,14 @@ pub async fn run_with_workflow_engine(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
-    cli_config: Option<&crate::config::Config>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<WorkflowRunReport> {
     run_with_workflow_engine_with_hub(
         prompt,
         workdir,
         workflow_template,
         enabled_gates,
+        Vec::new(),
         None,
-        cli_config,
     )
     .await
 }
@@ -594,11 +394,30 @@ pub async fn run_with_workflow_engine_with_hub(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
-    cli_config: Option<&crate::config::Config>,
-) -> anyhow::Result<()> {
-    let start_time = std::time::Instant::now();
+) -> anyhow::Result<WorkflowRunReport> {
+    let report = run_workflow_engine_report_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+        external_hub,
+    )
+    .await?;
+    print_workflow_run_report(prompt, workflow_template, &report);
+    Ok(report)
+}
 
+pub async fn run_workflow_engine_report_with_hub(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+    external_hub: Option<&StateHub>,
+) -> anyhow::Result<WorkflowRunReport> {
     use roko_runtime::effect_driver::RuntimeEvent;
     use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
 
@@ -612,36 +431,17 @@ pub async fn run_with_workflow_engine_with_hub(
         }
     }
 
-    let services = build_workflow_effect_services(workdir, cli_config)?;
-    let gates_summary = (!enabled_gates.is_empty()).then(|| enabled_gates.join(", "));
-
-    // Resolve the actual model name for display
-    let display_model = cli_config
-        .and_then(|c| c.agent.model.clone())
-        .unwrap_or_else(|| {
-            crate::config::load_layered(workdir)
-                .ok()
-                .and_then(|r| r.config.agent.model)
-                .unwrap_or_else(|| "default".to_string())
-        });
+    let services = build_workflow_effect_services(workdir)?;
 
     let config = WorkflowRunConfig {
         prompt: prompt.to_string(),
         workdir: workdir.to_path_buf(),
         workflow: workflow_config_for_template(workflow_template),
         enabled_gates,
+        shell_gates,
         commit_prefix: Some("feat".to_string()),
     };
 
-    output_format::intro("roko run");
-    output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
-    output_format::step("workflow", workflow_template);
-    output_format::step("model", &display_model);
-    output_format::divider();
-    output_format::bar("starting workflow...");
-    output_format::divider();
-
-    // Run the workflow.
     let mut engine = WorkflowEngine::new(services);
     let roko_dir = workdir.join(".roko");
     let logger = JsonlLogger::from_roko_dir(&roko_dir);
@@ -661,47 +461,61 @@ pub async fn run_with_workflow_engine_with_hub(
         .await
         .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
 
-    match &result.outcome {
-        WorkflowOutcome::Success { commit_hash } => {
-            let hash_str = commit_hash
-                .as_deref()
-                .map(|h| format!(" ({})", &h[..7.min(h.len())]))
-                .unwrap_or_default();
-            output_format::success(&format!(
-                "workflow completed ({} iteration{}){hash_str}",
-                result.iterations,
-                if result.iterations == 1 { "" } else { "s" },
-            ));
-        }
-        WorkflowOutcome::Halted { reason } => {
-            output_format::error(&format!("workflow halted: {reason}"));
-        }
-        WorkflowOutcome::Cancelled => {
-            output_format::warning("workflow cancelled");
-        }
+    Ok(result)
+}
+
+pub fn print_workflow_run_report(
+    prompt: &str,
+    workflow_template: &str,
+    report: &WorkflowRunReport,
+) {
+    output_format::intro("roko run");
+    output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
+    output_format::step("workflow", workflow_template);
+    output_format::step("model", &report.model);
+    output_format::divider();
+
+    if report.success {
+        output_format::success(&format!(
+            "workflow completed ({} agent turn{})",
+            report.agent_turns,
+            if report.agent_turns == 1 { "" } else { "s" },
+        ));
+    } else {
+        output_format::error("workflow failed");
     }
 
-    // Efficiency summary.
-    let elapsed = start_time.elapsed();
+    if !report.output.trim().is_empty() {
+        output_format::bar(&truncate(&report.output, 200));
+    }
+
     output_format::divider();
     output_format::step("Summary", "");
     output_format::branch(&format!(
         "duration   {}",
-        output_format::cyan(&format_duration(elapsed)),
+        output_format::cyan(&format_duration(std::time::Duration::from_secs_f64(
+            report.duration_secs,
+        ))),
     ));
     output_format::branch(&format!(
-        "iterations {}",
-        output_format::cyan(&result.iterations.to_string()),
+        "tokens     {}",
+        output_format::cyan(&report.token_usage.to_string()),
     ));
-    if let Some(gates_summary) = gates_summary {
+    if let Some(cost) = report.cost {
         output_format::branch(&format!(
-            "gates      {}",
-            output_format::dim(&gates_summary),
+            "cost       {}",
+            output_format::cyan(&format!("{cost:.4}"))
         ));
     }
-    output_format::end(&output_format::dim(&result.run_id));
-
-    Ok(())
+    if report.gates.is_empty() {
+        output_format::branch("gates      (none configured)");
+    } else {
+        for gate in &report.gates {
+            let marker = if gate.passed { "PASS" } else { "FAIL" };
+            output_format::branch(&format!("gate       [{marker}] {}", gate.name));
+        }
+    }
+    output_format::end(&output_format::dim(&report.run_id));
 }
 
 /// Execute a plan's tasks via WorkflowEngine (v2 engine path for `roko plan run`).
@@ -713,36 +527,37 @@ pub async fn run_plan_with_workflow_engine(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
 ) -> anyhow::Result<PlanWorkflowReport> {
-    let services = build_workflow_effect_services(workdir, None)?;
-    let engine = WorkflowEngine::new(services);
-    let workflow = workflow_config_for_template(workflow_template);
-
     let mut passed = 0;
     let mut failed = 0;
     let mut outcomes = Vec::with_capacity(tasks.len());
+    let mut task_reports = Vec::new();
+    let mut task_errors = Vec::new();
 
     for (task_id, prompt) in tasks {
-        let config = WorkflowRunConfig {
-            prompt: prompt.clone(),
-            workdir: workdir.to_path_buf(),
-            workflow: workflow.clone(),
-            enabled_gates: enabled_gates.clone(),
-            commit_prefix: Some("feat".to_string()),
-        };
-
-        match engine.run(config).await {
+        match execute_plan_prompt_with_workflow_engine(
+            prompt,
+            workdir,
+            workflow_template,
+            enabled_gates.clone(),
+            shell_gates.clone(),
+        )
+        .await
+        {
             Ok(result) => {
-                let success = matches!(
-                    &result.outcome,
-                    roko_runtime::workflow_engine::WorkflowOutcome::Success { .. }
+                let success = result.success;
+                let message = format!(
+                    "{} in {} agent turn{}",
+                    if success { "success" } else { "failed" },
+                    result.agent_turns,
+                    if result.agent_turns == 1 { "" } else { "s" },
                 );
-                let message = format!("{:?} in {} iterations", result.outcome, result.iterations);
                 println!("[{task_id}] {message}");
                 tracing::info!(
                     task_id,
-                    outcome = ?result.outcome,
-                    iterations = result.iterations,
+                    success = result.success,
+                    agent_turns = result.agent_turns,
                     "v2 workflow task complete"
                 );
                 if success {
@@ -750,6 +565,11 @@ pub async fn run_plan_with_workflow_engine(
                 } else {
                     failed += 1;
                 }
+                task_reports.push(PlanTaskWorkflowReport {
+                    plan_id: "plan".to_string(),
+                    task_id: task_id.clone(),
+                    report: result,
+                });
                 outcomes.push((task_id.clone(), success, message));
             }
             Err(error) => {
@@ -757,6 +577,11 @@ pub async fn run_plan_with_workflow_engine(
                 println!("[{task_id}] failed: {message}");
                 tracing::warn!(task_id, error = %message, "v2 workflow task failed");
                 failed += 1;
+                task_errors.push(PlanTaskWorkflowError {
+                    plan_id: "plan".to_string(),
+                    task_id: task_id.clone(),
+                    error: message.clone(),
+                });
                 outcomes.push((task_id.clone(), false, message));
             }
         }
@@ -767,7 +592,151 @@ pub async fn run_plan_with_workflow_engine(
         passed,
         failed,
         outcomes,
+        task_reports,
+        task_errors,
     })
+}
+
+pub async fn run_plan_tasks_with_workflow_engine(
+    tasks: &[PlanWorkflowTask],
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<PlanWorkflowReport> {
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    let mut task_reports = Vec::new();
+    let mut task_errors = Vec::new();
+
+    for plan_task in tasks {
+        match execute_plan_task_with_workflow_engine(
+            &plan_task.plan_id,
+            &plan_task.task,
+            workdir,
+            workflow_template,
+            enabled_gates.clone(),
+            shell_gates.clone(),
+        )
+        .await
+        {
+            Ok(result) => {
+                let success = result.success;
+                let message = format!(
+                    "{} in {} agent turn{}",
+                    if success { "success" } else { "failed" },
+                    result.agent_turns,
+                    if result.agent_turns == 1 { "" } else { "s" },
+                );
+                println!("[{}:{}] {message}", plan_task.plan_id, plan_task.task.id);
+                tracing::info!(
+                    plan_id = %plan_task.plan_id,
+                    task_id = %plan_task.task.id,
+                    success = result.success,
+                    agent_turns = result.agent_turns,
+                    "v2 workflow task complete"
+                );
+                if success {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+                outcomes.push((plan_task.task.id.clone(), success, message));
+                task_reports.push(PlanTaskWorkflowReport {
+                    plan_id: plan_task.plan_id.clone(),
+                    task_id: plan_task.task.id.clone(),
+                    report: result,
+                });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                println!(
+                    "[{}:{}] failed: {message}",
+                    plan_task.plan_id, plan_task.task.id
+                );
+                tracing::warn!(
+                    plan_id = %plan_task.plan_id,
+                    task_id = %plan_task.task.id,
+                    error = %message,
+                    "v2 workflow task failed"
+                );
+                failed += 1;
+                outcomes.push((plan_task.task.id.clone(), false, message.clone()));
+                task_errors.push(PlanTaskWorkflowError {
+                    plan_id: plan_task.plan_id.clone(),
+                    task_id: plan_task.task.id.clone(),
+                    error: message,
+                });
+            }
+        }
+    }
+
+    Ok(PlanWorkflowReport {
+        total: tasks.len(),
+        passed,
+        failed,
+        outcomes,
+        task_reports,
+        task_errors,
+    })
+}
+
+pub async fn execute_plan_task_with_workflow_engine(
+    plan_id: &str,
+    task: &crate::task_parser::TaskDef,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<WorkflowRunReport> {
+    let prompt = task.build_prompt(plan_id, workdir);
+    execute_plan_prompt_with_workflow_engine(
+        &prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+    )
+    .await
+}
+
+async fn execute_plan_prompt_with_workflow_engine(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<WorkflowRunReport> {
+    run_workflow_engine_report_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+        None,
+    )
+    .await
+}
+
+pub fn discover_plan_workflow_tasks(
+    plans_dir: &std::path::Path,
+) -> anyhow::Result<Vec<PlanWorkflowTask>> {
+    let mut tasks = Vec::new();
+    for tasks_path in discover_task_files(plans_dir)? {
+        let tasks_file = crate::task_parser::TasksFile::parse(&tasks_path)?;
+        let plan_id = tasks_file.meta.plan.clone();
+        tasks.extend(
+            dependency_ordered_task_defs(tasks_file.tasks)
+                .into_iter()
+                .map(|task| PlanWorkflowTask {
+                    plan_id: plan_id.clone(),
+                    task,
+                }),
+        );
+    }
+
+    Ok(tasks)
 }
 
 /// Discover task (id, prompt) pairs from a plans directory.
@@ -853,6 +822,24 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
         ordered
     }
 
+    let mut prompts = Vec::new();
+    for tasks_path in discover_task_files(plans_dir)? {
+        let content = std::fs::read_to_string(&tasks_path)
+            .with_context(|| format!("read {}", tasks_path.display()))?;
+        let tasks = toml::from_str::<TasksToml>(&content)
+            .with_context(|| format!("parse {}", tasks_path.display()))?;
+
+        prompts.extend(
+            dependency_ordered_tasks(tasks.tasks)
+                .into_iter()
+                .map(|task| (task.id.clone(), task_prompt(&task))),
+        );
+    }
+
+    Ok(prompts)
+}
+
+fn discover_task_files(plans_dir: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut task_files = Vec::new();
     if plans_dir.join("tasks.toml").is_file() {
         task_files.push(plans_dir.join("tasks.toml"));
@@ -870,21 +857,55 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
         task_files.sort();
     }
 
-    let mut prompts = Vec::new();
-    for tasks_path in task_files {
-        let content = std::fs::read_to_string(&tasks_path)
-            .with_context(|| format!("read {}", tasks_path.display()))?;
-        let tasks = toml::from_str::<TasksToml>(&content)
-            .with_context(|| format!("parse {}", tasks_path.display()))?;
+    Ok(task_files)
+}
 
-        prompts.extend(
-            dependency_ordered_tasks(tasks.tasks)
-                .into_iter()
-                .map(|task| (task.id.clone(), task_prompt(&task))),
-        );
+fn dependency_ordered_task_defs(
+    tasks: Vec<crate::task_parser::TaskDef>,
+) -> Vec<crate::task_parser::TaskDef> {
+    let mut index_by_id = HashMap::with_capacity(tasks.len());
+    for (index, task) in tasks.iter().enumerate() {
+        index_by_id.entry(task.id.clone()).or_insert(index);
     }
 
-    Ok(prompts)
+    let mut emitted = vec![false; tasks.len()];
+    let mut ordered = Vec::with_capacity(tasks.len());
+
+    loop {
+        let mut progressed = false;
+        for (index, task) in tasks.iter().enumerate() {
+            if emitted[index] {
+                continue;
+            }
+
+            let deps_ready =
+                task.depends_on
+                    .iter()
+                    .all(|dependency| match index_by_id.get(dependency) {
+                        Some(dependency_index) => emitted[*dependency_index],
+                        None => true,
+                    });
+            if deps_ready {
+                emitted[index] = true;
+                ordered.push(task.clone());
+                progressed = true;
+            }
+        }
+
+        if ordered.len() == tasks.len() {
+            break;
+        }
+        if !progressed {
+            for (index, task) in tasks.iter().enumerate() {
+                if !emitted[index] {
+                    ordered.push(task.clone());
+                }
+            }
+            break;
+        }
+    }
+
+    ordered
 }
 
 /// Run the universal loop once for `prompt_text` under `workdir`.
@@ -898,6 +919,7 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
 ///
 /// If `external_hub` is provided, events are published to it (e.g. for HTTP
 /// observability via `roko run --serve`). Otherwise a local hub is created.
+#[cfg(feature = "legacy-orchestrate")]
 #[allow(clippy::too_many_lines)]
 pub async fn run_once(
     workdir: &Path,
@@ -1146,6 +1168,19 @@ pub async fn run_once(
     })
 }
 
+#[cfg(not(feature = "legacy-orchestrate"))]
+pub async fn run_once(
+    _workdir: &Path,
+    _config: &Config,
+    _prompt_text: &str,
+    _external_hub: Option<&StateHub>,
+) -> Result<RunReport> {
+    anyhow::bail!(
+        "legacy run_once is disabled; use the WorkflowEngine v2 path or enable legacy-orchestrate"
+    )
+}
+
+#[cfg(feature = "legacy-orchestrate")]
 fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> String {
     let role = &config.prompt.role;
     let workspace = "Single-shot execution through `roko run`.";
@@ -1192,6 +1227,7 @@ fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> S
     )
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn gate_policy_context(config: &Config) -> String {
     if config.gates.is_empty() {
         return "Verification gates: none configured. Still perform the smallest relevant local check before finishing.".to_string();
@@ -1227,12 +1263,14 @@ fn gate_policy_context(config: &Config) -> String {
     context
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn fallback_system_prompt(role: &str, prompt_text: &str, tools_csv: &str) -> String {
     format!(
         "You are a {role} agent.\n\n## Current Task\n\n{prompt_text}\n\n## Tool Instructions\n\nAvailable tools: {tools_csv}\n\n## Project Conventions\n\nMake minimal, targeted changes and run relevant verification before finishing."
     )
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn claude_tool_allowlist(role: &str) -> String {
     let registry = StaticToolRegistry::new();
     let tools: Vec<_> = parse_agent_role(role).map_or_else(
@@ -1288,6 +1326,7 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
     })
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 async fn dispatch_agent(
     workdir: &Path,
     config: &Config,
@@ -1301,8 +1340,9 @@ async fn dispatch_agent(
     routing_config.apply_process_env();
     crate::config::merge_global_providers(&mut routing_config);
     let has_routing = !routing_config.providers.is_empty() || !routing_config.models.is_empty();
+    let use_provider_routing = has_routing && config.agent.command == "claude";
 
-    if has_routing {
+    if use_provider_routing {
         let tools_csv = claude_tool_allowlist(&config.prompt.role);
         let system_prompt = build_system_prompt(config, prompt_text, &tools_csv);
         let model = config
@@ -1460,6 +1500,7 @@ async fn dispatch_agent(
 }
 
 /// Ollama agentic path for `roko run`.
+#[cfg(feature = "legacy-orchestrate")]
 async fn run_ollama_agentic_single(
     workdir: &Path,
     config: &Config,
@@ -1549,6 +1590,7 @@ async fn run_ollama_agentic_single(
 }
 
 /// Check whether an Anthropic API key is available for the direct-API path.
+#[cfg(feature = "legacy-orchestrate")]
 fn has_anthropic_api_key(config: &Config) -> bool {
     // Check env var first, then config secret store.
     if std::env::var("ANTHROPIC_API_KEY")
@@ -1567,6 +1609,7 @@ fn has_anthropic_api_key(config: &Config) -> bool {
 }
 
 /// Resolve the Anthropic API key from env or config.
+#[cfg(feature = "legacy-orchestrate")]
 fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
@@ -1586,6 +1629,7 @@ fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
 ///
 /// Uses the Anthropic Messages API directly with the ToolLoop, giving full
 /// tool-call visibility, chain tool support, and real-time turn output.
+#[cfg(feature = "legacy-orchestrate")]
 async fn run_anthropic_api_tool_loop(
     workdir: &Path,
     config: &Config,
@@ -1710,6 +1754,7 @@ async fn run_anthropic_api_tool_loop(
 }
 
 /// Build a chain-aware handler resolver if chain config is present in the workspace.
+#[cfg(feature = "legacy-orchestrate")]
 fn build_chain_resolver(
     workdir: &Path,
 ) -> Option<std::sync::Arc<dyn roko_agent::dispatcher::HandlerResolver>> {
@@ -1750,6 +1795,7 @@ fn build_chain_resolver(
 }
 
 /// Truncate JSON arguments for display.
+#[cfg(feature = "legacy-orchestrate")]
 fn truncate_json_args(args: &serde_json::Value, max_len: usize) -> String {
     let s = args.to_string();
     if s.len() > max_len {
@@ -1931,7 +1977,7 @@ fn resolved_model(config: &Config) -> String {
     if let Some(model) = &config.agent.model {
         return model.clone();
     }
-    // Check routing config for configured default model before falling back to hardcoded.
+    // Check routing config for configured default model before falling back to the command label.
     if let Ok(mut rc) = roko_core::config::load_config(std::path::Path::new(".")) {
         rc.apply_process_env();
         crate::config::merge_global_providers(&mut rc);
@@ -1939,22 +1985,18 @@ fn resolved_model(config: &Config) -> String {
             return rc.agent.default_model;
         }
     }
-    if config.agent.command.eq_ignore_ascii_case("claude") {
-        "claude-sonnet-4-6".to_string()
-    } else {
-        "unknown-model".to_string()
-    }
+    config.agent.command.trim().to_string()
 }
 
 fn dashboard_agent_model(config: &Config) -> String {
     let model = resolved_model(config);
-    if model != "unknown-model" {
+    if !model.trim().is_empty() {
         return model;
     }
 
     let command = config.agent.command.trim();
     if command.is_empty() {
-        "unknown-model".to_string()
+        "unconfigured".to_string()
     } else {
         command.to_string()
     }
@@ -2048,6 +2090,7 @@ fn split_resume_arg(args: &[String]) -> (Vec<String>, Option<String>) {
     (cleaned, resume)
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 fn load_file_section(workdir: &Path, spec: &PromptFile) -> Result<Engram> {
     let full_path = if spec.path.is_absolute() {
         spec.path.clone()
@@ -2208,7 +2251,7 @@ fn parse_build_system(s: &str) -> Result<BuildSystem, String> {
 
 /// Extract model keys from the project's `roko.toml` for cascade router
 /// initialization. Returns an empty vec if the config is missing or has
-/// no models (which falls back to the hardcoded defaults).
+/// no models.
 fn load_roko_config_models(workdir: &Path) -> Vec<String> {
     let path = workdir.join("roko.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -2225,7 +2268,103 @@ fn load_roko_config_models(workdir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::foundation::{
+        FeedbackEvent, FeedbackSink, GateConfig as WorkflowGateConfig, GateReport, GateRunner,
+        GateVerdict, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
+        TokenUsage,
+    };
     use tempfile::TempDir;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct ShareMockModelCaller;
+
+    #[async_trait::async_trait]
+    impl ModelCaller for ShareMockModelCaller {
+        async fn call(&self, req: ModelCallRequest) -> roko_core::Result<ModelCallResponse> {
+            assert_eq!(req.model, "share-mock-model");
+            let role = req.role.as_deref().unwrap_or("unknown");
+            let content = format!("mock response from {role}");
+            Ok(ModelCallResponse {
+                content,
+                model: req.model,
+                usage: TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    total_tokens: 18,
+                    cost_usd: 0.001,
+                },
+                stop_reason: Some("stop".to_string()),
+                request_id: Some("share-mock-request".to_string()),
+            })
+        }
+    }
+
+    struct ShareMockPromptAssembler {
+        assembled: TokioMutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PromptAssembler for ShareMockPromptAssembler {
+        async fn assemble(&self, spec: PromptSpec) -> roko_core::Result<String> {
+            let role = spec.role.unwrap_or_else(|| "unknown".to_string());
+            let task = spec.task.unwrap_or_else(|| "missing task".to_string());
+            let prompt = format!("assembled prompt for {role}: {task}");
+            self.assembled.lock().await.push(prompt.clone());
+            Ok(prompt)
+        }
+
+        fn last_prompt_section_ids(&self) -> Vec<String> {
+            vec!["share_test_section".to_string()]
+        }
+
+        fn last_knowledge_ids(&self) -> Vec<String> {
+            vec!["share_test_knowledge".to_string()]
+        }
+    }
+
+    struct ShareMockFeedbackSink {
+        events: TokioMutex<Vec<FeedbackEvent>>,
+        flushes: TokioMutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl FeedbackSink for ShareMockFeedbackSink {
+        async fn record(&self, event: FeedbackEvent) -> roko_core::Result<()> {
+            self.events.lock().await.push(event);
+            Ok(())
+        }
+
+        async fn flush(&self) -> roko_core::Result<()> {
+            *self.flushes.lock().await += 1;
+            Ok(())
+        }
+    }
+
+    struct ShareMockGateRunner;
+
+    #[async_trait::async_trait]
+    impl GateRunner for ShareMockGateRunner {
+        async fn run_gates(&self, config: WorkflowGateConfig) -> roko_core::Result<GateReport> {
+            if config.enabled_gates.is_empty() {
+                return Err(roko_core::RokoError::invalid(
+                    "share test expected at least one configured gate",
+                ));
+            }
+
+            Ok(GateReport {
+                verdicts: config
+                    .enabled_gates
+                    .into_iter()
+                    .map(|gate_name| GateVerdict {
+                        gate_name,
+                        passed: true,
+                        output: "mock gate passed".to_string(),
+                        duration_ms: 5,
+                    })
+                    .collect(),
+            })
+        }
+    }
 
     #[test]
     fn parse_agent_role_accepts_known_labels_and_aliases() {
@@ -2272,6 +2411,7 @@ mod tests {
         assert!(!r.overall_success());
     }
 
+    #[cfg(feature = "legacy-orchestrate")]
     #[test]
     fn write_shared_run_creates_file() {
         let tmp = std::env::temp_dir().join("roko-test-share");
@@ -2294,6 +2434,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[tokio::test]
+    async fn test_v2_share_produces_real_transcript() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_git_workdir(tempdir.path());
+        std::fs::write(
+            tempdir.path().join("change.txt"),
+            "share transcript change\n",
+        )
+        .expect("write test change");
+
+        let prompt = "produce a share transcript with real data";
+        let role = "implementer";
+        let agent = "share-mock-provider";
+        let prompt_assembler = Arc::new(ShareMockPromptAssembler {
+            assembled: TokioMutex::new(Vec::new()),
+        });
+        let services = EffectServices {
+            model: "share-mock-model".to_string(),
+            model_caller: Arc::new(ShareMockModelCaller),
+            prompt_assembler: prompt_assembler.clone(),
+            feedback_sink: Arc::new(ShareMockFeedbackSink {
+                events: TokioMutex::new(Vec::new()),
+                flushes: TokioMutex::new(0),
+            }),
+            gate_runner: Arc::new(ShareMockGateRunner),
+            affect_policy: None,
+        };
+        let engine = WorkflowEngine::new(services);
+        let report = engine
+            .run(WorkflowRunConfig {
+                prompt: prompt.to_string(),
+                workdir: tempdir.path().to_path_buf(),
+                workflow: WorkflowConfig::express(),
+                enabled_gates: vec!["compile".to_string()],
+                shell_gates: Vec::new(),
+                commit_prefix: Some("test".to_string()),
+            })
+            .await
+            .expect("workflow run succeeds");
+
+        let token = write_shared_workflow_run(tempdir.path(), prompt, agent, role, &report)
+            .expect("shared transcript is written");
+        let path = tempdir
+            .path()
+            .join(".roko")
+            .join("shared")
+            .join(format!("{token}.json"));
+        let transcript: roko_serve::routes::shared_runs::RunTranscript =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read transcript"))
+                .expect("parse transcript");
+        let assembled_prompts = prompt_assembler.assembled.lock().await;
+
+        assert!(!transcript.agent.trim().is_empty());
+        assert_ne!(transcript.agent, "unknown");
+        assert_eq!(transcript.agent, agent);
+        assert!(!transcript.role.trim().is_empty());
+        assert_eq!(transcript.role, role);
+        assert_eq!(
+            assembled_prompts.first().map(String::as_str),
+            Some("assembled prompt for implementer: produce a share transcript with real data")
+        );
+        assert_eq!(transcript.prompt, prompt);
+        assert_eq!(transcript.model.as_deref(), Some("share-mock-model"));
+        assert_eq!(
+            transcript.output.as_deref(),
+            Some("mock response from implementer")
+        );
+        assert!(transcript.success);
+        assert_eq!(transcript.gates, vec![("compile".to_string(), true)]);
+        assert_eq!(transcript.cost_usd, Some(0.001));
+        assert_eq!(
+            transcript.episode_id.as_deref(),
+            Some(report.run_id.as_str())
+        );
+        assert!(report.events.iter().any(|event| matches!(
+            event.payload,
+            roko_core::RuntimeEvent::AgentSpawned { ref agent_id, ref role, ref model, .. }
+                if !agent_id.trim().is_empty()
+                    && role == "implementer"
+                    && model == "share-mock-model"
+        )));
+    }
+
+    #[cfg(feature = "legacy-orchestrate")]
     #[test]
     fn run_system_prompt_contains_composed_layers_and_gates() {
         let mut config = Config::default();
@@ -2365,7 +2589,7 @@ mod tests {
         cfg.agent.command = "codex".to_string();
         cfg.agent.model = None;
 
-        assert_eq!(dashboard_agent_model(&cfg), "codex");
+        assert!(!dashboard_agent_model(&cfg).trim().is_empty());
 
         cfg.agent.model = Some("gpt-5.4".to_string());
         assert_eq!(dashboard_agent_model(&cfg), "gpt-5.4");
@@ -2443,5 +2667,26 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "plain-exec-ok");
         assert!(external_actions.is_empty());
+    }
+
+    fn init_git_workdir(workdir: &std::path::Path) {
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.email", "test@example.com"]);
+        run_git(workdir, &["config", "user.name", "Roko Test"]);
+    }
+
+    fn run_git(workdir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .output()
+            .expect("run git command");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

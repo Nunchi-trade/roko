@@ -3,10 +3,12 @@
 //! Implements EventConsumer to receive workflow events and forwards them
 //! to connected SSE clients as JSON event data.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use roko_core::foundation::EventConsumer;
 use roko_core::runtime_event::RuntimeEvent;
+use roko_core::runtime_event::RuntimeEventEnvelope;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -26,6 +28,8 @@ pub struct SseEvent {
 /// Maintains a broadcast channel that SSE endpoint handlers can subscribe to.
 pub struct SseAdapter {
     sender: broadcast::Sender<SseEvent>,
+    state_hub_consumer: RwLock<Option<Arc<dyn EventConsumer>>>,
+    runtime_subscription_started: AtomicBool,
 }
 
 impl SseAdapter {
@@ -33,7 +37,11 @@ impl SseAdapter {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self { sender }
+        Self {
+            sender,
+            state_hub_consumer: RwLock::new(None),
+            runtime_subscription_started: AtomicBool::new(false),
+        }
     }
 
     /// Subscribe to the SSE event stream.
@@ -45,6 +53,50 @@ impl SseAdapter {
     #[must_use]
     pub fn subscriber_count(&self) -> usize {
         self.sender.receiver_count()
+    }
+
+    pub fn set_state_hub_consumer(&self, consumer: Arc<dyn EventConsumer>) {
+        let mut slot = self
+            .state_hub_consumer
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(consumer);
+    }
+
+    pub fn start_runtime_event_subscription(self: &Arc<Self>) {
+        if self
+            .runtime_subscription_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            self.runtime_subscription_started
+                .store(false, Ordering::Release);
+            tracing::warn!("workflow SSE runtime event subscription requires a tokio runtime");
+            return;
+        };
+
+        let adapter = Arc::clone(self);
+        let mut rx = roko_runtime::event_bus::runtime_event_bus::<RuntimeEvent>().subscribe();
+        handle.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(envelope) => adapter.consume(&envelope.payload),
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(n, "workflow SSE runtime event bridge lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    pub fn consume_envelope(&self, envelope: &RuntimeEventEnvelope) {
+        self.consume(&envelope.payload);
     }
 
     /// Convert a RuntimeEvent to an SseEvent.
@@ -164,11 +216,6 @@ impl SseAdapter {
 }
 
 /// Get the SseAdapter as an EventConsumer for WorkflowEngine registration.
-///
-/// Usage in routes/run.rs (future batch):
-/// ```ignore
-/// engine.add_consumer(crate::adapters::sse_event_consumer(&state.sse_adapter));
-/// ```
 #[must_use]
 pub fn sse_event_consumer(adapter: &Arc<SseAdapter>) -> Arc<dyn EventConsumer> {
     Arc::clone(adapter) as Arc<dyn EventConsumer>
@@ -179,6 +226,15 @@ impl EventConsumer for SseAdapter {
         let sse_event = Self::to_sse_event(event);
         // Non-blocking: if no subscribers exist, the event is dropped.
         let _ = self.sender.send(sse_event);
+
+        let consumer = self
+            .state_hub_consumer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(consumer) = consumer {
+            consumer.consume(event);
+        }
     }
 }
 

@@ -49,7 +49,7 @@ pub(crate) fn strategy_fragment_query(
         neuro_prompt_task_category(role).label().to_string(),
         task_text.trim().to_string(),
     ];
-    if let Some(crate_name) = super::orchestrate::task_crate_name(task_def) {
+    if let Some(crate_name) = crate::task_helpers::task_crate_name(task_def) {
         query_parts.push(crate_name);
     }
     query_parts.retain(|part| !part.trim().is_empty());
