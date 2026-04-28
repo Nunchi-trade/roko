@@ -1,0 +1,73 @@
+# cargo-deny configuration for the roko workspace.
+# Run: cargo deny check
+# Install: cargo install cargo-deny
+
+[graph]
+# Only check workspace crates and their direct/transitive deps.
+all-features = true
+
+# --- Advisories --------------------------------------------------------------
+
+[advisories]
+# Use the RustSec advisory database.
+db-path = "$CARGO_HOME/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Allow specific advisories that we've reviewed and accepted.
+ignore = []
+
+# --- Licenses ----------------------------------------------------------------
+
+[licenses]
+# Confidence threshold for license detection.
+confidence-threshold = 0.8
+# Allow common permissive OSS licenses.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+    "MPL-2.0",
+]
+# Copyleft licenses are denied by omission from the allow list.
+# Allow dual-licensed crates where at least one license is acceptable.
+# This handles the common "MIT OR Apache-2.0" pattern.
+
+# Some crates have non-standard license expressions. Clarify them here.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# --- Bans --------------------------------------------------------------------
+
+[bans]
+# Warn on multiple versions of the same crate.
+multiple-versions = "warn"
+# Allow specific duplicate crates that are hard to consolidate.
+# Add entries here as needed:
+# allow = []
+# Deny specific crates known to be problematic.
+deny = []
+# Allow wildcard dependencies in dev/build (not in normal deps).
+wildcards = "allow"
+
+# --- Sources -----------------------------------------------------------------
+
+[sources]
+# Only allow crates from crates.io.
+unknown-registry = "deny"
+# Allow git sources (some deps may use git refs).
+unknown-git = "warn"
+# Explicitly allow crates.io.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
