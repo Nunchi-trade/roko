@@ -6,6 +6,7 @@
 //! 3. `OPENAI_API_KEY` environment variable (OpenAI-compatible)
 //! 4. Falls back to `NeedsSetup`
 
+#[cfg(feature = "legacy-orchestrate")]
 use std::process::Command;
 
 /// Detected authentication method for agent dispatch.
@@ -96,7 +97,8 @@ pub fn detect_auth() -> AuthMethod {
         }
     }
 
-    // 4. Claude CLI (fallback — can succeed at version check but fail at dispatch)
+    // 4. Claude CLI (legacy fallback — can succeed at version check but fail at dispatch)
+    #[cfg(feature = "legacy-orchestrate")]
     if let Ok(output) = Command::new("claude").arg("--version").output() {
         if output.status.success() {
             return AuthMethod::ClaudeCli;

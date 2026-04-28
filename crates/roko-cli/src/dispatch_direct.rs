@@ -9,7 +9,9 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+#[cfg(feature = "legacy-orchestrate")]
 use tokio::io::AsyncBufReadExt;
+#[cfg(feature = "legacy-orchestrate")]
 use tokio::process::Command;
 
 use crate::auth_detect::AuthMethod;
@@ -137,6 +139,7 @@ pub async fn dispatch_via_model_call_service(prompt: &str) -> Result<DispatchRes
 // Claude CLI
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "legacy-orchestrate")]
 async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
     let mut child = Command::new("claude")
         .args(["--print", "--output-format", "stream-json"])
@@ -276,6 +279,13 @@ async fn dispatch_claude_cli(prompt: &str) -> Result<DispatchResult> {
         tool_outputs,
         session_id,
     })
+}
+
+#[cfg(not(feature = "legacy-orchestrate"))]
+async fn dispatch_claude_cli(_prompt: &str) -> Result<DispatchResult> {
+    bail!(
+        "Claude CLI subprocess dispatch is disabled; use ModelCallService or enable legacy-orchestrate"
+    )
 }
 
 // ---------------------------------------------------------------------------
