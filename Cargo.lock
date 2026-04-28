@@ -6059,7 +6059,6 @@ dependencies = [
  "regex",
  "rkyv",
  "roko-primitives",
- "roko-runtime",
  "serde",
  "serde_json",
  "tempfile",

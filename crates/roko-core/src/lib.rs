@@ -93,7 +93,30 @@ pub mod language;
 pub mod loop_tick;
 pub mod metric;
 pub mod namespace;
-pub mod obs;
+pub mod obs {
+    #[path = "../obs/health.rs"]
+    pub mod health;
+    #[path = "../obs/histograms.rs"]
+    pub mod histograms;
+    #[path = "../obs/metrics.rs"]
+    pub mod metrics;
+    #[path = "../obs/schema.rs"]
+    pub mod schema;
+    #[path = "../obs/scrub.rs"]
+    pub mod scrub;
+
+    pub use health::{
+        AlwaysUpProbe, DegradedReason, HealthStatus, NamedProbe, Probe, ProbeRegistry,
+        ReadinessStatus,
+    };
+    pub use histograms::{Histogram, HistogramSnapshot, LLM_LATENCY_BUCKETS};
+    pub use metrics::{
+        Counter, Gauge, LabelSet, MetricKind, MetricRegistry, MetricSnapshot, MetricValue,
+        STANDARD_METRICS, register_standard_metrics,
+    };
+    pub use schema::{CanonicalMetricSchema, MetricDescriptor, MetricSchema, SCHEMA_VERSION};
+    pub use scrub::{LogScrubber, REDACTED};
+}
 pub mod operating_frequency;
 pub mod phase;
 pub mod policy_manifest;
@@ -102,7 +125,6 @@ pub mod prediction;
 pub mod project;
 pub mod provenance;
 pub mod pulse;
-pub mod pulse_bus;
 pub mod query;
 pub mod runtime_event;
 pub mod score;
@@ -111,7 +133,6 @@ pub mod shutdown;
 /// Signal — forward-compatible alias for `Engram` (Phase 1 prep).
 pub mod signal;
 pub mod signal_kinds;
-pub mod state_hub;
 pub mod task;
 pub mod temperament;
 pub mod tool;
@@ -213,7 +234,6 @@ pub use provenance::{
     Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
 };
 pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
-pub use pulse_bus::{PulseBus, PulseBusReceiver};
 pub use query::{Budget, Query};
 pub use roko_primitives::HdcVector;
 pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
@@ -242,7 +262,6 @@ pub use job::{
 pub use namespace::{
     Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
 };
-pub use state_hub::{SharedStateHub, StateHub, StateHubSender, shared_state_hub};
 pub use temperament::Temperament;
 pub use tool::{
     ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
