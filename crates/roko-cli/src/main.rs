@@ -1284,6 +1284,32 @@ enum DeployCmd {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Rebuild the Nunchi mirage-devnet stack end-to-end.
+    ///
+    /// Runs the bundled `rebuild_mirage_devnet.sh` script — agents stack,
+    /// exchange (forge + Cannon), market + orderbook, address propagation
+    /// to the four consumer files, fund + register 11 agents, indexer
+    /// reset. Designed to recover from a chain-state wipe in ~10 min
+    /// without hand-walking every step.
+    ///
+    /// The script lives in `Nunchi-trade/offchainservices-agent` —
+    /// pass `--script-path` (or set `MIRAGE_REBUILD_SCRIPT`) so we know
+    /// where to invoke it from.
+    MirageDevnet {
+        /// Absolute path to `rebuild_mirage_devnet.sh`. Falls back to
+        /// `$MIRAGE_REBUILD_SCRIPT`, then a couple of well-known checkout
+        /// locations.
+        #[arg(long)]
+        script_path: Option<PathBuf>,
+        /// Skip the indexer reset (Railway env-var push + ponder schema
+        /// drop). Useful for local-only testing.
+        #[arg(long)]
+        skip_indexer: bool,
+        /// Publish a public gist of the resulting address inventory at
+        /// the end of the run.
+        #[arg(long)]
+        publish_gist: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -9633,6 +9659,11 @@ async fn cmd_deploy(cli: &Cli, cmd: DeployCmd) -> Result<i32> {
         } => cmd_deploy_railway(cli, workdir, with_mirage, workers).await,
         DeployCmd::Fly { workdir } => cmd_deploy_fly(cli, workdir).await,
         DeployCmd::Docker { workdir, registry } => cmd_deploy_docker(cli, workdir, registry).await,
+        DeployCmd::MirageDevnet {
+            script_path,
+            skip_indexer,
+            publish_gist,
+        } => cmd_deploy_mirage_devnet(cli, script_path, skip_indexer, publish_gist).await,
     }
 }
 
@@ -10364,6 +10395,83 @@ async fn cmd_deploy_docker(
 
     run_command_status(&workdir, "docker", &["build", "-t", "roko", "."])?;
     run_command_status(&workdir, "docker", &["tag", "roko:latest", &tagged_image])?;
+
+    Ok(EXIT_SUCCESS)
+}
+
+/// Resolve the path to `rebuild_mirage_devnet.sh` from offchainservices-agent.
+///
+/// Order of preference:
+///   1. explicit `--script-path` flag
+///   2. `MIRAGE_REBUILD_SCRIPT` env var
+///   3. `$HOME/offchainservices-agent/scripts/rebuild_mirage_devnet.sh`
+///   4. `$HOME/dev/offchainservices-agent/scripts/rebuild_mirage_devnet.sh`
+fn resolve_mirage_rebuild_script(script_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = script_path {
+        if p.exists() {
+            return Ok(p);
+        }
+        bail!("mirage rebuild script not found at {}", p.display());
+    }
+    if let Ok(envp) = std::env::var("MIRAGE_REBUILD_SCRIPT") {
+        let p = PathBuf::from(envp);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for candidate in [
+            home.join("offchainservices-agent/scripts/rebuild_mirage_devnet.sh"),
+            home.join("dev/offchainservices-agent/scripts/rebuild_mirage_devnet.sh"),
+        ] {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    bail!(
+        "couldn't locate rebuild_mirage_devnet.sh — pass --script-path, set \
+         MIRAGE_REBUILD_SCRIPT, or check out Nunchi-trade/offchainservices-agent \
+         under $HOME"
+    )
+}
+
+async fn cmd_deploy_mirage_devnet(
+    _cli: &Cli,
+    script_path: Option<PathBuf>,
+    skip_indexer: bool,
+    publish_gist: bool,
+) -> Result<i32> {
+    let script = resolve_mirage_rebuild_script(script_path)?;
+    let script_dir = script
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("script path has no parent dir: {}", script.display()))?
+        .to_path_buf();
+
+    info!(
+        script = %script.display(),
+        skip_indexer,
+        publish_gist,
+        "invoking mirage-devnet rebuild"
+    );
+
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(&script).current_dir(&script_dir);
+    if skip_indexer {
+        cmd.env("SKIP_INDEXER", "1");
+    }
+    if publish_gist {
+        cmd.env("PUBLISH_GIST", "1");
+    }
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("run bash {}", script.display()))?;
+
+    if !status.success() {
+        bail!("mirage-devnet rebuild failed with status {status}");
+    }
 
     Ok(EXIT_SUCCESS)
 }
