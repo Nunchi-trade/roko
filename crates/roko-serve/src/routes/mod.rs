@@ -38,13 +38,19 @@ mod vision_loop;
 mod webhooks;
 mod ws;
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use super::state::AppState;
+use crate::adapters::SseAdapter;
+use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures::stream::{self, Stream};
 use roko_core::config::ServeAuthConfig;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tower_http::trace::TraceLayer;
 
 pub use self::config::reload_config_from_disk;
@@ -91,7 +97,8 @@ pub fn build_router(
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())
-        .merge(sse::routes());
+        .merge(sse::routes())
+        .route("/workflow/events", get(workflow_sse_handler));
 
     let api = if api_auth.enabled {
         api.layer(axum::middleware::from_fn(middleware::require_scope))
@@ -144,4 +151,36 @@ pub fn build_router(
 /// `GET /api/health`.
 async fn top_level_health() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+/// `GET /api/workflow/events` — RuntimeEvent-typed SSE stream for WorkflowEngine.
+async fn workflow_sse_handler(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let adapter: &Arc<SseAdapter> = &state.sse_adapter;
+    let rx = adapter.subscribe();
+    workflow_sse_from_adapter(rx)
+}
+
+fn workflow_sse_from_adapter(
+    rx: broadcast::Receiver<crate::adapters::SseEvent>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(sse_event) => {
+                    let data = serde_json::to_string(&sse_event).unwrap_or_default();
+                    let event = Event::default().event(sse_event.kind.clone()).data(data);
+                    return Some((Ok(event), rx));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(n, "workflow SSE client lagged");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

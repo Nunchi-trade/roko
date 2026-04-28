@@ -3,6 +3,8 @@
 //! Implements EventConsumer to receive workflow events and forwards them
 //! to connected SSE clients as JSON event data.
 
+use std::sync::Arc;
+
 use roko_core::foundation::EventConsumer;
 use roko_core::runtime_event::RuntimeEvent;
 use serde::Serialize;
@@ -37,6 +39,12 @@ impl SseAdapter {
     /// Subscribe to the SSE event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<SseEvent> {
         self.sender.subscribe()
+    }
+
+    /// Number of active SSE subscribers.
+    #[must_use]
+    pub fn subscriber_count(&self) -> usize {
+        self.sender.receiver_count()
     }
 
     /// Convert a RuntimeEvent to an SseEvent.
@@ -155,6 +163,17 @@ impl SseAdapter {
     }
 }
 
+/// Get the SseAdapter as an EventConsumer for WorkflowEngine registration.
+///
+/// Usage in routes/run.rs (future batch):
+/// ```ignore
+/// engine.add_consumer(crate::adapters::sse_event_consumer(&state.sse_adapter));
+/// ```
+#[must_use]
+pub fn sse_event_consumer(adapter: &Arc<SseAdapter>) -> Arc<dyn EventConsumer> {
+    Arc::clone(adapter) as Arc<dyn EventConsumer>
+}
+
 impl EventConsumer for SseAdapter {
     fn consume(&self, event: &RuntimeEvent) {
         let sse_event = Self::to_sse_event(event);
@@ -194,5 +213,31 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert_eq!(event.kind, "workflow_started");
+    }
+
+    #[test]
+    fn sse_adapter_broadcast_to_multiple_subscribers() {
+        let adapter = SseAdapter::new(16);
+        let mut rx1 = adapter.subscribe();
+        let mut rx2 = adapter.subscribe();
+
+        adapter.consume(&RuntimeEvent::WorkflowStarted {
+            run_id: "r1".into(),
+            template: "standard".into(),
+            prompt: "test".into(),
+        });
+
+        let e1 = rx1.try_recv().unwrap();
+        let e2 = rx2.try_recv().unwrap();
+        assert_eq!(e1.run_id, "r1");
+        assert_eq!(e2.run_id, "r1");
+    }
+
+    #[test]
+    fn sse_adapter_subscriber_count() {
+        let adapter = SseAdapter::new(16);
+        assert_eq!(adapter.subscriber_count(), 0);
+        let _rx = adapter.subscribe();
+        assert_eq!(adapter.subscriber_count(), 1);
     }
 }

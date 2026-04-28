@@ -361,6 +361,8 @@ pub struct AppState {
     pub event_bus: EventBus<ServerEvent>,
     /// Unified state hub for dashboard snapshot + event streaming.
     pub state_hub: roko_core::SharedStateHub,
+    /// RuntimeEvent SSE adapter for workflow event streaming.
+    pub sse_adapter: Arc<crate::adapters::SseAdapter>,
     /// Event subscriptions loaded at startup.
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
@@ -483,6 +485,7 @@ impl AppState {
             affect_engine: Mutex::new(affect_engine),
             event_bus: EventBus::new(16_384),
             state_hub,
+            sse_adapter: Arc::new(crate::adapters::SseAdapter::new(256)),
             subscriptions,
             runtime,
             roko_config: ArcSwap::from_pointee(roko_config),
