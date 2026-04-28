@@ -51,6 +51,7 @@ pub mod heartbeat_attention;
 pub mod heartbeat_probes;
 pub mod lifecycle;
 pub mod metrics;
+pub mod pipeline_state;
 pub mod process;
 pub mod resource;
 pub mod theta_consumer;
@@ -61,4 +62,7 @@ pub use lifecycle::{
     LifecycleTransitionReason, MachineLifecycleState, MeshRegistered, NeuroInitialized,
     ProbeHandler, ProbeSpec, Ready, ResourcesAllocated, RestartBackoff, RoutingConfigured,
     ToolsLoaded, Unvalidated, Validated,
+};
+pub use pipeline_state::{
+    Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
 };
