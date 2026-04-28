@@ -52,6 +52,7 @@
     clippy::io_other_error
 )]
 
+pub mod adapters;
 pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
