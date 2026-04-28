@@ -18,6 +18,7 @@ thiserror = "2"
 anyhow = "1"
 reqwest = { workspace = true }
 roko-core = { path = "../roko-core" }
+roko-runtime = { path = "../roko-runtime" }
 roko-agent = { path = "../roko-agent" }
 roko-gate = { path = "../roko-gate" }
 

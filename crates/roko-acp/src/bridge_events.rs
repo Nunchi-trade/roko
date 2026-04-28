@@ -1,7 +1,7 @@
 //! Cognitive event to session/update streaming.
 //!
-//! Bridges Roko's provider system (via `roko-agent`) or the Claude CLI to
-//! ACP `session/update` notifications.
+//! Bridges Roko's provider system (via `roko-agent`) to ACP
+//! `session/update` notifications.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,8 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+#[allow(unused_imports)]
+use crate::runner::run_with_workflow_engine;
 use crate::{
     session::{AcpSession, CancelToken},
     transport::{StdioTransport, TransportError, TransportResult},
@@ -30,6 +32,7 @@ use crate::{
 // ── Claude CLI stream-json wire types (kept for claude_cli fallback) ──
 
 /// Top-level stream event from `claude --output-format stream-json`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClaudeStreamEvent {
@@ -39,6 +42,7 @@ enum ClaudeStreamEvent {
     Result(ClaudeResultEvent),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeSystemEvent {
     #[serde(default)]
@@ -47,11 +51,13 @@ struct ClaudeSystemEvent {
     pub model: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeAssistantEvent {
     pub message: ClaudeMessage,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeMessage {
     #[serde(default)]
@@ -60,6 +66,7 @@ struct ClaudeMessage {
     pub usage: Option<ClaudeUsage>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClaudeContentBlock {
@@ -68,6 +75,7 @@ enum ClaudeContentBlock {
     Thinking { thinking: String },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeToolEvent {
     #[serde(default, rename = "tool_name")]
@@ -78,6 +86,7 @@ struct ClaudeToolEvent {
     pub content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeResultEvent {
     #[serde(default)]
@@ -88,6 +97,7 @@ struct ClaudeResultEvent {
     pub usage: Option<ClaudeUsage>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ClaudeUsage {
     #[serde(default)]
@@ -436,6 +446,9 @@ where
         } else {
             crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
         };
+        // TODO(arch): Wire run_with_workflow_engine as alternative to run_workflow_pipeline.
+        // When workflow config selects v2 engine, call:
+        //   run_with_workflow_engine(session_id, prompt, workdir, template, event_sender).await
         if let Some(template) = pipeline_template {
             return Ok(crate::runner::run_workflow_pipeline(
                 &session_id,
@@ -544,237 +557,34 @@ where
     stream_result.map(|sr| sr.prompt_result)
 }
 
-// ── Real Claude CLI dispatch ─────────────────────────────────────────
+// ── Legacy Claude CLI dispatch ───────────────────────────────────────
 
-/// Spawns `claude --print --output-format stream-json --verbose` as a
-/// subprocess, passes the prompt as a positional arg, and streams parsed
-/// events back through the `event_sender` channel.
+/// Handles legacy Claude CLI model selections without spawning a subprocess.
+///
+/// TODO(arch): Replace this compatibility shim with provider-backed
+/// `ModelCallService` dispatch for single-agent ACP prompts. WorkflowEngine
+/// already uses the shared provider abstraction through `run_with_workflow_engine`.
 #[allow(clippy::too_many_arguments)]
 async fn run_claude_cognitive_task(
-    session_id: &str,
-    prompt_text: &str,
-    workdir: &Path,
-    model: &str,
-    permission_mode: &str,
-    system_prompt: &str,
-    cancel_token: CancelToken,
+    _session_id: &str,
+    _prompt_text: &str,
+    _workdir: &Path,
+    _model: &str,
+    _permission_mode: &str,
+    _system_prompt: &str,
+    _cancel_token: CancelToken,
     event_sender: mpsc::Sender<CognitiveEvent>,
 ) -> Result<()> {
-    debug!(
-        session_id,
-        prompt_chars = prompt_text.chars().count(),
-        workdir = %workdir.display(),
-        model,
-        permission_mode,
-        "spawning claude CLI for ACP cognitive task"
-    );
-
-    if cancel_token.is_cancelled() {
-        return Ok(());
-    }
-
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.arg("--print")
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose")
-        .arg("--model")
-        .arg(model)
-        .arg("--permission-mode")
-        .arg(permission_mode)
-        .arg("--system-prompt")
-        .arg(system_prompt);
-
-    // Append the prompt after a `--` separator.
-    cmd.arg("--").arg(prompt_text);
-
-    let mut child = match cmd
-        .current_dir(workdir)
-        .env_remove("CLAUDECODE")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            error!(error = %e, "failed to spawn claude CLI");
-            let _ = event_sender
-                .send(CognitiveEvent::TokenChunk(format!(
-                    "Error: failed to spawn `claude` CLI: {e}"
-                )))
-                .await;
-            let _ = event_sender
-                .send(CognitiveEvent::Complete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: None,
-                })
-                .await;
-            return Ok(());
-        }
-    };
-
-    // Accumulate usage across the stream.
-    let mut total_input = 0u64;
-    let mut total_output = 0u64;
-    let mut total_cache_read = 0u64;
-    let mut total_cache_write = 0u64;
-    let mut final_cost: Option<f64> = None;
-
-    // Read stdout line-by-line.
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let mut reader = tokio::io::BufReader::new(stdout);
-    let mut line = String::new();
-
-    loop {
-        if cancel_token.is_cancelled() {
-            let _ = child.kill().await;
-            return Ok(());
-        }
-
-        line.clear();
-
-        let read_result = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => {
-                let _ = child.kill().await;
-                return Ok(());
-            }
-            result = reader.read_line(&mut line) => result,
-        };
-
-        match read_result {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(e) => {
-                warn!(session_id, error = %e, "error reading claude stdout");
-                break;
-            }
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let event: ClaudeStreamEvent = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let cognitive_events = match event {
-            ClaudeStreamEvent::System(sys) => {
-                debug!(
-                    session_id,
-                    claude_session = %sys.session_id,
-                    model = %sys.model,
-                    "claude CLI system init"
-                );
-                Vec::new()
-            }
-            ClaudeStreamEvent::Assistant(asst) => {
-                let mut events = Vec::new();
-                for block in &asst.message.content {
-                    match block {
-                        ClaudeContentBlock::Text { text } => {
-                            events.push(CognitiveEvent::TokenChunk(text.clone()));
-                        }
-                        ClaudeContentBlock::ToolUse { id, name } => {
-                            events.push(CognitiveEvent::ToolCallStart {
-                                tool_call_id: id.clone(),
-                                title: name.clone(),
-                                kind: tool_name_to_kind(name),
-                            });
-                        }
-                        ClaudeContentBlock::Thinking { thinking } => {
-                            events.push(CognitiveEvent::ThinkingChunk(thinking.clone()));
-                        }
-                    }
-                }
-                if let Some(usage) = &asst.message.usage {
-                    total_input = total_input.max(usage.input_tokens);
-                    total_output = total_output.max(usage.output_tokens);
-                    total_cache_read = total_cache_read.max(usage.cache_read_input_tokens);
-                    total_cache_write = total_cache_write.max(usage.cache_creation_input_tokens);
-                }
-                events
-            }
-            ClaudeStreamEvent::Tool(tool) => {
-                let truncated = if tool.content.len() > 4096 {
-                    format!("{}... [truncated]", &tool.content[..4096])
-                } else {
-                    tool.content
-                };
-                vec![CognitiveEvent::ToolCallComplete {
-                    tool_call_id: tool.tool_use_id,
-                    status: ToolCallStatus::Completed,
-                    content: vec![ContentBlock::Text { text: truncated }],
-                }]
-            }
-            ClaudeStreamEvent::Result(res) => {
-                if let Some(usage) = &res.usage {
-                    total_input = total_input.max(usage.input_tokens);
-                    total_output = total_output.max(usage.output_tokens);
-                    total_cache_read = total_cache_read.max(usage.cache_read_input_tokens);
-                    total_cache_write = total_cache_write.max(usage.cache_creation_input_tokens);
-                }
-                final_cost = res.total_cost_usd;
-                Vec::new() // we'll emit Complete after the loop
-            }
-        };
-
-        for ce in cognitive_events {
-            if event_sender.send(ce).await.is_err() {
-                let _ = child.kill().await;
-                return Ok(());
-            }
-        }
-    }
-
-    // Drain stderr for diagnostics.
-    if let Some(stderr) = child.stderr.take() {
-        let mut stderr_buf = String::new();
-        let mut stderr_reader = tokio::io::BufReader::new(stderr);
-        while let Ok(n) = stderr_reader.read_line(&mut stderr_buf).await {
-            if n == 0 {
-                break;
-            }
-        }
-        let stderr_trimmed = stderr_buf.trim();
-        if !stderr_trimmed.is_empty() {
-            warn!(session_id, stderr = %stderr_trimmed, "claude CLI stderr output");
-        }
-    }
-
-    // Wait for process to exit.
-    let status = child.wait().await;
-    debug!(session_id, ?status, cost = ?final_cost, "claude CLI process exited");
-
-    let stop_reason = StopReason::EndTurn;
-
-    let usage = if total_input > 0 || total_output > 0 {
-        Some(UsageInfo {
-            total_tokens: total_input + total_output,
-            input_tokens: total_input,
-            output_tokens: total_output,
-            thought_tokens: None,
-            cached_read_tokens: if total_cache_read > 0 {
-                Some(total_cache_read)
-            } else {
-                None
-            },
-            cached_write_tokens: if total_cache_write > 0 {
-                Some(total_cache_write)
-            } else {
-                None
-            },
-        })
-    } else {
-        None
-    };
-
     let _ = event_sender
-        .send(CognitiveEvent::Complete { stop_reason, usage })
+        .send(CognitiveEvent::TokenChunk(
+            "Claude CLI dispatch is disabled in this ACP path. Configure a provider-backed model or enable the WorkflowEngine path.".to_string(),
+        ))
+        .await;
+    let _ = event_sender
+        .send(CognitiveEvent::Complete {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        })
         .await;
 
     Ok(())
@@ -1638,6 +1448,7 @@ async fn run_shell_command(
 }
 
 /// Maps a Claude tool name to an ACP tool call kind.
+#[allow(dead_code)]
 fn tool_name_to_kind(name: &str) -> ToolCallKind {
     match name {
         "Edit" | "MultiEdit" => ToolCallKind::Edit,
