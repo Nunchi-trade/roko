@@ -74,6 +74,7 @@ pub(crate) mod knowledge_helpers;
 pub(crate) mod learning_helpers;
 pub mod oneshot;
 pub mod orchestrate;
+pub mod output_format;
 pub mod pipe;
 pub mod plan;
 pub mod plan_generate;
