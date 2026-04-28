@@ -2244,7 +2244,103 @@ fn load_roko_config_models(workdir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roko_core::foundation::{
+        FeedbackEvent, FeedbackSink, GateConfig as WorkflowGateConfig, GateReport, GateRunner,
+        GateVerdict, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
+        PromptSpec, TokenUsage,
+    };
     use tempfile::TempDir;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct ShareMockModelCaller;
+
+    #[async_trait::async_trait]
+    impl ModelCaller for ShareMockModelCaller {
+        async fn call(&self, req: ModelCallRequest) -> roko_core::Result<ModelCallResponse> {
+            assert_eq!(req.model, "share-mock-model");
+            let role = req.role.as_deref().unwrap_or("unknown");
+            let content = format!("mock response from {role}");
+            Ok(ModelCallResponse {
+                content,
+                model: req.model,
+                usage: TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    total_tokens: 18,
+                    cost_usd: 0.001,
+                },
+                stop_reason: Some("stop".to_string()),
+                request_id: Some("share-mock-request".to_string()),
+            })
+        }
+    }
+
+    struct ShareMockPromptAssembler {
+        assembled: TokioMutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PromptAssembler for ShareMockPromptAssembler {
+        async fn assemble(&self, spec: PromptSpec) -> roko_core::Result<String> {
+            let role = spec.role.unwrap_or_else(|| "unknown".to_string());
+            let task = spec.task.unwrap_or_else(|| "missing task".to_string());
+            let prompt = format!("assembled prompt for {role}: {task}");
+            self.assembled.lock().await.push(prompt.clone());
+            Ok(prompt)
+        }
+
+        fn last_prompt_section_ids(&self) -> Vec<String> {
+            vec!["share_test_section".to_string()]
+        }
+
+        fn last_knowledge_ids(&self) -> Vec<String> {
+            vec!["share_test_knowledge".to_string()]
+        }
+    }
+
+    struct ShareMockFeedbackSink {
+        events: TokioMutex<Vec<FeedbackEvent>>,
+        flushes: TokioMutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl FeedbackSink for ShareMockFeedbackSink {
+        async fn record(&self, event: FeedbackEvent) -> roko_core::Result<()> {
+            self.events.lock().await.push(event);
+            Ok(())
+        }
+
+        async fn flush(&self) -> roko_core::Result<()> {
+            *self.flushes.lock().await += 1;
+            Ok(())
+        }
+    }
+
+    struct ShareMockGateRunner;
+
+    #[async_trait::async_trait]
+    impl GateRunner for ShareMockGateRunner {
+        async fn run_gates(&self, config: WorkflowGateConfig) -> roko_core::Result<GateReport> {
+            if config.enabled_gates.is_empty() {
+                return Err(roko_core::RokoError::invalid(
+                    "share test expected at least one configured gate",
+                ));
+            }
+
+            Ok(GateReport {
+                verdicts: config
+                    .enabled_gates
+                    .into_iter()
+                    .map(|gate_name| GateVerdict {
+                        gate_name,
+                        passed: true,
+                        output: "mock gate passed".to_string(),
+                        duration_ms: 5,
+                    })
+                    .collect(),
+            })
+        }
+    }
 
     #[test]
     fn parse_agent_role_accepts_known_labels_and_aliases() {
@@ -2311,6 +2407,86 @@ mod tests {
                 .exists()
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_v2_share_produces_real_transcript() {
+        let tempdir = TempDir::new().expect("tempdir");
+        init_git_workdir(tempdir.path());
+        std::fs::write(tempdir.path().join("change.txt"), "share transcript change\n")
+            .expect("write test change");
+
+        let prompt = "produce a share transcript with real data";
+        let role = "implementer";
+        let agent = "share-mock-provider";
+        let prompt_assembler = Arc::new(ShareMockPromptAssembler {
+            assembled: TokioMutex::new(Vec::new()),
+        });
+        let services = EffectServices {
+            model: "share-mock-model".to_string(),
+            model_caller: Arc::new(ShareMockModelCaller),
+            prompt_assembler: prompt_assembler.clone(),
+            feedback_sink: Arc::new(ShareMockFeedbackSink {
+                events: TokioMutex::new(Vec::new()),
+                flushes: TokioMutex::new(0),
+            }),
+            gate_runner: Arc::new(ShareMockGateRunner),
+            affect_policy: None,
+        };
+        let engine = WorkflowEngine::new(services);
+        let report = engine
+            .run(WorkflowRunConfig {
+                prompt: prompt.to_string(),
+                workdir: tempdir.path().to_path_buf(),
+                workflow: WorkflowConfig::express(),
+                enabled_gates: vec!["compile".to_string()],
+                shell_gates: Vec::new(),
+                commit_prefix: Some("test".to_string()),
+            })
+            .await
+            .expect("workflow run succeeds");
+
+        let token = write_shared_workflow_run(tempdir.path(), prompt, agent, role, &report)
+            .expect("shared transcript is written");
+        let path = tempdir
+            .path()
+            .join(".roko")
+            .join("shared")
+            .join(format!("{token}.json"));
+        let transcript: roko_serve::routes::shared_runs::RunTranscript =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read transcript"))
+                .expect("parse transcript");
+        let assembled_prompts = prompt_assembler.assembled.lock().await;
+
+        assert!(!transcript.agent.trim().is_empty());
+        assert_ne!(transcript.agent, "unknown");
+        assert_eq!(transcript.agent, agent);
+        assert!(!transcript.role.trim().is_empty());
+        assert_eq!(transcript.role, role);
+        assert_eq!(
+            assembled_prompts.first().map(String::as_str),
+            Some("assembled prompt for implementer: produce a share transcript with real data")
+        );
+        assert_eq!(transcript.prompt, prompt);
+        assert_eq!(transcript.model.as_deref(), Some("share-mock-model"));
+        assert_eq!(
+            transcript.output.as_deref(),
+            Some("mock response from implementer")
+        );
+        assert!(transcript.success);
+        assert_eq!(transcript.gates, vec![("compile".to_string(), true)]);
+        assert_eq!(transcript.cost_usd, Some(0.001));
+        assert_eq!(transcript.episode_id.as_deref(), Some(report.run_id.as_str()));
+        assert!(report
+            .events
+            .iter()
+            .any(|event| matches!(
+                event.payload,
+                roko_core::RuntimeEvent::AgentSpawned { ref agent_id, ref role, ref model, .. }
+                    if !agent_id.trim().is_empty()
+                        && role == "implementer"
+                        && model == "share-mock-model"
+            )));
     }
 
     #[test]
@@ -2462,5 +2638,26 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output.body.as_text().unwrap_or(""), "plain-exec-ok");
         assert!(external_actions.is_empty());
+    }
+
+    fn init_git_workdir(workdir: &std::path::Path) {
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.email", "test@example.com"]);
+        run_git(workdir, &["config", "user.name", "Roko Test"]);
+    }
+
+    fn run_git(workdir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .output()
+            .expect("run git command");
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
