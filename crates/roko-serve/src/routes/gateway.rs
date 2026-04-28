@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use validator::Validate;
 
+use roko_agent::GatewayEventWriter;
 use roko_core::agent::{AgentRole, resolve_model};
 use roko_core::foundation::{
     CachePolicy, CallerIdentity, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole,
@@ -334,104 +335,109 @@ async fn inference_complete(
     Ok(Json(response))
 }
 
-/// `GET /api/gateway/stats` — aggregate gateway statistics from provider
-/// health and latency registries.
-async fn gateway_stats(State(state): State<Arc<AppState>>) -> Json<GatewayStatsResponse> {
-    let health_snapshot = state.provider_health.snapshot();
-
-    let mut total_requests: u64 = 0;
-    let mut total_successes: u64 = 0;
-    let mut providers_json = serde_json::Map::new();
-
-    for status in &health_snapshot {
-        total_requests = total_requests.saturating_add(status.total_attempts);
-        total_successes = total_successes.saturating_add(status.total_successes);
-
-        let latency = state
-            .latency_registry
-            .get_all_for_provider(&status.provider);
-
-        providers_json.insert(
-            status.provider.clone(),
-            json!({
-                "state": format!("{:?}", status.state),
-                "total_attempts": status.total_attempts,
-                "total_successes": status.total_successes,
-                "consecutive_failures": status.consecutive_failures,
-                "latency_p50_ms": latency.p50_ms(),
-                "latency_p95_ms": latency.p95_ms(),
-                "latency_p99_ms": latency.p99_ms(),
-                "error_rate": status.error_rate(),
-            }),
-        );
-    }
-
-    // Build per-model stats from provider-level requests + accumulated
-    // gateway token/cost counters (B1).
-    let config = state.load_roko_config();
-    let effective_models = config.effective_models();
-    let counter_map = state.gateway_model_counters.read().await;
-    let mut model_stats: HashMap<String, ModelStats> = HashMap::new();
-    let mut total_cost_usd: f64 = 0.0;
-
-    for (key, profile) in &effective_models {
-        let provider_status = health_snapshot
-            .iter()
-            .find(|s| s.provider == profile.provider);
-
-        let (tokens_in, tokens_out, cost) = if let Some(c) = counter_map.get(key) {
-            (
-                c.tokens_in.load(Ordering::Relaxed),
-                c.tokens_out.load(Ordering::Relaxed),
-                c.cost_usd(),
-            )
-        } else {
-            (0, 0, 0.0)
-        };
-
-        total_cost_usd += cost;
-
-        if let Some(status) = provider_status {
-            model_stats.insert(
-                key.clone(),
-                ModelStats {
-                    requests: status.total_attempts,
-                    tokens_in,
-                    tokens_out,
-                    cost_usd: cost,
-                },
-            );
-        } else if tokens_in > 0 || tokens_out > 0 {
-            // Model has recorded traffic but no provider health entry yet.
-            model_stats.insert(
-                key.clone(),
-                ModelStats {
-                    requests: 0,
-                    tokens_in,
-                    tokens_out,
-                    cost_usd: cost,
-                },
-            );
-        }
-    }
-
-    // Cache hit rate is a placeholder — populated once the inference cache
-    // layer is wired (currently no per-request caching exists).
-    let cache_hits: u64 = 0;
+/// `GET /api/gateway/stats` — aggregate gateway statistics from the durable
+/// gateway event log.
+async fn gateway_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<GatewayStatsResponse>, ApiError> {
+    let projection = GatewayEventWriter::for_workdir(&state.workdir)
+        .projection()
+        .map_err(|err| ApiError::internal(format!("load gateway event log: {err}")))?;
+    let model_aggregates = projection.stats_by_model();
+    let provider_aggregates = projection.stats_by_provider();
+    let total_requests = projection.total_events() as u64;
+    let cache_hits: u64 = model_aggregates
+        .values()
+        .map(|stats| stats.cache_hits)
+        .sum();
     let cache_hit_rate = if total_requests > 0 {
         cache_hits as f64 / total_requests as f64
     } else {
         0.0
     };
+    let total_cost_usd = projection.total_cost_usd();
 
-    Json(GatewayStatsResponse {
+    let health_snapshot = state.provider_health.snapshot();
+
+    let mut providers_json = serde_json::Map::new();
+
+    for status in &health_snapshot {
+        let latency = state
+            .latency_registry
+            .get_all_for_provider(&status.provider);
+        let durable = provider_aggregates.get(&status.provider);
+        let total_attempts = durable.map_or(0, |stats| stats.count);
+        let total_successes = durable.map_or(0, |stats| stats.count.saturating_sub(stats.errors));
+        let durable_error_rate = durable.map_or(0.0, |stats| {
+            if stats.count > 0 {
+                stats.errors as f64 / stats.count as f64
+            } else {
+                0.0
+            }
+        });
+
+        providers_json.insert(
+            status.provider.clone(),
+            json!({
+                "state": format!("{:?}", status.state),
+                "total_attempts": total_attempts,
+                "total_successes": total_successes,
+                "consecutive_failures": status.consecutive_failures,
+                "latency_p50_ms": latency.p50_ms(),
+                "latency_p95_ms": latency.p95_ms(),
+                "latency_p99_ms": latency.p99_ms(),
+                "error_rate": durable_error_rate,
+            }),
+        );
+    }
+
+    for (provider, stats) in &provider_aggregates {
+        if providers_json.contains_key(provider) {
+            continue;
+        }
+        let error_rate = if stats.count > 0 {
+            stats.errors as f64 / stats.count as f64
+        } else {
+            0.0
+        };
+        providers_json.insert(
+            provider.clone(),
+            json!({
+                "state": "Unknown",
+                "total_attempts": stats.count,
+                "total_successes": stats.count.saturating_sub(stats.errors),
+                "consecutive_failures": 0,
+                "latency_p50_ms": null,
+                "latency_p95_ms": null,
+                "latency_p99_ms": null,
+                "error_rate": error_rate,
+            }),
+        );
+    }
+
+    let model_stats = model_aggregates
+        .into_iter()
+        .map(|(model, stats)| {
+            (
+                model,
+                ModelStats {
+                    requests: stats.count,
+                    tokens_in: stats.total_input_tokens,
+                    tokens_out: stats.total_output_tokens,
+                    cost_usd: stats.total_cost_usd,
+                },
+            )
+        })
+        .collect();
+
+    Ok(Json(GatewayStatsResponse {
         total_requests,
         cache_hits,
         cache_hit_rate,
         total_cost_usd,
         models: model_stats,
         providers: Value::Object(providers_json),
-    })
+    }))
 }
 
 /// `GET /api/gateway/models` — list available models with capabilities and
@@ -1165,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn gateway_stats_returns_valid_structure() {
         let (_dir, state) = test_state();
-        let Json(stats) = gateway_stats(State(state)).await;
+        let Json(stats) = gateway_stats(State(state)).await.expect("gateway stats");
 
         assert_eq!(stats.total_requests, 0);
         assert_eq!(stats.cache_hits, 0);
