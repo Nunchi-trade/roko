@@ -266,3 +266,108 @@ pub trait EffectExecutor: Send + Sync {
     /// Execute the given effect, returning the outcome.
     async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
 }
+
+// -- AffectPolicy --
+
+/// Behavioral state of the affect engine.
+///
+/// Mirrors `roko_core::BehavioralState` from `affect.rs` but is re-exported
+/// here for self-contained trait signatures. Use the canonical enum from
+/// `roko_core::BehavioralState` — do NOT duplicate the definition.
+/// (The type is already `pub` in roko-core via `affect.rs`.)
+
+/// Affect context snapshot provided before dispatching a task.
+#[derive(Debug, Clone)]
+pub struct AffectContext {
+    /// Current behavioral state classification.
+    pub behavioral_state: crate::BehavioralState,
+    /// Current PAD vector: [Pleasure, Arousal, Dominance], each in [-1.0, 1.0].
+    pub pad: [f32; 3],
+    /// Human-readable emotional label, if available.
+    pub emotional_tag: Option<String>,
+}
+
+/// Modulation parameters applied to dispatch configuration.
+///
+/// The affect policy fills these in; the effect driver applies them.
+#[derive(Debug, Clone)]
+pub struct DispatchModulation {
+    /// Tier bias: -1.0 (prefer cheapest model) to +1.0 (prefer most capable model).
+    pub tier_bias: f32,
+    /// Multiplier on the default turn limit. 1.0 = no change.
+    pub turn_limit_factor: f32,
+    /// Exploration rate in [0.0, 1.0]. Higher = more exploratory routing.
+    pub exploration_rate: f32,
+}
+
+impl Default for DispatchModulation {
+    fn default() -> Self {
+        Self {
+            tier_bias: 0.0,
+            turn_limit_factor: 1.0,
+            exploration_rate: 0.0,
+        }
+    }
+}
+
+/// Policy trait for behavioral affect modulation in workflow execution.
+///
+/// The canonical implementation is `DaimonPolicy` in `roko-daimon`.
+/// When affect is disabled, use `NoOpAffectPolicy` which returns neutral defaults.
+#[async_trait]
+pub trait AffectPolicy: Send + Sync {
+    /// Called before dispatching a task. Returns an affect context snapshot.
+    fn pre_dispatch(&self, task_id: &str, role: &str) -> AffectContext;
+
+    /// Called after a task completes (success or failure).
+    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64);
+
+    /// Called after a gate verdict.
+    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64);
+
+    /// Modulate dispatch parameters based on current affect state.
+    fn modulate_dispatch(&self, role: &str, params: &mut DispatchModulation);
+
+    /// Get the current behavioral state for logging/display.
+    fn behavioral_state(&self) -> crate::BehavioralState;
+
+    /// Persist affect state to disk.
+    async fn persist(&self) -> Result<()>;
+}
+
+/// No-op implementation of `AffectPolicy` for when affect modulation is disabled.
+///
+/// All methods return neutral defaults. No state is tracked or persisted.
+pub struct NoOpAffectPolicy;
+
+#[async_trait]
+impl AffectPolicy for NoOpAffectPolicy {
+    fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
+        AffectContext {
+            behavioral_state: crate::BehavioralState::Engaged,
+            pad: [0.0, 0.0, 0.0],
+            emotional_tag: None,
+        }
+    }
+
+    fn on_task_outcome(
+        &mut self,
+        _task_id: &str,
+        _succeeded: bool,
+        _tokens_used: u64,
+        _cost_usd: f64,
+    ) {
+    }
+
+    fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {}
+
+    fn modulate_dispatch(&self, _role: &str, _params: &mut DispatchModulation) {}
+
+    fn behavioral_state(&self) -> crate::BehavioralState {
+        crate::BehavioralState::Engaged
+    }
+
+    async fn persist(&self) -> Result<()> {
+        Ok(())
+    }
+}
