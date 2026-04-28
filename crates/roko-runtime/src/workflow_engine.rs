@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use roko_core::RuntimeEvent;
-use roko_core::foundation::EventConsumer;
+use roko_core::foundation::{EventConsumer, ShellGateCommand};
 
 use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
@@ -29,6 +29,8 @@ pub struct WorkflowRunConfig {
     pub workflow: WorkflowConfig,
     /// Which gates to run.
     pub enabled_gates: Vec<String>,
+    /// Shell command configs for shell/custom:shell gate entries.
+    pub shell_gates: Vec<ShellGateCommand>,
     /// Commit message prefix.
     pub commit_prefix: Option<String>,
 }
@@ -190,7 +192,9 @@ impl WorkflowEngine {
                         gate_name: "pipeline".to_string(),
                         rung: 0,
                     });
-                    driver.run_gates(&config.enabled_gates).await
+                    driver
+                        .run_gates(&config.enabled_gates, &config.shell_gates)
+                        .await
                 }
                 PipelineOutput::Commit => {
                     let message = commit_message(&config);
@@ -364,7 +368,9 @@ impl WorkflowEngine {
                         gate_name: "pipeline".to_string(),
                         rung: 0,
                     });
-                    driver.run_gates(&config.enabled_gates).await
+                    driver
+                        .run_gates(&config.enabled_gates, &config.shell_gates)
+                        .await
                 }
                 PipelineOutput::Commit => {
                     let message = commit_message_for(
@@ -589,6 +595,7 @@ mod tests {
             workdir: PathBuf::from("."),
             workflow: WorkflowConfig::express(),
             enabled_gates: Vec::new(),
+            shell_gates: Vec::new(),
             commit_prefix: Some("fix".to_string()),
         };
 
@@ -795,6 +802,7 @@ mod tests {
             workdir: tempdir.path().to_path_buf(),
             workflow: WorkflowConfig::express(),
             enabled_gates: Vec::new(),
+            shell_gates: Vec::new(),
             commit_prefix: None,
         };
         (config, tempdir)
@@ -807,6 +815,7 @@ mod tests {
             workdir: tempdir.path().to_path_buf(),
             workflow: WorkflowConfig::standard(),
             enabled_gates: vec!["compile".to_string()],
+            shell_gates: Vec::new(),
             commit_prefix: None,
         };
         (config, tempdir)

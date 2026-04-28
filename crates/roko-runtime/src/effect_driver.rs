@@ -16,7 +16,7 @@ pub use roko_core::foundation::{
 };
 use roko_core::foundation::{
     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
-    PromptAssembler, PromptSpec,
+    PromptAssembler, PromptSpec, ShellGateCommand,
 };
 
 use crate::event_bus::emit_runtime_event;
@@ -206,10 +206,15 @@ impl EffectDriver {
     /// Run verification gates.
     ///
     /// Returns `PipelineInput::GatesPassed` or `PipelineInput::GateFailed`.
-    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput {
+    pub async fn run_gates(
+        &self,
+        enabled_gates: &[String],
+        shell_gates: &[ShellGateCommand],
+    ) -> PipelineInput {
         let config = GateConfig {
             workdir: self.workdir.clone(),
             enabled_gates: enabled_gates.to_vec(),
+            shell_gates: shell_gates.to_vec(),
             max_rung: None,
         };
 

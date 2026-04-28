@@ -29,6 +29,7 @@ use roko_core::foundation::{
     GateConfig as CoreGateConfig, GateRunner as CoreGateRunner, MessageRole as CoreMessageRole,
     ModelCallRequest as CoreModelCallRequest, ModelCaller as CoreModelCaller,
     PromptAssembler as CorePromptAssembler, PromptSpec as CorePromptSpec,
+    ShellGateCommand as CoreShellGateCommand,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
@@ -294,6 +295,7 @@ impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
             .run_gates(CoreGateConfig {
                 workdir: config.workdir,
                 enabled_gates: config.enabled_gates,
+                shell_gates: config.shell_gates,
                 max_rung: config.max_rung,
             })
             .await?;
@@ -460,6 +462,36 @@ fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
     }
 }
 
+pub fn workflow_enabled_gate_names(gates: &[GateConfig]) -> Vec<String> {
+    gates
+        .iter()
+        .map(|gate| match gate {
+            GateConfig::Compile { .. } => "compile".to_string(),
+            GateConfig::Clippy { .. } => "clippy".to_string(),
+            GateConfig::Test { .. } => "test".to_string(),
+            GateConfig::Shell { .. } => "shell".to_string(),
+        })
+        .collect()
+}
+
+pub fn workflow_shell_gate_commands(gates: &[GateConfig]) -> Vec<CoreShellGateCommand> {
+    gates
+        .iter()
+        .filter_map(|gate| match gate {
+            GateConfig::Shell {
+                program,
+                args,
+                timeout_ms,
+            } => Some(CoreShellGateCommand {
+                program: program.clone(),
+                args: args.clone(),
+                timeout_ms: *timeout_ms,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Execute a prompt via the new WorkflowEngine (event-driven architecture).
 ///
 /// This is an alternative to the existing orchestrate.rs path. It uses:
@@ -474,7 +506,15 @@ pub async fn run_with_workflow_engine(
     workflow_template: &str,
     enabled_gates: Vec<String>,
 ) -> anyhow::Result<()> {
-    run_with_workflow_engine_with_hub(prompt, workdir, workflow_template, enabled_gates, None).await
+    run_with_workflow_engine_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        Vec::new(),
+        None,
+    )
+    .await
 }
 
 /// Execute a prompt via the new WorkflowEngine and optionally publish lifecycle
@@ -484,6 +524,7 @@ pub async fn run_with_workflow_engine_with_hub(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
     external_hub: Option<&StateHub>,
 ) -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
@@ -509,6 +550,7 @@ pub async fn run_with_workflow_engine_with_hub(
         workdir: workdir.to_path_buf(),
         workflow: workflow_config_for_template(workflow_template),
         enabled_gates,
+        shell_gates,
         commit_prefix: Some("feat".to_string()),
     };
 
@@ -592,6 +634,7 @@ pub async fn run_plan_with_workflow_engine(
     workdir: &std::path::Path,
     workflow_template: &str,
     enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
 ) -> anyhow::Result<PlanWorkflowReport> {
     let services = build_workflow_effect_services(workdir)?;
     let engine = WorkflowEngine::new(services);
@@ -607,6 +650,7 @@ pub async fn run_plan_with_workflow_engine(
             workdir: workdir.to_path_buf(),
             workflow: workflow.clone(),
             enabled_gates: enabled_gates.clone(),
+            shell_gates: shell_gates.clone(),
             commit_prefix: Some("feat".to_string()),
         };
 

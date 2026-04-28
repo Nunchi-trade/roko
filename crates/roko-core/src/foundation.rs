@@ -205,12 +205,25 @@ pub trait FeedbackSink: Send + Sync {
 // -- GateRunner --
 
 /// Configuration for a gate run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShellGateCommand {
+    /// Program to invoke.
+    pub program: String,
+    /// Args to pass.
+    pub args: Vec<String>,
+    /// Timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+/// Configuration for a gate run.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GateConfig {
     /// Working directory to verify.
     pub workdir: PathBuf,
     /// Which gates to run (e.g., ["compile", "test", "clippy"]).
     pub enabled_gates: Vec<String>,
+    /// Configured shell commands, consumed by shell/custom:shell gate entries.
+    pub shell_gates: Vec<ShellGateCommand>,
     /// Maximum rung to run (0-6).
     pub max_rung: Option<u8>,
 }

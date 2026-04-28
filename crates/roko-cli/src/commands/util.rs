@@ -238,21 +238,19 @@ pub(crate) async fn cmd_run(
         // TODO(W03): expose workflow_template via Config.
         let template = "standard";
 
-        // Build enabled gates list from declared gate configs.
-        let enabled_gates: Vec<String> = config
-            .gates
-            .iter()
-            .map(|g| match g {
-                roko_cli::config::GateConfig::Compile { .. } => "compile".to_string(),
-                roko_cli::config::GateConfig::Clippy { .. } => "clippy".to_string(),
-                roko_cli::config::GateConfig::Test { .. } => "test".to_string(),
-                roko_cli::config::GateConfig::Shell { .. } => "shell".to_string(),
-            })
-            .collect();
+        // Build enabled gates list and typed shell commands from declared gate configs.
+        let enabled_gates = roko_cli::run::workflow_enabled_gate_names(&config.gates);
+        let shell_gates = roko_cli::run::workflow_shell_gate_commands(&config.gates);
 
-        let result =
-            roko_cli::run::run_with_workflow_engine(&prompt, &workdir, template, enabled_gates)
-                .await;
+        let result = roko_cli::run::run_with_workflow_engine_with_hub(
+            &prompt,
+            &workdir,
+            template,
+            enabled_gates,
+            shell_gates,
+            None,
+        )
+        .await;
 
         // Shut down the HTTP server if it was started.
         if let Some((state, handle)) = server_guard {

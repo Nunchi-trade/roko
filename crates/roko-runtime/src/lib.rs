@@ -80,7 +80,7 @@ pub use roko_core::RuntimeEvent;
 pub use roko_core::foundation::{
     ChatMessage, EventConsumer, FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner,
     GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
-    PromptSpec, TokenUsage,
+    PromptSpec, ShellGateCommand, TokenUsage,
 };
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
 pub use workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};

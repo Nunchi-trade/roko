@@ -97,6 +97,7 @@ pub async fn run_with_workflow_engine(
         workdir: workdir.to_path_buf(),
         workflow,
         enabled_gates: vec!["compile".into(), "test".into()],
+        shell_gates: Vec::new(),
         commit_prefix: Some("feat".to_string()),
     };
 
