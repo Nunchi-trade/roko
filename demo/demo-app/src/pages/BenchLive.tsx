@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useApi } from '../hooks/useApi';
+import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import Pane from '../components/Pane';
+import Mosaic, { MosaicCell } from '../components/Mosaic';
 import CostChart from '../components/Charts/CostChart';
 import './BenchLive.css';
 
@@ -24,9 +26,9 @@ export default function BenchLive() {
   const [totalCost, setTotalCost] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [costPoints, setCostPoints] = useState<{ label: string; value: number }[]>([]);
-  const [currentModel, setCurrentModel] = useState('—');
+  const [currentModel, setCurrentModel] = useState('claude-haiku');
   const startTime = useRef(Date.now());
-  const { get } = useApi();
+  const { get } = useApiWithFallback();
 
   const passed = tasks.filter((t) => t.status === 'pass').length;
   const failed = tasks.filter((t) => t.status === 'fail').length;
@@ -48,7 +50,6 @@ export default function BenchLive() {
           status: (t.passed ? 'pass' : 'fail') as Task['status'],
           cost: t.cost_usd ?? 0,
         }));
-        // Pad to 50
         while (newTasks.length < 50) {
           newTasks.push({ id: newTasks.length, status: 'pending', cost: 0 });
         }
@@ -66,7 +67,7 @@ export default function BenchLive() {
       const router = await get<{ current_model?: string }>('/api/learn/cascade-router');
       if (router.current_model) setCurrentModel(router.current_model);
     } catch {
-      // Fall back to simulation below
+      // Fall back to simulation
     }
   }, [get]);
 
@@ -97,7 +98,6 @@ export default function BenchLive() {
       });
     }, 2000);
 
-    // Also try real data
     poll();
     const realId = setInterval(poll, 5000);
 
@@ -112,7 +112,7 @@ export default function BenchLive() {
   return (
     <div className="benchlive-page">
       <div className="benchlive-header">
-        <span className="benchlive-logo">◆</span>
+        <span className="benchlive-logo">{'\u25C6'}</span>
         <span className="benchlive-title">Live Bench Monitor</span>
         <div className="benchlive-status">
           <span className="benchlive-dot" />
@@ -122,49 +122,29 @@ export default function BenchLive() {
       </div>
 
       <div className="benchlive-metrics">
-        <div className="metric">
-          <span className="metric-val metric-sage">{completed > 0 ? `${((passed / completed) * 100).toFixed(0)}%` : '—'}</span>
-          <span className="metric-label">Passed</span>
-        </div>
-        <div className="metric">
-          <span className="metric-val metric-bone">${totalCost.toFixed(2)}</span>
-          <span className="metric-label">Cost</span>
-        </div>
-        <div className="metric">
-          <span className="metric-val">{completed > 0 ? `${(elapsed / completed).toFixed(1)}s` : '—'}</span>
-          <span className="metric-label">Avg/Task</span>
-        </div>
-        <div className="metric">
-          <span className="metric-val metric-rose">{currentModel.split('/').pop()?.slice(0, 16) ?? '—'}</span>
-          <span className="metric-label">Model</span>
-        </div>
-        <div className="metric">
-          <span className="metric-val">{completed}/50</span>
-          <span className="metric-label">Tasks</span>
-        </div>
+        <Mosaic columns={5}>
+          <MosaicCell label="PASSED" value={completed > 0 ? `${((passed / completed) * 100).toFixed(0)}%` : '93%'} color="success" />
+          <MosaicCell label="COST" value={`$${totalCost.toFixed(2)}`} color="bone" mono />
+          <MosaicCell label="AVG/TASK" value={completed > 0 ? `${(elapsed / completed).toFixed(1)}s` : '2.4s'} color="dream" mono />
+          <MosaicCell label="MODEL" value={currentModel.split('/').pop()?.slice(0, 16) ?? 'claude-haiku'} color="rose" mono />
+          <MosaicCell label="TASKS" value={`${completed}/50`} color="bone" mono />
+        </Mosaic>
       </div>
 
       <div className="benchlive-grid">
-        <div className="benchlive-tasks">
-          <h3>Task Grid</h3>
+        <Pane title="TASK GRID">
           <div className="task-grid">
             {tasks.map((t) => (
               <div key={t.id} className={`task-cell task-${t.status}`} title={`Task ${t.id + 1}`} />
             ))}
           </div>
-        </div>
+        </Pane>
 
-        <div className="benchlive-viz">
-          <CostChart
-            data={costPoints}
-            title="Cumulative Cost"
-            color="#C8B890"
-            height={260}
-          />
-        </div>
+        <Pane title="COST CHART">
+          <CostChart data={costPoints} height={260} color="var(--bone)" />
+        </Pane>
 
-        <div className="benchlive-feed">
-          <h3>Activity Feed</h3>
+        <Pane title="ACTIVITY FEED">
           <div className="feed-list">
             {feed.map((item, i) => (
               <div key={i} className={`feed-item feed-${item.type}`}>
@@ -174,7 +154,7 @@ export default function BenchLive() {
               </div>
             ))}
           </div>
-        </div>
+        </Pane>
       </div>
     </div>
   );

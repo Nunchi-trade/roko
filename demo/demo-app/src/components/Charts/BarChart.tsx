@@ -40,7 +40,7 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
     ctx.clearRect(0, 0, w, h);
 
     if (title) {
-      ctx.fillStyle = '#706070';
+      ctx.fillStyle = '#8a7a88';
       ctx.font = '11px "General Sans", sans-serif';
       ctx.fillText(title, pad.left, 16);
     }
@@ -51,7 +51,7 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
       const color = d.color ?? '#AA7088';
 
       // Label
-      ctx.fillStyle = '#706070';
+      ctx.fillStyle = '#8a7a88';
       ctx.font = '10px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.fillText(d.label, pad.left - 8, y + barH / 2 + 3);
@@ -69,7 +69,7 @@ export default function BarChart({ data, title, height = 200 }: BarChartProps) {
       ctx.fill();
 
       // Value
-      ctx.fillStyle = '#B0A0B0';
+      ctx.fillStyle = '#c4b4c4';
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'left';
       ctx.fillText(d.value.toFixed(1), pad.left + barW + 6, y + barH / 2 + 3);

@@ -1,0 +1,58 @@
+.telemetry-sidebar {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 9990;
+  padding: 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: rgba(6, 6, 8, .55);
+  border-left: 1px solid var(--border-soft);
+  backdrop-filter: blur(6px);
+}
+
+.tel-row {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .24em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 400;
+  white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tel-row b {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 18px;
+  font-weight: 300;
+  color: var(--rose-glow);
+  letter-spacing: -.005em;
+  text-shadow: 0 0 14px rgba(220, 165, 189, .3);
+}
+
+.tel-row b.bone {
+  color: var(--bone-bright);
+  text-shadow: 0 0 14px rgba(216, 200, 160, .3);
+}
+
+.tel-row .delta {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--success);
+  letter-spacing: .12em;
+  font-style: normal;
+}
+
+.tel-row .delta.r {
+  color: var(--rose-bright);
+}
+
+@media (max-width: 1100px) {
+  .telemetry-sidebar { display: none }
+}

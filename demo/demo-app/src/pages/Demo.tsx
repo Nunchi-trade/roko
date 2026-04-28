@@ -1,68 +1,123 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
-import { SCENARIOS, type Scenario } from '../lib/demo-scenarios';
-import TerminalPane from '../components/Terminal/TerminalPane';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { SCENARIOS } from '../lib/demo-scenarios';
+import { useDemoPlayback } from '../hooks/useDemoPlayback';
+import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
+import Pane from '../components/Pane';
+import Mosaic, { MosaicCell } from '../components/Mosaic';
 import Timeline from '../components/Timeline';
-import StatCard from '../components/StatCard';
+import CommandLog from '../components/CommandLog';
+import GateBar from '../components/GateBar';
+import '@xterm/xterm/css/xterm.css';
+import '../components/Terminal/TerminalPane.css';
 import './Demo.css';
+
+const GATE_NAMES = ['compile', 'test', 'clippy', 'diff', 'coverage'];
 
 export default function Demo() {
   const [activeIdx, setActiveIdx] = useState(0);
-  const [currentStep, setCurrentStep] = useState(-1);
-  const [running, setRunning] = useState(false);
-  const [introCollapsed, setIntroCollapsed] = useState(false);
-  const [stats, setStats] = useState({ model: '—', cost: '$0.00', tokens: '0', time: '0s' });
-  const [speed, setSpeed] = useState(1);
-  const timerRef = useRef(0);
-
+  const [showIntro, setShowIntro] = useState(true);
   const scenario = SCENARIOS[activeIdx];
-  const sessionIds = scenario.labels.map((_, i) => `demo-${scenario.id}-${i}`);
+
+  const playback = useDemoPlayback();
+  const { currentStep, isPlaying, isPaused, speed } = playback;
+
+  // Terminal handles -- up to 2 panes
+  const handle0 = useRef<TerminalHandle | null>(null);
+  const handle1 = useRef<TerminalHandle | null>(null);
+
+  // Wire terminals + steps into playback whenever scenario changes
+  useEffect(() => {
+    const handles = scenario.panes === 2 ? [handle0, handle1] : [handle0];
+    playback.setTerminals(handles);
+    playback.setSteps(scenario.steps);
+  }, [activeIdx, scenario]);
+
+  // Simulated stats
+  const [stats, setStats] = useState({ model: 'claude-sonnet-4', cost: 0.12, tokens: 1840, time: 3 });
+
+  // Command log entries
+  const [logEntries, setLogEntries] = useState<{ ts: string; text: string; type?: 'info' | 'success' }[]>([]);
+
+  // Update stats + log when step changes
+  useEffect(() => {
+    if (currentStep < 0) return;
+    const step = scenario.steps[currentStep];
+    if (!step) return;
+
+    const now = new Date();
+    const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+    setLogEntries((prev) => [
+      ...prev,
+      { ts, text: `$ ${step.command}`, type: 'info' as const },
+      { ts, text: step.description, type: 'success' as const },
+    ]);
+
+    setStats((s) => ({
+      model: 'claude-sonnet-4',
+      cost: +(s.cost + 0.02 + Math.random() * 0.08).toFixed(2),
+      tokens: s.tokens + Math.floor(200 + Math.random() * 800),
+      time: s.time + Math.round((step.wait_after_ms + step.delay_before_ms) / 1000),
+    }));
+  }, [currentStep, scenario.steps]);
+
+  // Gate statuses derived from step progress
+  const gates = useMemo(() => {
+    const total = scenario.steps.length;
+    const progress = currentStep < 0 ? 0 : (currentStep + 1) / Math.max(total, 1);
+    return GATE_NAMES.map((name, i) => {
+      const threshold = (i + 1) / GATE_NAMES.length;
+      const status: 'pass' | 'pending' = progress >= threshold ? 'pass' : 'pending';
+      return { name, status };
+    });
+  }, [currentStep, scenario.steps.length]);
 
   const selectScenario = useCallback((idx: number) => {
+    playback.reset();
     setActiveIdx(idx);
-    setCurrentStep(-1);
-    setRunning(false);
-    setIntroCollapsed(false);
-    setStats({ model: '—', cost: '$0.00', tokens: '0', time: '0s' });
-  }, []);
+    setShowIntro(true);
+    setStats({ model: 'claude-sonnet-4', cost: 0.12, tokens: 1840, time: 3 });
+    setLogEntries([]);
+  }, [playback]);
 
-  const play = useCallback(async () => {
-    if (running || scenario.steps.length === 0) return;
-    setRunning(true);
-    setIntroCollapsed(true);
+  const handlePlay = useCallback(() => {
+    setShowIntro(false);
+    setLogEntries([]);
+    setStats({ model: 'claude-sonnet-4', cost: 0.12, tokens: 1840, time: 3 });
+    playback.play();
+  }, [playback]);
 
-    for (let i = 0; i < scenario.steps.length; i++) {
-      setCurrentStep(i);
-      // Simulate step duration
-      await new Promise((r) => {
-        timerRef.current = window.setTimeout(r, 3000 / speed);
-      });
-      // Update simulated stats
-      setStats((s) => ({
-        model: 'claude-sonnet-4',
-        cost: `$${(parseFloat(s.cost.slice(1)) + 0.02 + Math.random() * 0.08).toFixed(2)}`,
-        tokens: `${parseInt(s.tokens) + Math.floor(200 + Math.random() * 800)}`,
-        time: `${(i + 1) * Math.round(3 / speed)}s`,
-      }));
-    }
+  const handlePauseResume = useCallback(() => {
+    if (isPaused) playback.resume();
+    else playback.pause();
+  }, [isPaused, playback]);
 
-    setRunning(false);
-  }, [running, scenario, speed]);
+  const cycleSpeed = useCallback(() => {
+    playback.setSpeed(speed >= 4 ? 0.5 : speed * 2);
+  }, [speed, playback]);
 
+  // Autoplay support via ?autoplay=1
   useEffect(() => {
-    return () => clearTimeout(timerRef.current);
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('autoplay') === '1') {
+      const t = setTimeout(() => handlePlay(), 1000);
+      return () => clearTimeout(t);
+    }
   }, []);
 
-  const cycleSpeed = () => setSpeed((s) => (s >= 4 ? 0.5 : s * 2));
-
+  // Timeline steps
   const timelineSteps = scenario.steps.map((step, i) => ({
-    label: step.label,
-    detail: step.sublabel,
+    label: step.description,
+    detail: step.command.length > 50 ? step.command.slice(0, 47) + '...' : step.command,
     status: (i < currentStep ? 'done' : i === currentStep ? 'active' : 'pending') as 'done' | 'active' | 'pending',
   }));
 
+  // Session IDs for terminals
+  const sessionIds = scenario.labels.map((_, i) => `demo-${scenario.id}-${i}`);
+
   return (
     <div className="demo-page">
-      {/* Scenario tabs */}
+      {/* ── Top bar: tabs + controls ── */}
       <div className="demo-tabs-bar">
         <div className="demo-tab-list">
           {SCENARIOS.map((s, i) => (
@@ -77,58 +132,113 @@ export default function Demo() {
           ))}
         </div>
         <div className="demo-controls">
-          <button className="demo-speed" onClick={cycleSpeed}>{speed}×</button>
-          <button className="btn-primary" onClick={play} disabled={running || scenario.steps.length === 0}>
-            {running ? '▶ Running...' : '▶ Play'}
+          <button className="demo-speed" onClick={cycleSpeed}>
+            {speed}x
           </button>
+          {isPlaying ? (
+            <button className="demo-ctrl-btn" onClick={handlePauseResume}>
+              {isPaused ? '\u25B6' : '\u275A\u275A'}
+            </button>
+          ) : (
+            <button className="demo-ctrl-btn play" onClick={handlePlay}>
+              {'\u25B6'}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Intro band */}
-      <div className={`demo-intro${introCollapsed ? ' collapsed' : ''}`}>
-        <span className="demo-intro-title">{scenario.title}</span>
-        <span className="demo-intro-sub">{scenario.subtitle}</span>
-      </div>
-
-      {/* Main content */}
+      {/* ── Main content: terminals + sidebar ── */}
       <div className="demo-main">
+        {/* Terminal area (left 60%) */}
         <div className="demo-terminals">
-          <TerminalZone scenario={scenario} sessionIds={sessionIds} />
+          {/* Scanline overlay applied via CSS ::before */}
+
+          {/* Intro overlay */}
+          {showIntro && (
+            <div className="demo-intro-overlay" onClick={handlePlay}>
+              <div className="demo-intro-title">{scenario.title}</div>
+              <div className="demo-intro-sub">{scenario.subtitle}</div>
+              <button className="demo-play-btn" onClick={(e) => { e.stopPropagation(); handlePlay(); }}>
+                {'\u25B6'}
+              </button>
+            </div>
+          )}
+
+          <div className={`demo-terminal-grid demo-cols-${scenario.panes}`}>
+            <TerminalPaneWithHandle
+              key={`${scenario.id}-0`}
+              sessionId={sessionIds[0]}
+              label={scenario.labels[0]}
+              handleRef={handle0}
+            />
+            {scenario.panes === 2 && (
+              <TerminalPaneWithHandle
+                key={`${scenario.id}-1`}
+                sessionId={sessionIds[1]}
+                label={scenario.labels[1]}
+                handleRef={handle1}
+              />
+            )}
+          </div>
         </div>
 
-        {scenario.panel && (
-          <div className="demo-panel">
-            {/* Canvas placeholder */}
-            <div className="demo-canvas">
-              <canvas id="demo-viz" />
-            </div>
+        {/* Sidebar (right 40%) */}
+        <div className="demo-sidebar">
+          <Pane title="TIMELINE" flat>
+            <Timeline steps={timelineSteps} />
+          </Pane>
 
-            {/* Stats */}
-            <div className="demo-stats">
-              <StatCard label="Model" value={stats.model} color="rose" />
-              <StatCard label="Cost" value={stats.cost} color="bone" />
-              <StatCard label="Tokens" value={stats.tokens} color="sage" />
-              <StatCard label="Time" value={stats.time} color="warn" />
-            </div>
-
-            {/* Timeline */}
-            {timelineSteps.length > 0 && <Timeline steps={timelineSteps} />}
+          <div className="demo-stats-mosaic">
+            <Mosaic columns={2}>
+              <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
+              <MosaicCell label="COST" value={`$${stats.cost.toFixed(2)}`} mono color="bone" />
+              <MosaicCell label="TOKENS" value={stats.tokens.toLocaleString()} mono color="dream" />
+              <MosaicCell label="TIME" value={`${stats.time}s`} mono color="warning" />
+            </Mosaic>
           </div>
-        )}
+
+          <Pane title="GATES" flat>
+            <div style={{ padding: '12px 16px' }}>
+              <GateBar gates={gates} />
+            </div>
+          </Pane>
+
+          <Pane title="LOG" flat>
+            <CommandLog entries={logEntries} maxHeight="240px" />
+          </Pane>
+        </div>
       </div>
     </div>
   );
 }
 
-/** Terminal zone renders 1, 2, or 4 panes depending on the scenario. */
-function TerminalZone({ scenario, sessionIds }: { scenario: Scenario; sessionIds: string[] }) {
-  const cols = scenario.panes === 4 ? 2 : scenario.panes === 2 ? 2 : 1;
+/**
+ * TerminalPane wrapper that exposes the TerminalHandle ref for playback.
+ */
+function TerminalPaneWithHandle({
+  sessionId,
+  label,
+  handleRef,
+}: {
+  sessionId: string;
+  label: string;
+  handleRef: React.MutableRefObject<TerminalHandle | null>;
+}) {
+  const { attach, status, handle } = useTerminal(sessionId);
+
+  // Sync the internal handle ref to the parent ref
+  useEffect(() => {
+    handleRef.current = handle.current;
+  });
 
   return (
-    <div className={`demo-terminal-grid demo-cols-${cols}`}>
-      {sessionIds.map((id, i) => (
-        <TerminalPane key={id} sessionId={id} label={scenario.labels[i]} />
-      ))}
+    <div className="demo-term-pane">
+      <div className="demo-term-head">
+        <span className={`demo-term-dot ${status}`} />
+        <span className="demo-term-label">{label}</span>
+        <span className="demo-term-status">{status}</span>
+      </div>
+      <div className="demo-term-body" ref={attach} />
     </div>
   );
 }

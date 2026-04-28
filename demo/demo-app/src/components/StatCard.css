@@ -1,29 +1,51 @@
 .stat-card {
-  background: var(--glass-2-bg);
-  border: 1px solid var(--glass-2-border);
-  border-radius: 8px;
-  padding: 14px 18px;
+  background: var(--glass-bg, rgba(255,255,255,0.04));
+  background-image: linear-gradient(135deg, rgba(184, 122, 148, .04) 0%, transparent 45%, rgba(8, 8, 12, .2) 100%);
+  border: 1px solid var(--glass-border, rgba(255,255,255,0.08));
+  border-radius: 10px;
+  padding: 20px 22px;
+  transition: border-color .3s ease, box-shadow .3s ease;
+}
+
+.stat-card:hover {
+  border-color: rgba(184, 122, 148, .18);
+  box-shadow: 0 0 20px rgba(184, 122, 148, .06);
 }
 .stat-value {
-  font-family: var(--font-mono);
-  font-size: 1.4rem;
+  font-family: var(--mono, 'JetBrains Mono', monospace);
+  font-size: 1.6rem;
   font-weight: 600;
   line-height: 1;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 .stat-label {
   font-size: 0.68rem;
-  color: var(--text-dim);
+  color: var(--text-soft);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
 }
 .stat-sub {
   font-size: 0.62rem;
-  color: var(--text-ghost);
-  margin-top: 2px;
+  color: var(--text-dim);
+  margin-top: 4px;
 }
-.stat-rose .stat-value { color: var(--rose-bright); }
-.stat-bone .stat-value { color: var(--bone); }
-.stat-sage .stat-value { color: var(--sage-bright, var(--sage)); }
-.stat-fail .stat-value { color: var(--fail); }
-.stat-warn .stat-value { color: var(--warn); }
+.stat-rose .stat-value {
+  color: var(--rose-bright);
+  text-shadow: 0 0 16px rgba(216, 154, 178, .45), 0 0 40px rgba(216, 154, 178, .15);
+}
+.stat-bone .stat-value {
+  color: var(--bone);
+  text-shadow: var(--bone-bloom, 0 0 12px rgba(200,184,144,0.4), 0 0 32px rgba(200,184,144,0.15));
+}
+.stat-sage .stat-value {
+  color: var(--success);
+  text-shadow: 0 0 14px rgba(138, 156, 134, .45), 0 0 36px rgba(138, 156, 134, .15);
+}
+.stat-fail .stat-value {
+  color: var(--rose-bright);
+  text-shadow: 0 0 14px rgba(216, 154, 178, .5);
+}
+.stat-warn .stat-value {
+  color: var(--warning);
+  text-shadow: 0 0 14px rgba(216, 168, 120, .4);
+}

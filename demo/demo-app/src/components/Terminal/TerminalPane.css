@@ -1,6 +1,6 @@
 .terminal-pane {
   background: #0e0c10;
-  border: 1px solid var(--glass-2-border);
+  border: 1px solid var(--glass-border);
   border-radius: 4px;
   overflow: hidden;
   display: flex;
@@ -8,8 +8,8 @@
 }
 .pane-header {
   padding: 4px 12px;
-  background: var(--raised);
-  border-bottom: 1px solid var(--glass-2-border);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--glass-border);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -18,8 +18,8 @@
   flex-shrink: 0;
 }
 .pane-label {
-  color: var(--rose);
-  font-weight: 600;
+  color: var(--rose-bright);
+  font-weight: 500;
 }
 .pane-status {
   margin-left: auto;
@@ -30,12 +30,31 @@
   height: 6px;
   border-radius: 50%;
 }
-.pane-dot.connected { background: var(--sage); }
-.pane-dot.disconnected { background: var(--fail); }
-.pane-dot.connecting { background: var(--warn); animation: pulse 1.5s ease-in-out infinite; }
+.pane-dot.connected { background: var(--success); }
+.pane-dot.disconnected { background: var(--rose-dim); }
+.pane-dot.connecting { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
 
 .pane-body {
   flex: 1;
   padding: 4px;
   min-height: 0;
+}
+
+/* Active column glow */
+.terminal-pane:focus-within {
+  border-color: rgba(204,144,168,.2);
+}
+
+/* Blinking cursor for empty state */
+.pane-body:empty::after {
+  content: "\2588";
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--rose-dim);
+  animation: cursorBlink 1.2s step-end infinite;
+  margin-left: 4px;
+}
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }

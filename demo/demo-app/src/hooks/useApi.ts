@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { SERVE_URL } from '../lib/serve-url';
 
 /** Simple fetch wrapper with base URL resolution. */
@@ -19,5 +19,5 @@ export function useApi() {
     return res.json() as Promise<T>;
   }, []);
 
-  return { get, post, baseUrl: SERVE_URL };
+  return useMemo(() => ({ get, post, baseUrl: SERVE_URL }), [get, post]);
 }

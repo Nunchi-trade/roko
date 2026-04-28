@@ -1,44 +1,58 @@
 import { useState, useCallback } from 'react';
-import TerminalGrid from '../components/Terminal/TerminalGrid';
+import TerminalPane from '../components/Terminal/TerminalPane';
 import './Terminal.css';
 
 export default function Terminal() {
-  const [sessions, setSessions] = useState([{ id: `t${Date.now()}`, label: 'shell' }]);
-  const [columns, setColumns] = useState<1 | 2 | 3>(1);
+  const [terminals, setTerminals] = useState<{ id: string; label: string }[]>([
+    { id: `t-${Date.now()}`, label: 'shell' },
+  ]);
+  const [columns, setColumns] = useState<1 | 2 | 3 | 4>(1);
 
   const addTerminal = useCallback(() => {
-    setSessions((prev) => [...prev, { id: `t${Date.now()}`, label: `shell ${prev.length + 1}` }]);
-  }, []);
+    const n = terminals.length + 1;
+    setTerminals((prev) => [...prev, { id: `t-${Date.now()}-${n}`, label: `shell ${n}` }]);
+  }, [terminals.length]);
 
   const clearAll = useCallback(() => {
-    setSessions([]);
+    setTerminals([]);
   }, []);
+
+  const COL_OPTIONS: (1 | 2 | 3 | 4)[] = [1, 2, 3, 4];
 
   return (
     <div className="terminal-page">
       <div className="terminal-toolbar">
-        <span className="terminal-page-title">terminal</span>
-        <span className="terminal-info">multi-pane browser terminal with real PTY sessions</span>
+        <span className="terminal-page-title">Terminal</span>
         <div className="terminal-controls">
-          <button className="btn-primary" onClick={addTerminal}>+ Terminal</button>
-          <button className="btn-secondary" onClick={() => setColumns(1)}>1</button>
-          <button className="btn-secondary" onClick={() => setColumns(2)}>2</button>
-          <button className="btn-secondary" onClick={() => setColumns(3)}>3</button>
-          <button className="btn-danger" onClick={clearAll}>Clear All</button>
+          <button className="term-btn-add" onClick={addTerminal}>+</button>
+          {COL_OPTIONS.map((c) => (
+            <button
+              key={c}
+              className={`term-btn${columns === c ? ' active' : ''}`}
+              onClick={() => setColumns(c)}
+            >
+              {c}
+            </button>
+          ))}
+          <button className="term-btn-clear" onClick={clearAll}>Clear</button>
         </div>
       </div>
+
       <div className="terminal-body">
-        {sessions.length > 0 ? (
-          <TerminalGrid sessions={sessions} columns={columns} />
+        {terminals.length > 0 ? (
+          <div className={`term-grid cols-${columns}`}>
+            {terminals.map((t) => (
+              <div key={t.id} className="term-cell">
+                <TerminalPane sessionId={t.id} label={t.label} />
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="terminal-empty">
-            <p>No terminal sessions</p>
-            <button className="btn-primary" onClick={addTerminal}>+ Add Terminal</button>
+            <span className="terminal-empty-title">No terminals open</span>
+            <span className="terminal-empty-sub">Click + to add one</span>
           </div>
         )}
-      </div>
-      <div className="terminal-status-bar">
-        <span>{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
       </div>
     </div>
   );

@@ -1,0 +1,43 @@
+interface ConnectScreenProps {
+  onRetry?: () => void;
+}
+
+export default function ConnectScreen({ onRetry }: ConnectScreenProps) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      background: 'var(--bg-void, #060608)',
+    }}>
+      <div style={{
+        width: 16, height: 16, borderRadius: '50%',
+        background: 'var(--rose-dim, #6b4a5e)',
+        boxShadow: '0 0 30px rgba(220,165,189,.3)',
+        animation: 'pulse 1.8s ease-in-out infinite',
+      }} />
+      <div style={{
+        marginTop: 20,
+        fontFamily: 'var(--mono)', fontSize: 11,
+        letterSpacing: '.22em', textTransform: 'uppercase',
+        color: 'var(--text-dim)',
+      }}>
+        connecting to roko serve...
+      </div>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          style={{
+            marginTop: 24, padding: '8px 20px',
+            fontFamily: 'var(--mono)', fontSize: 10,
+            letterSpacing: '.2em', textTransform: 'uppercase',
+            color: 'var(--rose-glow)', background: 'transparent',
+            border: '1px solid var(--rose-dim)', cursor: 'pointer',
+          }}
+        >
+          Retry
+        </button>
+      )}
+      <style>{`@keyframes pulse { 0%,100%{transform:scale(1);opacity:.6} 50%{transform:scale(1.4);opacity:1} }`}</style>
+    </div>
+  );
+}

@@ -1,9 +1,6 @@
 .chart-container {
   position: relative;
   width: 100%;
-  background: var(--glass-2-bg);
-  border: 1px solid var(--glass-2-border);
-  border-radius: 8px;
   overflow: hidden;
 }
 .chart-canvas {

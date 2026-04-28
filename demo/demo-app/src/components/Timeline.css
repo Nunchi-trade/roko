@@ -2,46 +2,66 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  padding: 8px 0;
+  padding: 10px 16px;
 }
 .timeline-step {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 6px 0;
+  padding: 7px 0;
   position: relative;
 }
 .timeline-step:not(:last-child)::after {
   content: '';
   position: absolute;
   left: 5px;
-  top: 20px;
-  bottom: -6px;
+  top: 22px;
+  bottom: -7px;
   width: 1px;
-  background: var(--glass-2-border);
+  background: var(--glass-border);
+}
+
+/* Progress line: completed steps get a rose tint on their connector */
+.timeline-done:not(:last-child)::after {
+  background: linear-gradient(to bottom, rgba(138, 90, 112, .35), rgba(255,255,255,.06));
 }
 .timeline-marker {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  border: 2px solid var(--text-ghost);
+  border: 2px solid var(--text-dim);
   flex-shrink: 0;
   margin-top: 2px;
+  transition: all .3s var(--ease);
 }
-.timeline-done .timeline-marker { background: var(--sage); border-color: var(--sage); }
-.timeline-active .timeline-marker { background: var(--rose); border-color: var(--rose); box-shadow: 0 0 6px rgba(170,112,136,0.4); }
-.timeline-pending .timeline-marker { background: transparent; border-color: var(--text-ghost); }
+.timeline-done .timeline-marker { background: var(--success); border-color: var(--success); }
+.timeline-active .timeline-marker {
+  background: var(--rose-bright);
+  border-color: var(--rose-bright);
+  box-shadow: 0 0 10px rgba(216, 154, 178, .6), 0 0 22px rgba(216, 154, 178, .25);
+  animation: active-dot-breathe 2s ease-in-out infinite;
+}
+
+@keyframes active-dot-breathe {
+  0%, 100% { box-shadow: 0 0 10px rgba(216, 154, 178, .6), 0 0 22px rgba(216, 154, 178, .25); }
+  50% { box-shadow: 0 0 16px rgba(216, 154, 178, .85), 0 0 32px rgba(216, 154, 178, .4); }
+}
+.timeline-pending .timeline-marker { background: transparent; border-color: var(--text-dim); }
 
 .timeline-label {
   font-size: 0.78rem;
-  color: var(--text);
+  color: var(--text-primary);
+  font-family: var(--sans);
+  line-height: 1.4;
 }
-.timeline-done .timeline-label { color: var(--text-dim); }
-.timeline-active .timeline-label { color: var(--rose-bright); font-weight: 500; }
-.timeline-pending .timeline-label { color: var(--text-ghost); }
+.timeline-done .timeline-label { color: var(--text-soft); }
+.timeline-active .timeline-label { color: var(--rose-glow); font-weight: 500; }
+.timeline-pending .timeline-label { color: var(--text-dim); }
 
 .timeline-detail {
   font-size: 0.65rem;
-  color: var(--text-ghost);
-  margin-top: 1px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-family: var(--mono);
+  letter-spacing: .02em;
 }

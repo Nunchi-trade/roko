@@ -41,7 +41,7 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
 
     // Title
     if (title) {
-      ctx.fillStyle = '#706070';
+      ctx.fillStyle = '#8a7a88';
       ctx.font = '11px "General Sans", sans-serif';
       ctx.fillText(title, pad.left, 16);
     }
@@ -65,7 +65,7 @@ export default function CostChart({ data, title, color = '#C8B890', height = 200
       ctx.lineTo(pad.left + plotW, y);
       ctx.stroke();
 
-      ctx.fillStyle = '#504050';
+      ctx.fillStyle = '#6a5a68';
       ctx.font = '9px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
       ctx.fillText(`$${((maxVal * i) / 4).toFixed(2)}`, pad.left - 6, y + 3);
