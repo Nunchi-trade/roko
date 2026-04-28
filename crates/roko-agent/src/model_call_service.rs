@@ -67,6 +67,10 @@ pub struct ModelCallService {
     cache: CacheCell,
     /// Service-lifetime cost budget tracker.
     budget: BudgetCell,
+    /// Caps reasoning-token budgets for thinking-capable models.
+    thinking_cap: ThinkingCapCell,
+    /// Detects repeated near-identical agent outputs for a run/role.
+    convergence: ConvergenceDetectionCell,
     /// Run id used for emitted events and feedback when the request has none.
     run_id: String,
 }
@@ -87,6 +91,8 @@ impl ModelCallService {
             mcp_config: None,
             cache: CacheCell::new(128),
             budget: BudgetCell::new(None),
+            thinking_cap: ThinkingCapCell::new(16_384),
+            convergence: ConvergenceDetectionCell::new(5, 0.85, 3),
             run_id: "model-call-service".to_string(),
         }
     }
@@ -161,6 +167,26 @@ impl ModelCallService {
     #[must_use]
     pub fn with_cost_budget(mut self, max_cost_usd: f64) -> Self {
         self.budget = BudgetCell::new(Some(max_cost_usd));
+        self
+    }
+
+    /// Set the default thinking/reasoning token cap for capable models.
+    #[must_use]
+    pub fn with_thinking_budget(mut self, max_thinking_tokens: u32) -> Self {
+        self.thinking_cap = ThinkingCapCell::new(max_thinking_tokens);
+        self
+    }
+
+    /// Configure output convergence detection.
+    #[must_use]
+    pub fn with_convergence_detection(
+        mut self,
+        window_size: usize,
+        similarity_threshold: f64,
+        consecutive_trigger: usize,
+    ) -> Self {
+        self.convergence =
+            ConvergenceDetectionCell::new(window_size, similarity_threshold, consecutive_trigger);
         self
     }
 
@@ -584,6 +610,199 @@ fn micro_usd_to_usd(cost_micro_usd: u64) -> f64 {
     cost_micro_usd as f64 / 1_000_000.0
 }
 
+/// Caps thinking/reasoning tokens for models that support extended thinking.
+struct ThinkingCapCell {
+    /// Default maximum thinking tokens when thinking is enabled.
+    default_thinking_budget: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThinkingCapResult {
+    /// Effective thinking budget (None = thinking not applicable).
+    thinking_budget: Option<u32>,
+    /// Whether the cap was applied (original was higher or unset).
+    was_capped: bool,
+    /// Original value before capping.
+    original: Option<u32>,
+}
+
+impl ThinkingCapCell {
+    fn new(default_thinking_budget: u32) -> Self {
+        Self {
+            default_thinking_budget,
+        }
+    }
+
+    /// Apply thinking cap to a request, returning the effective thinking budget.
+    fn apply(&self, model: &str, max_tokens: Option<u32>) -> ThinkingCapResult {
+        if !supports_thinking(model) {
+            return ThinkingCapResult {
+                thinking_budget: None,
+                was_capped: false,
+                original: max_tokens,
+            };
+        }
+
+        match max_tokens {
+            Some(tokens) if tokens < self.default_thinking_budget => ThinkingCapResult {
+                thinking_budget: Some(tokens),
+                was_capped: false,
+                original: max_tokens,
+            },
+            Some(tokens) if tokens == self.default_thinking_budget => ThinkingCapResult {
+                thinking_budget: Some(tokens),
+                was_capped: false,
+                original: max_tokens,
+            },
+            _ => ThinkingCapResult {
+                thinking_budget: Some(self.default_thinking_budget),
+                was_capped: true,
+                original: max_tokens,
+            },
+        }
+    }
+}
+
+fn supports_thinking(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    lower.contains("opus")
+        || lower.contains("o1")
+        || lower.contains("o3")
+        || lower.contains("o4")
+        || lower.contains("deepseek-r1")
+}
+
+/// Detects when an agent produces near-identical outputs repeatedly.
+struct ConvergenceDetectionCell {
+    /// Maximum number of recent outputs to track per key.
+    window_size: usize,
+    /// Similarity threshold (0.0-1.0). Above this = "identical enough".
+    similarity_threshold: f64,
+    /// Number of consecutive similar outputs before triggering.
+    consecutive_trigger: usize,
+    /// Recent outputs keyed by (run_id, role).
+    history: Mutex<HashMap<String, Vec<String>>>,
+}
+
+impl ConvergenceDetectionCell {
+    fn new(window_size: usize, similarity_threshold: f64, consecutive_trigger: usize) -> Self {
+        Self {
+            window_size,
+            similarity_threshold,
+            consecutive_trigger,
+            history: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Check a new output against the history for this key.
+    fn check(&self, key: &str, new_output: &str) -> std::result::Result<(), GatewayError> {
+        if self.consecutive_trigger <= 1 {
+            return Err(GatewayError::ConvergenceDetected { consecutive: 1 });
+        }
+
+        let previous = {
+            let history = self
+                .history
+                .lock()
+                .expect("convergence history mutex poisoned");
+            history.get(key).cloned().unwrap_or_default()
+        };
+
+        if previous.len() + 1 < self.consecutive_trigger {
+            return Ok(());
+        }
+
+        let start = previous
+            .len()
+            .saturating_add(1)
+            .saturating_sub(self.consecutive_trigger);
+        let mut recent = previous.into_iter().skip(start).collect::<Vec<String>>();
+        recent.push(new_output.to_string());
+
+        let converged = recent
+            .windows(2)
+            .all(|pair| similarity(&pair[0], &pair[1]) >= self.similarity_threshold);
+
+        if converged {
+            Err(GatewayError::ConvergenceDetected {
+                consecutive: self.consecutive_trigger as u32,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record an output in the history for future checks.
+    fn record(&self, key: &str, output: String) {
+        if self.window_size == 0 {
+            return;
+        }
+
+        let mut history = self
+            .history
+            .lock()
+            .expect("convergence history mutex poisoned");
+        let outputs = history.entry(key.to_string()).or_default();
+        outputs.push(output);
+        if outputs.len() > self.window_size {
+            let drain_count = outputs.len() - self.window_size;
+            outputs.drain(0..drain_count);
+        }
+    }
+}
+
+fn set_max_tokens_option(options: &mut AgentOptions, max_tokens: u32) {
+    options
+        .extra_args
+        .retain(|arg| !arg.starts_with("max_tokens="));
+    options.extra_args.push(format!("max_tokens={max_tokens}"));
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a = a.chars().take(500).collect::<Vec<_>>();
+    let b = b.chars().take(500).collect::<Vec<_>>();
+
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+
+    let mut previous = (0..=b.len()).collect::<Vec<_>>();
+    let mut current = vec![0; b.len() + 1];
+
+    for (i, left) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right) in b.iter().enumerate() {
+            let substitution = usize::from(left != right);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[b.len()]
+}
+
+fn similarity(a: &str, b: &str) -> f64 {
+    let a = a.chars().take(500).collect::<String>();
+    let b = b.chars().take(500).collect::<String>();
+
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+
+    let max_len = a.chars().count().max(b.chars().count());
+    if max_len == 0 {
+        return 1.0;
+    }
+
+    let distance = edit_distance(&a, &b);
+    1.0 - (distance as f64 / max_len as f64)
+}
+
 /// Encapsulates a single provider execution attempt with fallback support.
 struct ProviderCallCell {
     config: RokoConfig,
@@ -773,7 +992,11 @@ impl ModelCaller for ModelCallService {
         let system_prompt = req.system.clone().or(message_system);
         let config = self.config_for_model(&model);
 
-        let options = self.build_agent_options(&req, None);
+        let mut options = self.build_agent_options(&req, None);
+        let thinking_cap = self.thinking_cap.apply(&model, req.max_tokens);
+        if let Some(max_tokens) = thinking_cap.thinking_budget {
+            set_max_tokens_option(&mut options, max_tokens);
+        }
         // TODO(converge): Thread per-request generation settings through
         // AgentOptions/provider adapters. The Anthropic and OpenAI-compatible
         // adapters derive max tokens from ModelProfile::max_output and do not
@@ -813,6 +1036,22 @@ impl ModelCaller for ModelCallService {
         };
 
         let usage = token_usage(&output.usage, output.cost_usd);
+        let role = req.role.as_deref().unwrap_or("default");
+        let convergence_key = format!("{}:{role}", self.run_id);
+        if let Err(error) = self.convergence.check(&convergence_key, &output.content) {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            self.emit(RuntimeEvent::AgentFailed {
+                run_id: self.run_id.clone(),
+                agent_id: format!("model-call:{}", output.model_used),
+                error: error.to_string(),
+            });
+            self.record_feedback(&req, &output.model_used, &usage, latency_ms, false)
+                .await?;
+            return Err(RokoError::from(error));
+        }
+        self.convergence
+            .record(&convergence_key, output.content.clone());
+
         self.budget.record_cost(usage.cost_usd);
         self.cache.store(
             cache_key,
@@ -1102,5 +1341,98 @@ mod tests {
 
         let err = budget.check(&None).expect_err("budget should be exceeded");
         assert!(matches!(err, GatewayError::BudgetExceeded { .. }));
+    }
+
+    #[test]
+    fn thinking_cap_ignores_non_thinking_models() {
+        let cap = ThinkingCapCell::new(16_384);
+
+        let result = cap.apply("claude-sonnet-4", None);
+
+        assert_eq!(result.thinking_budget, None);
+        assert!(!result.was_capped);
+    }
+
+    #[test]
+    fn thinking_cap_caps_opus() {
+        let cap = ThinkingCapCell::new(16_384);
+
+        let result = cap.apply("claude-opus-4", None);
+
+        assert_eq!(result.thinking_budget, Some(16_384));
+        assert!(result.was_capped);
+        assert_eq!(result.original, None);
+    }
+
+    #[test]
+    fn thinking_cap_respects_lower_explicit() {
+        let cap = ThinkingCapCell::new(16_384);
+
+        let result = cap.apply("claude-opus-4", Some(4096));
+
+        assert_eq!(result.thinking_budget, Some(4096));
+        assert!(!result.was_capped);
+        assert_eq!(result.original, Some(4096));
+    }
+
+    #[test]
+    fn convergence_allows_different_outputs() {
+        let convergence = ConvergenceDetectionCell::new(5, 0.85, 3);
+
+        for output in ["first output", "second response", "third answer"] {
+            convergence
+                .check("run:role", output)
+                .expect("different output should not converge");
+            convergence.record("run:role", output.to_string());
+        }
+    }
+
+    #[test]
+    fn convergence_detects_identical_outputs() {
+        let convergence = ConvergenceDetectionCell::new(5, 0.85, 3);
+
+        for _ in 0..2 {
+            convergence
+                .check("run:role", "same output")
+                .expect("first two identical outputs should not trigger");
+            convergence.record("run:role", "same output".to_string());
+        }
+
+        let err = convergence
+            .check("run:role", "same output")
+            .expect_err("third identical output should trigger");
+        assert!(matches!(
+            err,
+            GatewayError::ConvergenceDetected { consecutive: 3 }
+        ));
+    }
+
+    #[test]
+    fn convergence_resets_on_different_output() {
+        let convergence = ConvergenceDetectionCell::new(5, 0.85, 3);
+        let outputs = [
+            "repeat output",
+            "repeat output",
+            "a materially different response",
+            "repeat output",
+            "repeat output",
+        ];
+
+        for output in outputs {
+            convergence
+                .check("run:role", output)
+                .expect("different output should reset the convergence sequence");
+            convergence.record("run:role", output.to_string());
+        }
+    }
+
+    #[test]
+    fn edit_distance_basic() {
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn similarity_identical_strings() {
+        assert_eq!(similarity("abc", "abc"), 1.0);
     }
 }
