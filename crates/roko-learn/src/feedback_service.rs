@@ -3,13 +3,15 @@
 //! Records model call feedback, gate results, and workflow outcomes into the
 //! existing learning infrastructure as append-only efficiency JSONL events.
 
+use crate::cascade_router::CascadeRouter;
 use crate::episode_logger::{Episode, EpisodeLogger, Usage};
+use crate::model_router::CONTEXT_DIM;
 use async_trait::async_trait;
 use chrono::Utc;
 use roko_core::foundation::{FeedbackEvent, FeedbackSink};
 use roko_core::{Result, RokoError};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Service that records feedback events for the learning subsystem.
 ///
@@ -25,6 +27,8 @@ pub struct FeedbackService {
     buffer_capacity: usize,
     /// Optional episode logger for workflow outcome records.
     episode_logger: Option<EpisodeLogger>,
+    /// Optional cascade router for eager model-call reward observations.
+    cascade_router: Option<Arc<CascadeRouter>>,
 }
 
 impl FeedbackService {
@@ -36,6 +40,7 @@ impl FeedbackService {
             buffer: Mutex::new(Vec::with_capacity(64)),
             buffer_capacity: 64,
             episode_logger: None,
+            cascade_router: None,
         }
     }
 
@@ -52,6 +57,17 @@ impl FeedbackService {
     #[must_use]
     pub fn with_episode_logger(mut self, logger: EpisodeLogger) -> Self {
         self.episode_logger = Some(logger);
+        self
+    }
+
+    /// Attach a cascade router for bandit reward observations.
+    ///
+    /// On each `ModelCall` event, the service will call `router.observe()`
+    /// with a success/failure reward signal so the bandit can update its
+    /// model selection policy.
+    #[must_use]
+    pub fn with_cascade_router(mut self, router: Arc<CascadeRouter>) -> Self {
+        self.cascade_router = Some(router);
         self
     }
 
@@ -210,11 +226,40 @@ impl FeedbackService {
             })
             .collect())
     }
+
+    fn observe_model_call(&self, model: &str, success: bool, role: &str, latency_ms: u64) {
+        let Some(ref router) = self.cascade_router else {
+            return;
+        };
+
+        let context_vec = model_call_context_vec(role, latency_ms);
+        let model_idx = match router.model_index_for_slug(model) {
+            Some(idx) => idx,
+            None => {
+                tracing::debug!("model {model} not in cascade router slug list, skipping observe");
+                return;
+            }
+        };
+
+        let reward = if success { 1.0 } else { 0.0 };
+        router.observe(context_vec, model_idx, reward);
+    }
 }
 
 #[async_trait]
 impl FeedbackSink for FeedbackService {
     async fn record(&self, event: FeedbackEvent) -> Result<()> {
+        if let FeedbackEvent::ModelCall {
+            ref model,
+            ref role,
+            latency_ms,
+            success,
+            ..
+        } = event
+        {
+            self.observe_model_call(model, success, role, latency_ms);
+        }
+
         let should_flush = {
             let mut buf = self
                 .buffer
@@ -230,6 +275,27 @@ impl FeedbackSink for FeedbackService {
 
         Ok(())
     }
+}
+
+fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+    let role_feature = simple_role_hash(role);
+    let latency_feature = (latency_ms as f64 / 60_000.0).min(1.0);
+    let mut context_vec = vec![0.0; CONTEXT_DIM];
+
+    // Preserve the requested minimal model-call signals while using the
+    // router's fixed raw context width so LinUCB accepts the observation.
+    context_vec[0] = role_feature;
+    context_vec[1] = latency_feature;
+    context_vec[16] = 1.0;
+
+    context_vec
+}
+
+fn simple_role_hash(role: &str) -> f64 {
+    let hash: u32 = role.bytes().fold(0u32, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(b))
+    });
+    f64::from(hash % 1000) / 1000.0
 }
 
 impl Drop for FeedbackService {
@@ -365,5 +431,51 @@ mod tests {
         assert!(efficiency_path.exists());
         let content = std::fs::read_to_string(efficiency_path).unwrap();
         assert!(content.contains("model_call"));
+    }
+
+    #[tokio::test]
+    async fn observes_model_call_to_cascade_router() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = Arc::new(CascadeRouter::new(vec!["sonnet".into(), "opus".into()]));
+        let svc =
+            FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+
+        svc.record(FeedbackEvent::ModelCall {
+            run_id: "r1".into(),
+            model: "sonnet".into(),
+            role: "implementer".into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cost_usd: 0.01,
+            latency_ms: 2000,
+            success: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(router.total_observations(), 1);
+    }
+
+    #[tokio::test]
+    async fn skips_observation_for_unknown_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = Arc::new(CascadeRouter::new(vec!["sonnet".into()]));
+        let svc =
+            FeedbackService::new(dir.path().to_path_buf()).with_cascade_router(Arc::clone(&router));
+
+        svc.record(FeedbackEvent::ModelCall {
+            run_id: "r1".into(),
+            model: "unknown-model".into(),
+            role: "implementer".into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cost_usd: 0.01,
+            latency_ms: 2000,
+            success: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(router.total_observations(), 0);
     }
 }
