@@ -18,6 +18,8 @@ use roko_core::{
 use std::sync::Arc;
 use std::time::Instant;
 
+type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
+
 /// Service that calls LLM models via the existing provider infrastructure.
 ///
 /// This is the canonical way to call models in the workflow engine. It:
@@ -36,6 +38,8 @@ pub struct ModelCallService {
     event_consumers: Vec<Arc<dyn EventConsumer>>,
     /// Optional sink for model-call feedback.
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    /// Optional model router used when requests omit an explicit model.
+    model_router: Option<Arc<ModelRouter>>,
     /// Service-scoped environment entries passed into provider construction.
     env: Vec<(String, String)>,
     /// Optional base URL for OpenAI-compatible providers.
@@ -54,6 +58,7 @@ impl ModelCallService {
             cost_table: CostTable::default(),
             event_consumers: Vec::new(),
             feedback_sink: None,
+            model_router: None,
             env: Vec::new(),
             openai_base_url: None,
             run_id: "model-call-service".to_string(),
@@ -88,6 +93,16 @@ impl ModelCallService {
         self
     }
 
+    /// Attach a CascadeRouter-compatible callback for model selection.
+    #[must_use]
+    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
+    where
+        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
+    {
+        self.model_router = Some(Arc::new(router_fn));
+        self
+    }
+
     /// Provide an Anthropic API key for service-created agents.
     #[must_use]
     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
@@ -112,8 +127,9 @@ impl ModelCallService {
     /// Resolve which model to use for a request.
     fn resolve_model(&self, req: &ModelCallRequest) -> String {
         if req.model.is_empty() {
-            // TODO(arch): Route through CascadeRouter once the service can receive
-            // a router without making roko-agent depend on roko-learn.
+            if let Some(router) = &self.model_router {
+                return router(req.role.as_deref());
+            }
             self.default_model.clone()
         } else {
             req.model.clone()
@@ -397,6 +413,24 @@ mod tests {
             role: None,
         };
         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn cascade_router_selects_model_when_request_is_empty() {
+        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
+            assert_eq!(role, Some("reviewer"));
+            "router-selected-model".to_string()
+        });
+        let req = ModelCallRequest {
+            model: String::new(),
+            system: None,
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            role: Some("reviewer".to_string()),
+        };
+
+        assert_eq!(svc.resolve_model(&req), "router-selected-model");
     }
 
     #[tokio::test]
