@@ -21,6 +21,13 @@ use roko_agent::{AgentResult, OllamaLlmBackend};
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
+use roko_core::foundation::{
+    ChatMessage as CoreChatMessage, FeedbackEvent as CoreFeedbackEvent,
+    FeedbackSink as CoreFeedbackSink, GateConfig as CoreGateConfig, GateRunner as CoreGateRunner,
+    MessageRole as CoreMessageRole, ModelCallRequest as CoreModelCallRequest,
+    ModelCaller as CoreModelCaller, PromptAssembler as CorePromptAssembler,
+    PromptSpec as CorePromptSpec,
+};
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
@@ -32,9 +39,21 @@ use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
+use roko_runtime::effect_driver::{
+    BoxFuture as RuntimeBoxFuture, EffectServices, FeedbackEvent as RuntimeFeedbackEvent,
+    FeedbackSink as RuntimeFeedbackSink, GateConfig as RuntimeGateConfig,
+    GateReport as RuntimeGateReport, GateRunner as RuntimeGateRunner,
+    GateVerdict as RuntimeGateVerdict, MessageRole as RuntimeMessageRole,
+    ModelCallRequest as RuntimeModelCallRequest, ModelCallResponse as RuntimeModelCallResponse,
+    ModelCaller as RuntimeModelCaller, PromptAssembler as RuntimePromptAssembler,
+    PromptSpec as RuntimePromptSpec, Result as RuntimeResult, TokenUsage as RuntimeTokenUsage,
+};
+use roko_runtime::pipeline_state::WorkflowConfig;
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig};
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Summary of a single `run` invocation.
 #[derive(Debug, Clone)]
@@ -63,6 +82,251 @@ impl RunReport {
     }
 }
 
+struct RuntimeModelCallerAdapter {
+    inner: Arc<dyn CoreModelCaller>,
+}
+
+impl RuntimeModelCallerAdapter {
+    fn new(inner: Arc<dyn CoreModelCaller>) -> Self {
+        Self { inner }
+    }
+}
+
+impl RuntimeModelCaller for RuntimeModelCallerAdapter {
+    fn call(
+        &self,
+        req: RuntimeModelCallRequest,
+    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeModelCallResponse>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let response = inner.call(core_model_call_request(req)).await?;
+            Ok(RuntimeModelCallResponse {
+                content: response.content,
+                model: response.model,
+                usage: RuntimeTokenUsage {
+                    input_tokens: response.usage.input_tokens,
+                    output_tokens: response.usage.output_tokens,
+                    total_tokens: response.usage.total_tokens,
+                    cost_usd: response.usage.cost_usd,
+                },
+                stop_reason: response.stop_reason,
+            })
+        })
+    }
+}
+
+struct RuntimePromptAssemblerAdapter {
+    inner: Arc<dyn CorePromptAssembler>,
+}
+
+impl RuntimePromptAssemblerAdapter {
+    fn new(inner: Arc<dyn CorePromptAssembler>) -> Self {
+        Self { inner }
+    }
+}
+
+impl RuntimePromptAssembler for RuntimePromptAssemblerAdapter {
+    fn assemble(&self, spec: RuntimePromptSpec) -> RuntimeBoxFuture<'_, RuntimeResult<String>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            Ok(inner
+                .assemble(CorePromptSpec {
+                    role: spec.role,
+                    task: spec.task,
+                    workdir: spec.workdir,
+                    gate_feedback: spec.gate_feedback,
+                    anti_patterns: spec.anti_patterns,
+                })
+                .await?)
+        })
+    }
+}
+
+struct RuntimeFeedbackSinkAdapter {
+    inner: Arc<dyn CoreFeedbackSink>,
+}
+
+impl RuntimeFeedbackSinkAdapter {
+    fn new(inner: Arc<dyn CoreFeedbackSink>) -> Self {
+        Self { inner }
+    }
+}
+
+impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
+    fn record(&self, event: RuntimeFeedbackEvent) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            inner.record(core_feedback_event(event)).await?;
+            Ok(())
+        })
+    }
+}
+
+struct RuntimeGateRunnerAdapter {
+    inner: Arc<dyn CoreGateRunner>,
+}
+
+impl RuntimeGateRunnerAdapter {
+    fn new(inner: Arc<dyn CoreGateRunner>) -> Self {
+        Self { inner }
+    }
+}
+
+impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
+    fn run_gates(
+        &self,
+        config: RuntimeGateConfig,
+    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeGateReport>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let report = inner
+                .run_gates(CoreGateConfig {
+                    workdir: config.workdir,
+                    enabled_gates: config.enabled_gates,
+                    max_rung: config.max_rung,
+                })
+                .await?;
+            Ok(RuntimeGateReport {
+                verdicts: report
+                    .verdicts
+                    .into_iter()
+                    .map(|verdict| RuntimeGateVerdict {
+                        gate_name: verdict.gate_name,
+                        passed: verdict.passed,
+                        output: verdict.output,
+                        duration_ms: verdict.duration_ms,
+                    })
+                    .collect(),
+            })
+        })
+    }
+}
+
+fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest {
+    CoreModelCallRequest {
+        model: req.model,
+        system: req.system,
+        messages: req
+            .messages
+            .into_iter()
+            .map(|message| CoreChatMessage {
+                role: match message.role {
+                    RuntimeMessageRole::System => CoreMessageRole::System,
+                    RuntimeMessageRole::User => CoreMessageRole::User,
+                    RuntimeMessageRole::Assistant => CoreMessageRole::Assistant,
+                },
+                content: message.content,
+            })
+            .collect(),
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        role: req.role,
+    }
+}
+
+fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
+    match event {
+        RuntimeFeedbackEvent::ModelCall {
+            run_id,
+            model,
+            role,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            latency_ms,
+            success,
+        } => CoreFeedbackEvent::ModelCall {
+            run_id,
+            model,
+            role,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            latency_ms,
+            success,
+        },
+        RuntimeFeedbackEvent::GateResult {
+            run_id,
+            gate_name,
+            passed,
+            duration_ms,
+        } => CoreFeedbackEvent::GateResult {
+            run_id,
+            gate_name,
+            passed,
+            duration_ms,
+        },
+    }
+}
+
+/// Execute a prompt via the new WorkflowEngine (event-driven architecture).
+///
+/// This is an alternative to the existing orchestrate.rs path. It uses:
+/// - PipelineStateV2 for state machine decisions
+/// - EffectDriver for side-effect execution
+/// - RuntimeEvent bus for observability
+///
+/// Enable via config or `--engine v2` flag (to be wired).
+pub async fn run_with_workflow_engine(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+) -> anyhow::Result<()> {
+    // Import the concrete service implementations.
+    use roko_agent::model_call_service::ModelCallService;
+    use roko_compose::prompt_assembly_service::PromptAssemblyService;
+    use roko_gate::gate_service::GateService;
+    use roko_learn::feedback_service::FeedbackService;
+
+    // Build services.
+    let feedback_sink: Arc<dyn CoreFeedbackSink> =
+        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
+    let model_caller: Arc<dyn CoreModelCaller> = Arc::new(
+        ModelCallService::new("claude-sonnet-4-20250514".to_string())
+            .with_feedback_sink(Arc::clone(&feedback_sink)),
+    );
+    let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
+    let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+
+    let services = EffectServices {
+        model_caller: Arc::new(RuntimeModelCallerAdapter::new(model_caller)),
+        prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+        feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+        gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
+    };
+
+    // Select workflow config.
+    let workflow = match workflow_template {
+        "express" => WorkflowConfig::express(),
+        "full" => WorkflowConfig::full(),
+        _ => WorkflowConfig::standard(),
+    };
+
+    let config = WorkflowRunConfig {
+        prompt: prompt.to_string(),
+        workdir: workdir.to_path_buf(),
+        workflow,
+        enabled_gates,
+        commit_prefix: Some("feat".to_string()),
+    };
+
+    // Run the workflow.
+    let engine = WorkflowEngine::new(services);
+    let result = engine
+        .run(config)
+        .await
+        .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
+
+    println!(
+        "Workflow complete: {} ({:?})",
+        result.run_id, result.outcome
+    );
+    println!("Iterations: {}", result.iterations);
+
+    Ok(())
+}
+
 /// Run the universal loop once for `prompt_text` under `workdir`.
 ///
 /// - Opens (or creates) `workdir/.roko/engrams.jsonl`.
@@ -81,6 +345,8 @@ pub async fn run_once(
     prompt_text: &str,
     external_hub: Option<&StateHub>,
 ) -> Result<RunReport> {
+    // Future `--engine v2` dispatch should call `run_with_workflow_engine`
+    // before entering this existing orchestration path.
     let substrate_dir = workdir.join(".roko");
     let substrate = FileSubstrate::open(substrate_dir)
         .await
