@@ -125,6 +125,47 @@ pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
     ));
 }
 
+/// Print actual cost with delta against the prediction.
+///
+/// Prints:
+/// ```text
+/// ◇  Cost actual
+/// │  <tokens> tokens
+/// │  $<cost> USD
+/// │  Δ <sign>$<delta> (<direction> estimate)
+/// ```
+///
+/// The delta line is green if under budget, yellow if over, and omitted when
+/// the delta is zero (within $0.0001 tolerance).
+///
+/// `tokens` is the measured token count (input + output).
+/// `cost` is the actual cost in USD.
+/// `predicted` is the pre-execution cost estimate from `print_cost_prediction`.
+pub fn print_cost_actual(tokens: u64, cost: f64, predicted: f64) {
+    step("Cost actual", "");
+    bar(&format!("{} tokens", cyan(&fmt_tokens(tokens))));
+    bar(&format!("{} USD", cyan(&format!("${:.4}", cost))));
+
+    let delta = cost - predicted;
+    if delta.abs() < 0.0001 {
+        // No meaningful delta — skip the line.
+        return;
+    }
+
+    let (sign, direction, color_fn): (&str, &str, fn(&str) -> String) = if delta < 0.0 {
+        ("\u{2212}", "under estimate", green as fn(&str) -> String)
+    } else {
+        ("+", "over estimate", yellow as fn(&str) -> String)
+    };
+
+    bar(&color_fn(&format!(
+        "\u{0394} {}${:.4} ({})",
+        sign,
+        delta.abs(),
+        direction,
+    )));
+}
+
 /// Print the knowledge loading status block.
 ///
 /// Prints:
@@ -236,6 +277,26 @@ mod tests {
     fn cost_prediction_no_panic() {
         print_cost_prediction(8_400, 0.042);
         print_cost_prediction(0, 0.0);
+    }
+
+    #[test]
+    fn cost_actual_under_budget_no_panic() {
+        print_cost_actual(6_200, 0.031, 0.04);
+    }
+
+    #[test]
+    fn cost_actual_over_budget_no_panic() {
+        print_cost_actual(10_400, 0.052, 0.04);
+    }
+
+    #[test]
+    fn cost_actual_exact_match_no_panic() {
+        print_cost_actual(8_400, 0.04, 0.04);
+    }
+
+    #[test]
+    fn cost_actual_zero_tokens_no_panic() {
+        print_cost_actual(0, 0.0, 0.0);
     }
 
     #[test]
