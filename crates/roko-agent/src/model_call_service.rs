@@ -383,6 +383,129 @@ fn token_usage(usage: &Usage, cost_usd: f64) -> TokenUsage {
     }
 }
 
+/// Encapsulates a single provider execution attempt with fallback support.
+struct ProviderCallCell {
+    config: RokoConfig,
+    cost_table: CostTable,
+}
+
+impl ProviderCallCell {
+    fn new(config: RokoConfig, cost_table: CostTable) -> Self {
+        Self { config, cost_table }
+    }
+
+    /// Execute a model call through the provider layer.
+    ///
+    /// 1. Calls `create_agent_for_model()` to get a `Box<dyn Agent>`.
+    /// 2. Runs `agent.run()` with the prompt.
+    /// 3. Classifies the result as success or failure.
+    /// 4. On retryable failure, tries the next model in `fallback_models` (if any).
+    /// 5. Returns the response or the final error.
+    async fn execute(
+        &self,
+        model: &str,
+        system_prompt: Option<&str>,
+        user_content: &str,
+        options: AgentOptions,
+        fallback_models: &[String],
+    ) -> std::result::Result<CellOutput, CellError> {
+        let total_start = Instant::now();
+        let prompt = Engram::builder(Kind::Prompt)
+            .body(Body::text(user_content))
+            .build();
+        let mut last_error = None;
+
+        for (attempt_index, attempt_model) in std::iter::once(model)
+            .chain(fallback_models.iter().map(String::as_str))
+            .enumerate()
+        {
+            let mut attempt_options = options.clone();
+            attempt_options.system_prompt = system_prompt.map(ToOwned::to_owned);
+
+            let agent = create_agent_for_model(&self.config, attempt_model, attempt_options)
+                .map_err(|err| CellError::Construction {
+                    message: err.to_string(),
+                })?;
+
+            let ctx = Context::now();
+            let result = agent.run(&prompt, &ctx).await;
+            let calculated_cost = self.cost_table.calculate(attempt_model, &result.usage);
+            let cost_usd = if calculated_cost > 0.0 {
+                calculated_cost
+            } else {
+                f64::from(result.usage.cost_usd)
+            };
+
+            if result.success {
+                return Ok(CellOutput {
+                    content: output_text(&result.output),
+                    model_used: attempt_model.to_string(),
+                    usage: result.usage,
+                    cost_usd,
+                    latency_ms: total_start.elapsed().as_millis() as u64,
+                    fallback_used: attempt_index > 0,
+                });
+            }
+
+            let message = output_text(&result.output);
+            let error = if is_retryable_provider_message(&message) {
+                CellError::Retryable { message }
+            } else {
+                CellError::Terminal { message }
+            };
+
+            if !matches!(error, CellError::Retryable { .. }) {
+                return Err(error);
+            }
+
+            last_error = Some(error);
+        }
+
+        Err(last_error.unwrap_or_else(|| CellError::Retryable {
+            message: "provider call failed with no fallback model available".to_string(),
+        }))
+    }
+}
+
+struct CellOutput {
+    content: String,
+    model_used: String,
+    usage: Usage,
+    cost_usd: f64,
+    latency_ms: u64,
+    fallback_used: bool,
+}
+
+/// Classified cell-level error.
+#[derive(Debug)]
+enum CellError {
+    /// Provider returned an error but another provider may work.
+    Retryable { message: String },
+    /// Permanent failure, do not retry.
+    Terminal { message: String },
+    /// Agent construction failed (missing credentials, bad config).
+    Construction { message: String },
+}
+
+impl CellError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Retryable { message }
+            | Self::Terminal { message }
+            | Self::Construction { message } => message,
+        }
+    }
+}
+
+fn is_retryable_provider_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("rate limit")
+        || normalized.contains("timeout")
+        || normalized.contains("timed out")
+        || normalized.contains("503")
+        || normalized.contains("temporarily unavailable")
+}
+
 #[async_trait]
 impl ModelCaller for ModelCallService {
     async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse> {
@@ -393,7 +516,7 @@ impl ModelCaller for ModelCallService {
         let system_prompt = req.system.clone().or(message_system);
         let config = self.config_for_model(&model);
 
-        let options = self.build_agent_options(&req, system_prompt);
+        let options = self.build_agent_options(&req, None);
         // TODO(converge): Thread per-request generation settings through
         // AgentOptions/provider adapters. The Anthropic and OpenAI-compatible
         // adapters derive max tokens from ModelProfile::max_output and do not
@@ -401,55 +524,52 @@ impl ModelCaller for ModelCallService {
         // TODO(converge): Thread req-level MCP config here in S05 once
         // ModelCallRequest carries it.
 
-        let agent =
-            create_agent_for_model(&config, &model, options).map_err(|err| RokoError::Agent {
-                backend: model.clone(),
-                message: err.to_string(),
-            })?;
-
-        let prompt = Engram::builder(Kind::Prompt)
-            .body(Body::text(user_content))
-            .build();
-        let ctx = Context::now().with_session(self.run_id.clone());
-        let result = agent.run(&prompt, &ctx).await;
-        let latency_ms = start.elapsed().as_millis() as u64;
-        let calculated_cost = self.cost_table.calculate(&model, &result.usage);
-        let cost_usd = if calculated_cost > 0.0 {
-            calculated_cost
-        } else {
-            f64::from(result.usage.cost_usd)
+        let fallback_models: Vec<String> = Vec::new();
+        let cell = ProviderCallCell::new(config, self.cost_table.clone());
+        let output = match cell
+            .execute(
+                &model,
+                system_prompt.as_deref(),
+                &user_content,
+                options,
+                &fallback_models,
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                let usage = token_usage(&Usage::zero(), 0.0);
+                let message = error.message().to_string();
+                self.emit(RuntimeEvent::AgentFailed {
+                    run_id: self.run_id.clone(),
+                    agent_id,
+                    error: message.clone(),
+                });
+                self.record_feedback(&req, &model, &usage, latency_ms, false)
+                    .await?;
+                return Err(RokoError::Agent {
+                    backend: model,
+                    message,
+                });
+            }
         };
-        let usage = token_usage(&result.usage, cost_usd);
 
-        if !result.success {
-            let error = output_text(&result.output);
-            self.emit(RuntimeEvent::AgentFailed {
-                run_id: self.run_id.clone(),
-                agent_id,
-                error: error.clone(),
-            });
-            self.record_feedback(&req, &model, &usage, latency_ms, false)
-                .await?;
-            return Err(RokoError::Agent {
-                backend: agent.backend_id().to_string(),
-                message: error,
-            });
-        }
+        let usage = token_usage(&output.usage, output.cost_usd);
 
-        let content = output_text(&result.output);
         self.emit(RuntimeEvent::AgentCompleted {
             run_id: self.run_id.clone(),
-            agent_id,
-            output: content.clone(),
+            agent_id: format!("model-call:{}", output.model_used),
+            output: output.content.clone(),
             tokens_used: usage.total_tokens,
             cost_usd: usage.cost_usd,
         });
-        self.record_feedback(&req, &model, &usage, latency_ms, true)
+        self.record_feedback(&req, &output.model_used, &usage, output.latency_ms, true)
             .await?;
 
         Ok(ModelCallResponse {
-            content,
-            model,
+            content: output.content,
+            model: output.model_used,
             usage,
             stop_reason: Some("end_turn".to_string()),
             request_id: None,
