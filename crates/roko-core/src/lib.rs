@@ -46,6 +46,18 @@
     clippy::pedantic
 )]
 
+/// Generate a short share token: `<unix_millis_hex>-<rand_hex>`.
+pub fn generate_share_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand_part: u16 = (millis as u16) ^ (std::process::id() as u16);
+    format!("{millis:x}-{rand_part:04x}")
+}
+
 pub mod affect;
 pub mod agent;
 /// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).

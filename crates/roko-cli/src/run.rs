@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Summary of a single `run` invocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RunReport {
     /// Content hash of the episode signal emitted at the end.
     pub episode_id: String,
@@ -85,6 +85,42 @@ impl RunReport {
     pub fn overall_success(&self) -> bool {
         self.agent_success && self.gate_verdicts.iter().all(|(_, ok)| *ok)
     }
+}
+
+/// Write a RunReport to `.roko/shared/{token}.json` and return the token.
+pub fn write_shared_run(workdir: &std::path::Path, report: &RunReport) -> anyhow::Result<String> {
+    let token = roko_core::generate_share_token();
+    let dir = workdir.join(".roko").join("shared");
+    std::fs::create_dir_all(&dir)?;
+    let transcript = serde_json::json!({
+        "id": &token,
+        "agent": "unknown",
+        "role": "unknown",
+        "prompt": &report.prompt_id,
+        "success": report.overall_success(),
+        "gates": &report.gate_verdicts,
+        "output": &report.output_text,
+        "cost_usd": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "model": null,
+        "duration_s": null,
+        "episode_id": &report.episode_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    std::fs::write(
+        dir.join(format!("{token}.json")),
+        serde_json::to_string_pretty(&transcript)?,
+    )?;
+
+    output_format::divider();
+    output_format::step("Shared", "");
+    output_format::bar(&output_format::cyan(&format!(
+        "http://localhost:6677/runs/{token}"
+    )));
+    output_format::note("run with --serve to make the URL accessible");
+
+    Ok(token)
 }
 
 /// Summary of running a plan through the WorkflowEngine.
@@ -2106,6 +2142,24 @@ mod tests {
             ..r
         };
         assert!(!r.overall_success());
+    }
+
+    #[test]
+    fn write_shared_run_creates_file() {
+        let tmp = std::env::temp_dir().join("roko-test-share");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let report = RunReport {
+            episode_id: "ep-1".into(),
+            prompt_id: "hi".into(),
+            agent_output_id: "out-1".into(),
+            agent_success: true,
+            gate_verdicts: vec![],
+            total_signals: 3,
+            output_text: Some("done".into()),
+        };
+        let token = write_shared_run(&tmp, &report).unwrap();
+        assert!(tmp.join(".roko/shared").join(format!("{token}.json")).exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
