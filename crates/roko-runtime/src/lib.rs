@@ -57,6 +57,7 @@ pub mod process;
 pub mod resource;
 pub mod task_scheduler;
 pub mod theta_consumer;
+pub mod workflow_engine;
 
 pub use effect_driver::{
     ChatMessage, EffectDriver, EffectServices, FeedbackEvent, FeedbackSink, GateConfig, GateReport,
@@ -74,3 +75,6 @@ pub use pipeline_state::{
     Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
 };
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
+pub use workflow_engine::{
+    WorkflowEngine, WorkflowEvent, WorkflowEventConsumer, WorkflowRunConfig, WorkflowResult,
+};
