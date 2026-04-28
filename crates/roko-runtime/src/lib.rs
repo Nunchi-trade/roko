@@ -50,9 +50,11 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod heartbeat_attention;
 pub mod heartbeat_probes;
+pub mod jsonl_logger;
 pub mod lifecycle;
 pub mod metrics;
 pub mod pipeline_state;
+pub mod projection;
 pub mod process;
 pub mod resource;
 pub mod task_scheduler;
@@ -64,6 +66,7 @@ pub use effect_driver::{
     GateRunner, GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller,
     PromptAssembler, PromptSpec, RuntimeEvent, TokenUsage,
 };
+pub use jsonl_logger::{EventConsumer, JsonlLogger};
 pub use lifecycle::{
     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
     GitOpsRetryPolicy, HealthProbeConfig, HookSpec, LifecycleHooks, LifecycleTransition,
@@ -74,6 +77,7 @@ pub use lifecycle::{
 pub use pipeline_state::{
     Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
 };
+pub use projection::{RunSummary, RuntimeProjection};
 pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
 pub use workflow_engine::{
     WorkflowEngine, WorkflowEvent, WorkflowEventConsumer, WorkflowRunConfig, WorkflowResult,
