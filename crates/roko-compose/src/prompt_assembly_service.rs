@@ -11,8 +11,10 @@ use std::path::Path;
 use crate::conventions::detect_conventions;
 use crate::role_prompts::role_identity_for;
 use crate::system_prompt_builder::SystemPromptBuilder;
+use crate::token_counter::TokenCounter;
 
 const SOURCE_SAMPLE_LIMIT: usize = 12;
+const WORKSPACE_MAP_LINE_LIMIT: usize = 200;
 
 /// Service that assembles system prompts via the 9-layer `SystemPromptBuilder`.
 ///
@@ -24,6 +26,12 @@ const SOURCE_SAMPLE_LIMIT: usize = 12;
 pub struct PromptAssemblyService {
     /// Default conventions text used when workdir detection is unavailable.
     default_conventions: Option<String>,
+    /// Static domain knowledge injected into layer 3.
+    domain_context: Option<String>,
+    /// Tool usage guidance injected into layer 5.
+    tool_instructions: Option<String>,
+    /// Optional token cap passed through to the system prompt builder.
+    token_budget: Option<usize>,
 }
 
 impl PromptAssemblyService {
@@ -32,6 +40,9 @@ impl PromptAssemblyService {
     pub const fn new() -> Self {
         Self {
             default_conventions: None,
+            domain_context: None,
+            tool_instructions: None,
+            token_budget: None,
         }
     }
 
@@ -39,6 +50,27 @@ impl PromptAssemblyService {
     #[must_use]
     pub fn with_conventions(mut self, conventions: String) -> Self {
         self.default_conventions = Some(conventions);
+        self
+    }
+
+    /// Add static domain context for layer 3.
+    #[must_use]
+    pub fn with_domain_context(mut self, domain: String) -> Self {
+        self.domain_context = Some(domain);
+        self
+    }
+
+    /// Add tool usage instructions for layer 5.
+    #[must_use]
+    pub fn with_tool_instructions(mut self, tools: String) -> Self {
+        self.tool_instructions = Some(tools);
+        self
+    }
+
+    /// Set a token budget for assembled prompts.
+    #[must_use]
+    pub const fn with_token_budget(mut self, budget: usize) -> Self {
+        self.token_budget = Some(budget);
         self
     }
 }
@@ -56,14 +88,28 @@ impl PromptAssembler for PromptAssemblyService {
         let identity = role_identity_for(role);
 
         let mut builder = SystemPromptBuilder::new(identity);
+        builder = builder.with_cache_markers();
+        // SystemPromptBuilder's current API is no-arg; this is equivalent to with_cache_markers(true).
 
         if let Some(conventions) = conventions_for_spec(&spec, self.default_conventions.as_deref())
         {
             builder = builder.with_conventions(conventions);
         }
 
+        if let Some(domain) = &self.domain_context {
+            builder = builder.with_domain(domain.clone());
+        }
+
+        if let Some(workspace_map) = workspace_map_for_spec(&spec) {
+            builder = builder.with_context(workspace_map);
+        }
+
         if let Some(task) = spec.task {
             builder = builder.with_task(task);
+        }
+
+        if let Some(tools) = &self.tool_instructions {
+            builder = builder.with_tools(tools.clone());
         }
 
         for feedback in spec.gate_feedback {
@@ -72,6 +118,14 @@ impl PromptAssembler for PromptAssemblyService {
 
         if !spec.anti_patterns.is_empty() {
             builder = builder.with_anti_patterns(spec.anti_patterns);
+        }
+
+        if let Some(budget) = self.token_budget {
+            builder = builder.with_token_budget(budget);
+            let counter = TokenCounter::Heuristic {
+                chars_per_token: 4.0,
+            };
+            return Ok(builder.build_with_counter(&counter));
         }
 
         Ok(builder.build())
@@ -98,6 +152,27 @@ fn conventions_for_spec(spec: &PromptSpec, default_conventions: Option<&str>) ->
         .or_else(|| default_conventions.map(ToOwned::to_owned))
 }
 
+fn workspace_map_for_spec(spec: &PromptSpec) -> Option<String> {
+    let workdir = spec.workdir.as_deref()?;
+    let (_, file_listing) = collect_source_context(workdir);
+    workspace_map_from_file_listing(&file_listing)
+}
+
+fn workspace_map_from_file_listing(file_listing: &[String]) -> Option<String> {
+    if file_listing.is_empty() {
+        return None;
+    }
+
+    let lines = file_listing
+        .iter()
+        .take(WORKSPACE_MAP_LINE_LIMIT.saturating_sub(1))
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(format!("## Workspace Map\n{lines}"))
+}
+
 fn detect_workdir_conventions(workdir: &Path) -> Option<String> {
     let cargo_toml = read_to_string_if_exists(&workdir.join("Cargo.toml")).unwrap_or_default();
     let (source_samples, file_listing) = collect_source_context(workdir);
@@ -106,7 +181,10 @@ fn detect_workdir_conventions(workdir: &Path) -> Option<String> {
         return None;
     }
 
-    let source_refs = source_samples.iter().map(String::as_str).collect::<Vec<_>>();
+    let source_refs = source_samples
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let file_refs = file_listing.iter().map(String::as_str).collect::<Vec<_>>();
     let conventions = detect_conventions(&cargo_toml, &source_refs, &file_refs);
     let fragment = conventions.to_prompt_fragment();
@@ -225,9 +303,18 @@ mod tests {
 
     #[test]
     fn resolves_role_labels_and_serde_names() {
-        assert_eq!(resolve_role(Some("quick-reviewer")), AgentRole::QuickReviewer);
-        assert_eq!(resolve_role(Some("quick_reviewer")), AgentRole::QuickReviewer);
-        assert_eq!(resolve_role(Some("dep-validator")), AgentRole::DependencyValidator);
+        assert_eq!(
+            resolve_role(Some("quick-reviewer")),
+            AgentRole::QuickReviewer
+        );
+        assert_eq!(
+            resolve_role(Some("quick_reviewer")),
+            AgentRole::QuickReviewer
+        );
+        assert_eq!(
+            resolve_role(Some("dep-validator")),
+            AgentRole::DependencyValidator
+        );
         assert_eq!(resolve_role(Some("unknown")), AgentRole::Implementer);
     }
 
@@ -238,5 +325,50 @@ mod tests {
             conventions_for_spec(&spec, Some("Use workspace conventions")),
             Some("Use workspace conventions".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn assembly_includes_domain_context() {
+        let svc = PromptAssemblyService::new()
+            .with_domain_context("DeFi context: Uniswap v4 hooks".into());
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Implement hook routing".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("DeFi context: Uniswap v4 hooks"));
+    }
+
+    #[tokio::test]
+    async fn assembly_includes_tool_instructions() {
+        let svc = PromptAssemblyService::new()
+            .with_tool_instructions("Use cargo check for Rust verification".into());
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Verify the crate".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("## Tool Instructions"));
+        assert!(prompt.contains("Use cargo check for Rust verification"));
+    }
+
+    #[test]
+    fn workspace_map_is_capped_to_two_hundred_lines() {
+        let listing = (0..250)
+            .map(|index| format!("src/file_{index}.rs"))
+            .collect::<Vec<_>>();
+        let map = workspace_map_from_file_listing(&listing).unwrap();
+
+        assert_eq!(map.lines().count(), WORKSPACE_MAP_LINE_LIMIT);
+        assert!(map.contains("src/file_198.rs"));
+        assert!(!map.contains("src/file_199.rs"));
     }
 }
