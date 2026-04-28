@@ -97,7 +97,7 @@ pub struct EffectServices {
     /// Gate execution service.
     pub gate_runner: Arc<dyn GateRunner>,
     /// Optional affect policy for behavioral modulation.
-    pub affect_policy: Option<Arc<std::sync::Mutex<dyn AffectPolicy>>>,
+    pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
 }
 
 /// Drives workflow execution by translating state-machine actions into effects.
@@ -131,10 +131,9 @@ impl EffectDriver {
 
         let mut modulation = DispatchModulation::default();
         if let Some(ref affect) = self.services.affect_policy {
-            if let Ok(policy) = affect.lock() {
-                let _ctx = policy.pre_dispatch(&agent_id, role);
-                policy.modulate_dispatch(role, &mut modulation);
-            }
+            let policy = affect.lock().await;
+            let _ctx = policy.pre_dispatch(&agent_id, role);
+            policy.modulate_dispatch(role, &mut modulation);
         }
 
         let system_prompt = match self
@@ -193,14 +192,13 @@ impl EffectDriver {
         match result {
             Ok(response) => {
                 if let Some(ref affect) = self.services.affect_policy {
-                    if let Ok(mut policy) = affect.lock() {
-                        policy.on_task_outcome(
-                            &agent_id,
-                            true,
-                            response.usage.total_tokens,
-                            response.usage.cost_usd,
-                        );
-                    }
+                    let mut policy = affect.lock().await;
+                    policy.on_task_outcome(
+                        &agent_id,
+                        true,
+                        response.usage.total_tokens,
+                        response.usage.cost_usd,
+                    );
                 }
 
                 let _record_result = self
@@ -235,9 +233,8 @@ impl EffectDriver {
             Err(err) => {
                 let error = err.to_string();
                 if let Some(ref affect) = self.services.affect_policy {
-                    if let Ok(mut policy) = affect.lock() {
-                        policy.on_task_outcome(&agent_id, false, 0, 0.0);
-                    }
+                    let mut policy = affect.lock().await;
+                    policy.on_task_outcome(&agent_id, false, 0, 0.0);
                 }
 
                 let _record_result = self
@@ -285,10 +282,9 @@ impl EffectDriver {
                 }
 
                 if let Some(ref affect) = self.services.affect_policy {
-                    if let Ok(mut policy) = affect.lock() {
-                        for verdict in &report.verdicts {
-                            policy.on_gate_result(&verdict.gate_name, verdict.passed, 0, 0.0);
-                        }
+                    let mut policy = affect.lock().await;
+                    for verdict in &report.verdicts {
+                        policy.on_gate_result(&verdict.gate_name, verdict.passed, 0, 0.0);
                     }
                 }
 

@@ -29,6 +29,13 @@ pub const DEFAULT_SERVE_PORT: u16 = 6677;
 /// Canonical default base URL for CLI and TUI calls into `roko-serve`.
 pub const DEFAULT_SERVE_URL: &str = "http://localhost:6677";
 
+// TODO(converge): remove once roko-core re-exports state_hub from its crate root.
+// state_hub.rs lives in roko-core but depends on roko_runtime (which depends on roko-core),
+// so roko-core can't declare `pub mod state_hub`. We include it here via #[path] since
+// roko-cli depends on both crates.
+#[path = "../../roko-core/src/state_hub.rs"]
+pub mod state_hub;
+
 pub mod agent_config;
 pub mod agent_episode;
 pub mod agent_exec;

@@ -32,21 +32,24 @@ use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
 use roko_core::tool::ToolRegistry;
 use roko_core::{
-    AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, StateHub, Store, Verdict,
-    Verify,
+    AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, Store, Verdict, Verify,
 };
+use crate::state_hub::StateHub;
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_runtime::effect_driver::{
-    BoxFuture as RuntimeBoxFuture, EffectServices, FeedbackEvent as RuntimeFeedbackEvent,
-    FeedbackSink as RuntimeFeedbackSink, GateConfig as RuntimeGateConfig,
-    GateReport as RuntimeGateReport, GateRunner as RuntimeGateRunner,
-    GateVerdict as RuntimeGateVerdict, MessageRole as RuntimeMessageRole,
-    ModelCallRequest as RuntimeModelCallRequest, ModelCallResponse as RuntimeModelCallResponse,
-    ModelCaller as RuntimeModelCaller, PromptAssembler as RuntimePromptAssembler,
-    PromptSpec as RuntimePromptSpec, Result as RuntimeResult, TokenUsage as RuntimeTokenUsage,
+    BoxFuture as RuntimeBoxFuture, EffectServices, Result as RuntimeResult,
+};
+use roko_runtime::{
+    FeedbackEvent as RuntimeFeedbackEvent, FeedbackSink as RuntimeFeedbackSink,
+    GateConfig as RuntimeGateConfig, GateReport as RuntimeGateReport,
+    GateRunner as RuntimeGateRunner, GateVerdict as RuntimeGateVerdict,
+    MessageRole as RuntimeMessageRole, ModelCallRequest as RuntimeModelCallRequest,
+    ModelCallResponse as RuntimeModelCallResponse, ModelCaller as RuntimeModelCaller,
+    PromptAssembler as RuntimePromptAssembler, PromptSpec as RuntimePromptSpec,
+    TokenUsage as RuntimeTokenUsage,
 };
 use roko_runtime::pipeline_state::WorkflowConfig;
 use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig};
@@ -92,25 +95,24 @@ impl RuntimeModelCallerAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeModelCaller for RuntimeModelCallerAdapter {
-    fn call(
+    async fn call(
         &self,
         req: RuntimeModelCallRequest,
-    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeModelCallResponse>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let response = inner.call(core_model_call_request(req)).await?;
-            Ok(RuntimeModelCallResponse {
-                content: response.content,
-                model: response.model,
-                usage: RuntimeTokenUsage {
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    total_tokens: response.usage.total_tokens,
-                    cost_usd: response.usage.cost_usd,
-                },
-                stop_reason: response.stop_reason,
-            })
+    ) -> roko_core::Result<RuntimeModelCallResponse> {
+        let response = self.inner.call(core_model_call_request(req)).await?;
+        Ok(RuntimeModelCallResponse {
+            content: response.content,
+            model: response.model,
+            usage: RuntimeTokenUsage {
+                input_tokens: response.usage.input_tokens,
+                output_tokens: response.usage.output_tokens,
+                total_tokens: response.usage.total_tokens,
+                cost_usd: response.usage.cost_usd,
+            },
+            stop_reason: response.stop_reason,
+            request_id: response.request_id,
         })
     }
 }
@@ -125,20 +127,19 @@ impl RuntimePromptAssemblerAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimePromptAssembler for RuntimePromptAssemblerAdapter {
-    fn assemble(&self, spec: RuntimePromptSpec) -> RuntimeBoxFuture<'_, RuntimeResult<String>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            Ok(inner
-                .assemble(CorePromptSpec {
-                    role: spec.role,
-                    task: spec.task,
-                    workdir: spec.workdir,
-                    gate_feedback: spec.gate_feedback,
-                    anti_patterns: spec.anti_patterns,
-                })
-                .await?)
-        })
+    async fn assemble(&self, spec: RuntimePromptSpec) -> roko_core::Result<String> {
+        Ok(self
+            .inner
+            .assemble(CorePromptSpec {
+                role: spec.role,
+                task: spec.task,
+                workdir: spec.workdir,
+                gate_feedback: spec.gate_feedback,
+                anti_patterns: spec.anti_patterns,
+            })
+            .await?)
     }
 }
 
@@ -152,13 +153,11 @@ impl RuntimeFeedbackSinkAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
-    fn record(&self, event: RuntimeFeedbackEvent) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            inner.record(core_feedback_event(event)).await?;
-            Ok(())
-        })
+    async fn record(&self, event: RuntimeFeedbackEvent) -> roko_core::Result<()> {
+        self.inner.record(core_feedback_event(event)).await?;
+        Ok(())
     }
 }
 
@@ -172,32 +171,31 @@ impl RuntimeGateRunnerAdapter {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
-    fn run_gates(
+    async fn run_gates(
         &self,
         config: RuntimeGateConfig,
-    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeGateReport>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let report = inner
-                .run_gates(CoreGateConfig {
-                    workdir: config.workdir,
-                    enabled_gates: config.enabled_gates,
-                    max_rung: config.max_rung,
-                })
-                .await?;
-            Ok(RuntimeGateReport {
-                verdicts: report
-                    .verdicts
-                    .into_iter()
-                    .map(|verdict| RuntimeGateVerdict {
-                        gate_name: verdict.gate_name,
-                        passed: verdict.passed,
-                        output: verdict.output,
-                        duration_ms: verdict.duration_ms,
-                    })
-                    .collect(),
+    ) -> roko_core::Result<RuntimeGateReport> {
+        let report = self
+            .inner
+            .run_gates(CoreGateConfig {
+                workdir: config.workdir,
+                enabled_gates: config.enabled_gates,
+                max_rung: config.max_rung,
             })
+            .await?;
+        Ok(RuntimeGateReport {
+            verdicts: report
+                .verdicts
+                .into_iter()
+                .map(|verdict| RuntimeGateVerdict {
+                    gate_name: verdict.gate_name,
+                    passed: verdict.passed,
+                    output: verdict.output,
+                    duration_ms: verdict.duration_ms,
+                })
+                .collect(),
         })
     }
 }
@@ -221,6 +219,9 @@ fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         role: req.role,
+        caller: req.caller,
+        budget: req.budget,
+        cache_policy: req.cache_policy,
     }
 }
 
@@ -254,6 +255,19 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
             run_id,
             gate_name,
             passed,
+            duration_ms,
+        },
+        RuntimeFeedbackEvent::WorkflowComplete {
+            run_id,
+            outcome,
+            total_cost_usd,
+            total_tokens,
+            duration_ms,
+        } => CoreFeedbackEvent::WorkflowComplete {
+            run_id,
+            outcome,
+            total_cost_usd,
+            total_tokens,
             duration_ms,
         },
     }
@@ -294,6 +308,7 @@ pub async fn run_with_workflow_engine(
         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
         gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
+        affect_policy: None,
     };
 
     // Select workflow config.
@@ -1313,7 +1328,7 @@ async fn append_episode_log(
     };
     let distillation_workdir = workdir.to_path_buf();
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
     });
     let mut completed = CompletedRunInput::from_episode(episode);
     completed.provider = Some(infer_provider(config));

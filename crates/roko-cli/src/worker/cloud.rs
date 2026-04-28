@@ -458,7 +458,7 @@ pub async fn run_code_implementer_cloud(
             plan_dir.clone(),
             roko_config,
         );
-        let state_hub = roko_core::state_hub::StateHub::default_capacity();
+        let state_hub = crate::state_hub::StateHub::default_capacity();
         let report = crate::runner::run(
             plans,
             &run_config,

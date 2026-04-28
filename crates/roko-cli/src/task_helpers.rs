@@ -660,7 +660,7 @@ pub(crate) fn save_task_output(
     workdir: &Path,
     task_id: &str,
     output: &str,
-    hub: Option<&roko_core::StateHubSender>,
+    hub: Option<&crate::state_hub::StateHubSender>,
 ) {
     let output_dir = workdir.join(".roko").join("task-outputs");
     let _ = std::fs::create_dir_all(&output_dir);

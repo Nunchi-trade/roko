@@ -732,7 +732,7 @@ async fn run_generated_plans(workdir: &Path, plans_root: &Path) -> Result<()> {
         plans_root.to_path_buf(),
         roko_config,
     );
-    let state_hub = roko_core::state_hub::StateHub::default_capacity();
+    let state_hub = crate::state_hub::StateHub::default_capacity();
     let report = crate::runner::run(
         plans,
         &run_config,

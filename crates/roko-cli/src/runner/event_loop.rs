@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use roko_core::state_hub::StateHub;
+use crate::state_hub::StateHub;
 use roko_core::{AgentRole, PhaseKind, PlanPhase, TaskCategory, TaskComplexityBand};
 use roko_learn::contextual_bandit::{
     ActionSafetyBounds, BanditContextFeatures, BanditDecisionKind,

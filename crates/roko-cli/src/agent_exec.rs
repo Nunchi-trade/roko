@@ -209,7 +209,7 @@ pub async fn persist_capture_episode(
         .map_err(|e| anyhow::anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);

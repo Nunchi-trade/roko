@@ -4,7 +4,7 @@
 //! `DashboardEvent` variants for each significant runner event.
 
 use roko_core::dashboard_snapshot::DashboardEvent;
-use roko_core::state_hub::StateHubSender;
+use crate::state_hub::StateHubSender;
 
 use super::types::RunnerEvent;
 

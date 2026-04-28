@@ -2446,7 +2446,7 @@ pub struct PlanRunner {
     /// Optional event bus sender for HTTP API event streaming.
     server_event_bus: Option<roko_runtime::event_bus::BusSender<crate::serve::events::ServerEvent>>,
     /// Optional state hub sender for unified dashboard snapshot updates.
-    state_hub_sender: Option<roko_core::StateHubSender>,
+    state_hub_sender: Option<crate::state_hub::StateHubSender>,
     /// Optional approval IPC sender for connected TUI sessions.
     approval_tx: Option<mpsc::Sender<ApprovalRequest>>,
     /// Optional cloud execution state for code-implementer runs.
@@ -4687,7 +4687,7 @@ impl PlanRunner {
     }
 
     /// Attach a state hub sender for unified dashboard snapshot updates.
-    pub fn set_state_hub(&mut self, sender: roko_core::StateHubSender) {
+    pub fn set_state_hub(&mut self, sender: crate::state_hub::StateHubSender) {
         self.state_hub_sender = Some(sender);
     }
 

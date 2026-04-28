@@ -159,7 +159,7 @@ fn run_plan_on_local_runtime(
         let roko_config = load_effective_roko_config(&workdir, &repo_registry)?;
         let run_config = build_runner_config(&workdir, &execution_root, &config, roko_config);
         let events_offset = runner_events_offset(&workdir);
-        let state_hub = roko_core::shared_state_hub();
+        let state_hub = crate::state_hub::shared_state_hub();
         let cancel = tokio_util::sync::CancellationToken::new();
 
         let report = crate::runner::run(plans, &run_config, &state_hub, cancel).await?;

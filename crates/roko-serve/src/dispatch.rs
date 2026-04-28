@@ -2197,7 +2197,7 @@ async fn append_dispatch_episode(
     let distill_workdir = repo_ctx
         .map(|ctx| ctx.repo_workdir.clone())
         .unwrap_or_else(|| state.workdir.clone());
-    spawn_episode_distillation(distill_workdir, episode.clone());
+    spawn_episode_distillation(distill_workdir, episode.clone(), None);
 
     if let Err(err) = publish_dispatch_learning_feedback(
         state,

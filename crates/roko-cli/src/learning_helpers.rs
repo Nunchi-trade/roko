@@ -340,7 +340,7 @@ pub(crate) fn apply_concluded_experiment_overrides(learning: &LearningRuntime, w
 pub(crate) fn install_episode_distillation_hook(learning: &mut LearningRuntime, workdir: &Path) {
     let distillation_workdir = workdir.to_path_buf();
     learning.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
     });
 }
 

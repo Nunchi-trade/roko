@@ -226,9 +226,12 @@ pub(crate) async fn cmd_run(
         None
     };
 
-    // When --serve is active, share the server's StateHub so DashboardEvents
-    // from run_once() flow to the HTTP server's SSE/WebSocket/snapshot endpoints.
-    let external_hub = server_guard.as_ref().map(|(state, _)| &*state.state_hub);
+    // TODO(converge): When --serve is active we should share the server's StateHub
+    // so DashboardEvents flow to the HTTP server's SSE/WebSocket/snapshot endpoints.
+    // Currently roko_serve::StateHub and roko_cli::state_hub::StateHub are distinct
+    // types (same source included via #[path] in both crates). Bridge them once
+    // roko-core re-exports StateHub from its crate root.
+    let external_hub: Option<&roko_cli::state_hub::StateHub> = None;
 
     // Use inline rendering when stdout is a TTY and we're not in --json or --quiet mode.
     if !cli.json && !cli.quiet && roko_cli::inline::should_use_inline() {
@@ -1437,7 +1440,7 @@ pub(crate) async fn persist_capture_episode(
         .map_err(|e| anyhow!("open learning runtime: {e}"))?;
     let distillation_workdir = workdir.to_path_buf();
     runtime.set_episode_completion_hook(move |episode| {
-        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode);
+        roko_neuro::spawn_episode_distillation(distillation_workdir.clone(), episode, None);
     });
 
     let mut completed = CompletedRunInput::from_episode(episode);

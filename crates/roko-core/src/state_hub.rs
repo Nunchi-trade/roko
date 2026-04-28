@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use roko_runtime::event_bus::{self, EventBus};
 use tokio::sync::watch;
 
-use crate::dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
+use roko_core::dashboard_snapshot::{DashboardEvent, DashboardSnapshot};
 
 /// Append-only JSONL writer for persisting events to disk.
 struct EventLogWriter {

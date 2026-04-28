@@ -432,9 +432,8 @@ impl WorkflowEngine {
 
     async fn persist_affect_policy(&self) {
         if let Some(ref affect) = self.services.affect_policy {
-            if let Ok(policy) = affect.lock() {
-                let _ = policy.persist().await;
-            }
+            let policy = affect.lock().await;
+            let _ = policy.persist().await;
         }
     }
 }

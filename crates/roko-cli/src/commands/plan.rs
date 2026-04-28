@@ -147,7 +147,7 @@ pub(crate) async fn cmd_plan(cli: &Cli, cmd: PlanCmd) -> Result<i32> {
             prepare_runtime_hooks(&wd, cli.quiet);
             let config = load_layered(&wd)?.config;
             let task_timeout_secs = config.executor.task_timeout_secs;
-            let state_hub = roko_core::shared_state_hub();
+            let state_hub = roko_cli::state_hub::shared_state_hub();
 
             // Runner v2 auto-resumes from .roko/state/executor.json if it exists.
             // Explicit --resume-plan paths are honored by copying to the standard location.

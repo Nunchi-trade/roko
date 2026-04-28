@@ -83,6 +83,7 @@ pub async fn run_with_workflow_engine(
         prompt_assembler: Arc::new(AcpPromptAssembler),
         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
         gate_runner,
+        affect_policy: None,
     };
 
     let workflow = match template {

@@ -109,7 +109,7 @@ pub struct App {
     /// Pending response channel for the active approval modal.
     pending_approval_response: Option<oneshot::Sender<bool>>,
     /// Owning handle for the in-process or connected state hub.
-    _state_hub: Option<roko_core::SharedStateHub>,
+    _state_hub: Option<crate::state_hub::SharedStateHub>,
     /// Live dashboard snapshot receiver from `StateHub` when connected.
     pub snapshot_rx: Option<tokio::sync::watch::Receiver<roko_core::DashboardSnapshot>>,
     /// Last error entry surfaced from the live snapshot stream.
@@ -416,7 +416,7 @@ impl App {
     /// Build a new app from a workspace root.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
-        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let state_hub = crate::state_hub::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
@@ -432,7 +432,7 @@ impl App {
     /// Build a new app from a workspace root with an initial page selection.
     #[must_use]
     pub fn new_with_page(root: impl AsRef<Path>, initial_page: Option<PageId>) -> Self {
-        let state_hub = roko_core::SharedStateHub::new_in_process();
+        let state_hub = crate::state_hub::SharedStateHub::new_in_process();
         let _ = state_hub.bootstrap_from_workdir(root.as_ref());
         // Replay events.jsonl to pick up events from roko run / roko serve.
         let events_path = root.as_ref().join(".roko").join("events.jsonl");
@@ -448,7 +448,7 @@ impl App {
     fn new_with_page_inner(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: Option<roko_core::SharedStateHub>,
+        state_hub: Option<crate::state_hub::SharedStateHub>,
     ) -> Self {
         let workdir = root.as_ref().to_path_buf();
         let terminal_size = size().unwrap_or((80, 24));
@@ -504,7 +504,7 @@ impl App {
 
     /// Build a new app connected to a shared `StateHub`.
     #[must_use]
-    pub fn new_connected(root: impl AsRef<Path>, state_hub: &roko_core::SharedStateHub) -> Self {
+    pub fn new_connected(root: impl AsRef<Path>, state_hub: &crate::state_hub::SharedStateHub) -> Self {
         Self::new_connected_with_page(root, None, state_hub)
     }
 
@@ -513,7 +513,7 @@ impl App {
     pub fn new_connected_with_page(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: &roko_core::SharedStateHub,
+        state_hub: &crate::state_hub::SharedStateHub,
     ) -> Self {
         Self::new_connected_with_state_hub(root, initial_page, state_hub.clone())
     }
@@ -521,7 +521,7 @@ impl App {
     fn new_connected_with_state_hub(
         root: impl AsRef<Path>,
         initial_page: Option<PageId>,
-        state_hub: roko_core::SharedStateHub,
+        state_hub: crate::state_hub::SharedStateHub,
     ) -> Self {
         let mut app = Self::new_with_page_inner(root, initial_page, Some(state_hub.clone()));
         let snapshot_rx = state_hub.snapshot();

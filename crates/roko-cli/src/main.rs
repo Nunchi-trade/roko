@@ -2060,14 +2060,15 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             if tui {
                 let (state, server_handle) =
                     roko_serve::start_server_background(wd.clone(), runtime, bind, port).await?;
-                let hub = state.state_hub.clone();
+                // TODO(converge): pass server's SharedStateHub once roko-core
+                // re-exports StateHub to unify the duplicated #[path] types.
                 let tui_result = commands::dashboard::cmd_dashboard(
                     cli,
                     Some(wd),
                     None,
                     false,
                     false,
-                    Some(hub),
+                    None,
                 )
                 .await;
                 state.cancel.cancel();

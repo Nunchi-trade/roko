@@ -9,7 +9,7 @@ pub(crate) async fn cmd_dashboard(
     page: Option<String>,
     list_pages: bool,
     text: bool,
-    state_hub: Option<roko_core::SharedStateHub>,
+    state_hub: Option<roko_cli::state_hub::SharedStateHub>,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
