@@ -2239,6 +2239,53 @@ mod tests {
         assert_eq!(dashboard_agent_model(&cfg), "gpt-5.4");
     }
 
+    #[test]
+    fn engine_flag_express_selects_express_config() {
+        let workflow = match "express" {
+            "express" => WorkflowConfig::express(),
+            "full" => WorkflowConfig::full(),
+            _ => WorkflowConfig::standard(),
+        };
+
+        assert!(!workflow.has_strategy);
+        assert!(!workflow.has_review);
+        assert_eq!(workflow.max_iterations, 1);
+    }
+
+    #[test]
+    fn engine_flag_full_selects_full_config() {
+        let workflow = match "full" {
+            "express" => WorkflowConfig::express(),
+            "full" => WorkflowConfig::full(),
+            _ => WorkflowConfig::standard(),
+        };
+
+        assert!(workflow.has_strategy);
+        assert!(workflow.has_review);
+        assert_eq!(workflow.max_iterations, 3);
+    }
+
+    #[test]
+    fn engine_flag_legacy_and_unknown_select_standard_config() {
+        for workflow_template in ["legacy", "v2", "standard", "unknown"] {
+            let workflow = match workflow_template {
+                "express" => WorkflowConfig::express(),
+                "full" => WorkflowConfig::full(),
+                _ => WorkflowConfig::standard(),
+            };
+
+            assert!(
+                !workflow.has_strategy,
+                "{workflow_template} should not enable strategy"
+            );
+            assert!(
+                workflow.has_review,
+                "{workflow_template} should enable review"
+            );
+            assert_eq!(workflow.max_iterations, 2);
+        }
+    }
+
     #[tokio::test]
     async fn dispatch_agent_uses_exec_agent_for_plain_commands_without_routing() {
         if std::env::var("ANTHROPIC_API_KEY").is_err() {
