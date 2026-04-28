@@ -5,21 +5,23 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use roko_agent::ModelCallService;
+use roko_agent::{GatewayEventWriter, ModelCallService};
 use roko_compose::prompt_assembly_service::PromptAssemblyService;
 use roko_core::agent::resolve_model;
 use roko_core::config::schema::{RokoConfig, ToolsConfig};
 use roko_core::foundation::{
     AffectPolicy, FeedbackEvent, FeedbackSink, GateRunner, ModelCaller, PromptAssembler,
 };
-use roko_core::{Result, RokoError};
+use roko_core::{AgentRole, Result, RokoError};
 use roko_daimon::policy::DaimonPolicy;
 use roko_gate::gate_service::GateService;
+use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::feedback_service::FeedbackService;
+use roko_learn::model_router::RoutingContext;
 use roko_learn::playbook::PlaybookStore;
 use roko_learn::section_effect::SectionEffectivenessRegistry;
 use roko_neuro::knowledge_store::KnowledgeStore;
-use roko_runtime::effect_driver::EffectServices;
+use roko_runtime::{JsonlLogger, effect_driver::EffectServices};
 
 /// Input settings for constructing shared workflow services.
 #[derive(Clone)]
@@ -117,25 +119,54 @@ impl ServiceFactory {
         workspace_config.agent.default_model = model.clone();
         let prompt_token_budget = workspace_config.budget.prompt_token_budget;
         let tool_instructions = tool_instructions_for_config(&workspace_config.tools);
+        let cascade_model_slugs = model_slugs_for_config(&workspace_config, &model);
+        let cascade_router = Arc::new(CascadeRouter::load_or_new(
+            &config.roko_dir.join("learn").join("cascade-router.json"),
+            cascade_model_slugs,
+        ));
+        let knowledge_store = Arc::new(KnowledgeStore::for_roko_dir(&config.roko_dir));
 
         let feedback_sink: Arc<dyn FeedbackSink> = if config.feedback_enabled {
-            Arc::new(FeedbackService::from_roko_dir_with_episodes(
-                &config.roko_dir,
-            ))
+            Arc::new(
+                FeedbackService::from_roko_dir_with_episodes(&config.roko_dir)
+                    .with_cascade_router(Arc::clone(&cascade_router)),
+            )
         } else {
             Arc::new(MemoryFeedbackSink::default())
         };
 
+        let gateway_knowledge_store = Arc::clone(&knowledge_store);
+        let gateway_knowledge_query = Arc::new(move |topic: &str, limit: usize| {
+            let entries = gateway_knowledge_store
+                .query(topic, limit)
+                .map_err(|err| RokoError::invalid(format!("query knowledge store: {err}")))?;
+            entries
+                .into_iter()
+                .map(|entry| {
+                    serde_json::to_value(entry)
+                        .map_err(|err| RokoError::invalid(format!("serialize knowledge: {err}")))
+                })
+                .collect()
+        });
+        let model_router = Arc::clone(&cascade_router);
         let mut model_call_service = ModelCallService::new(model.clone())
             .with_config(workspace_config)
             .with_feedback_sink(Arc::clone(&feedback_sink))
+            .with_gateway_event_writer(Arc::new(GatewayEventWriter::for_workdir(&config.workdir)))
+            .with_event_consumer(Arc::new(JsonlLogger::from_roko_dir(&config.roko_dir)))
+            .with_knowledge_store(gateway_knowledge_query)
+            .with_cascade_router(Arc::clone(&cascade_router))
+            .with_model_router(move |role| {
+                let mut ctx = RoutingContext::default();
+                ctx.role = agent_role_from_label(role.unwrap_or("implementer"));
+                model_router.route(&ctx).primary.slug
+            })
             .with_run_id(config.run_id.unwrap_or_else(default_run_id));
         if let Some(mcp_config) = config.mcp_config {
             model_call_service = model_call_service.with_mcp_config(mcp_config);
         }
         let model_call_service = Arc::new(model_call_service);
 
-        let knowledge_store = Arc::new(KnowledgeStore::for_roko_dir(&config.roko_dir));
         let playbook_store = Arc::new(PlaybookStore::new(
             config.roko_dir.join("learn").join("playbooks"),
         ));
@@ -205,6 +236,52 @@ fn tool_instructions_for_config(tools: &ToolsConfig) -> Option<String> {
     }
 
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn model_slugs_for_config(config: &RokoConfig, default_model: &str) -> Vec<String> {
+    let mut slugs = Vec::new();
+    push_model_slug(config, &mut slugs, default_model);
+
+    if let Some(fallback) = config.agent.fallback_model.as_deref() {
+        push_model_slug(config, &mut slugs, fallback);
+    }
+
+    let mut tier_models = config.agent.tier_models.values().collect::<Vec<_>>();
+    tier_models.sort();
+    for tier_model in tier_models {
+        push_model_slug(config, &mut slugs, tier_model);
+    }
+
+    let mut configured_models = config
+        .effective_models()
+        .into_values()
+        .map(|profile| profile.slug)
+        .collect::<Vec<_>>();
+    configured_models.sort();
+    for slug in configured_models {
+        push_model_slug(config, &mut slugs, &slug);
+    }
+
+    slugs
+}
+
+fn push_model_slug(config: &RokoConfig, slugs: &mut Vec<String>, model_key: &str) {
+    let slug = resolve_model(config, model_key).slug;
+    if !slug.trim().is_empty() && !slugs.contains(&slug) {
+        slugs.push(slug);
+    }
+}
+
+fn agent_role_from_label(label: &str) -> AgentRole {
+    let normalized = label.trim().to_ascii_lowercase();
+    if normalized == AgentRole::Conductor.label() {
+        return AgentRole::Conductor;
+    }
+    AgentRole::ALL_AGENTS
+        .iter()
+        .copied()
+        .find(|role| role.label() == normalized)
+        .unwrap_or(AgentRole::Implementer)
 }
 
 #[derive(Default)]
