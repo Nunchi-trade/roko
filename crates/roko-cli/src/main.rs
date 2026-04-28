@@ -362,6 +362,8 @@ Examples:
         #[arg(long)]
         serve_url: Option<String>,
     },
+    /// Check workspace layer dependency rules.
+    LayerCheck,
 
     // ── Planning & PRDs ─────────────────────────────────────────────
     /// Manage plans (list, show, create, validate, run, generate).
@@ -2000,6 +2002,7 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
         Command::Doctor { workdir, serve_url } => {
             commands::util::cmd_doctor(cli, workdir, serve_url).await
         }
+        Command::LayerCheck => roko_cli::layer_check::run_layer_check(),
         Command::Plan { cmd } => {
             let result = commands::plan::cmd_plan(cli, cmd).await;
             let _ = roko_cli::index::rebuild_all(&std::env::current_dir().unwrap_or_default());

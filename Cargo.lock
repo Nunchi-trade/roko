@@ -5952,6 +5952,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "cargo_metadata",
  "chrono",
  "clap",
  "crossterm",
