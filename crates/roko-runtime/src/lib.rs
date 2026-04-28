@@ -43,6 +43,7 @@
 pub mod cancel;
 pub mod delta_consumer;
 pub mod demurrage_consumer;
+pub mod effect_driver;
 /// Cognitive energy model -- metabolic costs for cognitive operations.
 pub mod energy;
 pub mod event_bus;
@@ -57,6 +58,11 @@ pub mod resource;
 pub mod task_scheduler;
 pub mod theta_consumer;
 
+pub use effect_driver::{
+    ChatMessage, EffectDriver, EffectServices, FeedbackEvent, FeedbackSink, GateConfig, GateReport,
+    GateRunner, GateVerdict, MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller,
+    PromptAssembler, PromptSpec, RuntimeEvent, TokenUsage,
+};
 pub use lifecycle::{
     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
     GitOpsRetryPolicy, HealthProbeConfig, HookSpec, LifecycleHooks, LifecycleTransition,
