@@ -6,7 +6,9 @@
 use async_trait::async_trait;
 use roko_core::foundation::{PromptAssembler, PromptSpec};
 use roko_core::{AgentRole, Result};
+use roko_neuro::{KnowledgeEntry, KnowledgeKind, KnowledgeStore, KnowledgeTier};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::conventions::detect_conventions;
 use crate::role_prompts::role_identity_for;
@@ -28,6 +30,8 @@ pub struct PromptAssemblyService {
     default_conventions: Option<String>,
     /// Static domain knowledge injected into layer 3.
     domain_context: Option<String>,
+    /// Durable knowledge source injected into layer 3 when relevant.
+    knowledge_store: Option<Arc<KnowledgeStore>>,
     /// Tool usage guidance injected into layer 5.
     tool_instructions: Option<String>,
     /// Optional token cap passed through to the system prompt builder.
@@ -41,6 +45,7 @@ impl PromptAssemblyService {
         Self {
             default_conventions: None,
             domain_context: None,
+            knowledge_store: None,
             tool_instructions: None,
             token_budget: None,
         }
@@ -57,6 +62,13 @@ impl PromptAssemblyService {
     #[must_use]
     pub fn with_domain_context(mut self, domain: String) -> Self {
         self.domain_context = Some(domain);
+        self
+    }
+
+    /// Add a durable knowledge store for layer 3 domain context.
+    #[must_use]
+    pub fn with_knowledge_store(mut self, store: Arc<KnowledgeStore>) -> Self {
+        self.knowledge_store = Some(store);
         self
     }
 
@@ -96,8 +108,12 @@ impl PromptAssembler for PromptAssemblyService {
             builder = builder.with_conventions(conventions);
         }
 
-        if let Some(domain) = &self.domain_context {
-            builder = builder.with_domain(domain.clone());
+        if let Some(domain) = domain_context_for_spec(
+            &spec,
+            self.domain_context.as_deref(),
+            self.knowledge_store.as_deref(),
+        ) {
+            builder = builder.with_domain(domain);
         }
 
         if let Some(workspace_map) = workspace_map_for_spec(&spec) {
@@ -156,6 +172,66 @@ fn workspace_map_for_spec(spec: &PromptSpec) -> Option<String> {
     let workdir = spec.workdir.as_deref()?;
     let (_, file_listing) = collect_source_context(workdir);
     workspace_map_from_file_listing(&file_listing)
+}
+
+fn domain_context_for_spec(
+    spec: &PromptSpec,
+    static_domain_context: Option<&str>,
+    knowledge_store: Option<&KnowledgeStore>,
+) -> Option<String> {
+    let knowledge_text = knowledge_store.and_then(|store| relevant_knowledge_for_spec(store, spec));
+
+    match (static_domain_context, knowledge_text) {
+        (Some(existing), Some(knowledge)) if !existing.trim().is_empty() => {
+            Some(format!("{existing}\n\n{knowledge}"))
+        }
+        (Some(existing), _) if !existing.trim().is_empty() => Some(existing.to_owned()),
+        (_, Some(knowledge)) => Some(knowledge),
+        _ => None,
+    }
+}
+
+fn relevant_knowledge_for_spec(store: &KnowledgeStore, spec: &PromptSpec) -> Option<String> {
+    let topic = spec
+        .task
+        .as_deref()
+        .map(|task| first_chars(task, 200))
+        .or(spec.role.as_deref())?;
+
+    let entries = store.query(topic, 5).ok()?;
+    let facts = entries
+        .iter()
+        .filter(|entry| entry.confidence >= 0.5 && !matches!(entry.tier, KnowledgeTier::Transient))
+        .collect::<Vec<_>>();
+
+    (!facts.is_empty()).then(|| format_knowledge_section(&facts))
+}
+
+fn first_chars(value: &str, max_chars: usize) -> &str {
+    value
+        .char_indices()
+        .nth(max_chars)
+        .map_or(value, |(index, _)| &value[..index])
+}
+
+fn format_knowledge_section(entries: &[&KnowledgeEntry]) -> String {
+    let lines = entries
+        .iter()
+        .map(|entry| format!("- [{}] {}", knowledge_kind_label(entry.kind), entry.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("## Relevant Knowledge\n\n{lines}")
+}
+
+fn knowledge_kind_label(kind: KnowledgeKind) -> &'static str {
+    match kind {
+        KnowledgeKind::Insight => "Fact",
+        KnowledgeKind::Heuristic | KnowledgeKind::StrategyFragment => "Pattern",
+        KnowledgeKind::AntiKnowledge => "Antipattern",
+        KnowledgeKind::Warning => "Warning",
+        KnowledgeKind::CausalLink => "Reference",
+    }
 }
 
 fn workspace_map_from_file_listing(file_listing: &[String]) -> Option<String> {
@@ -341,6 +417,70 @@ mod tests {
             .unwrap();
 
         assert!(prompt.contains("DeFi context: Uniswap v4 hooks"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_store_facts_injected_into_domain_layer() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = Arc::new(KnowledgeStore::new(
+            tempdir.path().join("neuro").join("knowledge.jsonl"),
+        ));
+        store
+            .add(KnowledgeEntry {
+                id: "k-rate-limit-fact".into(),
+                kind: KnowledgeKind::Insight,
+                content: "The rate limiter uses token buckets for burst control.".into(),
+                confidence: 0.9,
+                tags: vec!["rate".into(), "limiter".into()],
+                tier: KnowledgeTier::Consolidated,
+                ..KnowledgeEntry::default()
+            })
+            .unwrap();
+
+        let svc = PromptAssemblyService::new().with_knowledge_store(store);
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Fix the rate limiter".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("## Domain Context"));
+        assert!(prompt.contains("## Relevant Knowledge"));
+        assert!(prompt.contains("The rate limiter uses token buckets for burst control."));
+    }
+
+    #[tokio::test]
+    async fn knowledge_store_skips_low_confidence_entries() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = Arc::new(KnowledgeStore::new(
+            tempdir.path().join("neuro").join("knowledge.jsonl"),
+        ));
+        store
+            .add(KnowledgeEntry {
+                id: "k-low-confidence".into(),
+                kind: KnowledgeKind::Insight,
+                content: "Low confidence limiter advice should stay out.".into(),
+                confidence: 0.1,
+                tags: vec!["rate".into(), "limiter".into()],
+                tier: KnowledgeTier::Consolidated,
+                ..KnowledgeEntry::default()
+            })
+            .unwrap();
+
+        let svc = PromptAssemblyService::new().with_knowledge_store(store);
+        let prompt = svc
+            .assemble(PromptSpec {
+                role: Some("implementer".into()),
+                task: Some("Fix the rate limiter".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(!prompt.contains("Low confidence limiter advice should stay out."));
     }
 
     #[tokio::test]
