@@ -707,6 +707,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn workflow_engine_standard_passes_through_review() {
+        let (config, _tempdir) = standard_workflow_config();
+        let engine = WorkflowEngine::new(mock_services());
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => panic!("workflow should complete successfully: {err}"),
+        };
+        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
+        assert_eq!(result.iterations, 1);
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
+        let (config, _tempdir) = standard_workflow_config();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = WorkflowEngine::new(mock_services());
+        engine.add_consumer(Arc::new(RecordingConsumer {
+            events: Arc::clone(&events),
+        }));
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let events = events.lock().clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::PhaseTransition { from, to, .. }
+                if from == "implementing" && to == "gating"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::PhaseTransition { from, to, .. }
+                if from == "gating" && to == "reviewing"
+        )));
+    }
+
     fn mock_services() -> EffectServices {
         EffectServices {
             model_caller: Arc::new(MockModelCaller),
@@ -723,6 +764,18 @@ mod tests {
             workdir: tempdir.path().to_path_buf(),
             workflow: WorkflowConfig::express(),
             enabled_gates: Vec::new(),
+            commit_prefix: None,
+        };
+        (config, tempdir)
+    }
+
+    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+        let tempdir = isolated_git_workdir();
+        let config = WorkflowRunConfig {
+            prompt: "fix the bug".into(),
+            workdir: tempdir.path().to_path_buf(),
+            workflow: WorkflowConfig::standard(),
+            enabled_gates: vec!["compile".to_string()],
             commit_prefix: None,
         };
         (config, tempdir)
