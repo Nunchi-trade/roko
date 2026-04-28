@@ -28,6 +28,7 @@ use roko_daimon::{DaimonState, StrategySpaceDefinition};
 use roko_learn::cascade_router::CascadeRouter;
 use roko_learn::latency::LatencyRegistry;
 use roko_learn::provider_health::ProviderHealthTracker;
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::cancel::CancelToken;
 use roko_runtime::process::{ProcessId, ProcessSupervisor};
 
@@ -487,10 +488,10 @@ impl AppState {
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
         let http_client = reqwest::Client::new();
-        let model_call_service = Arc::new(
-            ModelCallService::new(roko_config.agent.default_model.clone())
-                .with_config(roko_config.clone()),
-        );
+        let service_bundle =
+            ServiceFactory::build(ServiceConfig::production(workdir.clone(), roko_config.clone()))
+                .expect("build shared service bundle");
+        let model_call_service = service_bundle.model_call_service;
 
         Self {
             workdir,
