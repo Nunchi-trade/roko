@@ -6,7 +6,8 @@
 use crate::provider::{AgentOptions, create_agent_for_model};
 use crate::task_runner::CostTable;
 use async_trait::async_trait;
-use roko_core::config::schema::RokoConfig;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
     ChatMessage, FeedbackEvent, FeedbackSink, MessageRole, ModelCallRequest, ModelCallResponse,
     ModelCaller, TokenUsage,
@@ -35,6 +36,10 @@ pub struct ModelCallService {
     event_consumers: Vec<Arc<dyn EventConsumer>>,
     /// Optional sink for model-call feedback.
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    /// Service-scoped environment entries passed into provider construction.
+    env: Vec<(String, String)>,
+    /// Optional base URL for OpenAI-compatible providers.
+    openai_base_url: Option<String>,
     /// Run id used for emitted events and feedback when the request has none.
     run_id: String,
 }
@@ -49,6 +54,8 @@ impl ModelCallService {
             cost_table: CostTable::default(),
             event_consumers: Vec::new(),
             feedback_sink: None,
+            env: Vec::new(),
+            openai_base_url: None,
             run_id: "model-call-service".to_string(),
         }
     }
@@ -81,6 +88,20 @@ impl ModelCallService {
         self
     }
 
+    /// Provide an Anthropic API key for service-created agents.
+    #[must_use]
+    pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+        self.set_env("ANTHROPIC_API_KEY", key);
+        self
+    }
+
+    /// Configure the base URL used by implicit OpenAI-compatible routes.
+    #[must_use]
+    pub fn with_openai_base_url(mut self, url: String) -> Self {
+        self.openai_base_url = Some(url);
+        self
+    }
+
     /// Use a specific run id for emitted events and feedback.
     #[must_use]
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
@@ -97,6 +118,98 @@ impl ModelCallService {
         } else {
             req.model.clone()
         }
+    }
+
+    fn set_env(&mut self, key: &str, value: String) {
+        if let Some((_, existing)) = self.env.iter_mut().find(|(name, _)| name == key) {
+            *existing = value;
+        } else {
+            self.env.push((key.to_string(), value));
+        }
+    }
+
+    fn has_env(&self, key: &str) -> bool {
+        self.env
+            .iter()
+            .any(|(name, value)| name == key && !value.is_empty())
+    }
+
+    fn config_for_model(&self, model: &str) -> RokoConfig {
+        let mut config = self.config.clone();
+
+        if let Some(url) = &self.openai_base_url {
+            config.providers.insert(
+                "openai-compat".to_string(),
+                ProviderConfig {
+                    kind: ProviderKind::OpenAiCompat,
+                    base_url: Some(url.clone()),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    command: None,
+                    args: None,
+                    timeout_ms: Some(120_000),
+                    ttft_timeout_ms: Some(15_000),
+                    connect_timeout_ms: Some(5_000),
+                    extra_headers: None,
+                    max_concurrent: None,
+                },
+            );
+        }
+
+        let has_explicit_model = config.models.contains_key(model)
+            || config.models.values().any(|profile| profile.slug == model);
+        let has_anthropic_provider = config
+            .providers
+            .values()
+            .any(|provider| provider.kind == ProviderKind::AnthropicApi);
+
+        if model.starts_with("claude-") && self.has_env("ANTHROPIC_API_KEY") {
+            if !has_anthropic_provider {
+                config.providers.insert(
+                    "anthropic".to_string(),
+                    ProviderConfig {
+                        kind: ProviderKind::AnthropicApi,
+                        base_url: Some("https://api.anthropic.com".to_string()),
+                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        command: None,
+                        args: None,
+                        timeout_ms: Some(120_000),
+                        ttft_timeout_ms: Some(15_000),
+                        connect_timeout_ms: Some(5_000),
+                        extra_headers: None,
+                        max_concurrent: None,
+                    },
+                );
+            }
+
+            if !has_explicit_model {
+                config.models.insert(
+                    model.to_string(),
+                    ModelProfile {
+                        provider: "anthropic".to_string(),
+                        slug: model.to_string(),
+                        context_window: 200_000,
+                        tool_format: "anthropic_blocks".to_string(),
+                        ..Default::default()
+                    },
+                );
+            }
+        } else if self.openai_base_url.is_some()
+            && !model.starts_with("claude-")
+            && !has_explicit_model
+        {
+            config.models.insert(
+                model.to_string(),
+                ModelProfile {
+                    provider: "openai-compat".to_string(),
+                    slug: model.to_string(),
+                    context_window: 128_000,
+                    tool_format: "openai_json".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        config
     }
 
     fn emit(&self, event: RuntimeEvent) {
@@ -181,10 +294,12 @@ impl ModelCaller for ModelCallService {
         let agent_id = format!("model-call:{model}");
         let (message_system, user_content) = request_prompt(&req.messages);
         let system_prompt = req.system.clone().or(message_system);
+        let config = self.config_for_model(&model);
 
         let options = AgentOptions {
             system_prompt,
             name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+            env: self.env.clone(),
             ..AgentOptions::default()
         };
         // TODO(converge): Thread per-request generation settings through
@@ -194,12 +309,11 @@ impl ModelCaller for ModelCallService {
         // TODO(converge): Thread req-level MCP config here in S05 once
         // ModelCallRequest carries it.
 
-        let agent = create_agent_for_model(&self.config, &model, options).map_err(|err| {
-            RokoError::Agent {
+        let agent =
+            create_agent_for_model(&config, &model, options).map_err(|err| RokoError::Agent {
                 backend: model.clone(),
                 message: err.to_string(),
-            }
-        })?;
+            })?;
 
         let prompt = Engram::builder(Kind::Prompt)
             .body(Body::text(user_content))
@@ -283,5 +397,32 @@ mod tests {
             role: None,
         };
         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn routes_claude_model_to_anthropic_api_when_key_set() {
+        let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+        let req = ModelCallRequest {
+            model: "claude-haiku-4".into(),
+            system: None,
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+        let model = svc.resolve_model(&req);
+        let config = svc.config_for_model(&model);
+
+        let provider = config
+            .providers
+            .get("anthropic")
+            .expect("anthropic provider");
+        assert_eq!(provider.kind, ProviderKind::AnthropicApi);
+        assert_eq!(provider.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(provider.timeout_ms, Some(120_000));
+
+        let profile = config.models.get("claude-haiku-4").expect("model profile");
+        assert_eq!(profile.provider, "anthropic");
+        assert_eq!(profile.slug, "claude-haiku-4");
     }
 }

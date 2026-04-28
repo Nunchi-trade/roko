@@ -198,8 +198,7 @@ impl BackendResponse {
                         }
                         // Assistant events: extract text content as before
                         _ => {
-                            if let Some(delta) =
-                                ev.pointer("/delta/text").and_then(|x| x.as_str())
+                            if let Some(delta) = ev.pointer("/delta/text").and_then(|x| x.as_str())
                             {
                                 buf.push_str(delta);
                             } else if let Some(text) =
