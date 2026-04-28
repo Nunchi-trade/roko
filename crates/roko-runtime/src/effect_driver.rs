@@ -223,6 +223,11 @@ impl EffectDriver {
             .await;
 
         if let Err(err) = add_result {
+            self.emit(RuntimeEvent::FeedbackRecorded {
+                run_id: self.run_id.clone(),
+                kind: "commit_error".to_string(),
+                summary: format!("git add failed: {err}"),
+            });
             return PipelineInput::AgentFailed {
                 error: format!("git add failed: {err}"),
             };
@@ -247,11 +252,22 @@ impl EffectDriver {
                     .and_then(|output| String::from_utf8(output.stdout).ok())
                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
 
+                self.emit(RuntimeEvent::FeedbackRecorded {
+                    run_id: self.run_id.clone(),
+                    kind: "commit".to_string(),
+                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
+                });
+
                 PipelineInput::CommitDone { hash }
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 if stderr.contains("nothing to commit") {
+                    self.emit(RuntimeEvent::FeedbackRecorded {
+                        run_id: self.run_id.clone(),
+                        kind: "commit_noop".to_string(),
+                        summary: "nothing to commit, working tree clean".to_string(),
+                    });
                     PipelineInput::CommitDone {
                         hash: "noop".to_string(),
                     }
@@ -304,6 +320,14 @@ impl EffectDriver {
 fn duration_millis(start: Instant) -> u64 {
     let millis = start.elapsed().as_millis();
     u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn truncate_message(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..s.floor_char_boundary(max)]
+    }
 }
 
 /// Count the number of files changed in the working directory via `git diff --name-only`.
