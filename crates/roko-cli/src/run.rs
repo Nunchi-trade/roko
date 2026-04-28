@@ -19,17 +19,12 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{AgentResult, ModelCallService, OllamaLlmBackend};
+use roko_agent::{AgentResult, OllamaLlmBackend};
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
 use roko_core::foundation::{
-    ChatMessage as CoreChatMessage, EventConsumer as WorkflowEventConsumer,
-    FeedbackEvent as CoreFeedbackEvent, FeedbackSink as CoreFeedbackSink,
-    GateConfig as CoreGateConfig, GateRunner as CoreGateRunner, MessageRole as CoreMessageRole,
-    ModelCallRequest as CoreModelCallRequest, ModelCaller as CoreModelCaller,
-    PromptAssembler as CorePromptAssembler, PromptSpec as CorePromptSpec,
-    ShellGateCommand as CoreShellGateCommand,
+    EventConsumer as WorkflowEventConsumer, ShellGateCommand as CoreShellGateCommand,
 };
 use roko_core::metric::{ConfigHash, TaskMetric};
 use roko_core::tool::ExternalAction;
@@ -41,18 +36,10 @@ use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
 use roko_runtime::effect_driver::EffectServices;
 use roko_runtime::pipeline_state::WorkflowConfig;
 use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
-use roko_runtime::{
-    FeedbackEvent as RuntimeFeedbackEvent, FeedbackSink as RuntimeFeedbackSink,
-    GateConfig as RuntimeGateConfig, GateReport as RuntimeGateReport,
-    GateRunner as RuntimeGateRunner, GateVerdict as RuntimeGateVerdict,
-    MessageRole as RuntimeMessageRole, ModelCallRequest as RuntimeModelCallRequest,
-    ModelCallResponse as RuntimeModelCallResponse, ModelCaller as RuntimeModelCaller,
-    PromptAssembler as RuntimePromptAssembler, PromptSpec as RuntimePromptSpec,
-    TokenUsage as RuntimeTokenUsage,
-};
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::collections::HashMap;
@@ -201,164 +188,7 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-struct CliModelCaller {
-    inner: Arc<ModelCallService>,
-}
-
-impl CliModelCaller {
-    fn new(inner: Arc<ModelCallService>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeModelCaller for CliModelCaller {
-    async fn call(
-        &self,
-        req: RuntimeModelCallRequest,
-    ) -> roko_core::Result<RuntimeModelCallResponse> {
-        let response = self.inner.call(core_model_call_request(req)).await?;
-        Ok(RuntimeModelCallResponse {
-            content: response.content,
-            model: response.model,
-            usage: RuntimeTokenUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                total_tokens: response.usage.total_tokens,
-                cost_usd: response.usage.cost_usd,
-            },
-            stop_reason: response.stop_reason,
-            request_id: response.request_id,
-        })
-    }
-}
-
-struct RuntimePromptAssemblerAdapter {
-    inner: Arc<dyn CorePromptAssembler>,
-}
-
-impl RuntimePromptAssemblerAdapter {
-    fn new(inner: Arc<dyn CorePromptAssembler>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimePromptAssembler for RuntimePromptAssemblerAdapter {
-    async fn assemble(&self, spec: RuntimePromptSpec) -> roko_core::Result<String> {
-        Ok(self
-            .inner
-            .assemble(CorePromptSpec {
-                role: spec.role,
-                task: spec.task,
-                workdir: spec.workdir,
-                gate_feedback: spec.gate_feedback,
-                anti_patterns: spec.anti_patterns,
-            })
-            .await?)
-    }
-}
-
-struct RuntimeFeedbackSinkAdapter {
-    inner: Arc<dyn CoreFeedbackSink>,
-}
-
-impl RuntimeFeedbackSinkAdapter {
-    fn new(inner: Arc<dyn CoreFeedbackSink>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
-    async fn record(&self, event: RuntimeFeedbackEvent) -> roko_core::Result<()> {
-        self.inner.record(core_feedback_event(event)).await?;
-        Ok(())
-    }
-
-    async fn flush(&self) -> roko_core::Result<()> {
-        self.inner.flush().await
-    }
-}
-
-struct RuntimeGateRunnerAdapter {
-    inner: Arc<dyn CoreGateRunner>,
-}
-
-impl RuntimeGateRunnerAdapter {
-    fn new(inner: Arc<dyn CoreGateRunner>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait::async_trait]
-impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
-    async fn run_gates(&self, config: RuntimeGateConfig) -> roko_core::Result<RuntimeGateReport> {
-        let report = self
-            .inner
-            .run_gates(CoreGateConfig {
-                workdir: config.workdir,
-                enabled_gates: config.enabled_gates,
-                shell_gates: config.shell_gates,
-                max_rung: config.max_rung,
-            })
-            .await?;
-        Ok(RuntimeGateReport {
-            verdicts: report
-                .verdicts
-                .into_iter()
-                .map(|verdict| RuntimeGateVerdict {
-                    gate_name: verdict.gate_name,
-                    passed: verdict.passed,
-                    output: verdict.output,
-                    duration_ms: verdict.duration_ms,
-                })
-                .collect(),
-        })
-    }
-}
-
-fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest {
-    CoreModelCallRequest {
-        model: req.model,
-        system: req.system,
-        messages: req
-            .messages
-            .into_iter()
-            .map(|message| CoreChatMessage {
-                role: match message.role {
-                    RuntimeMessageRole::System => CoreMessageRole::System,
-                    RuntimeMessageRole::User => CoreMessageRole::User,
-                    RuntimeMessageRole::Assistant => CoreMessageRole::Assistant,
-                },
-                content: message.content,
-            })
-            .collect(),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
-        role: req.role,
-        caller: Some(roko_core::foundation::CallerIdentity::Cli.into()),
-        run_id: None,
-        prompt_section_ids: Vec::new(),
-        knowledge_ids: Vec::new(),
-        budget: req.budget,
-        budget_remaining: None,
-        routing_hints: Vec::new(),
-        cache_policy: req.cache_policy,
-    }
-}
-
-fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
-    event
-}
-
 fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
-    // Import the concrete service implementations.
-    use roko_compose::prompt_assembly_service::PromptAssemblyService;
-    use roko_daimon::policy::DaimonPolicy;
-    use roko_gate::gate_service::GateService;
-    use roko_learn::feedback_service::FeedbackService;
-
     let config = crate::config::load_layered(workdir)
         .map(|resolved| resolved.config)
         .unwrap_or_default();
@@ -378,46 +208,20 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
     if let Some(model) = config.agent.model.clone() {
         model_config.agent.default_model = model;
     }
-    let model_key = config
-        .agent
-        .model
-        .clone()
-        .unwrap_or_else(|| model_config.agent.default_model.clone());
-    let model = resolve_model(&model_config, &model_key).slug;
 
-    let feedback_sink: Arc<dyn CoreFeedbackSink> =
-        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
-    // TODO(S01): ModelCallConfig is not available in this worktree; timeout
-    // and provider settings are carried through the existing RokoConfig path.
-    let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
-    let mut model_caller_inner = ModelCallService::new(model.clone())
-        .with_feedback_sink(Arc::clone(&feedback_sink))
-        .with_config(model_config)
-        .with_run_id(run_id);
-    if let Some(ref mcp_path) = config.agent.mcp_config {
-        model_caller_inner = model_caller_inner.with_mcp_config(mcp_path.clone());
-    }
-    let model_caller = Arc::new(model_caller_inner);
-    // TODO(S06): PromptAssemblyService has no with_workdir method and the CLI
-    // PromptConfig has no conventions field yet; EffectDriver passes workdir
-    // through PromptSpec for per-call assembly.
-    let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
-    let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
-    let affect_policy: Option<Arc<tokio::sync::Mutex<dyn roko_core::foundation::AffectPolicy>>> = {
-        let daimon_state_path = workdir.join(".roko/state/daimon.json");
-        Some(Arc::new(tokio::sync::Mutex::new(DaimonPolicy::new(
-            daimon_state_path,
-        ))))
-    };
-
-    Ok(EffectServices {
-        model,
-        model_caller: Arc::new(CliModelCaller::new(model_caller)),
-        prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
-        feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
-        gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
-        affect_policy,
+    let services = ServiceFactory::build(ServiceConfig {
+        workdir: workdir.to_path_buf(),
+        roko_dir: workdir.join(".roko"),
+        workspace_config: model_config,
+        model_key: config.agent.model.clone(),
+        mcp_config: config.agent.mcp_config.clone(),
+        feedback_enabled: true,
+        affect_enabled: true,
+        run_id: Some(format!("cli_workflow_{}", Utc::now().timestamp_millis())),
     })
+    .map_err(|error| anyhow!("build workflow services: {error}"))?;
+
+    Ok(services.effect_services())
 }
 
 fn workflow_config_for_template(workflow_template: &str) -> WorkflowConfig {
