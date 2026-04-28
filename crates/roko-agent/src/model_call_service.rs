@@ -1273,7 +1273,7 @@ impl ProviderCallCell {
                     model_used: attempt_model.to_string(),
                     usage: result.usage,
                     cost_usd,
-                    latency_ms: total_start.elapsed().as_millis() as u64,
+                    latency_ms: (total_start.elapsed().as_millis() as u64).max(1),
                     fallback_used: attempt_index > 0,
                 });
             }

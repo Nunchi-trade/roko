@@ -208,6 +208,7 @@ pub struct AggregateStats {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cost_usd: f64,
+    pub total_latency_ms: u64,
     pub cache_hits: u64,
     pub errors: u64,
 }
@@ -218,6 +219,7 @@ impl AggregateStats {
         self.total_input_tokens += event.input_tokens;
         self.total_output_tokens += event.output_tokens;
         self.total_cost_usd += event.cost_usd;
+        self.total_latency_ms += event.latency_ms;
         if event.cache_hit {
             self.cache_hits += 1;
         }

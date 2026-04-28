@@ -226,6 +226,7 @@ struct ModelStats {
     tokens_in: u64,
     tokens_out: u64,
     cost_usd: f64,
+    average_latency_ms: f64,
 }
 
 /// Gateway-level statistics response.
@@ -235,6 +236,7 @@ struct GatewayStatsResponse {
     cache_hits: u64,
     cache_hit_rate: f64,
     total_cost_usd: f64,
+    average_latency_ms: f64,
     models: HashMap<String, ModelStats>,
     providers: Value,
 }
@@ -356,6 +358,15 @@ async fn gateway_stats(
         0.0
     };
     let total_cost_usd = projection.total_cost_usd();
+    let total_latency_ms: u64 = model_aggregates
+        .values()
+        .map(|stats| stats.total_latency_ms)
+        .sum();
+    let average_latency_ms = if total_requests > 0 {
+        total_latency_ms as f64 / total_requests as f64
+    } else {
+        0.0
+    };
 
     let health_snapshot = state.provider_health.snapshot();
 
@@ -425,6 +436,11 @@ async fn gateway_stats(
                     tokens_in: stats.total_input_tokens,
                     tokens_out: stats.total_output_tokens,
                     cost_usd: stats.total_cost_usd,
+                    average_latency_ms: if stats.count > 0 {
+                        stats.total_latency_ms as f64 / stats.count as f64
+                    } else {
+                        0.0
+                    },
                 },
             )
         })
@@ -435,6 +451,7 @@ async fn gateway_stats(
         cache_hits,
         cache_hit_rate,
         total_cost_usd,
+        average_latency_ms,
         models: model_stats,
         providers: Value::Object(providers_json),
     }))
@@ -921,7 +938,12 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::extract::State;
     use axum::http::Request;
+    use roko_agent::GatewayEvent;
+    use roko_agent::ModelCallService;
+    use roko_agent::task_runner::{CostTable, ModelPricing};
     use roko_core::config::ServeAuthConfig;
+    use roko_core::config::schema::ModelProfile;
+    use roko_learn::FeedbackService;
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -1177,6 +1199,152 @@ mod tests {
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.cache_hit_rate, 0.0);
         assert_eq!(stats.total_cost_usd, 0.0);
+        assert_eq!(stats.average_latency_ms, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_gateway_writes_durable_events() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let model = "gateway-durable-model";
+        let provider = model;
+
+        let script = workdir.join("mock-provider.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.01\nprintf 'gateway durable reply'\n",
+        )
+        .expect("write mock provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script)
+                .expect("mock provider metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).expect("chmod mock provider");
+        }
+
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = model.to_string();
+        config.agent.command = Some(script.display().to_string());
+        config.models.insert(
+            model.to_string(),
+            ModelProfile {
+                provider: provider.to_string(),
+                slug: model.to_string(),
+                cost_input_per_m: Some(1.0),
+                cost_output_per_m: Some(2.0),
+                ..Default::default()
+            },
+        );
+
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let feedback = Arc::new(FeedbackService::from_roko_dir_with_episodes(
+            &workdir.join(".roko"),
+        ));
+        let feedback_sink: Arc<dyn roko_core::foundation::FeedbackSink> = feedback.clone();
+        let mut cost_table = CostTable::default();
+        cost_table.insert(
+            model,
+            ModelPricing {
+                input_per_m: 1.0,
+                output_per_m: 2.0,
+                cache_read_per_m: 0.0,
+                cache_write_per_m: 0.0,
+            },
+        );
+
+        let mut state = AppState::new(
+            workdir.clone(),
+            Arc::new(NoOpRuntime),
+            config.clone(),
+            deploy_backend,
+        );
+        state.model_call_service = Arc::new(
+            ModelCallService::new(model.to_string())
+                .with_config(config)
+                .with_cost_table(cost_table)
+                .with_feedback_sink(feedback_sink)
+                .with_gateway_event_writer(Arc::new(GatewayEventWriter::for_workdir(&workdir)))
+                .with_run_id("gateway-durable-test"),
+        );
+        let state = Arc::new(state);
+        let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/inference/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"model":"{model}","agent_id":"gateway-test-agent","messages":[{{"role":"user","content":"Say hello from the gateway durability test"}}]}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let completion: CompletionResponse = serde_json::from_slice(&body).expect("completion");
+        assert_eq!(completion.model, model);
+        assert!(completion.usage.input_tokens > 0);
+        assert!(completion.usage.output_tokens > 0);
+        assert!(completion.cost_usd > 0.0);
+
+        let gateway_log = workdir.join(".roko").join("learn").join("gateway.jsonl");
+        let gateway_events = std::fs::read_to_string(&gateway_log).expect("gateway log");
+        let events: Vec<GatewayEvent> = gateway_events
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("gateway event"))
+            .collect();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.model, model);
+        assert_eq!(event.provider.as_deref(), Some(provider));
+        assert!(event.input_tokens > 0);
+        assert!(event.output_tokens > 0);
+        assert!(event.cost_usd > 0.0);
+        assert!(event.latency_ms > 0);
+        assert!(!event.cache_hit);
+        assert!(event.success);
+
+        feedback.flush_async().await.expect("flush feedback");
+        let feedback_log = workdir.join(".roko").join("learn").join("efficiency.jsonl");
+        let feedback_events = std::fs::read_to_string(&feedback_log).expect("feedback log");
+        let feedback_event: Value = feedback_events
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("feedback event"))
+            .find(|event: &Value| event["kind"] == "model_call")
+            .expect("model feedback event");
+        assert_eq!(feedback_event["model"], model);
+        assert_eq!(feedback_event["provider"], provider);
+        assert_eq!(feedback_event["input_tokens"], event.input_tokens);
+        assert_eq!(feedback_event["output_tokens"], event.output_tokens);
+        assert_eq!(feedback_event["cost_usd"], event.cost_usd);
+        assert_eq!(feedback_event["latency_ms"], event.latency_ms);
+
+        let health = state.provider_health.get(provider);
+        assert_eq!(health.total_attempts, 1);
+        assert_eq!(health.total_successes, 1);
+
+        let Json(stats) = gateway_stats(State(Arc::clone(&state)))
+            .await
+            .expect("gateway stats");
+        assert!(stats.total_requests > 0);
+        assert!(stats.average_latency_ms > 0.0);
+        let model_stats = stats.models.get(model).expect("model stats");
+        assert_eq!(model_stats.requests, 1);
+        assert_eq!(model_stats.tokens_in, event.input_tokens);
+        assert_eq!(model_stats.tokens_out, event.output_tokens);
+        assert_eq!(model_stats.cost_usd, event.cost_usd);
+        assert_eq!(model_stats.average_latency_ms, event.latency_ms as f64);
+        assert_eq!(stats.providers[provider]["total_attempts"], 1);
     }
 
     #[tokio::test]
