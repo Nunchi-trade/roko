@@ -202,6 +202,7 @@ pub(crate) async fn cmd_run(
     workdir: Option<PathBuf>,
     prompt: String,
     serve: bool,
+    _engine: crate::EngineVariant,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);

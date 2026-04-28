@@ -284,6 +284,16 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// Which execution engine to use for `roko run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+pub enum EngineVariant {
+    /// WorkflowEngine v2 (event-driven, default).
+    #[default]
+    V2,
+    /// Legacy run_once() path (PlanRunner + orchestrate.rs).
+    Legacy,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     // ── Core workflow ────────────────────────────────────────────────
@@ -322,6 +332,9 @@ Examples:
         /// Generate a shareable URL for this run (starts serve if needed).
         #[arg(long)]
         share: bool,
+        /// Execution engine: v2 (WorkflowEngine, default) or legacy (run_once).
+        #[arg(long, value_enum, default_value_t = EngineVariant::V2)]
+        engine: EngineVariant,
     },
     /// Print signal counts, most recent episode, and gate pass/fail.
     #[command(after_help = "\
@@ -1974,7 +1987,8 @@ async fn dispatch_subcommand(command: Command, cli: &Cli) -> Result<i32> {
             workdir,
             serve,
             share,
-        } => commands::util::cmd_run(cli, workdir, prompt, serve || share).await,
+            engine,
+        } => commands::util::cmd_run(cli, workdir, prompt, serve || share, engine).await,
         Command::Status {
             workdir,
             cfactor,
@@ -2684,6 +2698,44 @@ mod tests {
     fn cli_parses_run_subcommand() {
         let cli = Cli::try_parse_from(["roko", "run", "do something"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Run { .. })));
+    }
+
+    #[test]
+    fn cli_parses_engine_v2_flag() {
+        let cli =
+            Cli::try_parse_from(["roko", "run", "do something", "--engine", "v2"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                engine: EngineVariant::V2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_parses_engine_legacy_flag() {
+        let cli =
+            Cli::try_parse_from(["roko", "run", "do something", "--engine", "legacy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                engine: EngineVariant::Legacy,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn cli_run_engine_defaults_to_v2() {
+        let cli = Cli::try_parse_from(["roko", "run", "do something"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                engine: EngineVariant::V2,
+                ..
+            })
+        ));
     }
 
     #[test]
