@@ -1,0 +1,13 @@
+Implemented W07 in [crates/roko-serve/src/lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/lib.rs:443).
+
+Changes:
+- Added `DashboardEventBridge` implementing canonical `roko_core::foundation::EventConsumer`.
+- Added `dashboard_event_bridge(&Arc<AppState>) -> Arc<dyn EventConsumer>`.
+- Mapped WorkflowEngine `RuntimeEvent`s into `DashboardEvent`s using `publish_batch`.
+- Preserved existing `start_state_hub_bridge` and server startup behavior.
+- Added a scoped compatibility shim for `StateHub`/`SharedStateHub` root paths so `roko-serve` compiles with the current local `roko-core`.
+
+Verification:
+- Grep done-criteria checks passed.
+- `cargo check -p roko-serve` passed.
+- `cargo test -p roko-serve --lib` did not pass due existing test-build errors in [dreams.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/dreams.rs:556): `DreamCycleReport` test initializers are missing `cross_episode_report` and `routing_recommendations`. That file is outside this batch’s write scope, so I left it unchanged.

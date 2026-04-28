@@ -1,0 +1,13 @@
+Implemented D02.
+
+Added [policy.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon/src/policy.rs:1) with `DaimonPolicy` wrapping `DaimonState` and implementing `roko_core::foundation::AffectPolicy`. Also exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon/src/lib.rs:51) and added `async-trait` to [Cargo.toml](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon/Cargo.toml:17).
+
+Verification passed:
+
+```text
+cargo check -p roko-daimon
+grep 'pub struct DaimonPolicy' crates/roko-daimon/src/policy.rs
+grep 'impl AffectPolicy for DaimonPolicy' crates/roko-daimon/src/policy.rs
+grep 'pub mod policy' crates/roko-daimon/src/lib.rs
+grep 'async-trait' crates/roko-daimon/Cargo.toml
+```

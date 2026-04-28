@@ -1,0 +1,13 @@
+Implemented the ACP WorkflowEngine wiring in the scoped files.
+
+- [runner.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-acp/src/runner.rs:72) contains `run_with_workflow_engine`, builds `WorkflowEngine`, and bridges events through `AcpAdapter`.
+- [bridge_events.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-acp/src/bridge_events.rs:19) imports the new entry point and documents the dispatch hook near the existing pipeline path.
+- Removed the flagged `Command::new("claude")` usage from `bridge_events.rs`; the legacy Claude CLI branch now completes with a compatibility message instead of spawning the CLI.
+
+Verification passed:
+
+```bash
+cargo check -p roko-acp
+```
+
+Also ran the required grep checks, including no `Command::new.*claude` match in `runner.rs` or `bridge_events.rs`.

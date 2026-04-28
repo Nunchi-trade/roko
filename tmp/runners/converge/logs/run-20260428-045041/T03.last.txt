@@ -1,0 +1,8 @@
+Implemented the three clone-based checkpoint/resume tests at the bottom of [pipeline_state.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/pipeline_state.rs:1008).
+
+Verification:
+- `cargo test -p roko-runtime checkpoint` passed.
+- `cargo test -p roko-runtime resume_does_not_affect_original` passed.
+- `cargo clippy -p roko-runtime` completed successfully. It reports existing warnings in unrelated/current code paths, but none from the new tests.
+
+Only modified `crates/roko-runtime/src/pipeline_state.rs`.

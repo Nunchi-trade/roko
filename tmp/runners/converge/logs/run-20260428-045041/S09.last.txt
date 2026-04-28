@@ -1,0 +1,19 @@
+Implemented S09 in [prompt_assembly_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose/src/prompt_assembly_service.rs:46).
+
+Changes:
+- Added `section_effectiveness: Option<HashMap<String, f64>>`.
+- Added `with_section_effectiveness`, `should_include`, and `effective_budget_ratio`.
+- Guarded conventions, domain, context, task, gate feedback, tools, playbooks, and anti-pattern injection.
+- Kept identity always injected.
+- Scaled configured token budget by effectiveness ratio with a 256-token floor.
+- Added the three requested unit tests.
+
+Verification passed:
+- `cargo check -p roko-compose`
+- `grep -q 'with_section_effectiveness' ...`
+- `grep -q 'should_include' ...`
+- `grep -q 'effective_budget_ratio' ...`
+- `cargo test -p roko-compose prompt_assembly_service`
+- `cargo test -p roko-compose effectiveness_skips`
+- `cargo test -p roko-compose effectiveness_includes`
+- `cargo test -p roko-compose no_effectiveness`

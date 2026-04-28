@@ -1,0 +1,12 @@
+Implemented [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs).
+
+What changed:
+- Added internal `ProviderCallCell` with `execute()` wrapping `create_agent_for_model()` -> `agent.run()`.
+- Added `CellOutput` and classified `CellError`.
+- Added retryable failure detection for `rate limit`, `timeout`, `503`, and `temporarily unavailable`.
+- Refactored `ModelCallService::call()` to delegate provider execution to the cell.
+- Kept fallback model wiring as an empty `Vec<String>` for now, while the cell handles fallback iteration.
+
+Verification:
+- `cargo check -p roko-agent` passed.
+- `cargo test -p roko-agent model_call_service` passed: 7 passed, 1 ignored.

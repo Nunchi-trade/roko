@@ -1,0 +1,11 @@
+Implemented W06 within scope.
+
+Changed:
+- Added `dispatch_via_model_call_service` in [dispatch_direct.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/dispatch_direct.rs:64), wired through `ModelCallService`, core `ModelCaller`, config-based model resolution, and `FeedbackService`.
+- Updated oneshot inline mode in [unified.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/unified.rs:95) to prefer the ModelCallService path and fall back to `dispatch_prompt`.
+- Added the requested unit test in [dispatch_direct.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/dispatch_direct.rs:466).
+
+Verification:
+- All required `grep` checks passed.
+- `cargo check -p roko-cli` passed.
+- `cargo test -p roko-cli --lib` did not pass due to pre-existing out-of-scope test-build errors in `crates/roko-cli/src/tui/app.rs` and `crates/roko-cli/src/orchestrate.rs` involving duplicate/moved `StateHub` symbols. I did not modify those files because they are outside the batch write scope.

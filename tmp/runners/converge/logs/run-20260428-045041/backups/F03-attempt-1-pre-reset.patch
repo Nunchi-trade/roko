@@ -1,0 +1,34 @@
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index a27cdc2c..4d636d3c 100644
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -182,21 +182,18 @@ impl ModelCaller for ModelCallService {
+         let (message_system, user_content) = request_prompt(&req.messages);
+         let system_prompt = req.system.clone().or(message_system);
+ 
+-        let mut options = AgentOptions {
++        let options = AgentOptions {
+             system_prompt,
++            // TODO(converge): Thread WorkflowEngine MCP config here in S05.
++            mcp_config: None,
+             name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+             ..AgentOptions::default()
+         };
+-        if let Some(max_tokens) = req.max_tokens {
+-            options
+-                .extra_args
+-                .push(format!("max_tokens={max_tokens}"));
+-        }
+-        if let Some(temperature) = req.temperature {
+-            options
+-                .extra_args
+-                .push(format!("temperature={temperature}"));
+-        }
++        // TODO(converge): AnthropicApiAdapter and OpenAiCompatAdapter currently
++        // take max output from ModelProfile::max_output and do not parse
++        // request-level max_tokens/temperature from AgentOptions::extra_args.
++        // Preserve provider dispatch without emitting ignored ad-hoc args until
++        // AgentOptions grows typed sampling fields or adapters accept overrides.
+ 
+         let agent = create_agent_for_model(&self.config, &model, options).map_err(|err| {
+             RokoError::Agent {

@@ -1,0 +1,4649 @@
+=== Batch: S03 (ModelCallService: integrate CascadeRouter for model selection) ===
+=== Started: 2026-04-28T05:46:36+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/S03.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd232-2cb6-7890-9b9a-35e9cf055faa
+--------
+user
+# Convergence Batch S03 — ModelCallService: integrate CascadeRouter for model selection
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## S03: Integrate CascadeRouter into ModelCallService
+
+### Write Scope
+- **MODIFY**: `crates/roko-agent/src/model_call_service.rs`
+- **MODIFY**: `crates/roko-agent/Cargo.toml` (add `roko-learn` dependency if not present)
+
+### Dependencies
+S01 and S02 must be complete.
+
+### DO NOT
+- Modify `crates/roko-learn/src/cascade_router.rs`
+- Modify `crates/roko-core/src/foundation.rs`
+- Change the `ModelCaller` trait
+- Create a new crate or new module files
+- Break existing tests
+
+### Existing Code Context
+
+The current `resolve_model` has this TODO:
+```rust
+fn resolve_model(&self, req: &ModelCallRequest) -> String {
+    if req.model.is_empty() {
+        // TODO(arch): Route through CascadeRouter once the service can receive
+        // a router without making roko-agent depend on roko-learn.
+        self.default_model.clone()
+    } else {
+        req.model.clone()
+    }
+}
+```
+
+`ModelCallService` struct (current fields):
+```rust
+pub struct ModelCallService {
+    default_model: String,
+    config: RokoConfig,
+    cost_table: CostTable,
+    event_consumers: Vec<Arc<dyn EventConsumer>>,
+    feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    run_id: String,
+    // (add cascade_router here)
+}
+```
+
+`CascadeRouter` is in `roko_learn::cascade_router::CascadeRouter`. Its key method:
+```rust
+// In roko_learn::cascade_router::CascadeRouter
+impl CascadeRouter {
+    // Returns the selected model slug and a selection struct
+    pub fn select(
+        &self,
+        role: Option<AgentRole>,
+        requirements: Option<TaskRequirements>,
+    ) -> CascadeSelection { ... }
+}
+
+pub struct CascadeSelection {
+    pub primary: String,       // model slug
+    pub fallback_chain: Vec<String>,
+    pub stage: CascadeStage,
+    // ...
+}
+```
+
+`CascadeSelection.primary` is the model slug to use. `CascadeStage` can be `Static`,
+`Confidence`, or `Ucb1`.
+
+`AgentRole` is from `roko_core::agent::AgentRole`. The `ModelCallRequest.role` field is
+`Option<String>` — convert it to `AgentRole` by parsing with `serde_json` or by matching the
+label strings (use `AgentRole::ALL_AGENTS` iterator).
+
+`roko-learn` depends on `roko-agent` (for `AgentResult`). Check `crates/roko-agent/Cargo.toml`
+for whether `roko-learn` is already listed. If it would create a circular dependency, use a
+`Box<dyn Fn(...) -> String>` router trait object instead:
+
+```rust
+// If circular dep, use this escape hatch:
+pub struct ModelCallService {
+    // ...
+    model_router: Option<Arc<dyn Fn(Option<&str>) -> String + Send + Sync>>,
+}
+```
+
+Check `crates/roko-agent/Cargo.toml` for existing `roko-learn` dep before deciding which
+approach to use.
+
+### Task
+
+1. Check `crates/roko-agent/Cargo.toml` to see if `roko-learn` is already a dependency.
+   If it is, use `Arc<CascadeRouter>` directly. If it would create a cycle, use
+   `Arc<dyn Fn(Option<&str>) -> String + Send + Sync>` as the router field type.
+
+2. Add a `with_cascade_router` builder method:
+   ```rust
+   // If direct dep is possible:
+   pub fn with_cascade_router(mut self, router: Arc<roko_learn::cascade_router::CascadeRouter>) -> Self
+
+   // If using trait object:
+   pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
+   where F: Fn(Option<&str>) -> String + Send + Sync + 'static
+   ```
+
+3. In `resolve_model`, when the request model is empty AND a router is configured, call
+   the router to select a model. Pass the `role` field from the request as the role hint:
+   ```rust
+   fn resolve_model(&self, req: &ModelCallRequest) -> String {
+       if req.model.is_empty() {
+           if let Some(router) = &self.cascade_router {
+               return router.select_for_role(req.role.as_deref());
+           }
+           self.default_model.clone()
+       } else {
+           req.model.clone()
+       }
+   }
+   ```
+
+4. Remove the `TODO(arch)` comment from `resolve_model` once the router is wired.
+
+5. Add a unit test `cascade_router_selects_model_when_request_is_empty` that builds a
+   `ModelCallService` with a mock router (closure or mock `CascadeRouter`), submits a request
+   with empty model, and asserts the router's returned model is used.
+
+### Done Criteria
+```bash
+# Compiles clean
+cargo check -p roko-agent
+
+# Builder method exists
+grep -q 'with_cascade_router' crates/roko-agent/src/model_call_service.rs
+
+# TODO comment is removed
+! grep -q 'TODO(arch): Route through CascadeRouter' crates/roko-agent/src/model_call_service.rs
+
+# All tests pass
+cargo test -p roko-agent model_call_service
+
+# New routing test passes
+cargo test -p roko-agent cascade_router_selects_model
+```
+
+codex
+I’ll inspect the agent and learn crates first so the router wiring matches the current dependency graph and existing test style.
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-agent/Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "sed -n '1,260p' crates/roko-agent/src/model_call_service.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+[package]
+name = "roko-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Agent trait and backends for Roko: spawn LLMs (Claude, exec'd CLIs, mock) that produce signals."
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+roko-core = { path = "../roko-core" }
+roko-fs = { path = "../roko-fs" }
+roko-std = { path = "../roko-std" }
+async-trait = "0.1"
+tokio = { workspace = true, features = ["process", "io-util", "time", "sync", "rt", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+governor = "0.10"
+url = "2"
+regex = "1"
+parking_lot = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+roko-learn = { path = "../roko-learn" }
+roko-std = { path = "../roko-std" }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+wiremock = "0.6"
+
+ succeeded in 0ms:
+//! ModelCallService -- concrete implementation of `ModelCaller`.
+//!
+//! Wraps the existing provider dispatch (`create_agent_for_model`) with model
+//! resolution, cost tracking, event emission, and feedback recording.
+
+use crate::provider::{AgentOptions, create_agent_for_model};
+use crate::task_runner::CostTable;
+use async_trait::async_trait;
+use roko_core::agent::ProviderKind;
+use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
+use roko_core::foundation::{
+    ChatMessage, FeedbackEvent, FeedbackSink, MessageRole, ModelCallRequest, ModelCallResponse,
+    ModelCaller, TokenUsage,
+};
+use roko_core::{
+    Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, Usage,
+};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Service that calls LLM models via the existing provider infrastructure.
+///
+/// This is the canonical way to call models in the workflow engine. It:
+/// - Resolves a request model, falling back to the configured default model
+/// - Tracks token usage and cost
+/// - Emits RuntimeEvents for observability
+/// - Records feedback for learning when a feedback sink is configured
+pub struct ModelCallService {
+    /// Default model to use when request doesn't specify one.
+    default_model: String,
+    /// Provider/model configuration used by `create_agent_for_model`.
+    config: RokoConfig,
+    /// Optional pricing table for calculating cost from raw token usage.
+    cost_table: CostTable,
+    /// Optional event consumers for runtime observability.
+    event_consumers: Vec<Arc<dyn EventConsumer>>,
+    /// Optional sink for model-call feedback.
+    feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    /// Service-scoped environment entries passed into provider construction.
+    env: Vec<(String, String)>,
+    /// Optional base URL for OpenAI-compatible providers.
+    openai_base_url: Option<String>,
+    /// Run id used for emitted events and feedback when the request has none.
+    run_id: String,
+}
+
+impl ModelCallService {
+    /// Create a new ModelCallService with the given default model.
+    #[must_use]
+    pub fn new(default_model: String) -> Self {
+        Self {
+            default_model,
+            config: RokoConfig::default(),
+            cost_table: CostTable::default(),
+            event_consumers: Vec::new(),
+            feedback_sink: None,
+            env: Vec::new(),
+            openai_base_url: None,
+            run_id: "model-call-service".to_string(),
+        }
+    }
+
+    /// Use an explicit Roko configuration for provider dispatch.
+    #[must_use]
+    pub fn with_config(mut self, config: RokoConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Use an explicit pricing table for cost calculation.
+    #[must_use]
+    pub fn with_cost_table(mut self, cost_table: CostTable) -> Self {
+        self.cost_table = cost_table;
+        self
+    }
+
+    /// Attach a runtime event consumer.
+    #[must_use]
+    pub fn with_event_consumer(mut self, consumer: Arc<dyn EventConsumer>) -> Self {
+        self.event_consumers.push(consumer);
+        self
+    }
+
+    /// Attach a feedback sink.
+    #[must_use]
+    pub fn with_feedback_sink(mut self, feedback_sink: Arc<dyn FeedbackSink>) -> Self {
+        self.feedback_sink = Some(feedback_sink);
+        self
+    }
+
+    /// Provide an Anthropic API key for service-created agents.
+    #[must_use]
+    pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+        self.set_env("ANTHROPIC_API_KEY", key);
+        self
+    }
+
+    /// Configure the base URL used by implicit OpenAI-compatible routes.
+    #[must_use]
+    pub fn with_openai_base_url(mut self, url: String) -> Self {
+        self.openai_base_url = Some(url);
+        self
+    }
+
+    /// Use a specific run id for emitted events and feedback.
+    #[must_use]
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = run_id.into();
+        self
+    }
+
+    /// Resolve which model to use for a request.
+    fn resolve_model(&self, req: &ModelCallRequest) -> String {
+        if req.model.is_empty() {
+            // TODO(arch): Route through CascadeRouter once the service can receive
+            // a router without making roko-agent depend on roko-learn.
+            self.default_model.clone()
+        } else {
+            req.model.clone()
+        }
+    }
+
+    fn set_env(&mut self, key: &str, value: String) {
+        if let Some((_, existing)) = self.env.iter_mut().find(|(name, _)| name == key) {
+            *existing = value;
+        } else {
+            self.env.push((key.to_string(), value));
+        }
+    }
+
+    fn has_env(&self, key: &str) -> bool {
+        self.env
+            .iter()
+            .any(|(name, value)| name == key && !value.is_empty())
+    }
+
+    fn config_for_model(&self, model: &str) -> RokoConfig {
+        let mut config = self.config.clone();
+
+        if let Some(url) = &self.openai_base_url {
+            config.providers.insert(
+                "openai-compat".to_string(),
+                ProviderConfig {
+                    kind: ProviderKind::OpenAiCompat,
+                    base_url: Some(url.clone()),
+                    api_key_env: Some("OPENAI_API_KEY".to_string()),
+                    command: None,
+                    args: None,
+                    timeout_ms: Some(120_000),
+                    ttft_timeout_ms: Some(15_000),
+                    connect_timeout_ms: Some(5_000),
+                    extra_headers: None,
+                    max_concurrent: None,
+                },
+            );
+        }
+
+        let has_explicit_model = config.models.contains_key(model)
+            || config.models.values().any(|profile| profile.slug == model);
+        let has_anthropic_provider = config
+            .providers
+            .values()
+            .any(|provider| provider.kind == ProviderKind::AnthropicApi);
+
+        if model.starts_with("claude-") && self.has_env("ANTHROPIC_API_KEY") {
+            if !has_anthropic_provider {
+                config.providers.insert(
+                    "anthropic".to_string(),
+                    ProviderConfig {
+                        kind: ProviderKind::AnthropicApi,
+                        base_url: Some("https://api.anthropic.com".to_string()),
+                        api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                        command: None,
+                        args: None,
+                        timeout_ms: Some(120_000),
+                        ttft_timeout_ms: Some(15_000),
+                        connect_timeout_ms: Some(5_000),
+                        extra_headers: None,
+                        max_concurrent: None,
+                    },
+                );
+            }
+
+            if !has_explicit_model {
+                config.models.insert(
+                    model.to_string(),
+                    ModelProfile {
+                        provider: "anthropic".to_string(),
+                        slug: model.to_string(),
+                        context_window: 200_000,
+                        tool_format: "anthropic_blocks".to_string(),
+                        ..Default::default()
+                    },
+                );
+            }
+        } else if self.openai_base_url.is_some()
+            && !model.starts_with("claude-")
+            && !has_explicit_model
+        {
+            config.models.insert(
+                model.to_string(),
+                ModelProfile {
+                    provider: "openai-compat".to_string(),
+                    slug: model.to_string(),
+                    context_window: 128_000,
+                    tool_format: "openai_json".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        config
+    }
+
+    fn emit(&self, event: RuntimeEvent) {
+        for consumer in &self.event_consumers {
+            consumer.consume(&event);
+        }
+    }
+
+    async fn record_feedback(
+        &self,
+        req: &ModelCallRequest,
+        model: &str,
+        usage: &TokenUsage,
+        latency_ms: u64,
+        success: bool,
+    ) -> Result<()> {
+        let Some(sink) = &self.feedback_sink else {
+            // TODO(arch): Make a FeedbackSink mandatory at workflow construction
+            // time so every model call is recorded without relying on optional
+            // service wiring.
+            return Ok(());
+        };
+
+        sink.record(FeedbackEvent::ModelCall {
+            run_id: self.run_id.clone(),
+            model: model.to_string(),
+            role: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_usd: usage.cost_usd,
+            latency_ms,
+            success,
+        })
+        .await
+    }
+}
+
+fn request_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
+    let mut system_prompt = None;
+    let mut user_content = String::new();
+
+    for msg in messages {
+        match msg.role {
+            MessageRole::System => {
+                system_prompt = Some(msg.content.clone());
+            }
+            MessageRole::User | MessageRole::Assistant => {
+                if !user_content.is_empty() {
+
+exec
+/bin/zsh -lc 'rg -n "roko-agent|roko_agent|cascade_router|CascadeRouter" crates/roko-learn/Cargo.toml crates/roko-learn/src crates/roko-agent/src/model_call_service.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+crates/roko-learn/Cargo.toml:15:roko-agent = { path = "../roko-agent" }
+crates/roko-agent/src/model_call_service.rs:115:            // TODO(arch): Route through CascadeRouter once the service can receive
+crates/roko-agent/src/model_call_service.rs:116:            // a router without making roko-agent depend on roko-learn.
+crates/roko-learn/src/verdict_scorer.rs:177:// ─── Verdict history for CascadeRouter integration ───────────────────────────
+crates/roko-learn/src/calibration_policy.rs:183:    use roko_agent::Usage;
+crates/roko-learn/src/calibration_policy.rs:184:    use roko_agent::chat_types::FinishReason;
+crates/roko-learn/src/cost_table.rs:5:use roko_agent::Usage;
+crates/roko-learn/src/skill_library.rs:37:use roko_agent::{Agent, nl_to_format::NlToFormatConverter};
+crates/roko-learn/src/skill_library.rs:1997:    use roko_agent::MockAgent;
+crates/roko-learn/src/lib.rs:99:pub mod cascade_router;
+crates/roko-learn/src/model_router.rs:1485:// Use the canonical slug_family from cascade_router.
+crates/roko-learn/src/model_router.rs:1486:use crate::cascade_router::slug_family;
+crates/roko-learn/src/model_router.rs:2133:    fn cascade_router_glm_selects_glm_when_present() {
+crates/roko-learn/src/model_experiment.rs:6:use crate::cascade_router::CascadeRouter;
+crates/roko-learn/src/model_experiment.rs:239:        self.sync_cascade_router(path)?;
+crates/roko-learn/src/model_experiment.rs:357:    fn sync_cascade_router(&self, experiment_store_path: &Path) -> Result<(), std::io::Error> {
+crates/roko-learn/src/model_experiment.rs:430:        let mut router = CascadeRouter::load_or_new(&router_path, model_slugs);
+crates/roko-learn/src/model_experiment.rs:438:                cascade_router = %router_path.display(),
+crates/roko-learn/src/model_experiment.rs:468:    use crate::cascade_router::{CascadeRouter, CascadeStage};
+crates/roko-learn/src/model_experiment.rs:712:        let router = CascadeRouter::new(vec![
+crates/roko-learn/src/model_experiment.rs:731:        let reloaded = CascadeRouter::load_or_new(
+crates/roko-learn/src/quality_judge.rs:8:use roko_agent::Agent;
+crates/roko-learn/src/quality_judge.rs:61:    use roko_agent::MockAgent;
+crates/roko-learn/src/cascade_router.rs:25:use roko_agent::AgentResult;
+crates/roko-learn/src/cascade_router.rs:37:// `crate::cascade_router::CascadeRouter` etc. still works for downstream crates.
+crates/roko-learn/src/cascade_router.rs:76:// ─── CascadeRouter ──────────────────────────────────────────────────────────
+crates/roko-learn/src/cascade_router.rs:81:pub struct CascadeRouter {
+crates/roko-learn/src/cascade_router.rs:98:impl roko_core::Cell for CascadeRouter {
+crates/roko-learn/src/cascade_router.rs:103:        "CascadeRouter"
+crates/roko-learn/src/cascade_router.rs:110:impl CascadeRouter {
+crates/roko-learn/src/cascade_router.rs:119:            "CascadeRouter: need at least one model"
+crates/roko-learn/src/cascade_router.rs:314:            .expect("CascadeRouter: need at least one model");
+crates/roko-learn/src/cascade_router.rs:335:            .expect("CascadeRouter: need at least one model");
+crates/roko-learn/src/cascade_router.rs:1460:                assert!(!slugs.is_empty(), "CascadeRouter: need at least one model");
+crates/roko-learn/src/routing_extras.rs:8:use crate::cascade_router::{CascadeModel, CascadeRouter};
+crates/roko-learn/src/routing_extras.rs:108:    inner: CascadeRouter,
+crates/roko-learn/src/routing_extras.rs:122:    pub fn new(inner: CascadeRouter, task_graph: TaskDag) -> Self {
+crates/roko-learn/src/routing_extras.rs:152:    pub const fn inner(&self) -> &CascadeRouter {
+crates/roko-learn/src/event_subscriber.rs:17:use roko_agent::chat_types::FinishReason;
+crates/roko-learn/src/event_subscriber.rs:21:use crate::cascade_router::CascadeRouter;
+crates/roko-learn/src/event_subscriber.rs:54:    router: Arc<CascadeRouter>,
+crates/roko-learn/src/event_subscriber.rs:277:    use crate::cascade_router::CascadeRouter;
+crates/roko-learn/src/event_subscriber.rs:283:    use roko_agent::Usage;
+crates/roko-learn/src/event_subscriber.rs:284:    use roko_agent::chat_types::FinishReason;
+crates/roko-learn/src/event_subscriber.rs:294:        let router = Arc::new(CascadeRouter::new(vec!["glm-5.1".to_string()]));
+crates/roko-learn/src/event_subscriber.rs:370:        let router = Arc::new(CascadeRouter::new(vec!["glm-5.1".to_string()]));
+crates/roko-learn/src/events.rs:8:use roko_agent::chat_types::FinishReason;
+crates/roko-learn/src/events.rs:9:use roko_agent::{StreamChunk, Usage};
+crates/roko-learn/src/cascade/mod.rs:4://! [`crate::cascade_router::CascadeRouter`]. The router struct itself and its
+crates/roko-learn/src/cascade/mod.rs:5://! core routing methods remain in `cascade_router.rs`.
+crates/roko-learn/src/cascade/tests.rs:6:use crate::cascade_router::CascadeRouter;
+crates/roko-learn/src/cascade/tests.rs:15:use roko_agent::AgentResult;
+crates/roko-learn/src/cascade/tests.rs:16:use roko_agent::gemini::{CodeExecutionResultPart, GroundingMetadata};
+crates/roko-learn/src/cascade/tests.rs:73:    let usage = roko_agent::Usage {
+crates/roko-learn/src/cascade/tests.rs:89:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:97:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:110:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:125:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:161:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:197:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:209:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:226:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:241:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:283:    let reloaded = CascadeRouter::load_or_new(&path, test_slugs());
+crates/roko-learn/src/cascade/tests.rs:292:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:323:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:360:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:374:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:387:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:401:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:460:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:502:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:523:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:544:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:565:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:577:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:593:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:609:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:677:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:711:    use roko_agent::provider::ProviderError;
+crates/roko-learn/src/cascade/tests.rs:765:    let cascade = CascadeRouter::new(test_slugs()).with_role_table(table);
+crates/roko-learn/src/cascade/tests.rs:802:    let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+crates/roko-learn/src/cascade/tests.rs:823:    let loaded = CascadeRouter::load_or_new(&path, vec!["glm-5.1".to_string()]);
+crates/roko-learn/src/cascade/tests.rs:830:fn cascade_router_kimi_selects_kimi_in_static_stage() {
+crates/roko-learn/src/cascade/tests.rs:831:    let cascade = CascadeRouter::new(vec!["kimi-k2.5".to_string()]);
+crates/roko-learn/src/cascade/tests.rs:841:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:881:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:897:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:922:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:938:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:952:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:961:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:982:    let mut cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1015:    let mut cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1058:    let mut cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1111:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1155:    use roko_agent::gemini::GeminiMetadata;
+crates/roko-learn/src/cascade/tests.rs:1194:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1237:    let reloaded = CascadeRouter::load_or_new(
+crates/roko-learn/src/cascade/tests.rs:1262:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1283:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1296:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1333:    let cascade = CascadeRouter::new(vec!["sonar".to_string(), "claude-sonnet-4-5".to_string()]);
+crates/roko-learn/src/cascade/tests.rs:1355:    let reloaded = CascadeRouter::load_or_new(
+crates/roko-learn/src/cascade/tests.rs:1378:    let cascade = CascadeRouter::new(slugs);
+crates/roko-learn/src/cascade/tests.rs:1395:    let cascade = CascadeRouter::new(slugs);
+crates/roko-learn/src/cascade/tests.rs:1406:    let cascade = CascadeRouter::new(test_slugs()); // no sonar in test_slugs
+crates/roko-learn/src/cascade/tests.rs:1434:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1464:    let cascade = CascadeRouter::new(vec![
+crates/roko-learn/src/cascade/tests.rs:1489:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1516:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1527:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1539:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/tests.rs:1550:    let cascade = CascadeRouter::new(test_slugs());
+crates/roko-learn/src/cascade/types.rs:5:use roko_agent::AgentResult;
+crates/roko-learn/src/cascade/types.rs:6:use roko_agent::provider::ProviderError;
+crates/roko-learn/src/cascade/types.rs:454:        metadata: &roko_agent::gemini::GeminiMetadata,
+crates/roko-learn/src/error_enrichment.rs:8:use roko_agent::Agent;
+crates/roko-learn/src/error_enrichment.rs:267:    use roko_agent::MockAgent;
+crates/roko-learn/src/cascade/helpers.rs:5:use roko_agent::AgentResult;
+crates/roko-learn/src/cascade/helpers.rs:406:        .expect("CascadeRouter: score-based routing requires at least one candidate");
+crates/roko-learn/src/cascade/helpers.rs:456:/// This is the canonical family classifier used by both `cascade_router` and
+crates/roko-learn/src/runtime_feedback.rs:26:use crate::cascade_router::CascadeRouter;
+crates/roko-learn/src/runtime_feedback.rs:123:    pub cascade_router_json: PathBuf,
+crates/roko-learn/src/runtime_feedback.rs:159:            cascade_router_json: root.join("cascade-router.json"),
+crates/roko-learn/src/runtime_feedback.rs:1153:    cascade_router: CascadeRouter,
+crates/roko-learn/src/runtime_feedback.rs:1193:        let cascade_router = CascadeRouter::load_or_new(
+crates/roko-learn/src/runtime_feedback.rs:1194:            &paths.cascade_router_json,
+crates/roko-learn/src/runtime_feedback.rs:1223:            cascade_router,
+crates/roko-learn/src/runtime_feedback.rs:1264:        let cascade_router = CascadeRouter::load_or_new(&paths.cascade_router_json, models);
+crates/roko-learn/src/runtime_feedback.rs:1291:            cascade_router,
+crates/roko-learn/src/runtime_feedback.rs:1421:    pub const fn cascade_router(&self) -> &CascadeRouter {
+crates/roko-learn/src/runtime_feedback.rs:1422:        &self.cascade_router
+crates/roko-learn/src/runtime_feedback.rs:1817:    pub fn save_cascade_router(&self) -> Result<(), LearningRuntimeError> {
+crates/roko-learn/src/runtime_feedback.rs:1818:        self.cascade_router.save(&self.paths.cascade_router_json)?;
+crates/roko-learn/src/runtime_feedback.rs:1840:        self.cascade_router
+crates/roko-learn/src/runtime_feedback.rs:1842:        if let Err(err) = self.save_cascade_router() {
+crates/roko-learn/src/runtime_feedback.rs:2052:            update.router_updated = self.update_cascade_router(&input.episode);
+crates/roko-learn/src/runtime_feedback.rs:2058:            if let Err(e) = self.save_cascade_router() {
+crates/roko-learn/src/runtime_feedback.rs:2087:            if static_table_updated && let Err(e) = self.save_cascade_router() {
+crates/roko-learn/src/runtime_feedback.rs:2156:    fn update_cascade_router(&self, episode: &Episode) -> bool {
+crates/roko-learn/src/runtime_feedback.rs:2201:            .get("cascade_router_observed")
+crates/roko-learn/src/runtime_feedback.rs:2217:        self.cascade_router
+crates/roko-learn/src/runtime_feedback.rs:2240:        if !self.cascade_router.update_static_table(role, winner_slug) {
+crates/roko-learn/src/runtime_feedback.rs:2828:    pub cascade_router: Option<serde_json::Value>,
+crates/roko-learn/src/runtime_feedback.rs:2846:    pub cascade_router_path: PathBuf,
+crates/roko-learn/src/runtime_feedback.rs:2915:    let cascade_router_path = roko.join("learn").join("cascade-router.json");
+crates/roko-learn/src/runtime_feedback.rs:2931:    let cascade_router = match tokio::fs::read_to_string(&cascade_router_path).await {
+crates/roko-learn/src/runtime_feedback.rs:2946:        cascade_router,
+crates/roko-learn/src/runtime_feedback.rs:2955:        cascade_router_path,
+crates/roko-learn/src/runtime_feedback.rs:3720:        assert!(snapshot.cascade_router.is_some());
+crates/roko-learn/src/runtime_feedback.rs:3796:        assert_eq!(runtime.cascade_router().total_observations(), 0);
+crates/roko-learn/src/runtime_feedback.rs:3820:        assert_eq!(runtime.cascade_router().total_observations(), 1);
+crates/roko-learn/src/runtime_feedback.rs:3844:        assert_eq!(runtime.cascade_router().total_observations(), 1);
+crates/roko-learn/src/runtime_feedback.rs:3868:        assert_eq!(runtime.cascade_router().total_observations(), 2);
+crates/roko-learn/src/runtime_feedback.rs:3974:    async fn open_under_loads_persisted_cascade_router_state() {
+crates/roko-learn/src/runtime_feedback.rs:3979:        let router = CascadeRouter::new(vec![
+crates/roko-learn/src/runtime_feedback.rs:4004:        router.save(&paths.cascade_router_json).unwrap();
+crates/roko-learn/src/runtime_feedback.rs:4007:        let loaded_router = runtime.cascade_router();
+crates/roko-learn/src/runtime_feedback.rs:4012:            crate::cascade_router::CascadeStage::Confidence
+crates/roko-learn/src/runtime_feedback.rs:4017:            crate::cascade_router::CascadeStage::Confidence
+crates/roko-learn/src/runtime_feedback.rs:4022:    async fn record_completed_run_persists_cascade_router_immediately() {
+crates/roko-learn/src/runtime_feedback.rs:4134:            runtime.cascade_router().route(&before_ctx).primary.slug,
+crates/roko-learn/src/runtime_feedback.rs:4174:            runtime.cascade_router().route(&before_ctx).primary.slug,
+crates/roko-learn/src/runtime_feedback.rs:4189:            reloaded.cascade_router().route(&before_ctx).primary.slug,
+crates/roko-learn/src/runtime_feedback.rs:4344:            .cascade_router()
+crates/roko-learn/src/runtime_feedback.rs:4379:            .cascade_router()
+crates/roko-learn/src/runtime_feedback.rs:4429:        let stats = runtime.cascade_router().observation_snapshot();
+crates/roko-learn/src/runtime_feedback.rs:4441:        let persisted = reloaded.cascade_router().observation_snapshot();
+crates/roko-learn/src/costs_db.rs:18:use roko_agent::Usage;
+crates/roko-learn/src/costs_db.rs:746:    use roko_agent::Usage;
+
+codex
+`roko-learn` already depends on `roko-agent`, so adding it as a normal dependency would create the cycle the prompt warns about. I’m using the closure-based router hook and keeping the existing dev-dependency available only for tests if needed.
+exec
+/bin/zsh -lc "sed -n '260,620p' crates/roko-agent/src/model_call_service.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+                if !user_content.is_empty() {
+                    user_content.push_str("\n\n");
+                }
+                user_content.push_str(&msg.content);
+            }
+        }
+    }
+
+    (system_prompt, user_content)
+}
+
+fn output_text(output: &Engram) -> String {
+    match &output.body {
+        Body::Text(text) => text.clone(),
+        Body::Json(value) => value.to_string(),
+        Body::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Body::Empty => String::new(),
+    }
+}
+
+fn token_usage(usage: &Usage, cost_usd: f64) -> TokenUsage {
+    TokenUsage {
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        total_tokens: u64::from(usage.total_tokens()),
+        cost_usd,
+    }
+}
+
+#[async_trait]
+impl ModelCaller for ModelCallService {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse> {
+        let model = self.resolve_model(&req);
+        let start = Instant::now();
+        let agent_id = format!("model-call:{model}");
+        let (message_system, user_content) = request_prompt(&req.messages);
+        let system_prompt = req.system.clone().or(message_system);
+        let config = self.config_for_model(&model);
+
+        let options = AgentOptions {
+            system_prompt,
+            name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+            env: self.env.clone(),
+            ..AgentOptions::default()
+        };
+        // TODO(converge): Thread per-request generation settings through
+        // AgentOptions/provider adapters. The Anthropic and OpenAI-compatible
+        // adapters derive max tokens from ModelProfile::max_output and do not
+        // parse "max_tokens=..." or "temperature=..." extra_args.
+        // TODO(converge): Thread req-level MCP config here in S05 once
+        // ModelCallRequest carries it.
+
+        let agent =
+            create_agent_for_model(&config, &model, options).map_err(|err| RokoError::Agent {
+                backend: model.clone(),
+                message: err.to_string(),
+            })?;
+
+        let prompt = Engram::builder(Kind::Prompt)
+            .body(Body::text(user_content))
+            .build();
+        let ctx = Context::now().with_session(self.run_id.clone());
+        let result = agent.run(&prompt, &ctx).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let calculated_cost = self.cost_table.calculate(&model, &result.usage);
+        let cost_usd = if calculated_cost > 0.0 {
+            calculated_cost
+        } else {
+            f64::from(result.usage.cost_usd)
+        };
+        let usage = token_usage(&result.usage, cost_usd);
+
+        if !result.success {
+            let error = output_text(&result.output);
+            self.emit(RuntimeEvent::AgentFailed {
+                run_id: self.run_id.clone(),
+                agent_id,
+                error: error.clone(),
+            });
+            self.record_feedback(&req, &model, &usage, latency_ms, false)
+                .await?;
+            return Err(RokoError::Agent {
+                backend: agent.backend_id().to_string(),
+                message: error,
+            });
+        }
+
+        let content = output_text(&result.output);
+        self.emit(RuntimeEvent::AgentCompleted {
+            run_id: self.run_id.clone(),
+            agent_id,
+            output: content.clone(),
+            tokens_used: usage.total_tokens,
+            cost_usd: usage.cost_usd,
+        });
+        self.record_feedback(&req, &model, &usage, latency_ms, true)
+            .await?;
+
+        Ok(ModelCallResponse {
+            content,
+            model,
+            usage,
+            stop_reason: Some("end_turn".to_string()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_model_resolution() {
+        let svc = ModelCallService::new("claude-sonnet-4-20250514".into());
+        let req = ModelCallRequest {
+            model: String::new(),
+            system: None,
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: "hello".into(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+        assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn explicit_model_resolution() {
+        let svc = ModelCallService::new("default".into());
+        let req = ModelCallRequest {
+            model: "claude-opus-4-20250514".into(),
+            system: None,
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+        assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn routes_claude_model_to_anthropic_api_when_key_set() {
+        let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+        let req = ModelCallRequest {
+            model: "claude-haiku-4".into(),
+            system: None,
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+        let model = svc.resolve_model(&req);
+        let config = svc.config_for_model(&model);
+
+        let provider = config
+            .providers
+            .get("anthropic")
+            .expect("anthropic provider");
+        assert_eq!(provider.kind, ProviderKind::AnthropicApi);
+        assert_eq!(provider.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(provider.timeout_ms, Some(120_000));
+
+        let profile = config.models.get("claude-haiku-4").expect("model profile");
+        assert_eq!(profile.provider, "anthropic");
+        assert_eq!(profile.slug, "claude-haiku-4");
+    }
+}
+
+exec
+/bin/zsh -lc 'rg -n "resolve_model|with_cascade_router|model_call_service|ModelCallService" crates/roko-agent/src crates/roko-agent/tests' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+crates/roko-agent/src/model_call_service.rs:1://! ModelCallService -- concrete implementation of `ModelCaller`.
+crates/roko-agent/src/model_call_service.rs:28:pub struct ModelCallService {
+crates/roko-agent/src/model_call_service.rs:47:impl ModelCallService {
+crates/roko-agent/src/model_call_service.rs:48:    /// Create a new ModelCallService with the given default model.
+crates/roko-agent/src/model_call_service.rs:113:    fn resolve_model(&self, req: &ModelCallRequest) -> String {
+crates/roko-agent/src/model_call_service.rs:290:impl ModelCaller for ModelCallService {
+crates/roko-agent/src/model_call_service.rs:292:        let model = self.resolve_model(&req);
+crates/roko-agent/src/model_call_service.rs:373:        let svc = ModelCallService::new("claude-sonnet-4-20250514".into());
+crates/roko-agent/src/model_call_service.rs:385:        assert_eq!(svc.resolve_model(&req), "claude-sonnet-4-20250514");
+crates/roko-agent/src/model_call_service.rs:390:        let svc = ModelCallService::new("default".into());
+crates/roko-agent/src/model_call_service.rs:399:        assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+crates/roko-agent/src/model_call_service.rs:404:        let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+crates/roko-agent/src/model_call_service.rs:413:        let model = svc.resolve_model(&req);
+crates/roko-agent/src/lib.rs:65:pub mod model_call_service;
+crates/roko-agent/src/lib.rs:115:pub use model_call_service::ModelCallService;
+crates/roko-agent/src/provider/mod.rs:48:use roko_core::agent::{ProviderKind, resolve_model};
+crates/roko-agent/src/provider/mod.rs:120:    let resolved = resolve_model(config, model_key);
+
+codex
+I’m going to add the router callback field to `ModelCallService`, expose `with_cascade_router`, and route only the empty-request-model case. Existing explicit model behavior and default fallback stay unchanged.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+codex
+The implementation is in place. I’m formatting just the touched Rust file, then I’ll run the required check and focused tests.
+exec
+/bin/zsh -lc "grep -q 'with_cascade_router' crates/roko-agent/src/model_call_service.rs && echo with_cascade_router_found" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+with_cascade_router_found
+
+exec
+/bin/zsh -lc "if grep -q 'TODO(arch): Route through CascadeRouter' crates/roko-agent/src/model_call_service.rs; then echo TODO_STILL_PRESENT; exit 1; else echo todo_removed; fi" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+todo_removed
+
+exec
+/bin/zsh -lc 'rustfmt crates/roko-agent/src/model_call_service.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+ exited 1 in 140ms:
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:237:5
+    |
+237 |     async fn record_feedback(
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:307:5
+    |
+307 |     async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse> {
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:388:5
+    |
+388 |     async fn default_model_resolution() {
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:405:5
+    |
+405 |     async fn explicit_model_resolution() {
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:419:5
+    |
+419 |     async fn cascade_router_selects_model_when_request_is_empty() {
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+error[E0670]: `async fn` is not permitted in Rust 2015
+   --> /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:437:5
+    |
+437 |     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+    |     ^^^^^ to use `async fn`, switch to Rust 2018 or later
+    |
+    = help: pass `--edition 2024` to `rustc`
+    = note: for more on editions, read https://doc.rust-lang.org/edition-guide
+
+
+codex
+`rustfmt` defaulted to Rust 2015 when run on a single file, so I’m rerunning it with the workspace edition. The grep checks already confirm the builder exists and the old TODO is gone.
+exec
+/bin/zsh -lc 'rustfmt --edition 2024 crates/roko-agent/src/model_call_service.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+codex
+Formatting is clean. I’m running `cargo check -p roko-agent` now; if it exposes issues from the new field or tests, I’ll fix them before running the focused test commands.
+exec
+/bin/zsh -lc 'cargo check -p roko-agent' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+ succeeded in 45573ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.15.1
+    Checking pin-project-lite v0.2.17
+    Checking scopeguard v1.2.0
+   Compiling parking_lot_core v0.9.12
+    Checking once_cell v1.21.4
+    Checking memchr v2.8.0
+    Checking bytes v1.11.1
+    Checking core-foundation-sys v0.8.7
+    Checking futures-core v0.3.32
+   Compiling serde_core v1.0.228
+   Compiling shlex v1.3.0
+    Checking lock_api v0.4.14
+    Checking itoa v1.0.18
+   Compiling find-msvc-tools v0.1.9
+    Checking equivalent v1.0.2
+    Checking futures-sink v0.3.32
+    Checking stable_deref_trait v1.2.1
+   Compiling serde v1.0.228
+   Compiling cc v1.2.60
+   Compiling version_check v0.9.5
+    Checking slab v0.4.12
+    Checking hashbrown v0.17.0
+   Compiling getrandom v0.4.2
+   Compiling typenum v1.19.0
+    Checking zeroize v1.8.2
+    Checking futures-channel v0.3.32
+    Checking bitflags v2.11.0
+    Checking tracing-core v0.1.36
+    Checking futures-task v0.3.32
+    Checking futures-io v0.3.32
+    Checking http v1.4.0
+    Checking subtle v2.6.1
+   Compiling zmij v1.0.21
+    Checking writeable v0.6.3
+   Compiling semver v1.0.28
+    Checking litemap v0.8.2
+    Checking utf8_iter v1.0.4
+    Checking indexmap v2.14.0
+   Compiling httparse v1.10.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+    Checking http-body v1.0.1
+   Compiling rustc_version v0.4.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling rustix v1.1.4
+   Compiling serde_json v1.0.149
+   Compiling generic-array v0.14.9
+    Checking percent-encoding v2.3.2
+   Compiling zerocopy v0.8.48
+   Compiling autocfg v1.5.0
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking parking_lot v0.12.5
+   Compiling syn v2.0.117
+    Checking getrandom v0.2.17
+   Compiling curve25519-dalek v4.1.3
+    Checking rustls-pki-types v1.14.0
+    Checking try-lock v0.2.5
+    Checking untrusted v0.9.0
+    Checking tower-service v0.3.3
+    Checking atomic-waker v1.1.2
+    Checking fnv v1.0.7
+    Checking want v0.3.1
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking cpufeatures v0.2.17
+    Checking digest v0.10.7
+    Checking core-foundation v0.9.4
+    Checking aho-corasick v1.1.4
+    Checking fastrand v2.4.1
+    Checking toml_write v0.1.2
+    Checking signature v2.2.0
+    Checking winnow v0.7.15
+    Checking regex-syntax v0.8.10
+   Compiling native-tls v0.2.18
+   Compiling num-traits v0.2.19
+   Compiling rustls v0.23.38
+   Compiling thiserror v2.0.18
+   Compiling getrandom v0.3.4
+    Checking system-configuration v0.7.0
+    Checking uuid v1.23.0
+    Checking ed25519 v2.2.3
+    Checking tempfile v3.27.0
+    Checking security-framework v3.7.0
+    Checking sha2 v0.10.9
+    Checking iana-time-zone v0.1.65
+    Checking constant_time_eq v0.4.2
+    Checking arrayref v0.3.9
+    Checking arrayvec v0.7.6
+   Compiling crossbeam-utils v0.8.21
+    Checking base64 v0.22.1
+    Checking ipnet v2.12.0
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking rand_core v0.9.5
+    Checking ed25519-dalek v2.2.0
+    Checking webpki-roots v1.0.6
+    Checking http-body-util v0.1.3
+    Checking ryu v1.0.23
+    Checking iri-string v0.7.12
+   Compiling portable-atomic v1.13.1
+    Checking rand_core v0.6.4
+    Checking encoding_rs v0.8.35
+    Checking allocator-api2 v0.2.21
+    Checking hashbrown v0.14.5
+    Checking foldhash v0.2.0
+    Checking log v0.4.29
+    Checking mime v0.3.17
+    Checking spinning_top v0.3.0
+    Checking nonzero_ext v0.3.0
+    Checking futures-timer v3.0.3
+    Checking web-time v1.1.0
+    Checking hashbrown v0.16.1
+    Checking regex-automata v0.4.14
+    Checking dashmap v6.1.0
+    Checking quanta v0.12.6
+   Compiling synstructure v0.13.2
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.4
+    Checking ppv-lite86 v0.2.21
+    Checking regex v1.12.3
+    Checking rand_chacha v0.9.0
+    Checking rand v0.9.3
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.5
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling serde_derive v1.0.228
+   Compiling displaydoc v0.2.5
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+    Checking rustls-webpki v0.103.11
+    Checking tokio v1.51.1
+    Checking zerofrom v0.1.7
+    Checking tokio-util v0.7.18
+    Checking futures-util v0.3.32
+    Checking tokio-native-tls v0.3.1
+    Checking tokio-rustls v0.26.4
+    Checking yoke v0.8.2
+    Checking zerovec v0.11.6
+    Checking zerotrie v0.2.4
+    Checking tinystr v0.8.3
+    Checking tracing v0.1.44
+    Checking icu_locale_core v2.2.0
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking h2 v0.4.13
+    Checking tower v0.5.3
+    Checking futures-executor v0.3.32
+    Checking governor v0.10.4
+    Checking icu_provider v2.2.0
+    Checking futures v0.3.32
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking tower-http v0.6.8
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking toml_edit v0.22.27
+    Checking idna_adapter v1.2.1
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking hyper v1.9.0
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.8
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.12.28
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 45.51s
+
+codex
+`cargo check -p roko-agent` passes. I’m running the two required focused test commands now.
+exec
+/bin/zsh -lc 'cargo test -p roko-agent cascade_router_selects_model' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc 'cargo test -p roko-agent model_call_service' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+codex
+The focused tests are still compiling; one command is waiting on Cargo’s artifact lock because both test invocations share the same target directory. I’ll let them finish and then inspect any failures.
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+ succeeded in 130513ms:
+   Compiling cfg-if v1.0.4
+   Compiling smallvec v1.15.1
+   Compiling pin-project-lite v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling memchr v2.8.0
+   Compiling bytes v1.11.1
+   Compiling once_cell v1.21.4
+   Compiling core-foundation-sys v0.8.7
+   Compiling itoa v1.0.18
+   Compiling libc v0.2.185
+   Compiling futures-core v0.3.32
+   Compiling equivalent v1.0.2
+   Compiling serde_core v1.0.228
+   Compiling zerofrom v0.1.7
+   Compiling stable_deref_trait v1.2.1
+   Compiling futures-sink v0.3.32
+   Compiling lock_api v0.4.14
+   Compiling yoke v0.8.2
+   Compiling hashbrown v0.17.0
+   Compiling slab v0.4.12
+   Compiling zeroize v1.8.2
+   Compiling futures-channel v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling bitflags v2.11.0
+   Compiling typenum v1.19.0
+   Compiling futures-task v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling subtle v2.6.1
+   Compiling zerovec v0.11.6
+   Compiling num-traits v0.2.19
+   Compiling zmij v1.0.21
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling zerotrie v0.2.4
+   Compiling futures-util v0.3.32
+   Compiling errno v0.3.14
+   Compiling parking_lot_core v0.9.12
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling parking_lot v0.12.5
+   Compiling tracing v0.1.44
+   Compiling indexmap v2.14.0
+   Compiling getrandom v0.4.2
+   Compiling generic-array v0.14.9
+   Compiling http v1.4.0
+   Compiling tinystr v0.8.3
+   Compiling getrandom v0.2.17
+   Compiling tokio v1.51.1
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling aho-corasick v1.1.4
+   Compiling utf8_iter v1.0.4
+   Compiling regex-syntax v0.8.10
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.6
+   Compiling percent-encoding v2.3.2
+   Compiling http-body v1.0.1
+   Compiling icu_collections v2.2.0
+   Compiling digest v0.10.7
+   Compiling tower-service v0.3.3
+   Compiling atomic-waker v1.1.2
+   Compiling try-lock v0.2.5
+   Compiling fnv v1.0.7
+   Compiling want v0.3.1
+   Compiling httparse v1.10.1
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling system-configuration-sys v0.6.0
+   Compiling icu_properties_data v2.2.0
+   Compiling cpufeatures v0.2.17
+   Compiling core-foundation v0.9.4
+   Compiling rustls-pki-types v1.14.0
+   Compiling untrusted v0.9.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling toml_write v0.1.2
+   Compiling winnow v0.7.15
+   Compiling httpdate v1.0.3
+   Compiling signature v2.2.0
+   Compiling log v0.4.29
+   Compiling system-configuration v0.7.0
+   Compiling ed25519 v2.2.3
+   Compiling ring v0.17.14
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling regex-automata v0.4.14
+   Compiling uuid v1.23.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling sha2 v0.10.9
+   Compiling curve25519-dalek v4.1.3
+   Compiling zerocopy v0.8.48
+   Compiling rustix v1.1.4
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling toml_edit v0.22.27
+   Compiling iana-time-zone v0.1.65
+   Compiling arrayvec v0.7.6
+   Compiling arrayref v0.3.9
+   Compiling fastrand v2.4.1
+   Compiling constant_time_eq v0.4.2
+   Compiling rustversion v1.0.22
+   Compiling ipnet v2.12.0
+   Compiling base64 v0.22.1
+   Compiling tempfile v3.27.0
+   Compiling blake3 v1.8.4
+   Compiling chrono v0.4.44
+   Compiling thiserror v2.0.18
+   Compiling security-framework v3.7.0
+   Compiling rustls-webpki v0.103.11
+   Compiling idna_adapter v1.2.1
+   Compiling regex v1.12.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling form_urlencoded v1.2.2
+   Compiling idna v1.1.0
+   Compiling tokio-util v0.7.18
+   Compiling h2 v0.4.13
+   Compiling ppv-lite86 v0.2.21
+   Compiling toml v0.8.23
+   Compiling native-tls v0.2.18
+   Compiling rustls v0.23.38
+   Compiling getrandom v0.3.4
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling http-body-util v0.1.3
+   Compiling sync_wrapper v1.0.2
+   Compiling tower-layer v0.3.3
+   Compiling tower v0.5.3
+   Compiling rand_core v0.9.5
+   Compiling tokio-native-tls v0.3.1
+   Compiling url v2.5.8
+   Compiling crossbeam-utils v0.8.21
+   Compiling webpki-roots v1.0.6
+   Compiling generator v0.8.8
+   Compiling equator-macro v0.4.2
+   Compiling iri-string v0.7.12
+   Compiling hyper v1.9.0
+   Compiling ryu v1.0.23
+   Compiling serde_urlencoded v0.7.1
+   Compiling rand_chacha v0.9.0
+   Compiling futures-executor v0.3.32
+   Compiling rand_core v0.6.4
+   Compiling encoding_rs v0.8.35
+   Compiling foldhash v0.2.0
+   Compiling hashbrown v0.14.5
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-util v0.1.20
+   Compiling tower-http v0.6.8
+   Compiling hyper-rustls v0.27.8
+   Compiling hyper-tls v0.6.0
+   Compiling mime v0.3.17
+   Compiling allocator-api2 v0.2.21
+   Compiling anyhow v1.0.102
+   Compiling reqwest v0.12.28
+   Compiling hashbrown v0.16.1
+   Compiling dashmap v6.1.0
+   Compiling rand_chacha v0.3.1
+   Compiling futures v0.3.32
+   Compiling rand v0.9.3
+   Compiling portable-atomic v1.13.1
+   Compiling quanta v0.12.6
+   Compiling ordered-float v5.3.0
+   Compiling spinning_top v0.3.0
+   Compiling web-time v1.1.0
+   Compiling divrem v1.0.0
+   Compiling array-init v2.1.0
+   Compiling futures-timer v3.0.3
+   Compiling nonzero_ext v0.3.0
+   Compiling sorted-vec v0.8.10
+   Compiling az v1.3.0
+   Compiling equator v0.4.2
+   Compiling cmov v0.5.3
+   Compiling governor v0.10.4
+   Compiling rand v0.8.5
+   Compiling aligned-vec v0.6.4
+   Compiling num_cpus v1.17.0
+   Compiling bstr v1.12.1
+   Compiling lazy_static v1.5.0
+   Compiling deadpool-runtime v0.1.4
+   Compiling kiddo v5.3.0
+   Compiling globset v0.4.18
+   Compiling deadpool v0.12.3
+   Compiling assert-json-diff v2.0.2
+   Compiling wiremock v0.6.5
+   Compiling roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+   Compiling roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+   Compiling roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+   Compiling roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+   Compiling roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+   Compiling roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/glm_web_search.rs:1:1
+   |
+ 1 | / use roko_agent::translate::openai::parse_glm_metadata;
+ 2 | |
+ 3 | | #[test]
+ 4 | | fn glm_web_search_response() {
+...  |
+32 | |     );
+33 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/mock_provider.rs:1:1
+    |
+  1 | / use std::sync::atomic::{AtomicUsize, Ordering};
+  2 | |
+  3 | | use serde_json::json;
+  4 | | use wiremock::matchers::{method, path};
+...   |
+102 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for a function
+ --> crates/roko-agent/tests/mock_provider.rs:7:1
+  |
+7 | pub async fn mock_openai_compat() -> (MockServer, String) {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> crates/roko-agent/tests/mock_provider.rs:20:1
+   |
+20 | pub async fn mock_openai_with_tool_calls() -> (MockServer, String) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/exec_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+31 | |     run_session_continuation(ParityBackend::Exec).await.unwrap();
+32 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/cursor_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/tool_loop_integration.rs:1:1
+    |
+  1 | / use std::io::{Read, Write};
+  2 | | use std::net::TcpListener;
+  3 | | use std::sync::{Arc, Mutex};
+  4 | | use std::thread;
+...   |
+227 | |     );
+228 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_partial.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+204 | |     assert_eq!(requests[1].body["messages"][1]["partial"], true);
+205 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_tool_loop.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+316 | |     assert_eq!(tool_ids, vec!["functions.Edit:1", "functions.Read:0"]);
+317 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: function `zai_provider_config` is never used
+  --> crates/roko-agent/tests/provider_integration.rs:55:4
+   |
+55 | fn zai_provider_config(base_url: impl Into<String>) -> ProviderConfig {
+   |    ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `glm_5_1_model` is never used
+  --> crates/roko-agent/tests/provider_integration.rs:70:4
+   |
+70 | fn glm_5_1_model() -> ModelProfile {
+   |    ^^^^^^^^^^^^^
+
+warning: function `zai_config` is never used
+   --> crates/roko-agent/tests/provider_integration.rs:100:4
+    |
+100 | fn zai_config(base_url: impl Into<String>) -> RokoConfig {
+    |    ^^^^^^^^^^
+
+warning: function `mock_openai_with_tool_calls` is never used
+  --> crates/roko-agent/tests/mock_provider.rs:20:14
+   |
+20 | pub async fn mock_openai_with_tool_calls() -> (MockServer, String) {
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OpenAiToolCallSequence` is never constructed
+  --> crates/roko-agent/tests/mock_provider.rs:53:8
+   |
+53 | struct OpenAiToolCallSequence {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/provider_integration.rs:1:1
+    |
+  1 | / mod mock_provider;
+  2 | |
+  3 | | use std::sync::{Arc, Mutex};
+...   |
+574 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "glm_web_search") generated 1 warning
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/openai_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "kimi_partial") generated 1 warning
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/openrouter_integration.rs:1:1
+    |
+  1 | / use std::collections::HashMap;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+226 | |     assert_eq!(request.timeout_ms, 120_000);
+227 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/thinking_response.rs:1:1
+   |
+ 1 | / use roko_agent::Usage;
+ 2 | | use roko_agent::translate::{
+ 3 | |     BackendResponse, ChatResponse, FinishReason, OpenAiTranslator, Translator,
+ 4 | |     normalize_finish_reason,
+...  |
+97 | |     assert!(matches!(response.finish_reason, FinishReason::ToolCalls));
+98 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "thinking_response") generated 1 warning
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/signal_chat_roundtrip.rs:1:1
+   |
+ 1 | / use roko_agent::chat_types::{ChatResponse, FinishReason, ResponseMetadata};
+ 2 | | use roko_agent::{ChatRequest, RequestOptions};
+ 3 | | use roko_core::{Body, ChatMessage, Engram, Kind, MessageContent};
+...  |
+50 | |     assert_eq!(output.tag("finish_reason"), Some("Stop"));
+51 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/codex_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "openrouter_integration") generated 1 warning
+warning: `roko-agent` (test "exec_parity") generated 1 warning
+warning: `roko-agent` (test "cursor_parity") generated 1 warning
+warning: `roko-agent` (test "signal_chat_roundtrip") generated 1 warning
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/stream_accumulator.rs:1:1
+    |
+  1 | / use roko_agent::chat_types::FinishReason;
+  2 | | use roko_agent::{StreamAccumulator, StreamChunk, Usage};
+  3 | |
+  4 | | fn chunk_string(input: &str, parts: usize) -> Vec<String> {
+...   |
+149 | |     assert!(matches!(response.finish_reason, FinishReason::Stop));
+150 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/chat_request.rs:1:1
+    |
+  1 | / use roko_agent::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
+  2 | | use roko_core::{ChatMessage, ContentBlock, MessageContent, ToolCategory, ToolDef, ToolPermission};
+  3 | | use serde_json::json;
+...   |
+142 | |     assert_eq!(cursor.options.extra.get("partial"), Some(&json!(true)));
+143 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/fixture_loading.rs:1:1
+    |
+  1 | / use std::fs;
+  2 | | use std::path::{Path, PathBuf};
+  3 | |
+  4 | | use roko_agent::provider::{OpenAiCompatAdapter, ProviderAdapter, ProviderError};
+...   |
+181 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "tool_loop_integration") generated 1 warning
+warning: `roko-agent` (test "kimi_tool_loop") generated 1 warning
+warning: `roko-agent` (test "openai_parity") generated 1 warning
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/glm_tool_loop.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+315 | |     assert_eq!(updated, "goodbye world");
+316 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_thinking_tools.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+281 | |     assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read_file");
+282 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "fixture_loading") generated 1 warning
+warning: `roko-agent` (test "stream_accumulator") generated 1 warning
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/chat_response_to_message.rs:1:1
+   |
+ 1 | / use roko_agent::chat_types::ChatResponse;
+ 2 | | use roko_core::ChatMessage;
+ 3 | | use roko_core::tool::ToolCall;
+...  |
+48 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "chat_request") generated 1 warning
+warning: `roko-agent` (test "chat_response_to_message") generated 1 warning
+warning: `roko-agent` (test "codex_parity") generated 1 warning
+warning: `roko-agent` (test "kimi_thinking_tools") generated 1 warning
+warning: `roko-agent` (test "mock_provider") generated 3 warnings
+warning: `roko-agent` (test "glm_tool_loop") generated 1 warning
+warning: `roko-agent` (test "provider_integration") generated 6 warnings
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 58s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/roko_agent-fed974eaf5b5d559)
+
+running 1 test
+test model_call_service::tests::cascade_router_selects_model_when_request_is_empty ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1108 filtered out; finished in 0.00s
+
+     Running tests/chat_message_serde.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_message_serde-2d0c2e3db84a8676)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/chat_request.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_request-2ab774e630e86e0d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/chat_response_to_message.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_response_to_message-4c9747ef4f07e437)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/codex_conformance.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/codex_conformance-ab5e344a212de51e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/codex_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/codex_parity-00ba6539d432e444)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/contract_tests.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/contract_tests-f88cced9414b826e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/contracts.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/contracts-81beaa363799f362)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/cursor_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/cursor_parity-9c6ef721db6e66f8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/cursor_streaming.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/cursor_streaming-5bd0cf5039012f05)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/exec_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/exec_parity-949ded46c07c275a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/fixture_loading.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/fixture_loading-d4b814134694ddff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/gemini_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/gemini_integration-c0fac9428db6bbc4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/glm_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/glm_tool_loop-f470ce6b0e8b167a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/glm_web_search.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/glm_web_search-7b7e83befae466ce)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_partial.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_partial-d09389bd438d8d3a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_thinking_tools.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_thinking_tools-58312bb2e368ddb4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_tool_loop-67332d47f0dd111d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mock_provider.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/mock_provider-f1d47a95be9be67f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ollama_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/ollama_tool_loop-75e8ff3646e09dca)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/openai_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/openai_parity-135f05365d6b769f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/openrouter_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/openrouter_integration-f9abea26be4685e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/perplexity_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/perplexity_integration-c7d8a635393bcbed)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/process_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/process_integration-16e6852a55c06ec6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/provider_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/provider_integration-7c290e228ca5a3f3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/role_tools.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/role_tools-383cb413650cc179)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/safety_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/safety_integration-8dca345b1880fcb5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/signal_chat_roundtrip.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/signal_chat_roundtrip-d51c7f7cb68e71f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/stream_accumulator.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/stream_accumulator-600cd9b2ddee7086)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/stream_chunk_types.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/stream_chunk_types-d88deeb13336fc1d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/subprocess_safety_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/subprocess_safety_parity-c0ee875159bb2752)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/thinking_response.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/thinking_response-c5755aeade6d4e02)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/tool_loop_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/tool_loop_integration-64e8207310f08416)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+ succeeded in 130513ms:
+    Blocking waiting for file lock on artifact directory
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/glm_web_search.rs:1:1
+   |
+ 1 | / use roko_agent::translate::openai::parse_glm_metadata;
+ 2 | |
+ 3 | | #[test]
+ 4 | | fn glm_web_search_response() {
+...  |
+32 | |     );
+33 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/stream_accumulator.rs:1:1
+    |
+  1 | / use roko_agent::chat_types::FinishReason;
+  2 | | use roko_agent::{StreamAccumulator, StreamChunk, Usage};
+  3 | |
+  4 | | fn chunk_string(input: &str, parts: usize) -> Vec<String> {
+...   |
+149 | |     assert!(matches!(response.finish_reason, FinishReason::Stop));
+150 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_tool_loop.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+316 | |     assert_eq!(tool_ids, vec!["functions.Edit:1", "functions.Read:0"]);
+317 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_partial.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+204 | |     assert_eq!(requests[1].body["messages"][1]["partial"], true);
+205 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: function `zai_provider_config` is never used
+  --> crates/roko-agent/tests/provider_integration.rs:55:4
+   |
+55 | fn zai_provider_config(base_url: impl Into<String>) -> ProviderConfig {
+   |    ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `glm_5_1_model` is never used
+  --> crates/roko-agent/tests/provider_integration.rs:70:4
+   |
+70 | fn glm_5_1_model() -> ModelProfile {
+   |    ^^^^^^^^^^^^^
+
+warning: function `zai_config` is never used
+   --> crates/roko-agent/tests/provider_integration.rs:100:4
+    |
+100 | fn zai_config(base_url: impl Into<String>) -> RokoConfig {
+    |    ^^^^^^^^^^
+
+warning: function `mock_openai_with_tool_calls` is never used
+  --> crates/roko-agent/tests/mock_provider.rs:20:14
+   |
+20 | pub async fn mock_openai_with_tool_calls() -> (MockServer, String) {
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OpenAiToolCallSequence` is never constructed
+  --> crates/roko-agent/tests/mock_provider.rs:53:8
+   |
+53 | struct OpenAiToolCallSequence {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/provider_integration.rs:1:1
+    |
+  1 | / mod mock_provider;
+  2 | |
+  3 | | use std::sync::{Arc, Mutex};
+...   |
+574 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/thinking_response.rs:1:1
+   |
+ 1 | / use roko_agent::Usage;
+ 2 | | use roko_agent::translate::{
+ 3 | |     BackendResponse, ChatResponse, FinishReason, OpenAiTranslator, Translator,
+ 4 | |     normalize_finish_reason,
+...  |
+97 | |     assert!(matches!(response.finish_reason, FinishReason::ToolCalls));
+98 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/signal_chat_roundtrip.rs:1:1
+   |
+ 1 | / use roko_agent::chat_types::{ChatResponse, FinishReason, ResponseMetadata};
+ 2 | | use roko_agent::{ChatRequest, RequestOptions};
+ 3 | | use roko_core::{Body, ChatMessage, Engram, Kind, MessageContent};
+...  |
+50 | |     assert_eq!(output.tag("finish_reason"), Some("Stop"));
+51 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "glm_web_search") generated 1 warning
+warning: `roko-agent` (test "stream_accumulator") generated 1 warning
+warning: `roko-agent` (test "kimi_tool_loop") generated 1 warning
+warning: `roko-agent` (test "kimi_partial") generated 1 warning
+warning: `roko-agent` (test "provider_integration") generated 6 warnings
+warning: `roko-agent` (test "thinking_response") generated 1 warning
+warning: `roko-agent` (test "signal_chat_roundtrip") generated 1 warning
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/kimi_thinking_tools.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+281 | |     assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read_file");
+282 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/mock_provider.rs:1:1
+    |
+  1 | / use std::sync::atomic::{AtomicUsize, Ordering};
+  2 | |
+  3 | | use serde_json::json;
+  4 | | use wiremock::matchers::{method, path};
+...   |
+102 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for a function
+ --> crates/roko-agent/tests/mock_provider.rs:7:1
+  |
+7 | pub async fn mock_openai_compat() -> (MockServer, String) {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> crates/roko-agent/tests/mock_provider.rs:20:1
+   |
+20 | pub async fn mock_openai_with_tool_calls() -> (MockServer, String) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/fixture_loading.rs:1:1
+    |
+  1 | / use std::fs;
+  2 | | use std::path::{Path, PathBuf};
+  3 | |
+  4 | | use roko_agent::provider::{OpenAiCompatAdapter, ProviderAdapter, ProviderError};
+...   |
+181 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/glm_tool_loop.rs:1:1
+    |
+  1 | / use std::collections::VecDeque;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+315 | |     assert_eq!(updated, "goodbye world");
+316 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/chat_response_to_message.rs:1:1
+   |
+ 1 | / use roko_agent::chat_types::ChatResponse;
+ 2 | | use roko_core::ChatMessage;
+ 3 | | use roko_core::tool::ToolCall;
+...  |
+48 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/codex_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/openai_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/exec_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+31 | |     run_session_continuation(ParityBackend::Exec).await.unwrap();
+32 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/tool_loop_integration.rs:1:1
+    |
+  1 | / use std::io::{Read, Write};
+  2 | | use std::net::TcpListener;
+  3 | | use std::sync::{Arc, Mutex};
+  4 | | use std::thread;
+...   |
+227 | |     );
+228 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/chat_request.rs:1:1
+    |
+  1 | / use roko_agent::{ChatRequest, RequestOptions, ResponseFormat, ToolChoice};
+  2 | | use roko_core::{ChatMessage, ContentBlock, MessageContent, ToolCategory, ToolDef, ToolPermission};
+  3 | | use serde_json::json;
+...   |
+142 | |     assert_eq!(cursor.options.extra.get("partial"), Some(&json!(true)));
+143 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "kimi_thinking_tools") generated 1 warning
+warning: `roko-agent` (test "mock_provider") generated 3 warnings
+warning: `roko-agent` (test "fixture_loading") generated 1 warning
+warning: `roko-agent` (test "glm_tool_loop") generated 1 warning
+warning: `roko-agent` (test "chat_response_to_message") generated 1 warning
+warning: `roko-agent` (test "codex_parity") generated 1 warning
+warning: `roko-agent` (test "openai_parity") generated 1 warning
+warning: `roko-agent` (test "exec_parity") generated 1 warning
+warning: `roko-agent` (test "tool_loop_integration") generated 1 warning
+warning: `roko-agent` (test "chat_request") generated 1 warning
+warning: missing documentation for the crate
+   --> crates/roko-agent/tests/openrouter_integration.rs:1:1
+    |
+  1 | / use std::collections::HashMap;
+  2 | | use std::sync::{Arc, Mutex};
+  3 | |
+  4 | | use async_trait::async_trait;
+...   |
+226 | |     assert_eq!(request.timeout_ms, 120_000);
+227 | | }
+    | |_^
+    |
+    = note: requested on the command line with `-W missing-docs`
+
+warning: missing documentation for the crate
+  --> crates/roko-agent/tests/cursor_parity.rs:1:1
+   |
+ 1 | / use roko_agent::testutil::{
+ 2 | |     ParityBackend, run_error_path, run_happy_path, run_session_continuation, run_streaming,
+ 3 | |     run_tool_call,
+ 4 | | };
+...  |
+30 | |         .unwrap();
+31 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-agent` (test "openrouter_integration") generated 1 warning
+warning: `roko-agent` (test "cursor_parity") generated 1 warning
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 59s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/roko_agent-fed974eaf5b5d559)
+
+running 4 tests
+test model_call_service::tests::explicit_model_resolution ... ok
+test model_call_service::tests::default_model_resolution ... ok
+test model_call_service::tests::cascade_router_selects_model_when_request_is_empty ... ok
+test model_call_service::tests::routes_claude_model_to_anthropic_api_when_key_set ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1105 filtered out; finished in 0.00s
+
+     Running tests/chat_message_serde.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_message_serde-2d0c2e3db84a8676)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/chat_request.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_request-2ab774e630e86e0d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/chat_response_to_message.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/chat_response_to_message-4c9747ef4f07e437)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/codex_conformance.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/codex_conformance-ab5e344a212de51e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/codex_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/codex_parity-00ba6539d432e444)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/contract_tests.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/contract_tests-f88cced9414b826e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/contracts.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/contracts-81beaa363799f362)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/cursor_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/cursor_parity-9c6ef721db6e66f8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/cursor_streaming.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/cursor_streaming-5bd0cf5039012f05)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/exec_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/exec_parity-949ded46c07c275a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/fixture_loading.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/fixture_loading-d4b814134694ddff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/gemini_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/gemini_integration-c0fac9428db6bbc4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/glm_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/glm_tool_loop-f470ce6b0e8b167a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/glm_web_search.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/glm_web_search-7b7e83befae466ce)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_partial.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_partial-d09389bd438d8d3a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_thinking_tools.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_thinking_tools-58312bb2e368ddb4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/kimi_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/kimi_tool_loop-67332d47f0dd111d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/mock_provider.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/mock_provider-f1d47a95be9be67f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ollama_tool_loop.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/ollama_tool_loop-75e8ff3646e09dca)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/openai_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/openai_parity-135f05365d6b769f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/openrouter_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/openrouter_integration-f9abea26be4685e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/perplexity_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/perplexity_integration-c7d8a635393bcbed)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/process_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/process_integration-16e6852a55c06ec6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/provider_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/provider_integration-7c290e228ca5a3f3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/role_tools.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/role_tools-383cb413650cc179)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/safety_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/safety_integration-8dca345b1880fcb5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/signal_chat_roundtrip.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/signal_chat_roundtrip-d51c7f7cb68e71f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/stream_accumulator.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/stream_accumulator-600cd9b2ddee7086)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/stream_chunk_types.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/stream_chunk_types-d88deeb13336fc1d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/subprocess_safety_parity.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/subprocess_safety_parity-c0ee875159bb2752)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/thinking_response.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/thinking_response-c5755aeade6d4e02)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/tool_loop_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/codex-attempt-1/debug/deps/tool_loop_integration-64e8207310f08416)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+codex
+Both focused test commands passed. I’m doing a final diff check so the closeout only reports files actually touched.
+exec
+/bin/zsh -lc 'git diff -- crates/roko-agent/src/model_call_service.rs crates/roko-agent/Cargo.toml' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f9..0b7b8668 100644
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@ use roko_core::{
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@ pub struct ModelCallService {
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@ impl ModelCallService {
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@ impl ModelCallService {
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@ impl ModelCallService {
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -399,6 +415,24 @@ mod tests {
+         assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+     }
+ 
++    #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
+     #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-agent/src/model_call_service.rs
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+exec
+/bin/zsh -lc "nl -ba crates/roko-agent/src/model_call_service.rs | sed -n '18,140p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "nl -ba crates/roko-agent/src/model_call_service.rs | sed -n '410,438p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+   410	            messages: vec![],
+   411	            max_tokens: None,
+   412	            temperature: None,
+   413	            role: None,
+   414	        };
+   415	        assert_eq!(svc.resolve_model(&req), "claude-opus-4-20250514");
+   416	    }
+   417	
+   418	    #[tokio::test]
+   419	    async fn cascade_router_selects_model_when_request_is_empty() {
+   420	        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
+   421	            assert_eq!(role, Some("reviewer"));
+   422	            "router-selected-model".to_string()
+   423	        });
+   424	        let req = ModelCallRequest {
+   425	            model: String::new(),
+   426	            system: None,
+   427	            messages: vec![],
+   428	            max_tokens: None,
+   429	            temperature: None,
+   430	            role: Some("reviewer".to_string()),
+   431	        };
+   432	
+   433	        assert_eq!(svc.resolve_model(&req), "router-selected-model");
+   434	    }
+   435	
+   436	    #[tokio::test]
+   437	    async fn routes_claude_model_to_anthropic_api_when_key_set() {
+   438	        let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+
+ succeeded in 0ms:
+    18	use std::sync::Arc;
+    19	use std::time::Instant;
+    20	
+    21	type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
+    22	
+    23	/// Service that calls LLM models via the existing provider infrastructure.
+    24	///
+    25	/// This is the canonical way to call models in the workflow engine. It:
+    26	/// - Resolves a request model, falling back to the configured default model
+    27	/// - Tracks token usage and cost
+    28	/// - Emits RuntimeEvents for observability
+    29	/// - Records feedback for learning when a feedback sink is configured
+    30	pub struct ModelCallService {
+    31	    /// Default model to use when request doesn't specify one.
+    32	    default_model: String,
+    33	    /// Provider/model configuration used by `create_agent_for_model`.
+    34	    config: RokoConfig,
+    35	    /// Optional pricing table for calculating cost from raw token usage.
+    36	    cost_table: CostTable,
+    37	    /// Optional event consumers for runtime observability.
+    38	    event_consumers: Vec<Arc<dyn EventConsumer>>,
+    39	    /// Optional sink for model-call feedback.
+    40	    feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    41	    /// Optional model router used when requests omit an explicit model.
+    42	    model_router: Option<Arc<ModelRouter>>,
+    43	    /// Service-scoped environment entries passed into provider construction.
+    44	    env: Vec<(String, String)>,
+    45	    /// Optional base URL for OpenAI-compatible providers.
+    46	    openai_base_url: Option<String>,
+    47	    /// Run id used for emitted events and feedback when the request has none.
+    48	    run_id: String,
+    49	}
+    50	
+    51	impl ModelCallService {
+    52	    /// Create a new ModelCallService with the given default model.
+    53	    #[must_use]
+    54	    pub fn new(default_model: String) -> Self {
+    55	        Self {
+    56	            default_model,
+    57	            config: RokoConfig::default(),
+    58	            cost_table: CostTable::default(),
+    59	            event_consumers: Vec::new(),
+    60	            feedback_sink: None,
+    61	            model_router: None,
+    62	            env: Vec::new(),
+    63	            openai_base_url: None,
+    64	            run_id: "model-call-service".to_string(),
+    65	        }
+    66	    }
+    67	
+    68	    /// Use an explicit Roko configuration for provider dispatch.
+    69	    #[must_use]
+    70	    pub fn with_config(mut self, config: RokoConfig) -> Self {
+    71	        self.config = config;
+    72	        self
+    73	    }
+    74	
+    75	    /// Use an explicit pricing table for cost calculation.
+    76	    #[must_use]
+    77	    pub fn with_cost_table(mut self, cost_table: CostTable) -> Self {
+    78	        self.cost_table = cost_table;
+    79	        self
+    80	    }
+    81	
+    82	    /// Attach a runtime event consumer.
+    83	    #[must_use]
+    84	    pub fn with_event_consumer(mut self, consumer: Arc<dyn EventConsumer>) -> Self {
+    85	        self.event_consumers.push(consumer);
+    86	        self
+    87	    }
+    88	
+    89	    /// Attach a feedback sink.
+    90	    #[must_use]
+    91	    pub fn with_feedback_sink(mut self, feedback_sink: Arc<dyn FeedbackSink>) -> Self {
+    92	        self.feedback_sink = Some(feedback_sink);
+    93	        self
+    94	    }
+    95	
+    96	    /// Attach a CascadeRouter-compatible callback for model selection.
+    97	    #[must_use]
+    98	    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
+    99	    where
+   100	        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
+   101	    {
+   102	        self.model_router = Some(Arc::new(router_fn));
+   103	        self
+   104	    }
+   105	
+   106	    /// Provide an Anthropic API key for service-created agents.
+   107	    #[must_use]
+   108	    pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+   109	        self.set_env("ANTHROPIC_API_KEY", key);
+   110	        self
+   111	    }
+   112	
+   113	    /// Configure the base URL used by implicit OpenAI-compatible routes.
+   114	    #[must_use]
+   115	    pub fn with_openai_base_url(mut self, url: String) -> Self {
+   116	        self.openai_base_url = Some(url);
+   117	        self
+   118	    }
+   119	
+   120	    /// Use a specific run id for emitted events and feedback.
+   121	    #[must_use]
+   122	    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+   123	        self.run_id = run_id.into();
+   124	        self
+   125	    }
+   126	
+   127	    /// Resolve which model to use for a request.
+   128	    fn resolve_model(&self, req: &ModelCallRequest) -> String {
+   129	        if req.model.is_empty() {
+   130	            if let Some(router) = &self.model_router {
+   131	                return router(req.role.as_deref());
+   132	            }
+   133	            self.default_model.clone()
+   134	        } else {
+   135	            req.model.clone()
+   136	        }
+   137	    }
+   138	
+   139	    fn set_env(&mut self, key: &str, value: String) {
+   140	        if let Some((_, existing)) = self.env.iter_mut().find(|(name, _)| name == key) {
+
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+codex
+Implemented S03 in [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:21).
+
+What changed:
+- Added a closure-based CascadeRouter hook to avoid the `roko-agent` -> `roko-learn` dependency cycle.
+- Added `with_cascade_router(...)`.
+- Updated `resolve_model` to use the router when `req.model` is empty, passing `req.role.as_deref()`.
+- Removed the old `TODO(arch)` comment.
+- Added `cascade_router_selects_model_when_request_is_empty`.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- `grep -q 'with_cascade_router' crates/roko-agent/src/model_call_service.rs`
+- `! grep -q 'TODO(arch): Route through CascadeRouter' crates/roko-agent/src/model_call_service.rs`
+- `cargo test -p roko-agent model_call_service`
+- `cargo test -p roko-agent cascade_router_selects_model`
+
+`Cargo.toml` was not changed because `roko-learn` already depends on `roko-agent`, so a normal dependency would create a cycle.
+diff --git a/crates/roko-agent/src/model_call_service.rs b/crates/roko-agent/src/model_call_service.rs
+index 0c0f73f952c7be86a0c9257a17f037beca66a60f..0b7b8668329d1a41b869d1aa75b34e4cbf2ddaa2
+--- a/crates/roko-agent/src/model_call_service.rs
++++ b/crates/roko-agent/src/model_call_service.rs
+@@ -18,6 +18,8 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
++
+ /// Service that calls LLM models via the existing provider infrastructure.
+ ///
+ /// This is the canonical way to call models in the workflow engine. It:
+@@ -36,6 +38,8 @@
+     event_consumers: Vec<Arc<dyn EventConsumer>>,
+     /// Optional sink for model-call feedback.
+     feedback_sink: Option<Arc<dyn FeedbackSink>>,
++    /// Optional model router used when requests omit an explicit model.
++    model_router: Option<Arc<ModelRouter>>,
+     /// Service-scoped environment entries passed into provider construction.
+     env: Vec<(String, String)>,
+     /// Optional base URL for OpenAI-compatible providers.
+@@ -54,6 +58,7 @@
+             cost_table: CostTable::default(),
+             event_consumers: Vec::new(),
+             feedback_sink: None,
++            model_router: None,
+             env: Vec::new(),
+             openai_base_url: None,
+             run_id: "model-call-service".to_string(),
+@@ -88,6 +93,16 @@
+         self
+     }
+ 
++    /// Attach a CascadeRouter-compatible callback for model selection.
++    #[must_use]
++    pub fn with_cascade_router<F>(mut self, router_fn: F) -> Self
++    where
++        F: Fn(Option<&str>) -> String + Send + Sync + 'static,
++    {
++        self.model_router = Some(Arc::new(router_fn));
++        self
++    }
++
+     /// Provide an Anthropic API key for service-created agents.
+     #[must_use]
+     pub fn with_anthropic_api_key(mut self, key: String) -> Self {
+@@ -112,8 +127,9 @@
+     /// Resolve which model to use for a request.
+     fn resolve_model(&self, req: &ModelCallRequest) -> String {
+         if req.model.is_empty() {
+-            // TODO(arch): Route through CascadeRouter once the service can receive
+-            // a router without making roko-agent depend on roko-learn.
++            if let Some(router) = &self.model_router {
++                return router(req.role.as_deref());
++            }
+             self.default_model.clone()
+         } else {
+             req.model.clone()
+@@ -400,6 +416,24 @@
+     }
+ 
+     #[tokio::test]
++    async fn cascade_router_selects_model_when_request_is_empty() {
++        let svc = ModelCallService::new("default".into()).with_cascade_router(|role| {
++            assert_eq!(role, Some("reviewer"));
++            "router-selected-model".to_string()
++        });
++        let req = ModelCallRequest {
++            model: String::new(),
++            system: None,
++            messages: vec![],
++            max_tokens: None,
++            temperature: None,
++            role: Some("reviewer".to_string()),
++        };
++
++        assert_eq!(svc.resolve_model(&req), "router-selected-model");
++    }
++
++    #[tokio::test]
+     async fn routes_claude_model_to_anthropic_api_when_key_set() {
+         let svc = ModelCallService::new("default".into()).with_anthropic_api_key("sk-test".into());
+         let req = ModelCallRequest {
+
+2026-04-28T03:50:34.496811Z ERROR codex_core::session: failed to record rollout items: thread 019dd232-2cb6-7890-9b9a-35e9cf055faa not found
+tokens used
+84,210
+Implemented S03 in [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:21).
+
+What changed:
+- Added a closure-based CascadeRouter hook to avoid the `roko-agent` -> `roko-learn` dependency cycle.
+- Added `with_cascade_router(...)`.
+- Updated `resolve_model` to use the router when `req.model` is empty, passing `req.role.as_deref()`.
+- Removed the old `TODO(arch)` comment.
+- Added `cascade_router_selects_model_when_request_is_empty`.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- `grep -q 'with_cascade_router' crates/roko-agent/src/model_call_service.rs`
+- `! grep -q 'TODO(arch): Route through CascadeRouter' crates/roko-agent/src/model_call_service.rs`
+- `cargo test -p roko-agent model_call_service`
+- `cargo test -p roko-agent cascade_router_selects_model`
+
+`Cargo.toml` was not changed because `roko-learn` already depends on `roko-agent`, so a normal dependency would create a cycle.
+
+=== Finished: 2026-04-28T05:50:34+02:00 ===
+=== Duration: 3m 58s ===
+=== Exit code: 0 ===
+[structural] grep -q 'CascadeRouter' crates/roko-agent/src/model_call_service.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/S03/verify-attempt-1 cargo check -p roko-agent
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.15.1
+    Checking pin-project-lite v0.2.17
+    Checking scopeguard v1.2.0
+   Compiling parking_lot_core v0.9.12
+    Checking once_cell v1.21.4
+    Checking memchr v2.8.0
+    Checking bytes v1.11.1
+    Checking core-foundation-sys v0.8.7
+    Checking futures-core v0.3.32
+   Compiling serde_core v1.0.228
+    Checking lock_api v0.4.14
+    Checking itoa v1.0.18
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+    Checking stable_deref_trait v1.2.1
+    Checking futures-sink v0.3.32
+    Checking equivalent v1.0.2
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+    Checking hashbrown v0.17.0
+   Compiling cc v1.2.60
+   Compiling getrandom v0.4.2
+   Compiling typenum v1.19.0
+    Checking zeroize v1.8.2
+    Checking slab v0.4.12
+    Checking futures-channel v0.3.32
+    Checking bitflags v2.11.0
+    Checking tracing-core v0.1.36
+    Checking futures-io v0.3.32
+    Checking futures-task v0.3.32
+    Checking http v1.4.0
+    Checking indexmap v2.14.0
+    Checking subtle v2.6.1
+   Compiling zmij v1.0.21
+    Checking litemap v0.8.2
+   Compiling semver v1.0.28
+    Checking writeable v0.6.3
+   Compiling httparse v1.10.1
+   Compiling rustc_version v0.4.1
+   Compiling rustix v1.1.4
+    Checking percent-encoding v2.3.2
+   Compiling zerocopy v0.8.48
+    Checking http-body v1.0.1
+   Compiling generic-array v0.14.9
+   Compiling icu_properties_data v2.2.0
+   Compiling autocfg v1.5.0
+   Compiling icu_normalizer_data v2.2.0
+    Checking utf8_iter v1.0.4
+   Compiling syn v2.0.117
+   Compiling system-configuration-sys v0.6.0
+   Compiling serde_json v1.0.149
+   Compiling curve25519-dalek v4.1.3
+    Checking rustls-pki-types v1.14.0
+    Checking tower-service v0.3.3
+    Checking fnv v1.0.7
+    Checking atomic-waker v1.1.2
+    Checking errno v0.3.14
+    Checking socket2 v0.6.3
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.0
+    Checking getrandom v0.2.17
+    Checking crypto-common v0.1.6
+    Checking parking_lot v0.12.5
+    Checking block-buffer v0.10.4
+    Checking try-lock v0.2.5
+    Checking untrusted v0.9.0
+    Checking digest v0.10.7
+    Checking want v0.3.1
+    Checking core-foundation v0.9.4
+    Checking security-framework-sys v2.17.0
+    Checking cpufeatures v0.2.17
+    Checking core-foundation v0.10.1
+    Checking aho-corasick v1.1.4
+   Compiling getrandom v0.3.4
+   Compiling num-traits v0.2.19
+   Compiling thiserror v2.0.18
+    Checking winnow v0.7.15
+   Compiling rustls v0.23.38
+   Compiling native-tls v0.2.18
+    Checking toml_write v0.1.2
+    Checking signature v2.2.0
+    Checking regex-syntax v0.8.10
+    Checking fastrand v2.4.1
+    Checking ed25519 v2.2.3
+    Checking security-framework v3.7.0
+    Checking uuid v1.23.0
+    Checking tempfile v3.27.0
+    Checking system-configuration v0.7.0
+    Checking sha2 v0.10.9
+    Checking iana-time-zone v0.1.65
+    Checking constant_time_eq v0.4.2
+    Checking arrayref v0.3.9
+    Checking ipnet v2.12.0
+    Checking base64 v0.22.1
+    Checking arrayvec v0.7.6
+   Compiling crossbeam-utils v0.8.21
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking webpki-roots v1.0.6
+    Checking http-body-util v0.1.3
+    Checking ed25519-dalek v2.2.0
+    Checking ryu v1.0.23
+    Checking iri-string v0.7.12
+    Checking rand_core v0.9.5
+   Compiling portable-atomic v1.13.1
+    Checking rand_core v0.6.4
+    Checking encoding_rs v0.8.35
+    Checking log v0.4.29
+    Checking hashbrown v0.14.5
+    Checking mime v0.3.17
+    Checking allocator-api2 v0.2.21
+    Checking foldhash v0.2.0
+    Checking spinning_top v0.3.0
+    Checking nonzero_ext v0.3.0
+    Checking web-time v1.1.0
+    Checking futures-timer v3.0.3
+    Checking hashbrown v0.16.1
+    Checking regex-automata v0.4.14
+    Checking dashmap v6.1.0
+    Checking quanta v0.12.6
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.4
+   Compiling synstructure v0.13.2
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking rand_chacha v0.3.1
+    Checking rand v0.9.3
+    Checking regex v1.12.3
+    Checking rand v0.8.5
+   Compiling zerofrom-derive v0.1.7
+   Compiling tokio-macros v2.7.0
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+    Checking rustls-webpki v0.103.11
+    Checking tokio v1.51.1
+    Checking futures-util v0.3.32
+    Checking tokio-util v0.7.18
+    Checking tracing v0.1.44
+    Checking tokio-rustls v0.26.4
+    Checking tokio-native-tls v0.3.1
+    Checking h2 v0.4.13
+    Checking tower v0.5.3
+    Checking futures-executor v0.3.32
+    Checking futures v0.3.32
+    Checking governor v0.10.4
+    Checking tower-http v0.6.8
+    Checking zerofrom v0.1.7
+    Checking yoke v0.8.2
+    Checking zerovec v0.11.6
+    Checking zerotrie v0.2.4
+    Checking hyper v1.9.0
+    Checking hyper-util v0.1.20
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking hyper-tls v0.6.0
+    Checking hyper-rustls v0.27.8
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking chrono v0.4.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking serde_urlencoded v0.7.1
+    Checking toml_edit v0.22.27
+    Checking icu_provider v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking icu_properties v2.2.0
+    Checking idna_adapter v1.2.1
+    Checking idna v1.1.0
+    Checking toml v0.8.23
+    Checking url v2.5.8
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking reqwest v0.12.28
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 43.08s
+[antipattern] ! grep -rn 'Command::new.*claude' crates/roko-agent/src/model_call_service.rs
+[antipattern] ! grep -rn 'format!.*You are' crates/roko-agent/src/model_call_service.rs

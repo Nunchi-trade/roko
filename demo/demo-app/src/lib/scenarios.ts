@@ -13,6 +13,21 @@ import {
   resetRokoResolution,
 } from '../hooks/useTerminalSession';
 import { PlaybackController, TimelineStepper } from './playback-controller';
+import {
+  normalizePipelineRouteTier,
+  normalizePipelineTaskStatus,
+  type PipelineDemoState,
+  type PipelineEvent,
+  type PipelinePhase,
+  type PipelinePlan,
+  type PipelineScenarioExample,
+  type PipelineTask,
+} from './prd-pipeline-types';
+import {
+  createPipelineIntroState,
+  getPipelineSampleState,
+  PIPELINE_EXAMPLES,
+} from './prd-pipeline-sample';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -28,6 +43,11 @@ export interface ScenarioContext {
   setMetric: (id: string, value: string) => void;
   setGate: (name: string, status: 'pass' | 'fail' | 'pending') => void;
   logCommand: (cmd: string, desc: string) => void;
+  setPipeline: (state: PipelineDemoState) => void;
+  patchPipeline: (patch: Partial<PipelineDemoState>) => void;
+  updatePipelineTask: (planId: string, taskId: string, patch: Partial<PipelineTask>) => void;
+  appendPipelineEvent: (event: PipelineEvent) => void;
+  pipelineExample: PipelineScenarioExample;
   paused: { current: boolean };
   running: { current: boolean };
 }
@@ -55,7 +75,537 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
+function compactTime(): string {
+  return new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+let pipelineEventSeq = 0;
+
+function pipelineEvent(
+  phase: PipelinePhase,
+  text: string,
+  kind: PipelineEvent['kind'] = 'info',
+): PipelineEvent {
+  pipelineEventSeq += 1;
+  return {
+    id: `pipe-${Date.now()}-${pipelineEventSeq}`,
+    ts: compactTime(),
+    phase,
+    text,
+    kind,
+  };
+}
+
+interface SnapshotPrd {
+  slug: string;
+  title: string;
+  path?: string;
+  status: 'idea' | 'draft' | 'published' | 'planned';
+  excerpt: string;
+  requirements: string[];
+  acceptance: string[];
+}
+
+interface SnapshotVerify {
+  phase?: string;
+  command?: string;
+  fail_msg?: string;
+}
+
+interface SnapshotTask {
+  id: string;
+  title: string;
+  description?: string;
+  status?: string;
+  route_tier?: string;
+  routing_tier?: string;
+  tier?: string;
+  role?: string;
+  model_hint?: string;
+  max_loc?: number;
+  files?: string[];
+  depends_on?: string[];
+  verify?: SnapshotVerify[];
+}
+
+interface SnapshotPlan {
+  id: string;
+  title: string;
+  path?: string;
+  status?: string;
+  excerpt: string;
+  estimated_minutes?: number;
+  tasks: SnapshotTask[];
+}
+
+interface PipelineSnapshot {
+  prd?: SnapshotPrd;
+  plans: SnapshotPlan[];
+}
+
+function snapshotToPlans(snapshot: PipelineSnapshot): PipelinePlan[] {
+  return snapshot.plans.map((plan) => {
+    const tasks: PipelineTask[] = plan.tasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      status: normalizePipelineTaskStatus(task.status),
+      rawStatus: task.status,
+      routeTier: normalizePipelineRouteTier(
+        task.route_tier ?? task.routing_tier ?? task.tier,
+        task.model_hint,
+        task.role,
+        task.max_loc,
+        task.verify?.length ?? 0,
+      ),
+      tier: task.tier,
+      role: task.role,
+      modelHint: task.model_hint,
+      maxLoc: task.max_loc,
+      files: task.files ?? [],
+      dependsOn: task.depends_on ?? [],
+      verify: (task.verify ?? [])
+        .filter((step) => step.command)
+        .map((step) => ({
+          phase: step.phase ?? 'verify',
+          command: step.command ?? '',
+          failMsg: step.fail_msg,
+        })),
+    }));
+    const done = tasks.filter((task) => task.status === 'done').length;
+    const active = tasks.some((task) => task.status === 'active');
+    const failed = tasks.some((task) => task.status === 'failed');
+    return {
+      id: plan.id,
+      title: plan.title,
+      path: plan.path,
+      status: failed ? 'failed' : done === tasks.length && tasks.length > 0 ? 'complete' : active ? 'active' : 'pending',
+      excerpt: plan.excerpt,
+      estimatedMinutes: plan.estimated_minutes,
+      tasks,
+    };
+  });
+}
+
+function applySnapshot(
+  ctx: ScenarioContext,
+  snapshot: PipelineSnapshot,
+  phase: PipelinePhase,
+  headline: string,
+  currentCommand?: string,
+) {
+  ctx.patchPipeline({
+    source: 'live',
+    phase,
+    headline,
+    example: ctx.pipelineExample,
+    currentCommand,
+    prd: snapshot.prd,
+    plans: snapshotToPlans(snapshot),
+    lastUpdated: compactTime(),
+  });
+}
+
+function artifactScrapeScript(): string {
+  return String.raw`
+import json
+import pathlib
+import re
+
+try:
+    import tomllib
+except Exception:
+    tomllib = None
+
+root = pathlib.Path(".")
+
+def read(path, limit=5000):
+    try:
+        text = pathlib.Path(path).read_text(errors="replace")
+    except Exception:
+        return ""
+    return text[:limit]
+
+def newest(paths):
+    paths = [p for p in paths if p.exists()]
+    if not paths:
+        return None
+    return max(paths, key=lambda p: p.stat().st_mtime)
+
+def section_items(md, names):
+    lines = md.splitlines()
+    active = False
+    items = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            title = stripped[3:].strip().lower()
+            active = any(name in title for name in names)
+            continue
+        if active and stripped.startswith(("- ", "* ", "+ ")):
+            item = stripped[2:].strip()
+            if item and len(items) < 6:
+                items.append(item)
+    return items
+
+def title_from(md, fallback):
+    for line in md.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return fallback
+
+def excerpt(md):
+    body = []
+    fence = chr(96) * 3
+    for line in md.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("---") or stripped.startswith("#"):
+            continue
+        if stripped.startswith(("- ", "* ", "+ ", "|", fence)):
+            continue
+        body.append(stripped)
+        if len(" ".join(body)) > 520:
+            break
+    return " ".join(body)[:620]
+
+published = newest(list(root.glob(".roko/prd/published/*.md")))
+draft = newest(list(root.glob(".roko/prd/drafts/*.md")))
+prd_path = published or draft
+prd = None
+if prd_path:
+    md = read(prd_path, 12000)
+    status = "published" if "published" in prd_path.parts else "draft"
+    if list(root.glob(".roko/plans/*/tasks.toml")):
+        status = "planned"
+    prd = {
+        "slug": prd_path.stem,
+        "title": title_from(md, prd_path.stem.replace("-", " ").title()),
+        "path": str(prd_path),
+        "status": status,
+        "excerpt": excerpt(md),
+        "requirements": section_items(md, ["requirement", "requirements"]),
+        "acceptance": section_items(md, ["acceptance", "criteria"]),
+    }
+
+plans = []
+for plan_dir in sorted([p for p in root.glob(".roko/plans/*") if p.is_dir()]):
+    task_path = plan_dir / "tasks.toml"
+    plan_md_path = plan_dir / "plan.md"
+    plan_md = read(plan_md_path, 7000)
+    tasks = []
+    estimated = None
+    status = "pending"
+    if task_path.exists() and tomllib is not None:
+        try:
+            data = tomllib.loads(read(task_path, 200000))
+            meta = data.get("meta", {})
+            estimated = meta.get("estimated_total_minutes")
+            status = meta.get("status", "pending")
+            for t in data.get("task", [])[:24]:
+                verify = []
+                for step in t.get("verify", [])[:4]:
+                    verify.append({
+                        "phase": step.get("phase", "verify"),
+                        "command": step.get("command", ""),
+                        "fail_msg": step.get("fail_msg"),
+                    })
+                tasks.append({
+                    "id": str(t.get("id", "")),
+                    "title": str(t.get("title", "Untitled task")),
+                    "description": t.get("description"),
+                    "status": str(t.get("status", "pending")),
+                    "route_tier": t.get("route_tier") or t.get("routing_tier"),
+                    "tier": t.get("tier"),
+                    "role": t.get("role"),
+                    "model_hint": t.get("model_hint"),
+                    "max_loc": t.get("max_loc"),
+                    "files": t.get("files", []),
+                    "depends_on": t.get("depends_on", []),
+                    "verify": verify,
+                })
+        except Exception as exc:
+            tasks.append({
+                "id": "parse",
+                "title": "tasks.toml parse failed",
+                "status": "failed",
+                "description": str(exc),
+                "files": [str(task_path)],
+                "depends_on": [],
+                "verify": [],
+            })
+    plans.append({
+        "id": plan_dir.name,
+        "title": title_from(plan_md, plan_dir.name.replace("-", " ").title()),
+        "path": str(plan_dir),
+        "status": status,
+        "excerpt": excerpt(plan_md),
+        "estimated_minutes": estimated,
+        "tasks": tasks,
+    })
+
+print("__ROKO_PIPELINE_JSON__" + json.dumps({"prd": prd, "plans": plans}) + "__ROKO_PIPELINE_END__")
+`;
+}
+
+async function capturePipelineSnapshot(handle: TerminalHandle): Promise<PipelineSnapshot | null> {
+  const script = artifactScrapeScript();
+  const encoded = btoa(script);
+  const cmd = `python3 -c "import base64; exec(base64.b64decode('${encoded}'))"`;
+  handle.outputBuffer = '';
+  handle.sendRaw(`${cmd}\r`);
+  const ok = await handle.waitForMarker('__ROKO_PIPELINE_END__', 15000);
+  if (!ok) return null;
+  const text = stripAnsi(handle.getOutputBuffer());
+  const match = text.match(/__ROKO_PIPELINE_JSON__(.*?)__ROKO_PIPELINE_END__/s);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]) as PipelineSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+async function captureAndApply(
+  ctx: ScenarioContext,
+  handle: TerminalHandle,
+  phase: PipelinePhase,
+  headline: string,
+  currentCommand?: string,
+): Promise<PipelineSnapshot | null> {
+  const snapshot = await capturePipelineSnapshot(handle);
+  if (snapshot) applySnapshot(ctx, snapshot, phase, headline, currentCommand);
+  return snapshot;
+}
+
+async function monitorImplementation(
+  ctx: ScenarioContext,
+  handle: TerminalHandle,
+  isDone: () => boolean,
+) {
+  let projectedIndex = 0;
+  while (!isDone() && ctx.running.current) {
+    const snapshot = await capturePipelineSnapshot(handle);
+    if (snapshot) {
+      applySnapshot(ctx, snapshot, 'implementing', 'Roko is implementing generated tasks');
+      const plans = snapshotToPlans(snapshot);
+      const flat = plans.flatMap((plan) => plan.tasks.map((task) => ({ plan, task })));
+      const activeCount = flat.filter(({ task }) => task.status === 'active').length;
+      const pending = flat.filter(({ task }) => task.status === 'pending');
+      if (activeCount === 0 && pending.length > 0) {
+        const item = pending[projectedIndex % pending.length];
+        ctx.updatePipelineTask(item.plan.id, item.task.id, { status: 'active' });
+        projectedIndex += 1;
+      }
+    }
+    await rawSleep(4000);
+  }
+}
+
+function rustSetupCommand(example: PipelineScenarioExample): string {
+  const name = example.repoName.replace(/[^a-zA-Z0-9_]/g, '_');
+  return [
+    'mkdir -p src',
+    `printf '[package]\\nname = "${name}"\\nversion = "0.1.0"\\nedition = "2021"\\n\\n[dependencies]\\n' > Cargo.toml`,
+    `printf 'fn main() {\\n    println!("${example.label} demo");\\n}\\n' > src/main.rs`,
+    'cargo test',
+  ].join(' && ');
+}
+
+function sampleFallback(ctx: ScenarioContext, phase: PipelinePhase, text: string) {
+  const sample = getPipelineSampleState(ctx.pipelineExample.id);
+  ctx.setPipeline({
+    ...sample,
+    events: [
+      ...sample.events,
+      pipelineEvent(phase, text, 'warning'),
+    ],
+  });
+}
+
 // ── Scenarios ───────────────────────────────────────────────
+
+const prdPipeline: Scenario = {
+  id: 'prd-pipeline',
+  title: 'PRD Pipeline',
+  subtitle: 'Pick an example, generate the PRD, generate tasks.toml, then watch routing and gates.',
+  panes: 2,
+  labels: ['roko commands', 'artifact monitor'],
+  panel: true,
+  promptBar: false,
+  steps: [
+    { label: 'Capture job', sublabel: 'prd idea' },
+    { label: 'Generate PRD', sublabel: 'prd draft new' },
+    { label: 'Publish PRD', sublabel: 'draft promote' },
+    { label: 'Generate tasks', sublabel: 'prd plan' },
+    { label: 'Execute gates', sublabel: 'plan run' },
+  ],
+  async run(ctx) {
+    const { entries, playback, timeline, setMetric, setGate, logCommand } = ctx;
+    const [main, monitor] = entries;
+    const example = ctx.pipelineExample ?? PIPELINE_EXAMPLES[0];
+
+    ctx.setPipeline({
+      ...createPipelineIntroState(example),
+      source: 'live',
+      phase: 'setup',
+      headline: `Creating a workspace for ${example.label}`,
+      events: [pipelineEvent('setup', `Starting live PRD pipeline for ${example.label}.`)],
+    });
+
+    const dir = await setupWorkspace(main, example.workspacePrefix);
+    await joinWorkspace(monitor, dir);
+    const ROKO = getRoko();
+    timeline.init(this.steps);
+    setMetric('model', 'T1/T2/T3');
+
+    const setupCmd = rustSetupCommand(example);
+    playback.setProgress(0, 5, `preparing ${example.label}`);
+    ctx.patchPipeline({
+      phase: 'setup',
+      headline: `Seeding ${example.setupDescription}`,
+      currentCommand: setupCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('setup', `${example.setupDescription} This is setup, not the customer-facing demo step.`));
+    logCommand('prepare workspace', 'Creates a small Rust CLI so the generated PRD and plan target real files.');
+    await main.execCmd(setupCmd, 90000);
+    main.clearTerminal();
+
+    await playback.waitForStep();
+    const ideaCmd = `${ROKO} prd idea "${example.idea}"`;
+    playback.setProgress(1, 5, ideaCmd);
+    timeline.setActive(0);
+    ctx.patchPipeline({
+      phase: 'idea',
+      headline: `Capturing the job Roko will turn into a PRD`,
+      currentCommand: ideaCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('idea', 'Idea captured into .roko/prd/ideas.md.'));
+    await showCmd(main, ideaCmd, { timeout: 45000, onLog: logCommand });
+    setMetric('tokens', 'idea');
+
+    let livePrdSlug = example.slug;
+    await playback.waitForStep();
+    const draftCmd = `${ROKO} prd draft new "${example.prdTitle}"`;
+    playback.setProgress(2, 5, draftCmd);
+    timeline.setActive(1);
+    ctx.patchPipeline({
+      phase: 'draft',
+      headline: 'Generating a structured PRD',
+      currentCommand: draftCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('draft', 'Dispatching PRD writer agent.'));
+    const draftResult = await showCmd(main, draftCmd, {
+      timeout: 180000,
+      onLog: logCommand,
+      customDesc: 'Runs the PRD generator agent. The artifact monitor reads the resulting draft markdown from .roko/prd/drafts/.',
+    });
+    const draftSnapshot = await captureAndApply(
+      ctx,
+      monitor,
+      'draft',
+      'Structured PRD generated',
+      draftCmd,
+    );
+    if (!draftResult.ok || !draftSnapshot?.prd) {
+      ctx.appendPipelineEvent(pipelineEvent('draft', 'PRD agent did not produce a readable draft; switching to bundled sample.', 'warning'));
+      sampleFallback(ctx, 'failed', 'Live PRD generation was unavailable in this environment.');
+      return;
+    }
+    livePrdSlug = draftSnapshot.prd.slug || example.slug;
+    setMetric('cost', '$ live');
+
+    await playback.waitForStep();
+    const promoteCmd = `${ROKO} prd draft promote ${livePrdSlug}`;
+    playback.setProgress(3, 5, promoteCmd);
+    timeline.setActive(2);
+    ctx.patchPipeline({
+      phase: 'published',
+      headline: 'Publishing the PRD',
+      currentCommand: promoteCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('published', 'Promoting draft PRD into the published set.'));
+    await showCmd(main, promoteCmd, { timeout: 120000, onLog: logCommand });
+    await captureAndApply(ctx, monitor, 'published', 'PRD published and ready for planning', promoteCmd);
+
+    await playback.waitForStep();
+    const planCmd = `${ROKO} prd plan ${livePrdSlug}`;
+    playback.setProgress(4, 5, planCmd);
+    timeline.setActive(3);
+    ctx.patchPipeline({
+      phase: 'planning',
+      headline: 'Generating plan directories and tasks.toml',
+      currentCommand: planCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('planning', 'Planner agent is generating plan.md and tasks.toml.'));
+    const planResult = await showCmd(main, planCmd, {
+      timeout: 240000,
+      onLog: logCommand,
+      customDesc: 'Generates implementation plan directories under .roko/plans/ with modern tasks.toml metadata and verify commands.',
+    });
+    const planSnapshot = await captureAndApply(
+      ctx,
+      monitor,
+      'tasks',
+      'Generated tasks, gates, and routing are ready to execute',
+      planCmd,
+    );
+    if (!planResult.ok || !planSnapshot || planSnapshot.plans.length === 0) {
+      ctx.appendPipelineEvent(pipelineEvent('planning', 'Plan generation did not produce tasks; switching to bundled sample.', 'warning'));
+      sampleFallback(ctx, 'failed', 'Live plan generation was unavailable in this environment.');
+      return;
+    }
+
+    await playback.waitForStep();
+    const runCmd = `${ROKO} plan run .roko/plans --max-retries 1`;
+    playback.setProgress(5, 5, runCmd);
+    timeline.setActive(4);
+    ctx.patchPipeline({
+      phase: 'implementing',
+      headline: `Roko is implementing ${example.label}`,
+      currentCommand: runCmd,
+    });
+    ctx.appendPipelineEvent(pipelineEvent('implementing', 'Starting real plan execution. Task states update from tasks.toml.', 'success'));
+
+    let runDone = false;
+    const monitorLoop = monitorImplementation(ctx, monitor, () => runDone);
+    const runResult = await showCmd(main, runCmd, {
+      timeout: 420000,
+      onLog: logCommand,
+      onGate: setGate,
+      customDesc: 'Executes the generated plans through the Roko runner. The task board follows status changes from the generated tasks.toml files.',
+    });
+    runDone = true;
+    await monitorLoop;
+    const finalSnapshot = await capturePipelineSnapshot(monitor);
+    if (finalSnapshot) {
+      applySnapshot(
+        ctx,
+        finalSnapshot,
+        runResult.ok ? 'complete' : 'failed',
+        runResult.ok ? 'Generated tasks completed' : 'Plan run ended with failures',
+        runCmd,
+      );
+    } else {
+      ctx.patchPipeline({
+        phase: runResult.ok ? 'complete' : 'failed',
+        headline: runResult.ok ? 'Generated tasks completed' : 'Plan run ended with failures',
+      });
+    }
+    ctx.appendPipelineEvent(
+      pipelineEvent(
+        runResult.ok ? 'complete' : 'failed',
+        runResult.ok ? 'Implementation run finished.' : 'Implementation run returned a non-ready prompt or failure.',
+        runResult.ok ? 'success' : 'error',
+      ),
+    );
+    timeline.setActive(6);
+  },
+};
 
 const selfhost: Scenario = {
   id: 'selfhost',
@@ -435,6 +985,7 @@ const mirage: Scenario = {
 // ── Export ───────────────────────────────────────────────────
 
 export const SCENARIOS: Scenario[] = [
+  prdPipeline,
   selfhost,
   builder,
   race,

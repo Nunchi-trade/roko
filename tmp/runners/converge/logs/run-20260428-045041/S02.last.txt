@@ -1,0 +1,18 @@
+Implemented S02 in [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:39).
+
+Changes:
+- Added `with_anthropic_api_key` and `with_openai_base_url`.
+- Added service-scoped env storage and passes it through `AgentOptions.env`.
+- Builds a call-local config that injects:
+  - `anthropic` provider + minimal Claude model profile when `ANTHROPIC_API_KEY` is provided.
+  - `openai-compat` provider + minimal non-Claude model profile when an OpenAI-compatible base URL is provided.
+- Added `routes_claude_model_to_anthropic_api_when_key_set`.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- `grep -q 'with_anthropic_api_key' ...`
+- `grep -q 'with_openai_base_url' ...`
+- `cargo test -p roko-agent model_call_service`
+- `cargo test -p roko-agent routes_claude_model_to_anthropic_api`
+
+Note: `crates/roko-agent/src/translate/mod.rs` was already modified in the worktree; I did not touch it.

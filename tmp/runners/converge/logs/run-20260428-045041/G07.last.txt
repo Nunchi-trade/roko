@@ -1,0 +1,8 @@
+Implemented G07 in [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs): added internal `CacheCell` and `BudgetCell`, wired cache lookup before provider execution, force-refresh eviction, post-call cache storage, cumulative cost recording, and per-call token/cost budget checks.
+
+Verification passed:
+
+- `cargo check -p roko-agent`
+- `cargo test -p roko-agent model_call_service`
+
+The targeted test run passed with existing missing-doc warnings in integration test crates.

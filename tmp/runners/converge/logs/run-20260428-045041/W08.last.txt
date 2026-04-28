@@ -1,0 +1,12 @@
+Implemented the WorkflowEngine RuntimeEvent SSE wiring.
+
+Changed:
+- Added `SseAdapter::subscriber_count()` and `sse_event_consumer()` in [adapters.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/adapters.rs:44).
+- Added adapter broadcast tests in [adapters.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/adapters.rs:218).
+- Registered `/api/workflow/events` in [routes/mod.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/mod.rs:100).
+- Added `AppState::sse_adapter` and initialized it with `SseAdapter::new(256)` in [state.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/state.rs:365). This was necessary because the field did not exist yet.
+
+Verification:
+- Grep done criteria passed.
+- `cargo check -p roko-serve` passed.
+- `cargo test -p roko-serve --lib` failed before test execution due existing out-of-scope test compile errors in `crates/roko-serve/src/dreams.rs`: several `DreamCycleReport` initializers are missing `cross_episode_report` and `routing_recommendations`.

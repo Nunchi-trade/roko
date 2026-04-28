@@ -1,0 +1,7 @@
+Implemented P0B foundation traits in [foundation.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-core/src/foundation.rs) and wired the module/re-exports in [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-core/src/lib.rs).
+
+One compatibility note: crate root already exports `chat_types::ChatMessage`, so I re-exported the new foundation message type as `FoundationChatMessage`; it is also available directly as `roko_core::foundation::ChatMessage`.
+
+Verification passed:
+- Required grep checks
+- `cargo check -p roko-core`

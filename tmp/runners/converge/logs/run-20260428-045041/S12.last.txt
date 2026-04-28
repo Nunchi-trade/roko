@@ -1,0 +1,16 @@
+Implemented S12 in [gate_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-gate/src/gate_service.rs).
+
+Changes:
+- Added rung mappings for `diff`, `fmt`, `custom`, and `judge`.
+- Wired `diff` to `git diff --stat`, `custom` to a temporary `true` shell gate, and `judge` to private `StubJudgeGate`.
+- Added a local `FormatCheckGate` adapter that delegates `cargo fmt --check` through `ShellGate`; the existing `format_check_gate.rs` is not exposed by `lib.rs`, and including it directly does not compile in this worktree.
+- Added the four requested unit tests for rung coverage, gate lookup, ordering, and `max_rung` filtering.
+
+Verification passed:
+- `cargo check -p roko-gate`
+- `cargo test -p roko-gate gate_service`
+- `cargo test -p roko-gate rung_mapping_covers`
+- `cargo test -p roko-gate gate_for_name_returns`
+- `cargo test -p roko-gate orders_all_seven`
+- `cargo test -p roko-gate max_rung_filters_higher`
+- Static grep checks for `diff`, `fmt`, `custom`, `judge`, and `StubJudgeGate`

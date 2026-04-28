@@ -1,0 +1,10 @@
+Implemented the opt-in `legacy-orchestrate` feature in [Cargo.toml](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/Cargo.toml:13). No default feature was added.
+
+Verification passed:
+- `grep -q '\[features\]' crates/roko-cli/Cargo.toml`
+- `grep -q 'legacy-orchestrate' crates/roko-cli/Cargo.toml`
+- `! grep -q 'default.*legacy-orchestrate' crates/roko-cli/Cargo.toml`
+- `cargo check -p roko-cli`
+- `cargo check -p roko-cli --features legacy-orchestrate`
+
+Only existing warning observed: missing docs in `roko-serve` build script.

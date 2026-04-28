@@ -1,0 +1,2493 @@
+=== Batch: A01 (RuntimeEvent serde envelope with run id, sequence, timestamp, schema version) ===
+=== Started: 2026-04-28T23:15:45+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01 ===
+=== Model: gpt-5.5 ===
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd5f2-b330-7e13-8a12-32c6887b0763
+--------
+user
+# Batch A01 — RuntimeEvent serde envelope with run id, sequence, timestamp, schema version
+
+Run: run-20260428-231543 | Attempt: 1 | Model: gpt-5.5
+
+---
+
+# Rules
+
+You are modifying a Rust workspace (`roko`) with 18 crates. Follow these rules strictly.
+
+## Mandatory
+
+1. **One implementation, one code path.** Never duplicate traits, types, or logic that exists elsewhere.
+   Before defining anything, check `crates/roko-core/src/foundation.rs` — if it's there, import it.
+
+2. **Wire, don't build.** If the type/trait/function exists but isn't called, wire it in. Don't create
+   a new version. The codebase already has what you need — connect it.
+
+3. **No stubs that silently pass.** Never return `Ok(())`, `true`, `Verdict::pass`, or empty success
+   without doing real work. If functionality isn't ready, return an explicit error.
+
+4. **No empty string placeholders.** Never emit events or create requests with `String::new()` for
+   fields like `agent_id`, `model`, or `checkpoint_path`. Use `Option<String>` if the value may be
+   absent, or fill it with the real value.
+
+5. **No debug strings as data contracts.** Never use `format!("{:?}", event)` as a serialization
+   format. Use `serde_json::to_string(&event)` with proper `Serialize`/`Deserialize` derives.
+
+6. **Typed outcomes, not success-carrying-errors.** Don't encode errors inside success variants
+   (e.g., `CommitDone { hash: "error: ..." }`). Use `Result<T, E>` or typed enums.
+
+7. **Foundation types are canonical.** `crates/roko-core/src/foundation.rs` owns:
+   `ModelCallRequest`, `ModelCallResult`, `ModelCaller`, `PromptSpec`, `PromptAssembler`,
+   `FeedbackEvent`, `FeedbackSink`, `GateConfig`, `GateService`, `EventConsumer`, `Effect`,
+   `EffectExecutor`, `AffectPolicy`, `DispatchModulation`.
+   Do NOT define local copies of these in any other crate.
+
+8. **Preserve public API.** Don't change function signatures that are called from other crates
+   unless you also update all callers. `cargo check --workspace` must pass.
+
+## Style
+
+- Follow existing code style. Use `anyhow::Result` for errors in CLI/runtime, typed errors in core.
+- Derive `Serialize, Deserialize` for anything that crosses a persistence boundary.
+- Use `tokio::sync::Mutex` (never `std::sync::Mutex`) when the guard is held across `.await`.
+- Don't add unnecessary dependencies. Prefer what's already in `Cargo.toml`.
+- Don't add doc comments, tests, or clippy annotations unless the batch specifically asks for them.
+- Keep changes minimal. Only modify what the batch prompt asks for.
+
+---
+
+# Architecture
+
+## Crate Layers
+
+```
+Layer 0 (kernel):  roko-core          — Signal, 6 verb traits, foundation types, RuntimeEvent
+Layer 1 (support): roko-fs, roko-primitives, roko-neuro, roko-dreams, roko-daimon, roko-index
+Layer 2 (domain):  roko-agent, roko-gate, roko-compose, roko-learn, roko-orchestrator, roko-conductor
+Layer 3 (runtime): roko-runtime       — WorkflowEngine, PipelineState, EffectDriver, JsonlLogger
+Layer 4 (surface): roko-cli, roko-serve, roko-agent-server, roko-mcp-*
+```
+
+Dependencies flow downward only. Layer 3 uses Layer 0 types for events and contracts.
+Layer 4 constructs services from Layer 2 and runs them through Layer 3.
+
+## Key Types
+
+| Type | Crate | Role |
+|------|-------|------|
+| `RuntimeEvent` | roko-core | Durable event envelope for workflow lifecycle |
+| `ModelCallRequest` | roko-core | Full inference request contract |
+| `ModelCallResult` | roko-core | Inference response with metadata |
+| `AffectPolicy` | roko-core | Dispatch modulation from affect engine |
+| `DispatchModulation` | roko-core | Concrete modulation values |
+| `FeedbackEvent` | roko-core | Learning event for episodes/metrics |
+| `FeedbackSink` | roko-core | Trait for recording feedback |
+| `WorkflowEngine` | roko-runtime | Runs workflow pipelines |
+| `EffectDriver` | roko-runtime | Executes typed effects (spawn, gate, commit) |
+| `PipelineState` | roko-runtime | Workflow phase state machine |
+| `ModelCallService` | roko-agent | Inference gateway (routing, cache, budget) |
+| `PromptAssemblyService` | roko-compose | Dynamic prompt builder |
+| `FeedbackService` | roko-learn | Episode recording, efficiency metrics |
+| `GateService` | roko-gate | Gate pipeline execution |
+
+## Intended Flow (v2)
+
+```
+Entry point (CLI/server/ACP)
+  → ServiceFactory constructs services
+  → WorkflowEngine drives PipelineState
+  → EffectDriver executes effects:
+      → PromptAssemblyService assembles prompt
+      → ModelCallService dispatches to provider
+      → GateService runs gates
+      → FeedbackService records outcomes
+  → WorkflowRunReport returned to entry point
+  → Entry point uses report for CLI output, sharing, StateHub
+```
+
+## Current Reality
+
+- Entry points construct services independently (CLI in `run.rs:480-547`, server in `state.rs:479-482`)
+- `EffectDriver` has local policy traits instead of using core foundation
+- `WorkflowEngine` emits empty/duplicate lifecycle events
+- `JsonlLogger` writes debug strings, `RuntimeProjection` parses them back
+- Legacy `run_once`, `dispatch_agent`, and `orchestrate.rs` remain reachable
+- `--share` doesn't work on the default v2 path
+- Plan execution uses an env-gated adapter inside legacy orchestration
+
+---
+
+# Anti-Patterns To Avoid
+
+These are the specific anti-patterns the converge runner introduced or preserved.
+Your changes must not introduce any of these. The runner checks for them automatically.
+
+## AP-1: Stubs That Silently Pass
+
+**BAD:**
+```rust
+fn run_gate(&self, config: &GateConfig) -> Result<GateResult> {
+    Ok(GateResult { passed: true, ..Default::default() }) // stub
+}
+```
+
+**GOOD:**
+```rust
+fn run_gate(&self, config: &GateConfig) -> Result<GateResult> {
+    anyhow::bail!("custom gate not yet configured: {:?}", config.name)
+}
+```
+
+## AP-2: `block_on` Inside Async
+
+**BAD:** `futures::executor::block_on(async_fn())` inside a tokio runtime — panics.
+**GOOD:** Use `.await` directly or `tokio::task::spawn_blocking`.
+
+## AP-3: Duplicate Trait Definitions
+
+**BAD:** Defining `pub trait AffectPolicy` in `effect_driver.rs` when it exists in `foundation.rs`.
+**GOOD:** `use roko_core::foundation::AffectPolicy;`
+
+## AP-4: Computed But Unused Values
+
+**BAD:**
+```rust
+let modulation = policy.modulate(&context);
+// modulation never used
+```
+
+**GOOD:** Apply the result or don't compute it.
+
+## AP-5: Shell Out To Claude/Codex CLI
+
+**BAD:** `Command::new("claude")` for model inference at runtime.
+**GOOD:** Use `ModelCallService` with the appropriate provider.
+
+## AP-6: Inline Prompt Strings
+
+**BAD:** `format!("You are a helpful assistant...")` in dispatch code.
+**GOOD:** Use `PromptAssemblyService` with templates.
+
+## AP-7: `std::sync::Mutex` Held Across `.await`
+
+**BAD:**
+```rust
+let guard = std_mutex.lock().unwrap();
+some_async_fn().await; // guard still held — deadlock risk
+```
+
+**GOOD:** Use `tokio::sync::Mutex` or drop the guard before `.await`.
+
+## AP-8: Debug Strings As Event Contracts
+
+**BAD:** `writeln!(file, "{event:?}")` then parsing `Debug` output back into state.
+**GOOD:** `serde_json::to_string(&event)` then `serde_json::from_str`.
+
+## AP-9: Empty String Placeholders In Events
+
+**BAD:** `RuntimeEvent::AgentSpawned { agent_id: String::new(), model: String::new() }`
+**GOOD:** Use `Option<String>` or fill with the actual value from the effect/request.
+
+## AP-10: Success Variants Carrying Error State
+
+**BAD:** `CommitDone { hash: "error: git commit failed".into() }`
+**GOOD:** Return `Err(...)` or use a typed enum with `CommitFailed` variant.
+
+---
+
+# Execution Strategy
+
+## Use Maximum Parallelism
+
+You have access to subagents. **Use them aggressively** to complete this batch as fast as possible.
+
+### How to parallelize
+
+1. **Read all scope files and also_read files simultaneously** at the start — don't read them one at a time.
+2. **If the batch modifies multiple files**, plan all changes first, then apply them in parallel using subagents — one per file or logical change group.
+3. **Run verification commands in parallel** (e.g., `cargo check -p crate1` and `cargo check -p crate2` at the same time).
+4. **Don't wait for one edit to complete before starting the next** if they're in different files.
+
+### Speed guidelines
+
+- Do NOT run `cargo test`, `cargo clippy`, or full `cargo check --workspace` — only run per-crate `cargo check -p <crate>` if you need to verify your changes compile.
+- Do NOT write tests unless the batch prompt explicitly asks for tests.
+- Do NOT add doc comments, type annotations, or refactor surrounding code.
+- Make the minimal changes described in the batch prompt. Nothing more.
+- Prefer `cargo check -p <specific-crate>` over `cargo check --workspace` — it's 10x faster.
+
+---
+
+---
+
+## Current file contents (live from worktree)
+
+### `crates/roko-core/src/runtime_event.rs`
+
+```rust
+//! Runtime events emitted by the workflow engine.
+//!
+//! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+//! consume these via `EventBus<RuntimeEvent>`.
+
+use std::fmt;
+
+/// Outcome of a completed workflow run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowOutcome {
+    /// Workflow completed successfully, optionally with a commit hash.
+    Success { commit_hash: Option<String> },
+    /// Workflow halted due to an error or resource limit.
+    Halted { reason: String },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+/// Every event the workflow engine can emit.
+///
+/// These events are fire-and-forget: the engine emits them and does not wait
+/// for observers to process them. Observers subscribe via
+/// `EventBus<RuntimeEvent>`.
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    // Lifecycle
+    WorkflowStarted {
+        run_id: String,
+        template: String,
+        prompt: String,
+    },
+    PhaseTransition {
+        run_id: String,
+        from: String,
+        to: String,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        outcome: WorkflowOutcome,
+    },
+
+    // Agent
+    AgentSpawned {
+        run_id: String,
+        agent_id: String,
+        role: String,
+        model: String,
+    },
+    AgentOutput {
+        run_id: String,
+        agent_id: String,
+        chunk: String,
+    },
+    AgentCompleted {
+        run_id: String,
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+    },
+    AgentFailed {
+        run_id: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // Gates
+    GateStarted {
+        run_id: String,
+        gate_name: String,
+        rung: u8,
+    },
+    GatePassed {
+        run_id: String,
+        gate_name: String,
+        duration_ms: u64,
+    },
+    GateFailed {
+        run_id: String,
+        gate_name: String,
+        output: String,
+        duration_ms: u64,
+    },
+
+    // Feedback
+    FeedbackRecorded {
+        run_id: String,
+        kind: String,
+        summary: String,
+    },
+
+    // Persistence
+    StateCheckpointed {
+        run_id: String,
+        path: String,
+    },
+}
+
+impl RuntimeEvent {
+    /// Returns the run_id common to all event variants.
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::WorkflowStarted { run_id, .. }
+            | Self::PhaseTransition { run_id, .. }
+            | Self::WorkflowCompleted { run_id, .. }
+            | Self::AgentSpawned { run_id, .. }
+            | Self::AgentOutput { run_id, .. }
+            | Self::AgentCompleted { run_id, .. }
+            | Self::AgentFailed { run_id, .. }
+            | Self::GateStarted { run_id, .. }
+            | Self::GatePassed { run_id, .. }
+            | Self::GateFailed { run_id, .. }
+            | Self::FeedbackRecorded { run_id, .. }
+            | Self::StateCheckpointed { run_id, .. } => run_id,
+        }
+    }
+
+    /// Human-readable event kind label.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkflowStarted { .. } => "workflow_started",
+            Self::PhaseTransition { .. } => "phase_transition",
+            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::AgentSpawned { .. } => "agent_spawned",
+            Self::AgentOutput { .. } => "agent_output",
+            Self::AgentCompleted { .. } => "agent_completed",
+            Self::AgentFailed { .. } => "agent_failed",
+            Self::GateStarted { .. } => "gate_started",
+            Self::GatePassed { .. } => "gate_passed",
+            Self::GateFailed { .. } => "gate_failed",
+            Self::FeedbackRecorded { .. } => "feedback_recorded",
+            Self::StateCheckpointed { .. } => "state_checkpointed",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.run_id(), self.kind())
+    }
+}
+
+impl fmt::Display for WorkflowOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success {
+                commit_hash: Some(hash),
+            } => write!(f, "success ({hash})"),
+            Self::Success { commit_hash: None } => write!(f, "success"),
+            Self::Halted { reason } => write!(f, "halted: {reason}"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_accessor() {
+        let event = RuntimeEvent::WorkflowStarted {
+            run_id: "r1".into(),
+            template: "express".into(),
+            prompt: "fix bug".into(),
+        };
+
+        assert_eq!(event.run_id(), "r1");
+        assert_eq!(event.kind(), "workflow_started");
+    }
+
+    #[test]
+    fn display_formats() {
+        let outcome = WorkflowOutcome::Success {
+            commit_hash: Some("abc123".into()),
+        };
+
+        assert!(outcome.to_string().contains("abc123"));
+    }
+}
+```
+
+### `crates/roko-core/src/foundation.rs`
+
+```rust
+//! Foundation traits for the workflow engine.
+//!
+//! These define the contracts between the engine and its services:
+//! - `ModelCaller` - call LLMs (implemented by roko-agent)
+//! - `PromptAssembler` - build system prompts (implemented by roko-compose)
+//! - `FeedbackSink` - record feedback (implemented by roko-learn)
+//! - `GateRunner` - run verification gates (implemented by roko-gate)
+//! - `EventConsumer` - observe runtime events (implemented by adapters)
+//! - `EffectExecutor` - execute side-effects (implemented by roko-runtime)
+
+use crate::runtime_event::RuntimeEvent;
+use crate::{Result, RokoError};
+use async_trait::async_trait;
+use std::path::PathBuf;
+
+// -- ModelCaller --
+
+/// Request to call an LLM model.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCallRequest {
+    /// Model identifier (e.g., "claude-sonnet-4-20250514").
+    pub model: String,
+    /// System prompt.
+    pub system: Option<String>,
+    /// User messages.
+    pub messages: Vec<ChatMessage>,
+    /// Maximum tokens to generate.
+    pub max_tokens: Option<u32>,
+    /// Temperature (0.0-1.0).
+    pub temperature: Option<f32>,
+    /// Role for model routing.
+    pub role: Option<String>,
+    /// Caller surface that originated this request.
+    pub caller: Option<CallerIdentity>,
+    /// Per-call token and cost budget.
+    pub budget: Option<TokenBudget>,
+    /// Cache behavior for this request.
+    pub cache_policy: CachePolicy,
+}
+
+/// Who originated this model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CallerIdentity {
+    Cli,
+    Acp,
+    Serve,
+    Research,
+    Dreams,
+    Test,
+}
+
+/// Cache behaviour for this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CachePolicy {
+    /// Use the default L1 cache behaviour.
+    #[default]
+    Default,
+    /// Skip cache lookup but still store the result.
+    Bypass,
+    /// Skip cache lookup AND discard any prior cached result for this key.
+    ForceRefresh,
+}
+
+/// Token and cost budget for a single model call.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TokenBudget {
+    /// Maximum input tokens the gateway should accept.
+    pub max_input: Option<u64>,
+    /// Maximum output tokens requested from the provider.
+    pub max_output: Option<u64>,
+    /// Maximum cost in USD for this single call.
+    pub max_cost_usd: Option<f64>,
+}
+
+/// Errors specific to the gateway pipeline (not provider errors).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GatewayError {
+    #[error("provider error: {0}")]
+    ProviderError(String),
+    #[error("budget exceeded: {detail}")]
+    BudgetExceeded { detail: String },
+    #[error("rate limited: retry after {retry_after_ms:?} ms")]
+    RateLimited { retry_after_ms: Option<u64> },
+    #[error("cache error: {0}")]
+    CacheError(String),
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("convergence detected after {consecutive} identical outputs")]
+    ConvergenceDetected { consecutive: u32 },
+}
+
+impl From<GatewayError> for RokoError {
+    fn from(error: GatewayError) -> Self {
+        // TODO(converge): Map to RokoError::Other once that variant exists in roko-core.
+        RokoError::invalid(error.to_string())
+    }
+}
+
+/// A single chat message.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+
+/// Message role in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+/// Response from a model call.
+#[derive(Debug, Clone)]
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+    /// Gateway request id, set by ModelCallService when the call flows through the gateway.
+    pub request_id: Option<String>,
+}
+
+/// Token usage and cost from a model call.
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Call an LLM model. Wraps provider selection, streaming, cost tracking.
+#[async_trait]
+pub trait ModelCaller: Send + Sync {
+    /// Single-shot model call, returns complete response.
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+
+// -- PromptAssembler --
+
+/// Specification for assembling a system prompt.
+#[derive(Debug, Clone, Default)]
+pub struct PromptSpec {
+    /// Agent role (determines identity layer).
+    pub role: Option<String>,
+    /// Task description.
+    pub task: Option<String>,
+    /// Working directory for convention detection.
+    pub workdir: Option<PathBuf>,
+    /// Gate feedback from prior iterations.
+    pub gate_feedback: Vec<String>,
+    /// Anti-patterns to include.
+    pub anti_patterns: Vec<String>,
+}
+
+/// Assemble a system prompt for a given role and context.
+#[async_trait]
+pub trait PromptAssembler: Send + Sync {
+    /// Build a complete system prompt from the spec.
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+
+// -- FeedbackSink --
+
+/// A feedback event to record.
+#[derive(Debug, Clone)]
+pub enum FeedbackEvent {
+    /// Feedback from a model call.
+    ModelCall {
+        run_id: String,
+        model: String,
+        role: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        latency_ms: u64,
+        success: bool,
+    },
+    /// Feedback from a gate execution.
+    GateResult {
+        run_id: String,
+        gate_name: String,
+        passed: bool,
+        duration_ms: u64,
+    },
+    /// Feedback from a workflow completion.
+    WorkflowComplete {
+        run_id: String,
+        outcome: String,
+        total_cost_usd: f64,
+        total_tokens: u64,
+        duration_ms: u64,
+    },
+}
+
+/// Record feedback from model calls, gate results, and workflow outcomes.
+#[async_trait]
+pub trait FeedbackSink: Send + Sync {
+    /// Record a feedback event.
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+
+// -- GateRunner --
+
+/// Configuration for a gate run.
+#[derive(Debug, Clone)]
+pub struct GateConfig {
+    /// Working directory to verify.
+    pub workdir: PathBuf,
+    /// Which gates to run (e.g., ["compile", "test", "clippy"]).
+    pub enabled_gates: Vec<String>,
+    /// Maximum rung to run (0-6).
+    pub max_rung: Option<u8>,
+}
+
+/// Result from a single gate.
+#[derive(Debug, Clone)]
+pub struct GateVerdict {
+    pub gate_name: String,
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+/// Report from running a set of gates.
+#[derive(Debug, Clone)]
+pub struct GateReport {
+    pub verdicts: Vec<GateVerdict>,
+}
+
+impl GateReport {
+    /// Returns true if all gates passed.
+    #[must_use]
+    pub fn all_passed(&self) -> bool {
+        self.verdicts.iter().all(|v| v.passed)
+    }
+
+    /// Returns the first failing gate, if any.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<&GateVerdict> {
+        self.verdicts.iter().find(|v| !v.passed)
+    }
+
+    /// Collects all failure outputs for agent feedback.
+    #[must_use]
+    pub fn failure_summary(&self) -> String {
+        self.verdicts
+            .iter()
+            .filter(|v| !v.passed)
+            .map(|v| format!("{}: {}", v.gate_name, v.output))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+/// Run a set of verification gates against a working directory.
+#[async_trait]
+pub trait GateRunner: Send + Sync {
+    /// Execute gates per the config, returning a report.
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+
+// -- EventConsumer --
+
+/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+///
+/// Consumers must be non-blocking. If they need async work, they should
+/// buffer internally and process asynchronously.
+pub trait EventConsumer: Send + Sync {
+    /// Called for each event emitted by the workflow engine.
+    fn consume(&self, event: &RuntimeEvent);
+}
+
+// -- EffectExecutor --
+
+/// A side-effect the workflow engine needs to execute.
+#[derive(Debug, Clone)]
+pub enum Effect {
+    /// Spawn an agent with the given role and prompt.
+    SpawnAgent {
+        run_id: String,
+        role: String,
+        model: String,
+        system_prompt: String,
+        user_prompt: String,
+        workdir: PathBuf,
+    },
+    /// Run verification gates.
+    RunGates { run_id: String, config: GateConfig },
+    /// Create a git commit.
+    Commit {
+        run_id: String,
+        workdir: PathBuf,
+        message: String,
+    },
+    /// Persist a state checkpoint.
+    Checkpoint {
+        run_id: String,
+        state_json: String,
+        path: PathBuf,
+    },
+}
+
+/// Outcome from executing an effect.
+#[derive(Debug, Clone)]
+pub enum EffectOutcome {
+    /// Agent completed with output.
+    AgentDone {
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+        files_changed: Vec<String>,
+    },
+    /// Gates completed.
+    GatesDone { report: GateReport },
+    /// Commit created.
+    CommitDone { hash: String, message: String },
+    /// Checkpoint saved.
+    CheckpointDone { path: String },
+    /// Effect failed.
+    Failed { error: String },
+}
+
+/// Execute a side-effect (spawn agent, run gates, commit, checkpoint).
+///
+/// The state machine decides WHAT to do; the EffectExecutor decides HOW.
+#[async_trait]
+pub trait EffectExecutor: Send + Sync {
+    /// Execute the given effect, returning the outcome.
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+// -- AffectPolicy --
+
+/// Behavioral state of the affect engine.
+///
+/// Mirrors `roko_core::BehavioralState` from `affect.rs` but is re-exported
+/// here for self-contained trait signatures. Use the canonical enum from
+/// `roko_core::BehavioralState` — do NOT duplicate the definition.
+/// (The type is already `pub` in roko-core via `affect.rs`.)
+/// Affect context snapshot provided before dispatching a task.
+#[derive(Debug, Clone)]
+pub struct AffectContext {
+    /// Current behavioral state classification.
+    pub behavioral_state: crate::BehavioralState,
+    /// Current PAD vector: [Pleasure, Arousal, Dominance], each in [-1.0, 1.0].
+    pub pad: [f32; 3],
+    /// Human-readable emotional label, if available.
+    pub emotional_tag: Option<String>,
+}
+
+/// Modulation parameters applied to dispatch configuration.
+///
+/// The affect policy fills these in; the effect driver applies them.
+#[derive(Debug, Clone)]
+pub struct DispatchModulation {
+    /// Tier bias: -1.0 (prefer cheapest model) to +1.0 (prefer most capable model).
+    pub tier_bias: f32,
+    /// Multiplier on the default turn limit. 1.0 = no change.
+    pub turn_limit_factor: f32,
+    /// Exploration rate in [0.0, 1.0]. Higher = more exploratory routing.
+    pub exploration_rate: f32,
+}
+
+impl Default for DispatchModulation {
+    fn default() -> Self {
+        Self {
+            tier_bias: 0.0,
+            turn_limit_factor: 1.0,
+            exploration_rate: 0.0,
+        }
+    }
+}
+
+/// Policy trait for behavioral affect modulation in workflow execution.
+///
+/// The canonical implementation is `DaimonPolicy` in `roko-daimon`.
+/// When affect is disabled, use `NoOpAffectPolicy` which returns neutral defaults.
+#[async_trait]
+pub trait AffectPolicy: Send + Sync {
+    /// Called before dispatching a task. Returns an affect context snapshot.
+    fn pre_dispatch(&self, task_id: &str, role: &str) -> AffectContext;
+
+    /// Called after a task completes (success or failure).
+    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64);
+
+    /// Called after a gate verdict.
+    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64);
+
+    /// Modulate dispatch parameters based on current affect state.
+    fn modulate_dispatch(&self, role: &str, params: &mut DispatchModulation);
+
+    /// Get the current behavioral state for logging/display.
+    fn behavioral_state(&self) -> crate::BehavioralState;
+
+    /// Persist affect state to disk.
+    async fn persist(&self) -> Result<()>;
+}
+
+/// No-op implementation of `AffectPolicy` for when affect modulation is disabled.
+///
+/// All methods return neutral defaults. No state is tracked or persisted.
+pub struct NoOpAffectPolicy;
+
+#[async_trait]
+impl AffectPolicy for NoOpAffectPolicy {
+    fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
+        AffectContext {
+            behavioral_state: crate::BehavioralState::Engaged,
+            pad: [0.0, 0.0, 0.0],
+            emotional_tag: None,
+        }
+    }
+
+    fn on_task_outcome(
+        &mut self,
+        _task_id: &str,
+        _succeeded: bool,
+        _tokens_used: u64,
+        _cost_usd: f64,
+    ) {
+    }
+
+    fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {}
+
+    fn modulate_dispatch(&self, _role: &str, _params: &mut DispatchModulation) {}
+
+    fn behavioral_state(&self) -> crate::BehavioralState {
+        crate::BehavioralState::Engaged
+    }
+
+    async fn persist(&self) -> Result<()> {
+        Ok(())
+    }
+}
+```
+
+---
+
+# A01: RuntimeEvent Serde Envelope
+
+## Task
+
+Add proper serde serialization to `RuntimeEvent` in `crates/roko-core/src/runtime_event.rs`.
+
+Currently `RuntimeEvent` is a plain enum used only for in-memory dispatch and debug-string logging.
+Make it a durable, versioned event envelope suitable for JSONL persistence and typed projection.
+
+## Changes Required
+
+1. Add these fields to a new `RuntimeEventEnvelope` wrapper (or extend the existing enum):
+   - `run_id: String` — identifies the workflow run
+   - `seq: u64` — monotonic sequence number within the run
+   - `ts: chrono::DateTime<chrono::Utc>` — event timestamp (use `chrono` if available, or `std::time::SystemTime` serialized as ISO 8601)
+   - `schema_version: u8` — starts at `1`, for forward compatibility
+   - `source: String` — which component emitted the event (e.g., "workflow_engine", "effect_driver")
+   - `payload: RuntimeEvent` — the existing enum variants
+
+2. Derive `Serialize, Deserialize, Debug, Clone` on both the envelope and all `RuntimeEvent` variants.
+
+3. Ensure every variant's fields are serializable. Replace any non-serializable types (like `Box<dyn Error>`) with `String` error messages.
+
+4. Add a `RuntimeEventEnvelope::new(run_id, seq, source, payload)` constructor that sets `ts` to now and `schema_version` to 1.
+
+## Acceptance Criteria
+
+- `serde_json::to_string(&envelope)` produces valid JSON for every variant.
+- `serde_json::from_str::<RuntimeEventEnvelope>(&json)` round-trips correctly.
+- No `format!("{:?}", ...)` is used for event persistence anywhere in this file.
+- Existing code that pattern-matches on `RuntimeEvent` variants still compiles.
+
+## Do NOT
+
+- Change the semantic meaning of existing variants.
+- Add new event variants (that's for later batches).
+- Modify any file outside the scope.
+
+codex
+I’ll keep this tightly scoped to `roko-core/src/runtime_event.rs`. I’m first checking the crate dependencies and nearby exports so the serde shape fits the existing workspace without adding anything unnecessary.
+collab: SpawnAgent
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-core/Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+[package]
+name = "roko-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Roko kernel: Signal type and the six universal traits (Substrate, Scorer, Gate, Router, Composer, Policy)."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-primitives = { path = "../roko-primitives" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+blake3 = "1"
+ed25519-dalek = "2"
+async-trait = "0.1"
+parking_lot = "0.12"
+regex = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+rkyv = { version = "0.8", optional = true }
+
+[features]
+default = []
+rkyv = ["dep:rkyv"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name = "engram_bench"
+harness = false
+
+[package.metadata.roko]
+layer = 1
+
+exec
+/bin/zsh -lc 'rg -n "serde|chrono|RuntimeEvent" crates/roko-core/Cargo.toml crates/roko-core/src/lib.rs crates/roko-core/src/runtime_event.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+crates/roko-core/Cargo.toml:15:serde = { workspace = true, features = ["derive"] }
+crates/roko-core/Cargo.toml:16:serde_json = { workspace = true }
+crates/roko-core/Cargo.toml:18:chrono = { workspace = true }
+crates/roko-core/src/lib.rs:251:pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+crates/roko-core/src/runtime_event.rs:4://! consume these via `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:23:/// `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:25:pub enum RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:99:impl RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:137:impl fmt::Display for RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:162:        let event = RuntimeEvent::WorkflowStarted {
+
+exec
+/bin/zsh -lc 'rg -n "RuntimeEventEnvelope|RuntimeEvent::|format!'"\\(\\\"\\{:\\?\\}\\\"|\\{event:\\?\\}|serde_json::to_string\\(&event|writeln"'!'"\\(["'^'"\\n]*event\" crates" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+crates/roko-neuro/src/context.rs:894:            kind: format!("{:?}", entry.kind),
+crates/roko-neuro/src/hdc.rs:206:            role_hv("tier").bind(&text_hv(&format!("{:?}", entry.tier).to_ascii_lowercase())),
+crates/roko-runtime/src/jsonl_logger.rs:68:            "event": format!("{event:?}"),
+crates/roko-runtime/src/jsonl_logger.rs:106:        logger.consume(&RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/jsonl_logger.rs:113:        logger.consume(&RuntimeEvent::GatePassed {
+crates/roko-runtime/src/event_bus.rs:484:        let json = serde_json::to_string(&event)
+crates/roko-runtime/src/event_bus.rs:531:        let json = serde_json::to_string(&event)
+crates/roko-runtime/src/workflow_engine.rs:117:        self.emit(RuntimeEvent::WorkflowStarted {
+crates/roko-runtime/src/workflow_engine.rs:129:                    self.emit(RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:146:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:155:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:166:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:177:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:188:                    self.emit(RuntimeEvent::GateStarted {
+crates/roko-runtime/src/workflow_engine.rs:200:                    self.emit(RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:218:                    self.emit(RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:238:                self.emit(RuntimeEvent::PhaseTransition {
+crates/roko-runtime/src/workflow_engine.rs:306:        self.emit(RuntimeEvent::WorkflowStarted {
+crates/roko-runtime/src/workflow_engine.rs:320:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:329:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:340:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:351:                    self.emit(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/workflow_engine.rs:362:                    self.emit(RuntimeEvent::GateStarted {
+crates/roko-runtime/src/workflow_engine.rs:377:                    self.emit(RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:393:                    self.emit(RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:411:                self.emit(RuntimeEvent::PhaseTransition {
+crates/roko-runtime/src/workflow_engine.rs:418:                    self.emit(RuntimeEvent::StateCheckpointed {
+crates/roko-runtime/src/workflow_engine.rs:715:                    RuntimeEvent::WorkflowStarted { template, .. } if template == "express"
+crates/roko-runtime/src/workflow_engine.rs:723:                .any(|event| matches!(event, RuntimeEvent::PhaseTransition { .. }))
+crates/roko-runtime/src/workflow_engine.rs:730:                    RuntimeEvent::WorkflowCompleted {
+crates/roko-runtime/src/workflow_engine.rs:771:            RuntimeEvent::PhaseTransition { from, to, .. }
+crates/roko-runtime/src/workflow_engine.rs:776:            RuntimeEvent::PhaseTransition { from, to, .. }
+crates/roko-runtime/src/effect_driver.rs:165:        emit_runtime_event(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/effect_driver.rs:220:                emit_runtime_event(RuntimeEvent::AgentCompleted {
+crates/roko-runtime/src/effect_driver.rs:256:                emit_runtime_event(RuntimeEvent::AgentFailed {
+crates/roko-runtime/src/effect_driver.rs:319:            self.emit(RuntimeEvent::FeedbackRecorded {
+crates/roko-runtime/src/effect_driver.rs:350:                self.emit(RuntimeEvent::FeedbackRecorded {
+crates/roko-runtime/src/effect_driver.rs:361:                    self.emit(RuntimeEvent::FeedbackRecorded {
+crates/roko-runtime/src/effect_driver.rs:386:    /// On success, emits `RuntimeEvent::StateCheckpointed`.
+crates/roko-runtime/src/effect_driver.rs:402:        self.emit(RuntimeEvent::FeedbackRecorded {
+crates/roko-runtime/src/effect_driver.rs:407:        self.emit(RuntimeEvent::StateCheckpointed {
+crates/roko-runtime/src/effect_driver.rs:422:            RuntimeEvent::GatePassed {
+crates/roko-runtime/src/effect_driver.rs:428:            RuntimeEvent::GateFailed {
+crates/roko-fs/src/trace_sink.rs:177:        let line = match serde_json::to_string(&event) {
+crates/roko-index/src/sqlite.rs:177:                format!("{:?}", symbol.id.kind),
+crates/roko-index/src/sqlite.rs:180:                format!("{:?}", symbol.visibility),
+crates/roko-index/src/sqlite.rs:194:                format!("{:?}", from.kind),
+crates/roko-index/src/sqlite.rs:197:                format!("{:?}", to.kind),
+crates/roko-index/src/sqlite.rs:198:                format!("{:?}", kind),
+crates/roko-index/src/sqlite.rs:292:                        format!("{:?}", sym.id.kind),
+crates/roko-index/src/sqlite.rs:295:                        format!("{:?}", sym.visibility),
+crates/roko-index/src/sqlite.rs:308:                        format!("{:?}", from.kind),
+crates/roko-index/src/sqlite.rs:311:                        format!("{:?}", to.kind),
+crates/roko-index/src/sqlite.rs:312:                        format!("{:?}", kind),
+crates/roko-gate/src/error_patterns.rs:63:                classification: format!("{:?}", error.category).to_ascii_lowercase(),
+crates/roko-gate/src/error_patterns.rs:71:    let class = format!("{:?}", classification.primary).to_ascii_lowercase();
+crates/roko-gate/src/error_patterns.rs:92:            let status = format!("{:?}", parsed.evidence.status).to_ascii_lowercase();
+crates/roko-gate/src/error_patterns.rs:101:                suggestion: Some(format!("{:?}", parsed.evidence.required_next_action)),
+crates/roko-compose/src/role_prompts.rs:405:            builder = builder.with_section_effectiveness(format!("{:?}", self.role), registry);
+crates/roko-serve/src/routes/neuro.rs:62:                "kind": format!("{:?}", entry.kind),
+crates/roko-serve/src/routes/neuro.rs:63:                "tier": format!("{:?}", entry.tier),
+crates/roko-serve/src/routes/neuro.rs:108:                "kind": format!("{:?}", entry.kind),
+crates/roko-serve/src/routes/neuro.rs:109:                "tier": format!("{:?}", entry.tier),
+crates/roko-acp/src/runner.rs:226:            CoreRuntimeEvent::WorkflowStarted {
+crates/roko-acp/src/runner.rs:239:            CoreRuntimeEvent::PhaseTransition { run_id, to, .. } => {
+crates/roko-acp/src/runner.rs:252:            CoreRuntimeEvent::AgentOutput { run_id, chunk, .. } => {
+crates/roko-acp/src/runner.rs:257:            CoreRuntimeEvent::AgentCompleted { .. } => {}
+crates/roko-acp/src/runner.rs:258:            CoreRuntimeEvent::AgentFailed {
+crates/roko-acp/src/runner.rs:271:            CoreRuntimeEvent::GateStarted {
+crates/roko-acp/src/runner.rs:282:            CoreRuntimeEvent::GatePassed {
+crates/roko-acp/src/runner.rs:293:            CoreRuntimeEvent::GateFailed {
+crates/roko-acp/src/runner.rs:307:            CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+crates/roko-acp/src/runner.rs:315:            CoreRuntimeEvent::AgentSpawned { .. }
+crates/roko-acp/src/runner.rs:316:            | CoreRuntimeEvent::FeedbackRecorded { .. }
+crates/roko-acp/src/runner.rs:317:            | CoreRuntimeEvent::StateCheckpointed { .. } => {}
+crates/roko-serve/src/routes/plans.rs:269:                "status": format!("{:?}", h.status),
+crates/roko-acp/src/acp_adapter.rs:44:            RuntimeEvent::AgentOutput { chunk, .. } => {
+crates/roko-acp/src/acp_adapter.rs:47:            RuntimeEvent::AgentSpawned { agent_id, role, .. } => {
+crates/roko-acp/src/acp_adapter.rs:54:            RuntimeEvent::AgentCompleted {
+crates/roko-acp/src/acp_adapter.rs:61:            RuntimeEvent::AgentFailed {
+crates/roko-acp/src/acp_adapter.rs:68:            RuntimeEvent::GateStarted { gate_name, .. } => Some(CognitiveEvent::ToolCallStart {
+crates/roko-acp/src/acp_adapter.rs:73:            RuntimeEvent::GatePassed { gate_name, .. } => Some(CognitiveEvent::ToolCallComplete {
+crates/roko-acp/src/acp_adapter.rs:78:            RuntimeEvent::GateFailed {
+crates/roko-acp/src/acp_adapter.rs:85:            RuntimeEvent::PhaseTransition { from, to, .. } => Some(CognitiveEvent::TokenChunk(
+crates/roko-acp/src/acp_adapter.rs:88:            RuntimeEvent::WorkflowCompleted { outcome, .. } => Some(CognitiveEvent::Complete {
+crates/roko-acp/src/acp_adapter.rs:92:            RuntimeEvent::WorkflowStarted { .. }
+crates/roko-acp/src/acp_adapter.rs:93:            | RuntimeEvent::FeedbackRecorded { .. }
+crates/roko-acp/src/acp_adapter.rs:94:            | RuntimeEvent::StateCheckpointed { .. } => None,
+crates/roko-acp/src/acp_adapter.rs:143:        let event = RuntimeEvent::AgentOutput {
+crates/roko-acp/src/acp_adapter.rs:150:        let event = RuntimeEvent::AgentOutput {
+crates/roko-acp/src/acp_adapter.rs:163:        let event = RuntimeEvent::GatePassed {
+crates/roko-acp/src/acp_adapter.rs:183:        let event = RuntimeEvent::WorkflowCompleted {
+crates/roko-serve/src/adapters.rs:16:    /// Event kind (matches RuntimeEvent::kind()).
+crates/roko-serve/src/adapters.rs:56:            RuntimeEvent::WorkflowStarted {
+crates/roko-serve/src/adapters.rs:64:            RuntimeEvent::PhaseTransition { from, to, .. } => {
+crates/roko-serve/src/adapters.rs:70:            RuntimeEvent::WorkflowCompleted { outcome, .. } => {
+crates/roko-serve/src/adapters.rs:75:            RuntimeEvent::AgentSpawned {
+crates/roko-serve/src/adapters.rs:87:            RuntimeEvent::AgentOutput {
+crates/roko-serve/src/adapters.rs:95:            RuntimeEvent::AgentCompleted {
+crates/roko-serve/src/adapters.rs:107:            RuntimeEvent::AgentFailed {
+crates/roko-serve/src/adapters.rs:115:            RuntimeEvent::GateStarted {
+crates/roko-serve/src/adapters.rs:123:            RuntimeEvent::GatePassed {
+crates/roko-serve/src/adapters.rs:133:            RuntimeEvent::GateFailed {
+crates/roko-serve/src/adapters.rs:145:            RuntimeEvent::FeedbackRecorded {
+crates/roko-serve/src/adapters.rs:155:            RuntimeEvent::StateCheckpointed { path, .. } => {
+crates/roko-serve/src/adapters.rs:191:        let event = RuntimeEvent::GatePassed {
+crates/roko-serve/src/adapters.rs:208:        adapter.consume(&RuntimeEvent::WorkflowStarted {
+crates/roko-serve/src/adapters.rs:224:        adapter.consume(&RuntimeEvent::WorkflowStarted {
+crates/roko-serve/src/lib.rs:459:            RuntimeEvent::WorkflowStarted { run_id, prompt, .. } => {
+crates/roko-serve/src/lib.rs:474:            RuntimeEvent::AgentSpawned {
+crates/roko-serve/src/lib.rs:484:            RuntimeEvent::AgentOutput {
+crates/roko-serve/src/lib.rs:490:            RuntimeEvent::GatePassed {
+crates/roko-serve/src/lib.rs:500:            RuntimeEvent::GateFailed {
+crates/roko-serve/src/lib.rs:511:            RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+crates/roko-serve/src/routes/gateway.rs:357:                "state": format!("{:?}", status.state),
+crates/roko-serve/src/routes/status/dashboard.rs:68:        "status": format!("{:?}", handle.status),
+crates/roko-agent/src/streaming.rs:82:            AgentRuntimeEvent::SystemInit { session_id, model } => {
+crates/roko-agent/src/streaming.rs:85:            AgentRuntimeEvent::MessageDelta { text } => Some(Self::ContentDelta(text)),
+crates/roko-agent/src/streaming.rs:86:            AgentRuntimeEvent::ToolCall { id, name } => Some(Self::ToolCall {
+crates/roko-agent/src/streaming.rs:91:            AgentRuntimeEvent::TokenUsage {
+crates/roko-agent/src/streaming.rs:99:            AgentRuntimeEvent::TurnCompleted { is_error, .. } => {
+crates/roko-agent/src/streaming.rs:106:            AgentRuntimeEvent::Error { message } => Some(Self::Error(message)),
+crates/roko-agent/src/streaming.rs:107:            AgentRuntimeEvent::Started { .. }
+crates/roko-agent/src/streaming.rs:108:            | AgentRuntimeEvent::ToolOutput { .. }
+crates/roko-agent/src/streaming.rs:109:            | AgentRuntimeEvent::Exited { .. } => None,
+crates/roko-core/src/runtime_event.rs:162:        let event = RuntimeEvent::WorkflowStarted {
+crates/roko-agent/src/mcp/bridge.rs:44:                transport: format!("{:?}", server.transport).to_ascii_lowercase(),
+crates/roko-serve/src/dispatch.rs:278:        let mut line = serde_json::to_string(&event)?;
+crates/roko-agent/src/provider/claude_cli/stream.rs:152:        ClaudeStreamEvent::System(sys) => vec![AgentRuntimeEvent::SystemInit {
+crates/roko-agent/src/provider/claude_cli/stream.rs:165:                        events.push(AgentRuntimeEvent::MessageDelta { text: text.clone() });
+crates/roko-agent/src/provider/claude_cli/stream.rs:168:                        events.push(AgentRuntimeEvent::ToolCall {
+crates/roko-agent/src/provider/claude_cli/stream.rs:177:                events.push(AgentRuntimeEvent::TokenUsage {
+crates/roko-agent/src/provider/claude_cli/stream.rs:197:            vec![AgentRuntimeEvent::ToolOutput {
+crates/roko-agent/src/provider/claude_cli/stream.rs:204:            let mut events = vec![AgentRuntimeEvent::TurnCompleted {
+crates/roko-agent/src/provider/claude_cli/stream.rs:211:                events.push(AgentRuntimeEvent::TokenUsage {
+crates/roko-agent/src/provider/claude_cli/stream.rs:238:        return vec![AgentRuntimeEvent::Error {
+crates/roko-agent/src/provider/claude_cli/stream.rs:246:                return vec![AgentRuntimeEvent::MessageDelta {
+crates/roko-agent/src/provider/claude_cli/stream.rs:265:            AgentRuntimeEvent::SystemInit { session_id, model } => {
+crates/roko-agent/src/provider/claude_cli/stream.rs:278:            AgentRuntimeEvent::MessageDelta { text } => {
+crates/roko-agent/src/provider/claude_cli/stream.rs:290:            AgentRuntimeEvent::ToolCall { id, name } => {
+crates/roko-agent/src/provider/claude_cli/stream.rs:303:            AgentRuntimeEvent::ToolOutput { id, output } => {
+crates/roko-agent/src/provider/claude_cli/stream.rs:316:            AgentRuntimeEvent::TurnCompleted {
+crates/roko-agent/src/provider/claude_cli/stream.rs:350:            AgentRuntimeEvent::ToolOutput { output, .. } => {
+crates/roko-agent/src/provider/claude_cli/stream.rs:365:            AgentRuntimeEvent::MessageDelta { ref text } if text == "hi"
+crates/roko-agent/src/provider/claude_cli/stream.rs:369:            AgentRuntimeEvent::TokenUsage {
+crates/roko-agent/src/provider/claude_cli/stream.rs:384:            AgentRuntimeEvent::Error { message } => assert_eq!(message, "rate limited"),
+crates/roko-agent/src/model_call_service.rs:1254:                self.emit(RuntimeEvent::AgentFailed {
+crates/roko-agent/src/model_call_service.rs:1274:            self.emit(RuntimeEvent::AgentFailed {
+crates/roko-agent/src/model_call_service.rs:1298:        self.emit(RuntimeEvent::AgentCompleted {
+crates/roko-agent/src/runtime_events.rs:29:/// - emit exactly one [`AgentRuntimeEvent::Started`] before any output,
+crates/roko-agent/src/runtime_events.rs:32:/// - emit a [`AgentRuntimeEvent::TurnCompleted`] when an assistant turn
+crates/roko-agent/src/runtime_events.rs:34:/// - emit a [`AgentRuntimeEvent::Exited`] (or [`AgentRuntimeEvent::Error`]
+crates/roko-agent/src/runtime_events.rs:123:/// drained (after emitting the terminal [`AgentRuntimeEvent::Exited`]).
+crates/roko-agent/src/runtime_events.rs:139:                AgentRuntimeEvent::Started {
+crates/roko-agent/src/runtime_events.rs:148:                AgentRuntimeEvent::SystemInit {
+crates/roko-agent/src/runtime_events.rs:155:                AgentRuntimeEvent::MessageDelta { text: "hi".into() },
+crates/roko-agent/src/runtime_events.rs:159:                AgentRuntimeEvent::ToolCall {
+crates/roko-agent/src/runtime_events.rs:166:                AgentRuntimeEvent::ToolOutput {
+crates/roko-agent/src/runtime_events.rs:173:                AgentRuntimeEvent::TokenUsage {
+crates/roko-agent/src/runtime_events.rs:182:                AgentRuntimeEvent::TurnCompleted {
+crates/roko-agent/src/runtime_events.rs:191:                AgentRuntimeEvent::Error {
+crates/roko-agent/src/runtime_events.rs:197:                AgentRuntimeEvent::Exited { exit_code: Some(0) },
+crates/roko-agent/src/runtime_events.rs:208:        assert!(AgentRuntimeEvent::Exited { exit_code: None }.is_terminal());
+crates/roko-agent/src/runtime_events.rs:210:            !AgentRuntimeEvent::TurnCompleted {
+crates/roko-learn/src/contextual_bandit.rs:153:            format!("{:?}", record.section_kind),
+crates/roko-chain/src/marketplace.rs:269:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:299:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:330:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:366:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:405:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:430:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:453:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:502:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:548:                actual: format!("{:?}", job.state),
+crates/roko-chain/src/marketplace.rs:608:                    actual: format!("{:?}", level),
+crates/roko-core/src/chat_types.rs:243:            .tag("finish_reason", format!("{:?}", self.finish_reason))
+crates/roko-demo/src/events.rs:225:        match serde_json::to_string(&event) {
+crates/roko-demo/src/events.rs:235:        match serde_json::to_string(&event) {
+crates/roko-agent/src/dispatcher/mod.rs:310:                    "required": format!("{:?}", def.permission),
+crates/roko-agent/src/dispatcher/mod.rs:311:                    "granted": format!("{:?}", role_perms),
+crates/roko-agent/src/dispatcher/mod.rs:325:                "required": format!("{:?}", def.permission),
+crates/roko-agent/src/dispatcher/mod.rs:326:                "granted": format!("{:?}", role_perms),
+crates/roko-agent/src/dispatcher/mod.rs:379:                                "decision": format!("{:?}", record.decision),
+crates/roko-agent/src/dispatcher/mod.rs:397:                                "decision": format!("{:?}", record.decision),
+crates/roko-chain/src/futures_market.rs:131:                actual: format!("{:?}", future.state),
+crates/roko-chain/src/futures_market.rs:167:                actual: format!("{:?}", future.state),
+crates/roko-core/src/config/hot_reload.rs:246:                section = %format!("{:?}", change.section),
+crates/roko-core/src/config/hot_reload.rs:253:                section = %format!("{:?}", change.section),
+crates/roko-cli/src/projection/mod.rs:113:            .publish(RawRuntimeEvent::Runner(RunnerEvent::PlanStarted {
+crates/roko-cli/tests/runner_facades_e2e.rs:62:    //    the event_loop uses (RawRuntimeEvent::Runner -> publish).
+crates/roko-cli/tests/runner_facades_e2e.rs:92:            .publish(RawRuntimeEvent::Runner(event.clone()))
+crates/roko-cli/tests/runner_facades_e2e.rs:194:            .publish(RawRuntimeEvent::Runner(ev.clone()))
+crates/roko-cli/src/run.rs:150:            roko_core::RuntimeEvent::WorkflowStarted {
+crates/roko-cli/src/run.rs:165:            roko_core::RuntimeEvent::PhaseTransition { run_id, from, to } => {
+crates/roko-cli/src/run.rs:172:            roko_core::RuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+crates/roko-cli/src/run.rs:335:                behavioral_state: format!("{:?}", ctx.behavioral_state),
+crates/roko-cli/src/run.rs:376:            format!("{:?}", policy.behavioral_state())
+crates/roko-cli/src/commands/experiment.rs:156:                "status": format!("{:?}", experiment.status),
+crates/roko-cli/src/commands/experiment.rs:188:                format!("{:?}", experiment.status),
+crates/roko-cli/src/commands/experiment.rs:227:                "status": format!("{:?}", experiment.status),
+crates/roko-cli/src/orchestrate.rs:157:    Envelope as RuntimeEventEnvelope, EventBus as RuntimeEventBus, GateVerdictSummary,
+crates/roko-cli/src/orchestrate.rs:2439:    runtime_event_rx: broadcast::Receiver<RuntimeEventEnvelope<RokoEvent>>,
+crates/roko-cli/src/orchestrate.rs:13745:            to: format!("{event:?}"),
+crates/roko-cli/src/orchestrate.rs:13749:            serde_json::json!({"plan_id": plan_id, "event": format!("{event:?}")}),
+crates/roko-cli/src/orchestrate.rs:13755:                "event": format!("{event:?}"),
+crates/roko-cli/src/orchestrate.rs:15004:                format!("{:?}", self.daimon.query().behavioral_state),
+crates/roko-cli/src/orchestrate.rs:15090:                .unwrap_or_else(|_| fingerprint_text(&format!("{:?}", prompt.body))),
+crates/roko-cli/src/orchestrate.rs:15506:                    "severity": format!("{:?}", violation.severity),
+crates/roko-cli/src/orchestrate.rs:16101:                            .unwrap_or_else(|_| Body::text(format!("{:?}", recorded.verdict))),
+crates/roko-cli/src/commands/util.rs:1023:                        format!("{:?}", r.symbol.id.kind),
+crates/roko-cli/src/commands/util.rs:1061:                        format!("{:?}", r.symbol.id.kind),
+crates/roko-cli/tests/runner_integration.rs:154:    let raw = RawRuntimeEvent::Runner(RunnerEvent::PlanStarted {
+crates/roko-cli/tests/runner_integration.rs:172:        let _ = projection.publish(RawRuntimeEvent::Runner(RunnerEvent::PlanStarted {
+crates/roko-cli/tests/dispatch_feedback_projection_e2e.rs:213:        .publish(RawRuntimeEvent::Runner(RunnerEvent::PlanStarted {
+crates/roko-cli/src/commands/knowledge.rs:308:                    format!("{:?}", entry.kind).to_lowercase(),
+crates/roko-cli/src/commands/knowledge.rs:377:                        format!("{:?}", entry.kind).to_lowercase(),
+crates/roko-cli/src/commands/knowledge.rs:390:                        format!("{:?}", entry.kind).to_lowercase(),
+crates/roko-cli/src/commands/knowledge.rs:919:                let kind_str = format!("{:?}", entry.kind).to_lowercase();
+crates/roko-cli/src/tui/jsonl_tailer.rs:164:        format!("{:?}", self.cursor)
+crates/roko-cli/src/tui/dashboard.rs:1653:            status: format!("{:?}", experiment.status),
+crates/roko-cli/src/tui/dashboard.rs:3731:        let _ = writeln!(out, "events: {}", self.efficiency_events.len());
+crates/roko-cli/src/tui/dashboard.rs:3990:                format!("{:?}", exp.status),
+crates/roko-cli/src/tui/dashboard.rs:5058:                kind: format!("{:?}", entry.kind).to_lowercase(),
+crates/roko-cli/src/tui/dashboard.rs:5061:                tier: format!("{:?}", entry.tier).to_lowercase(),
+crates/roko-cli/src/dispatch/mod.rs:286:                    .send(AgentRuntimeEvent::Error {
+crates/roko-cli/src/dispatch/mod.rs:291:                    .send(AgentRuntimeEvent::Exited { exit_code: Some(1) })
+crates/roko-cli/src/dispatch/mod.rs:364:                provider: format!("{:?}", plan.model.backend).to_lowercase(),
+crates/roko-cli/src/runner/event_loop.rs:1256:        let raw = super::projection::RawRuntimeEvent::Runner(event.clone());
+crates/roko-cli/src/runner/event_loop.rs:2714:    ep.trigger_kind = format!("{:?}", completion.kind).to_ascii_lowercase();
+crates/roko-cli/src/runner/event_loop.rs:2744:        serde_json::Value::String(format!("{:?}", completion.kind).to_ascii_lowercase()),
+crates/roko-cli/src/runner/projection.rs:220:        self.publish(RawRuntimeEvent::Agent(input))
+crates/roko-cli/src/runner/projection.rs:225:        self.publish(RawRuntimeEvent::Runner(event))
+crates/roko-cli/src/runner/projection.rs:230:            RawRuntimeEvent::Runner(event) => self.from_runner(event),
+crates/roko-cli/src/runner/projection.rs:231:            RawRuntimeEvent::Agent(input) => self.from_agent(input),
+crates/roko-cli/src/runner/projection.rs:232:            RawRuntimeEvent::Custom {
+crates/roko-cli/src/runner/projection.rs:519:            .publish(RawRuntimeEvent::Custom {
+
+codex
+`roko-core` already depends on `serde` with derive and `chrono`; I’m checking the workspace chrono feature flags next because `DateTime<Utc>` needs chrono’s serde support to derive cleanly.
+exec
+/bin/zsh -lc "sed -n '1,120p' Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+[workspace]
+resolver = "2"
+members = [
+    # Support primitives (copied from bardo/) — reusable, not Mori code
+    "crates/roko-primitives",
+    "crates/roko-runtime",
+
+    # Roko kernel
+    "crates/roko-core",
+    # Standard trait impls (MemorySubstrate, NoOp, simple routers/scorers)
+    "crates/roko-std",
+    # Concrete Gate impls (ShellGate, CompileGate, ...)
+    "crates/roko-gate",
+    # Filesystem-backed Substrate (.roko/signals.jsonl)
+    "crates/roko-fs",
+    # Composer impls (PromptComposer, SectionScorer)
+    "crates/roko-compose",
+    # Plugin SDK (EventSource, FeedbackCollector)
+    "crates/roko-plugin",
+    # Agent backends (MockAgent, ExecAgent, future: ClaudeAgent, ...)
+    "crates/roko-agent",
+    # Orchestration layer (plan discovery, task DAG, worktree manager, executor)
+    "crates/roko-orchestrator",
+    # Chain client + wallet trait abstractions (reads + signed writes)
+    "crates/roko-chain",
+    # End-to-end integration tests
+    "tests",
+
+    # Apps (binaries + larger standalone components)
+    # mirage-rs: in-process EVM fork simulator. Default build = pure EVM surface.
+    # Opt-in `chain` feature adds HDC / InsightEntry / pheromone subsystems.
+    # Opt-in `roko` feature bridges to roko-core traits (Gate, Substrate).
+    "apps/mirage-rs",
+    "apps/agent-relay",
+    # roko-chain-watcher: long-running agent that observes a mirage chain and
+    # posts insights back via HTTP JSON-RPC.
+    "apps/roko-chain-watcher",
+    # Standalone MCP servers used by agents via --mcp-config.
+    "crates/roko-mcp-stdio",
+    "crates/roko-mcp-github",
+    "crates/roko-mcp-slack",
+    "crates/roko-mcp-scripts",
+    "crates/roko-mcp-code",
+
+    # Roko CLI: minimal user-facing binary that wires the universal loop
+    # (prompt → compose → agent → gate → persist → policy) against a working
+    # directory. Reads its agent/gate config from ./roko.toml.
+    "crates/roko-cli",
+    # HTTP server crate extracted from roko-cli's serve module.
+    "crates/roko-serve",
+    # Per-agent HTTP server extracted from the legacy mirage dashboard surface.
+    "crates/roko-agent-server",
+    # ACP server surface for editor integrations.
+    "crates/roko-acp",
+
+    # Conductor — reactive intelligence layer: watchers, circuit breaker, interventions.
+    "crates/roko-conductor",
+
+    # Learning subsystems — episodes, playbooks, skills, caches, pattern discovery.
+    "crates/roko-learn",
+
+    # Neuro subsystem — knowledge + memory.
+    "crates/roko-neuro",
+
+    "crates/roko-dreams",
+    # Daimon subsystem — affect and motivation modeling.
+    "crates/roko-daimon",
+
+    # Demo environment orchestrator — deploys contracts from roko/contracts/,
+    # seeds fixtures, spawns a clade of agents per declarative scenario manifest.
+    "crates/roko-demo",
+
+    # Language providers — trait impls for specific languages/build systems.
+    "crates/roko-lang-rust",
+    "crates/roko-lang-typescript",
+    "crates/roko-lang-go",
+
+    # Code intelligence — parsing, symbol graphs, PageRank, HDC fingerprints.
+    "crates/roko-index",
+]
+default-members = [
+    # Ordinary root builds target the main CLI plus the MCP servers we ship.
+    "crates/roko-cli",
+    "crates/roko-mcp-code",
+    "crates/roko-mcp-github",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Roko <engineering@roko.dev>"]
+repository = "https://github.com/nunchi/roko"
+homepage = "https://github.com/nunchi/roko"
+
+# cargo-dist configuration for prebuilt binary releases.
+# Targets: macOS ARM + Intel, Linux x86_64 glibc + musl.
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.1"
+ci = "github"
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+install-path = "CARGO_HOME"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.50", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+
+exec
+/bin/zsh -lc "rg -n \"chrono\\s*=|\\[workspace.dependencies\\]\" Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+110:[workspace.dependencies]
+136:chrono = { version = "0.4", features = ["serde"] }
+
+exec
+/bin/zsh -lc "sed -n '230,265p' crates/roko-core/src/lib.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+};
+pub use polyglot::{PolyglotProject, detect_polyglot};
+pub use prediction::{
+    AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
+    ChainQueryPayload, ChainTarget, ChangeContext, CodingMetric, CodingQueryPayload, CodingScope,
+    ExponentialMovingAverage, OperationsMetric, OperationsQueryPayload, Oracle, OracleDomain,
+    OracleQuery, PredictedValue, Prediction, PredictionAccuracy, PredictionCalibrationSource,
+    PredictionCalibrationSummary, PredictionInterval, PredictionOutcome, PredictionPolicy,
+    PredictionProvenance, PredictionStore, PredictiveScorer, QueryPayload, ResearchMetric,
+    ResearchQueryPayload, ResidualCorrector, SourceReference,
+};
+pub use project::{
+    DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
+    detect_from_files_with_cargo_toml,
+};
+pub use provenance::{
+    Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
+};
+pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
+pub use query::{Budget, Query};
+pub use roko_primitives::HdcVector;
+pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+pub use score::Score;
+pub use signal::{Signal, SignalBuilder};
+pub use signal_kinds::*;
+pub use task::{
+    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
+    TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
+};
+// Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
+// collision with phase::FailureKind (for PlanPhase failures); reach it via
+// `roko_core::tool::FailureKind`.
+pub use dashboard_snapshot::{
+    AgentState as DashboardAgentState, AgentTopology, AgentTopologyEdge, AgentTopologyNode,
+    CFactorBucket, DashboardEvent, DashboardEventLogEntry, DashboardSnapshot, DiagnosisSeverity,
+    DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
+
+exec
+/bin/zsh -lc 'rg -n "mod runtime_event|pub mod runtime_event" crates/roko-core/src/lib.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+141:pub mod runtime_event;
+
+codex
+The workspace has `chrono = { features = ["serde"] }`, so the envelope can use `chrono::DateTime<Utc>` directly. I’m going to derive serde on the existing event types and add the wrapper without changing the enum variants, so current pattern matches remain valid.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-core/src/runtime_event.rs
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..88cbc9fc6b5dde32075435a34f1698c110ed859f
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,41 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++/// Durable runtime event envelope for JSONL persistence.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +52,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..88cbc9fc6b5dde32075435a34f1698c110ed859f
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,41 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++/// Durable runtime event envelope for JSONL persistence.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +52,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+codex
+The code change is in place. I removed the need for any custom serializer by using chrono’s serde support and a tagged payload enum, then I’m running a targeted `roko-core` check to catch derive or API issues.
+exec
+/bin/zsh -lc "sed -n '1,210p' crates/roko-core/src/runtime_event.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+//! Runtime events emitted by the workflow engine.
+//!
+//! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+//! consume these via `EventBus<RuntimeEvent>`.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Durable runtime event envelope for JSONL persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeEventEnvelope {
+    pub run_id: String,
+    pub seq: u64,
+    pub ts: DateTime<Utc>,
+    pub schema_version: u8,
+    pub source: String,
+    pub payload: RuntimeEvent,
+}
+
+impl RuntimeEventEnvelope {
+    pub fn new(
+        run_id: impl Into<String>,
+        seq: u64,
+        source: impl Into<String>,
+        payload: RuntimeEvent,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            seq,
+            ts: Utc::now(),
+            schema_version: 1,
+            source: source.into(),
+            payload,
+        }
+    }
+}
+
+/// Outcome of a completed workflow run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WorkflowOutcome {
+    /// Workflow completed successfully, optionally with a commit hash.
+    Success { commit_hash: Option<String> },
+    /// Workflow halted due to an error or resource limit.
+    Halted { reason: String },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+/// Every event the workflow engine can emit.
+///
+/// These events are fire-and-forget: the engine emits them and does not wait
+/// for observers to process them. Observers subscribe via
+/// `EventBus<RuntimeEvent>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RuntimeEvent {
+    // Lifecycle
+    WorkflowStarted {
+        run_id: String,
+        template: String,
+        prompt: String,
+    },
+    PhaseTransition {
+        run_id: String,
+        from: String,
+        to: String,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        outcome: WorkflowOutcome,
+    },
+
+    // Agent
+    AgentSpawned {
+        run_id: String,
+        agent_id: String,
+        role: String,
+        model: String,
+    },
+    AgentOutput {
+        run_id: String,
+        agent_id: String,
+        chunk: String,
+    },
+    AgentCompleted {
+        run_id: String,
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+    },
+    AgentFailed {
+        run_id: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // Gates
+    GateStarted {
+        run_id: String,
+        gate_name: String,
+        rung: u8,
+    },
+    GatePassed {
+        run_id: String,
+        gate_name: String,
+        duration_ms: u64,
+    },
+    GateFailed {
+        run_id: String,
+        gate_name: String,
+        output: String,
+        duration_ms: u64,
+    },
+
+    // Feedback
+    FeedbackRecorded {
+        run_id: String,
+        kind: String,
+        summary: String,
+    },
+
+    // Persistence
+    StateCheckpointed {
+        run_id: String,
+        path: String,
+    },
+}
+
+impl RuntimeEvent {
+    /// Returns the run_id common to all event variants.
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::WorkflowStarted { run_id, .. }
+            | Self::PhaseTransition { run_id, .. }
+            | Self::WorkflowCompleted { run_id, .. }
+            | Self::AgentSpawned { run_id, .. }
+            | Self::AgentOutput { run_id, .. }
+            | Self::AgentCompleted { run_id, .. }
+            | Self::AgentFailed { run_id, .. }
+            | Self::GateStarted { run_id, .. }
+            | Self::GatePassed { run_id, .. }
+            | Self::GateFailed { run_id, .. }
+            | Self::FeedbackRecorded { run_id, .. }
+            | Self::StateCheckpointed { run_id, .. } => run_id,
+        }
+    }
+
+    /// Human-readable event kind label.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkflowStarted { .. } => "workflow_started",
+            Self::PhaseTransition { .. } => "phase_transition",
+            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::AgentSpawned { .. } => "agent_spawned",
+            Self::AgentOutput { .. } => "agent_output",
+            Self::AgentCompleted { .. } => "agent_completed",
+            Self::AgentFailed { .. } => "agent_failed",
+            Self::GateStarted { .. } => "gate_started",
+            Self::GatePassed { .. } => "gate_passed",
+            Self::GateFailed { .. } => "gate_failed",
+            Self::FeedbackRecorded { .. } => "feedback_recorded",
+            Self::StateCheckpointed { .. } => "state_checkpointed",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.run_id(), self.kind())
+    }
+}
+
+impl fmt::Display for WorkflowOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success {
+                commit_hash: Some(hash),
+            } => write!(f, "success ({hash})"),
+            Self::Success { commit_hash: None } => write!(f, "success"),
+            Self::Halted { reason } => write!(f, "halted: {reason}"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_accessor() {
+        let event = RuntimeEvent::WorkflowStarted {
+            run_id: "r1".into(),
+            template: "express".into(),
+            prompt: "fix bug".into(),
+        };
+
+        assert_eq!(event.run_id(), "r1");
+        assert_eq!(event.kind(), "workflow_started");
+    }
+
+    #[test]
+    fn display_formats() {
+        let outcome = WorkflowOutcome::Success {
+            commit_hash: Some("abc123".into()),
+        };
+
+        assert!(outcome.to_string().contains("abc123"));
+
+exec
+/bin/zsh -lc 'cargo check -p roko-core' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..88cbc9fc6b5dde32075435a34f1698c110ed859f
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,41 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++/// Durable runtime event envelope for JSONL persistence.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +52,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-core/src/runtime_event.rs
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-core/src/runtime_event.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d41..2353a4e1 100644
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@ pub enum WorkflowOutcome {
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+exec
+/bin/zsh -lc 'cargo fmt -p roko-core -- crates/roko-core/src/runtime_event.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+ succeeded in 287ms:
+ succeeded in 24379ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling serde v1.0.228
+    Checking memchr v2.8.0
+   Compiling semver v1.0.28
+   Compiling parking_lot_core v0.9.12
+   Compiling autocfg v1.5.0
+   Compiling zmij v1.0.21
+   Compiling getrandom v0.4.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling rustc_version v0.4.1
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.60
+    Checking scopeguard v1.2.0
+    Checking smallvec v1.15.1
+   Compiling serde_json v1.0.149
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking lock_api v0.4.14
+   Compiling curve25519-dalek v4.1.3
+   Compiling generic-array v0.14.9
+    Checking aho-corasick v1.1.4
+    Checking indexmap v2.14.0
+    Checking once_cell v1.21.4
+    Checking itoa v1.0.18
+    Checking core-foundation-sys v0.8.7
+    Checking subtle v2.6.1
+   Compiling num-traits v0.2.19
+    Checking pin-project-lite v0.2.17
+    Checking zeroize v1.8.2
+    Checking regex-syntax v0.8.10
+    Checking toml_write v0.1.2
+    Checking signature v2.2.0
+   Compiling thiserror v2.0.18
+    Checking winnow v0.7.15
+    Checking ed25519 v2.2.3
+    Checking iana-time-zone v0.1.65
+    Checking tracing-core v0.1.36
+    Checking bytes v1.11.1
+    Checking arrayref v0.3.9
+    Checking constant_time_eq v0.4.2
+    Checking arrayvec v0.7.6
+   Compiling syn v2.0.117
+    Checking regex-automata v0.4.14
+    Checking errno v0.3.14
+    Checking cpufeatures v0.2.17
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking uuid v1.23.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking regex v1.12.3
+    Checking ed25519-dalek v2.2.0
+   Compiling blake3 v1.8.4
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking chrono v0.4.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-primitives)
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-core)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 24.36s
+
+collab: CloseAgent
+2026-04-28T21:16:56.547982Z ERROR codex_core::session: failed to record rollout items: thread 019dd5f2-db64-70b2-abd7-a30f27e15426 not found
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+exec
+/bin/zsh -lc "rg -n \"RuntimeEventEnvelope|derive\\(Debug, Clone.*Serialize|serde\\(\" crates/roko-core/src/runtime_event.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+10:#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+11:pub struct RuntimeEventEnvelope {
+20:impl RuntimeEventEnvelope {
+39:#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+54:#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+55:#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+
+exec
+/bin/zsh -lc 'git diff --stat' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+exec
+/bin/zsh -lc 'git diff -- crates/roko-core/src/runtime_event.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+ succeeded in 103ms:
+ succeeded in 104ms:
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01
+ succeeded in 0ms:
+ M crates/roko-core/src/runtime_event.rs
+
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+codex
+Implemented the RuntimeEvent serde envelope in [runtime_event.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-core/src/runtime_event.rs).
+
+Changes:
+- Added `RuntimeEventEnvelope` with `run_id`, `seq`, `ts`, `schema_version`, `source`, and `payload`.
+- Added `RuntimeEventEnvelope::new(...)`, setting `ts = Utc::now()` and `schema_version = 1`.
+- Derived `Serialize` / `Deserialize` for `RuntimeEvent`, `WorkflowOutcome`, and the envelope.
+- Kept existing `RuntimeEvent` variants unchanged, so existing pattern matches remain valid.
+
+Verification:
+- Ran `cargo fmt -p roko-core -- crates/roko-core/src/runtime_event.rs`
+- Ran `cargo check -p roko-core` successfully.
+diff --git a/crates/roko-core/src/runtime_event.rs b/crates/roko-core/src/runtime_event.rs
+index 6a9d5d410fd68e3f12bd4b4a1dc87b94245c8837..2353a4e1ac5b8ad7dad3f63de98ce98a0444508b
+--- a/crates/roko-core/src/runtime_event.rs
++++ b/crates/roko-core/src/runtime_event.rs
+@@ -3,10 +3,40 @@
+ //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+ //! consume these via `EventBus<RuntimeEvent>`.
+ 
++use chrono::{DateTime, Utc};
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct RuntimeEventEnvelope {
++    pub run_id: String,
++    pub seq: u64,
++    pub ts: DateTime<Utc>,
++    pub schema_version: u8,
++    pub source: String,
++    pub payload: RuntimeEvent,
++}
++
++impl RuntimeEventEnvelope {
++    pub fn new(
++        run_id: impl Into<String>,
++        seq: u64,
++        source: impl Into<String>,
++        payload: RuntimeEvent,
++    ) -> Self {
++        Self {
++            run_id: run_id.into(),
++            seq,
++            ts: Utc::now(),
++            schema_version: 1,
++            source: source.into(),
++            payload,
++        }
++    }
++}
++
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success { commit_hash: Option<String> },
+@@ -21,7 +51,8 @@
+ /// These events are fire-and-forget: the engine emits them and does not wait
+ /// for observers to process them. Observers subscribe via
+ /// `EventBus<RuntimeEvent>`.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+ pub enum RuntimeEvent {
+     // Lifecycle
+     WorkflowStarted {
+
+2026-04-28T21:17:20.067971Z ERROR codex_core::session: failed to record rollout items: thread 019dd5f2-b330-7e13-8a12-32c6887b0763 not found
+tokens used
+46,812
+Implemented the RuntimeEvent serde envelope in [runtime_event.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-A01/crates/roko-core/src/runtime_event.rs).
+
+Changes:
+- Added `RuntimeEventEnvelope` with `run_id`, `seq`, `ts`, `schema_version`, `source`, and `payload`.
+- Added `RuntimeEventEnvelope::new(...)`, setting `ts = Utc::now()` and `schema_version = 1`.
+- Derived `Serialize` / `Deserialize` for `RuntimeEvent`, `WorkflowOutcome`, and the envelope.
+- Kept existing `RuntimeEvent` variants unchanged, so existing pattern matches remain valid.
+
+Verification:
+- Ran `cargo fmt -p roko-core -- crates/roko-core/src/runtime_event.rs`
+- Ran `cargo check -p roko-core` successfully.
+
+=== Finished: 2026-04-28T23:17:20+02:00 ===
+=== Duration: 1m 35s ===
+=== Exit: 0 ===

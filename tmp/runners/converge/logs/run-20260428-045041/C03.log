@@ -1,0 +1,3589 @@
+=== Batch: C03 (Cost prediction line: estimated tokens + cost) ===
+=== Started: 2026-04-28T13:44:09+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/C03.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd3e7-609a-7e81-a28b-940416b09033
+--------
+user
+# Convergence Batch C03 — Cost prediction line: estimated tokens + cost
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Batch C03: Cost prediction line — estimated tokens + cost before execution
+
+### Write Scope
+- **MODIFY**: `crates/roko-cli/src/output_format.rs`
+
+### Dependencies
+- C02 (`print_identity` exists; color helpers and layout primitives in place)
+- S04 (cost tracking adds `estimated_tokens`/`estimated_cost_usd` fields — but this prompt
+  only adds the *display* function; callers supply the values, no S04 code required here)
+
+### DO NOT
+- Modify any file other than `output_format.rs`
+- Add Cargo.toml dependencies
+- Change existing functions
+- Access any external service or file — the function is pure display
+
+### Existing Code Context
+
+`crates/roko-cli/src/output_format.rs` after C02 — relevant existing helpers:
+```rust
+pub fn step(label: &str, value: &str) { ... }  // ◇  label  value
+pub fn bar(text: &str) { ... }                 // │  text
+pub fn note(text: &str) { ... }                // │  text (dim)
+pub fn dim(s: &str) -> String { ... }
+pub fn cyan(s: &str) -> String { ... }
+pub fn yellow(s: &str) -> String { ... }
+```
+
+Visual output spec (what the terminal should look like):
+```
+◇  Cost estimate
+│  ~8 400 tokens
+│  ~$0.04 USD
+```
+
+The tilde prefix (`~`) signals that these are pre-execution estimates, not actuals. Token
+counts over 999 use a thin-space group separator for readability (`8 400`, not `8400`).
+
+### Task
+
+Add `print_cost_prediction` to `crates/roko-cli/src/output_format.rs`.
+
+#### Helper: token formatting
+
+Add a private helper that formats token counts with a thin-space (`\u{202F}`) thousands
+separator so large numbers are readable at a glance:
+
+```rust
+/// Format a token count with thin-space thousands grouping.
+/// 1234567 → "1 234 567"
+fn fmt_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push('\u{202F}'); // thin space
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+```
+
+#### Function signature
+
+```rust
+/// Print a cost prediction block before execution starts.
+///
+/// Prints:
+/// ```text
+/// ◇  Cost estimate
+/// │  ~<tokens> tokens
+/// │  ~$<cost> USD
+/// ```
+///
+/// `estimated_tokens` is the predicted token count (input + output combined).
+/// `estimated_cost_usd` is the predicted cost in US dollars.
+pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
+    // ...
+}
+```
+
+#### Implementation
+
+```rust
+pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
+    step("Cost estimate", "");
+    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
+    bar(&format!("~{} USD", yellow(&format!("${:.4}", estimated_cost_usd))));
+}
+```
+
+The cost is formatted to 4 decimal places (e.g., `$0.0042`) because sub-cent costs are
+common and meaningful for demos.
+
+#### Unit tests
+
+```rust
+#[test]
+fn fmt_tokens_small() {
+    assert_eq!(fmt_tokens(0), "0");
+    assert_eq!(fmt_tokens(999), "999");
+}
+
+#[test]
+fn fmt_tokens_thousands() {
+    assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
+    assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
+    assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
+}
+
+#[test]
+fn cost_prediction_no_panic() {
+    print_cost_prediction(8_400, 0.042);
+    print_cost_prediction(0, 0.0);
+}
+```
+
+Add these to the existing `#[cfg(test)] mod tests` block.
+
+### Done Criteria
+```bash
+# Function exists
+grep -q 'pub fn print_cost_prediction' crates/roko-cli/src/output_format.rs
+
+# Private token formatter exists
+grep -q 'fn fmt_tokens' crates/roko-cli/src/output_format.rs
+
+# Tilde prefix used
+grep -A 5 'fn print_cost_prediction' crates/roko-cli/src/output_format.rs | grep -q '~'
+
+# Compiles clean
+cargo check -p roko-cli
+
+# Unit tests pass
+cargo test -p roko-cli --lib output_format
+```
+
+codex
+I’ll make the scoped display-only change in `output_format.rs`, then run the requested grep, check, and focused test commands.
+exec
+/bin/zsh -lc "sed -n '1,240p' crates/roko-cli/src/output_format.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! Clack-style output primitives for CLI progress rendering.
+
+use crate::inline::symbols;
+
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+
+const FG_GREEN: &str = "\x1b[32m";
+const FG_RED: &str = "\x1b[31m";
+const FG_YELLOW: &str = "\x1b[33m";
+const FG_CYAN: &str = "\x1b[36m";
+const FG_MAGENTA: &str = "\x1b[35m";
+const FG_WHITE: &str = "\x1b[97m";
+const FG_GRAY: &str = "\x1b[90m";
+
+pub fn bold(s: &str) -> String {
+    format!("{BOLD}{s}{RESET}")
+}
+
+pub fn dim(s: &str) -> String {
+    format!("{DIM}{FG_GRAY}{s}{RESET}")
+}
+
+pub fn green(s: &str) -> String {
+    format!("{FG_GREEN}{s}{RESET}")
+}
+
+pub fn red(s: &str) -> String {
+    format!("{FG_RED}{s}{RESET}")
+}
+
+pub fn yellow(s: &str) -> String {
+    format!("{FG_YELLOW}{s}{RESET}")
+}
+
+pub fn cyan(s: &str) -> String {
+    format!("{FG_CYAN}{s}{RESET}")
+}
+
+pub fn magenta(s: &str) -> String {
+    format!("{FG_MAGENTA}{s}{RESET}")
+}
+
+/// Returns `true` if stdout is connected to a terminal.
+///
+/// When false, color helpers should be skipped. However, the current
+/// implementation always emits ANSI codes — the caller can check `is_tty()`
+/// and choose a plain-text path if needed.
+pub fn is_tty() -> bool {
+    use std::io::IsTerminal;
+
+    std::io::stdout().is_terminal()
+}
+
+/// Print the intro line: `◆  <title>` in bold.
+pub fn intro(title: &str) {
+    println!("{} {}", symbols::START, bold(title));
+}
+
+/// Print the agent identity block at the start of a run.
+///
+/// Prints:
+/// ```text
+/// ◆  <agent>
+/// │  model    <model>
+/// │  routing  <routing>
+/// ```
+///
+/// `agent` is the agent name (e.g., `"researcher"`).
+/// `model` is the resolved model string (e.g., `"claude-sonnet-4-6-20251001"`).
+/// `routing` is a human-readable routing decision string such as
+/// `"cascade-router → claude-sonnet-4-6-20251001"` or `"direct"`.
+pub fn print_identity(agent: &str, model: &str, routing: &str) {
+    intro(agent);
+    bar(&format!("{}  {}", dim(&format!("{:<8}", "model")), cyan(model)));
+
+    let routing_display = if let Some((before, after)) = routing.split_once(" → ") {
+        format!("{} {} {}", magenta(before), symbols::ARROW, cyan(after))
+    } else {
+        routing.to_string()
+    };
+    bar(&format!(
+        "{}  {}",
+        dim(&format!("{:<8}", "routing")),
+        routing_display
+    ));
+}
+
+/// Print a step line: `◇  <label>` with an optional value.
+pub fn step(label: &str, value: &str) {
+    if value.is_empty() {
+        println!("{} {}", symbols::START_EMPTY, bold(label));
+    } else {
+        println!("{} {}  {}", symbols::START_EMPTY, bold(label), dim(value));
+    }
+}
+
+/// Print a continuation line: `│  <text>`.
+pub fn bar(text: &str) {
+    println!("{}  {}", symbols::BAR, text);
+}
+
+/// Print a note line: `│  <text>` in dim style.
+pub fn note(text: &str) {
+    println!("{}  {}", symbols::BAR, dim(text));
+}
+
+/// Print a success line: `✔  <msg>` in green.
+pub fn success(msg: &str) {
+    println!("{}  {}", green(symbols::PASS), green(msg));
+}
+
+/// Print an error line: `✖  <msg>` in red.
+pub fn error(msg: &str) {
+    println!("{}  {}", red(symbols::FAIL), red(msg));
+}
+
+/// Print a warning line: `⚠  <msg>` in yellow.
+pub fn warning(msg: &str) {
+    println!("{}  {}", yellow(symbols::WARN), yellow(msg));
+}
+
+/// Print an empty `│` line (visual spacer between sections).
+pub fn divider() {
+    println!("{}", symbols::BAR);
+}
+
+/// Print a branch line: `├  <text>`.
+pub fn branch(text: &str) {
+    println!("{}  {}", symbols::BRANCH, text);
+}
+
+/// Print an end line: `└  <text>`.
+pub fn end(text: &str) {
+    println!("{}  {}", symbols::END, text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_split_on_arrow() {
+        // Smoke test: just ensure the function doesn't panic with typical inputs.
+        // (We can't assert on exact output because ANSI codes vary.)
+        print_identity(
+            "researcher",
+            "claude-sonnet-4-6",
+            "cascade-router → claude-sonnet-4-6",
+        );
+        print_identity("coder", "gpt-4o", "direct");
+    }
+}
+
+exec
+/bin/zsh -lc 'rg -n "mod tests|pub fn step|pub fn bar|pub fn note|pub fn dim|pub fn cyan|pub fn yellow" crates/roko-cli/src/output_format.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+21:pub fn dim(s: &str) -> String {
+33:pub fn yellow(s: &str) -> String {
+37:pub fn cyan(s: &str) -> String {
+91:pub fn step(label: &str, value: &str) {
+100:pub fn bar(text: &str) {
+105:pub fn note(text: &str) {
+140:mod tests {
+
+codex
+I found the expected helper surface and a small existing test module. I’m adding the private token formatter near the display helpers and extending the same test module so the change stays contained to the one allowed file.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+The implementation is in place. I’m running the exact done-criteria checks now, starting with the grep assertions and then the Rust build/test commands.
+exec
+/bin/zsh -lc "grep -q 'pub fn print_cost_prediction' crates/roko-cli/src/output_format.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc "grep -q 'fn fmt_tokens' crates/roko-cli/src/output_format.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "grep -A 5 'fn print_cost_prediction' crates/roko-cli/src/output_format.rs | grep -q '~'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ succeeded in 0ms:
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+exec
+/bin/zsh -lc 'cargo check -p roko-cli' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+`cargo check` is still running through the workspace dependency graph. The only output so far is a pre-existing missing-docs warning from `roko-serve`’s build script; I’m waiting for completion before moving to the focused tests.
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+The check is still active and now past the runtime and language crates into the remaining dependency set. No errors have appeared yet; I’m continuing to wait because the requested `cargo check -p roko-cli` must finish cleanly.
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+ succeeded in 133233ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+    Checking subtle v2.6.1
+    Checking itoa v1.0.18
+    Checking const-oid v0.9.6
+    Checking memchr v2.8.0
+    Checking log v0.4.29
+    Checking once_cell v1.21.4
+    Checking equivalent v1.0.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+    Checking base64ct v1.8.3
+    Checking pin-project-lite v0.2.17
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+    Checking pem-rfc7468 v0.7.0
+    Checking tracing-core v0.1.36
+    Checking arrayvec v0.7.6
+    Checking scopeguard v1.2.0
+   Compiling serde_json v1.0.149
+   Compiling paste v1.0.15
+   Compiling parking_lot_core v0.9.12
+   Compiling generic-array v0.14.9
+   Compiling syn v2.0.117
+    Checking lock_api v0.4.14
+    Checking base16ct v0.2.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling unicode-xid v0.2.6
+   Compiling ruint-macro v1.2.1
+   Compiling convert_case v0.10.0
+   Compiling dunce v1.0.5
+    Checking allocator-api2 v0.2.21
+    Checking foldhash v0.2.0
+    Checking core-foundation-sys v0.8.7
+    Checking futures-core v0.3.32
+    Checking bitflags v2.11.0
+   Compiling jobserver v0.1.34
+    Checking rustc-hash v2.1.2
+    Checking base64 v0.22.1
+   Compiling heck v0.5.0
+   Compiling cc v1.2.60
+    Checking hashbrown v0.16.1
+    Checking const-hex v1.18.1
+    Checking winnow v0.7.15
+    Checking getrandom v0.2.17
+    Checking rand_core v0.6.4
+    Checking cpufeatures v0.2.17
+    Checking errno v0.3.14
+    Checking mio v1.2.0
+    Checking ff v0.13.1
+    Checking socket2 v0.6.3
+    Checking signal-hook-registry v1.4.8
+    Checking group v0.13.0
+    Checking keccak v0.1.6
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+    Checking futures-sink v0.3.32
+    Checking futures-io v0.3.32
+    Checking futures-channel v0.3.32
+    Checking slab v0.4.12
+    Checking futures-task v0.3.32
+   Compiling synstructure v0.13.2
+    Checking hashbrown v0.17.0
+    Checking stable_deref_trait v1.2.1
+   Compiling cmake v0.1.58
+   Compiling ruint v1.17.2
+   Compiling proc-macro-error-attr2 v2.0.0
+    Checking indexmap v2.14.0
+   Compiling fs_extra v1.3.0
+   Compiling zerocopy v0.8.48
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling syn-solidity v1.5.7
+   Compiling macro-string v0.1.4
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling proc-macro-error2 v2.0.1
+   Compiling digest v0.10.7
+   Compiling sha3 v0.10.8
+    Checking percent-encoding v2.3.2
+   Compiling num-traits v0.2.19
+   Compiling aws-lc-rs v1.16.2
+    Checking aho-corasick v1.1.4
+    Checking untrusted v0.9.0
+    Checking regex-syntax v0.8.10
+   Compiling httparse v1.10.1
+   Compiling rustversion v1.0.22
+    Checking tower-service v0.3.3
+    Checking writeable v0.6.3
+    Checking litemap v0.8.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+    Checking utf8_iter v1.0.4
+   Compiling rustls v0.23.38
+   Compiling semver v1.0.28
+   Compiling getrandom v0.4.2
+   Compiling getrandom v0.3.4
+   Compiling crossbeam-utils v0.8.21
+    Checking regex-automata v0.4.14
+    Checking form_urlencoded v1.2.2
+    Checking num_cpus v1.17.0
+    Checking core-foundation v0.10.1
+    Checking threadpool v1.8.1
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking crc-catalog v2.4.0
+   Compiling system-configuration-sys v0.6.0
+    Checking crc v3.4.0
+    Checking security-framework-sys v2.17.0
+    Checking atomic-waker v1.1.2
+    Checking try-lock v0.2.5
+    Checking hex v0.4.3
+    Checking fnv v1.0.7
+    Checking httpdate v1.0.3
+    Checking want v0.3.1
+    Checking security-framework v3.7.0
+   Compiling rustc_version v0.4.1
+    Checking core-foundation v0.9.4
+    Checking ipnet v2.12.0
+   Compiling unicase v2.9.0
+    Checking mime v0.3.17
+    Checking iana-time-zone v0.1.65
+   Compiling mime_guess v2.0.5
+    Checking uuid v1.23.0
+   Compiling curve25519-dalek v4.1.3
+    Checking data-encoding v2.10.0
+    Checking futures-utils-wasm v0.1.0
+    Checking ppv-lite86 v0.2.21
+    Checking toml_write v0.1.2
+    Checking rand_core v0.9.5
+    Checking utf-8 v0.7.6
+    Checking ryu v1.0.23
+    Checking http-range-header v0.4.2
+    Checking arrayref v0.3.9
+    Checking system-configuration v0.7.0
+    Checking constant_time_eq v0.4.2
+    Checking iri-string v0.7.12
+    Checking rand_chacha v0.3.1
+    Checking rand_chacha v0.9.0
+    Checking bimap v0.6.3
+   Compiling rustix v1.1.4
+    Checking rand v0.8.5
+    Checking rand v0.9.3
+   Compiling doctest-file v1.1.1
+    Checking hashbrown v0.14.5
+    Checking regex v1.12.3
+    Checking fastrand v2.4.1
+   Compiling native-tls v0.2.18
+    Checking lru v0.16.3
+   Compiling anyhow v1.0.102
+    Checking encoding_rs v0.8.35
+   Compiling portable-atomic v1.13.1
+    Checking spin v0.9.8
+    Checking web-time v1.1.0
+    Checking quanta v0.12.6
+   Compiling aws-lc-sys v0.39.1
+   Compiling ring v0.17.14
+   Compiling blst v0.3.16
+   Compiling c-kzg v2.1.7
+   Compiling blake3 v1.8.4
+    Checking lazy_static v1.5.0
+   Compiling generator v0.8.8
+    Checking spinning_top v0.3.0
+    Checking futures-timer v3.0.3
+    Checking nonzero_ext v0.3.0
+    Checking bstr v1.12.1
+   Compiling darling_core v0.20.11
+    Checking ordered-float v5.3.0
+    Checking az v1.3.0
+    Checking cmov v0.5.3
+    Checking sorted-vec v0.8.10
+    Checking array-init v2.1.0
+    Checking divrem v1.0.0
+    Checking globset v0.4.18
+    Checking tempfile v3.27.0
+    Checking num-integer v0.1.46
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.1
+    Checking powerfmt v0.2.0
+    Checking crossbeam-epoch v0.9.18
+   Compiling time-macros v0.2.27
+   Compiling rayon-core v1.13.0
+    Checking deranged v0.5.8
+    Checking minimal-lexical v0.2.1
+    Checking same-file v1.0.6
+    Checking walkdir v2.5.0
+    Checking nom v7.1.3
+    Checking crossbeam-deque v0.8.6
+    Checking bit-vec v0.8.0
+    Checking utf8parse v0.2.2
+   Compiling camino v1.2.2
+    Checking anstyle-parse v1.0.0
+    Checking bit-set v0.8.0
+    Checking sharded-slab v0.1.7
+    Checking castaway v0.2.4
+    Checking matchers v0.2.0
+    Checking tracing-log v0.2.0
+    Checking thread_local v1.1.9
+    Checking anstyle-query v1.1.5
+    Checking nu-ansi-term v0.50.3
+    Checking is_terminal_polyfill v1.70.2
+   Compiling cfg_aliases v0.2.1
+    Checking colorchoice v1.0.5
+    Checking anstyle v1.0.14
+    Checking static_assertions v1.1.0
+   Compiling rustix v0.38.44
+   Compiling num-bigint-dig v0.8.6
+   Compiling nix v0.29.0
+    Checking num-iter v0.1.45
+    Checking num-bigint v0.4.6
+    Checking anstream v1.0.0
+    Checking fsevent-sys v4.1.0
+   Compiling cargo-platform v0.3.2
+    Checking serde_path_to_error v0.1.20
+   Compiling ahash v0.8.12
+   Compiling esaxx-rs v0.1.10
+   Compiling signal-hook v0.3.18
+   Compiling thiserror v1.0.69
+    Checking clap_lex v1.1.0
+   Compiling cfg_aliases v0.1.1
+    Checking clap_builder v4.6.0
+   Compiling nix v0.28.0
+    Checking crossbeam-channel v0.5.15
+   Compiling sha2 v0.10.9
+    Checking pem v3.0.6
+    Checking matchit v0.8.4
+    Checking time v0.3.47
+    Checking base64 v0.13.1
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling rust-embed-utils v8.11.0
+    Checking fancy-regex v0.17.0
+    Checking fancy-regex v0.14.0
+    Checking notify-types v2.1.0
+    Checking rustc-hash v1.1.0
+   Compiling instability v0.3.12
+    Checking unicode-width v0.2.0
+    Checking option-ext v0.2.0
+    Checking unsafe-libyaml v0.2.11
+    Checking foldhash v0.1.5
+    Checking unicode_categories v0.1.1
+    Checking dirs-sys v0.5.0
+    Checking macro_rules_attribute v0.2.2
+    Checking hashbrown v0.15.5
+    Checking tiktoken-rs v0.11.0
+    Checking notify v8.2.0
+    Checking signal-hook-mio v0.2.5
+    Checking arc-swap v1.9.1
+    Checking serial2 v0.2.36
+    Checking filetime v0.2.27
+   Compiling roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve)
+warning: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+   Compiling indoc v2.0.7
+    Checking shell-words v1.1.1
+    Checking symlink v0.1.0
+    Checking downcast-rs v1.2.1
+    Checking unicode-width v0.1.14
+   Compiling pulldown-cmark v0.12.2
+    Checking notify v6.1.1
+    Checking lru v0.12.5
+warning: `roko-serve` (build script) generated 1 warning
+    Checking dirs v6.0.0
+    Checking getopts v0.2.24
+    Checking gethostname v0.5.0
+    Checking compact_str v0.8.1
+    Checking file-id v0.2.3
+    Checking cassowary v0.3.0
+    Checking pulldown-cmark-escape v0.11.0
+   Compiling roko-cli v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli)
+    Checking dotenvy v0.15.7
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.4.3
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling derive_more-impl v2.1.1
+   Compiling tokio-macros v2.7.0
+   Compiling alloy-rlp-derive v0.3.15
+   Compiling futures-macro v0.3.32
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling auto_impl v1.3.0
+   Compiling async-trait v0.1.89
+    Checking zeroize v1.8.2
+   Compiling pin-project-internal v1.1.11
+    Checking der v0.7.10
+    Checking spki v0.7.3
+    Checking signature v2.2.0
+    Checking pkcs8 v0.10.2
+    Checking hmac v0.12.1
+    Checking crypto-bigint v0.5.5
+    Checking hkdf v0.12.4
+    Checking rfc6979 v0.4.0
+    Checking futures-util v0.3.32
+    Checking rustls-pki-types v1.14.0
+    Checking webpki-roots v1.0.6
+    Checking ed25519 v2.2.3
+    Checking sha1 v0.10.6
+    Checking rustls-native-certs v0.8.3
+    Checking webpki-roots v0.26.11
+   Compiling num_enum_derive v0.7.6
+   Compiling strum_macros v0.27.2
+   Compiling async-stream-impl v0.3.6
+    Checking ed25519-dalek v2.2.0
+   Compiling equator-macro v0.4.2
+    Checking futures-executor v0.3.32
+    Checking futures v0.3.32
+   Compiling darling_macro v0.20.11
+    Checking tracing v0.1.44
+    Checking simple_asn1 v0.6.4
+    Checking pkcs1 v0.7.5
+   Compiling clap_derive v4.6.0
+   Compiling thiserror-impl v1.0.69
+   Compiling monostate-impl v0.1.18
+    Checking monostate v0.1.18
+   Compiling darling v0.20.11
+   Compiling snafu-derive v0.8.9
+   Compiling derive_builder_core v0.20.2
+    Checking zerofrom v0.1.7
+    Checking async-stream v0.3.6
+    Checking yoke v0.8.2
+   Compiling validator_derive v0.20.0
+    Checking zerovec v0.11.6
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_locale_core v2.2.0
+    Checking zerotrie v0.2.4
+    Checking icu_collections v2.2.0
+    Checking equator v0.4.2
+    Checking icu_provider v2.2.0
+    Checking aligned-vec v0.6.4
+    Checking kiddo v5.3.0
+    Checking icu_properties v2.2.0
+    Checking bytes v1.11.1
+    Checking smallvec v1.15.1
+    Checking serdect v0.2.0
+    Checking sec1 v0.7.3
+    Checking either v1.15.0
+    Checking alloy-rlp v0.3.15
+    Checking parking_lot v0.12.5
+    Checking elliptic-curve v0.13.8
+    Checking http v1.4.0
+    Checking tokio v1.51.1
+    Checking ecdsa v0.16.9
+   Compiling alloy-sol-type-parser v1.5.7
+    Checking k256 v0.13.4
+   Compiling darling_core v0.23.0
+    Checking http-body v1.0.1
+    Checking icu_normalizer v2.2.0
+    Checking nybbles v0.4.8
+    Checking itertools v0.14.0
+    Checking idna_adapter v1.2.1
+    Checking http-body-util v0.1.3
+    Checking serde_spanned v0.6.9
+    Checking idna v1.1.0
+    Checking toml_datetime v0.6.11
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking url v2.5.8
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking pin-project v1.1.11
+    Checking num_enum v0.7.6
+    Checking dashmap v6.1.0
+    Checking serde_urlencoded v0.7.1
+    Checking governor v0.10.4
+    Checking tracing-serde v0.2.0
+    Checking primeorder v0.13.6
+    Checking toml v0.8.23
+    Checking rayon v1.11.0
+    Checking tracing-subscriber v0.3.23
+    Checking axum-core v0.5.6
+    Checking tokio-util v0.7.18
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking h2 v0.4.13
+    Checking tower v0.5.3
+    Checking tokio-stream v0.1.18
+    Checking interprocess v2.4.0
+    Checking tokio-native-tls v0.3.1
+    Checking tower-http v0.6.8
+   Compiling cargo_metadata v0.23.1
+    Checking rayon-cond v0.4.0
+    Checking p256 v0.13.2
+    Checking rsa v0.9.10
+    Checking strum v0.27.2
+    Checking p384 v0.13.1
+    Checking cron v0.12.1
+    Checking unicode-normalization-alignments v0.1.12
+    Checking compact_str v0.9.0
+    Checking dary_heap v0.3.8
+   Compiling derive_builder_macro v0.20.2
+    Checking spm_precompiled v0.1.4
+    Checking jsonwebtoken v10.3.0
+    Checking filedescriptor v0.8.3
+    Checking itertools v0.13.0
+    Checking serde_yaml_ng v0.10.0
+    Checking hyper v1.9.0
+    Checking secrecy v0.10.3
+   Compiling utoipa-gen v5.4.0
+   Compiling rust-embed-impl v8.11.0
+    Checking clap v4.6.0
+   Compiling strum_macros v0.26.4
+    Checking unicode-truncate v1.1.0
+    Checking hyper-util v0.1.20
+    Checking portable-pty v0.9.0
+    Checking tracing-appender v0.2.5
+    Checking crossterm v0.28.1
+    Checking jsonwebtoken v9.3.1
+    Checking snafu v0.8.9
+    Checking sysinfo v0.33.1
+    Checking derive_builder v0.20.2
+    Checking webbrowser v1.2.1
+    Checking notify-debouncer-full v0.3.2
+    Checking validator v0.20.0
+    Checking hyper-tls v0.6.0
+    Checking tokenizers v0.22.2
+    Checking hyper-timeout v0.5.2
+    Checking derive_more v2.1.1
+    Checking alloy-primitives v1.5.7
+    Checking alloy-json-abi v1.5.7
+    Checking alloy-eip2930 v0.2.3
+   Compiling darling_macro v0.23.0
+    Checking alloy-eip2124 v0.2.0
+    Checking alloy-serde v1.8.3
+    Checking alloy-eip7928 v0.3.3
+    Checking alloy-eip7702 v0.6.3
+   Compiling alloy-sol-macro-input v1.5.7
+    Checking alloy-trie v0.9.5
+    Checking alloy-signer v1.8.3
+    Checking alloy-chains v0.2.33
+   Compiling alloy-sol-macro-expander v1.5.7
+   Compiling octocrab v0.49.7
+    Checking rust-embed v8.11.0
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+   Compiling darling v0.23.0
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+   Compiling serde_with_macros v3.18.0
+   Compiling alloy-tx-macros v1.8.3
+    Checking strum v0.26.3
+    Checking roko-lang-go v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-go)
+    Checking roko-plugin v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-plugin)
+    Checking roko-lang-rust v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-rust)
+    Checking roko-lang-typescript v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-typescript)
+    Checking roko-index v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-index)
+    Checking ratatui v0.29.0
+    Checking serde_with v3.18.0
+    Checking utoipa v5.4.0
+    Checking alloy-eips v1.8.3
+    Checking alloy-rpc-types-debug v1.8.3
+   Compiling alloy-sol-macro v1.5.7
+    Checking alloy-consensus v1.8.3
+    Checking alloy-network-primitives v1.8.3
+    Checking alloy-consensus-any v1.8.3
+    Checking alloy-sol-types v1.5.7
+    Checking alloy-json-rpc v1.8.3
+    Checking alloy-rpc-types-eth v1.8.3
+    Checking alloy-dyn-abi v1.5.7
+    Checking rustls-webpki v0.103.11
+    Checking alloy-transport v1.8.3
+    Checking alloy-core v1.5.7
+    Checking alloy-pubsub v1.8.3
+    Checking alloy-transport-ipc v1.8.3
+    Checking alloy-rpc-types-any v1.8.3
+    Checking alloy-rpc-types-txpool v1.8.3
+    Checking alloy-rpc-types-trace v1.8.3
+    Checking alloy-rpc-types-anvil v1.8.3
+    Checking alloy-network v1.8.3
+    Checking alloy-signer-local v1.8.3
+    Checking alloy-rpc-types v1.8.3
+    Checking tokio-rustls v0.26.4
+    Checking tungstenite v0.28.0
+    Checking rustls-platform-verifier v0.6.2
+    Checking tungstenite v0.26.2
+    Checking hyper-rustls v0.27.8
+    Checking reqwest v0.13.2
+    Checking reqwest v0.12.28
+    Checking tokio-tungstenite v0.26.2
+    Checking tokio-tungstenite v0.28.0
+    Checking alloy-transport-ws v1.8.3
+    Checking axum v0.8.8
+    Checking alloy-transport-http v1.8.3
+    Checking alloy-rpc-client v1.8.3
+    Checking alloy-provider v1.8.3
+    Checking agent-relay v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/apps/agent-relay)
+    Checking alloy-contract v1.8.3
+    Checking alloy v1.8.3
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Checking roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+    Checking roko-gate v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-gate)
+    Checking roko-acp v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-acp)
+    Checking roko-neuro v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-neuro)
+    Checking roko-conductor v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-conductor)
+    Checking roko-orchestrator v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-orchestrator)
+    Checking roko-dreams v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-dreams)
+    Checking roko-compose v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose)
+    Checking roko-agent-server v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent-server)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2m 13s
+
+codex
+`cargo check -p roko-cli` completed successfully. I’m running the targeted library test filter next.
+exec
+/bin/zsh -lc 'cargo test -p roko-cli --lib output_format' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+The focused test target is compiling test artifacts, so it’s taking longer than the earlier incremental check. I’m waiting it out and will report any failures directly if they appear.
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+The targeted test command has reached `roko-cli` and dependent crates. There’s still only the same `roko-serve` build-script warning, no failures from this change.
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+ exited 101 in 226983ms:
+   Compiling cfg-if v1.0.4
+   Compiling itoa v1.0.18
+   Compiling subtle v2.6.1
+   Compiling const-oid v0.9.6
+   Compiling memchr v2.8.0
+   Compiling log v0.4.29
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.19.0
+   Compiling once_cell v1.21.4
+   Compiling equivalent v1.0.2
+   Compiling zeroize v1.8.2
+   Compiling base64ct v1.8.3
+   Compiling pin-project-lite v0.2.17
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+   Compiling hashbrown v0.17.0
+   Compiling tracing-core v0.1.36
+   Compiling arrayvec v0.7.6
+   Compiling unicode-segmentation v1.13.2
+   Compiling scopeguard v1.2.0
+   Compiling base16ct v0.2.0
+   Compiling allocator-api2 v0.2.21
+   Compiling lock_api v0.4.14
+   Compiling pem-rfc7468 v0.7.0
+   Compiling futures-core v0.3.32
+   Compiling core-foundation-sys v0.8.7
+   Compiling foldhash v0.2.0
+   Compiling generic-array v0.14.9
+   Compiling der v0.7.10
+   Compiling tracing v0.1.44
+   Compiling convert_case v0.10.0
+   Compiling bitflags v2.11.0
+   Compiling base64 v0.22.1
+   Compiling strsim v0.11.1
+   Compiling getrandom v0.2.17
+   Compiling cpufeatures v0.2.17
+   Compiling errno v0.3.14
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling keccak v0.1.6
+   Compiling rustc-hash v2.1.2
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling ff v0.13.1
+   Compiling crypto-bigint v0.5.5
+   Compiling winnow v0.7.15
+   Compiling digest v0.10.7
+   Compiling group v0.13.0
+   Compiling derive_more-impl v2.1.1
+   Compiling futures-sink v0.3.32
+   Compiling futures-channel v0.3.32
+   Compiling slab v0.4.12
+   Compiling signature v2.2.0
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling spki v0.7.3
+   Compiling sha3 v0.10.8
+   Compiling futures-task v0.3.32
+   Compiling hkdf v0.12.4
+   Compiling rfc6979 v0.4.0
+   Compiling pkcs8 v0.10.2
+   Compiling futures-io v0.3.32
+   Compiling serde_json v1.0.149
+   Compiling zerofrom v0.1.7
+   Compiling futures-util v0.3.32
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.2
+   Compiling libm v0.2.16
+   Compiling const-hex v1.18.1
+   Compiling fnv v1.0.7
+   Compiling zerovec v0.11.6
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling hashbrown v0.16.1
+   Compiling indexmap v2.14.0
+   Compiling aho-corasick v1.1.4
+   Compiling bytes v1.11.1
+   Compiling smallvec v1.15.1
+   Compiling parking_lot_core v0.9.12
+   Compiling serdect v0.2.0
+   Compiling either v1.15.0
+   Compiling sec1 v0.7.3
+   Compiling alloy-rlp v0.3.15
+   Compiling parking_lot v0.12.5
+   Compiling elliptic-curve v0.13.8
+   Compiling http v1.4.0
+   Compiling ruint v1.17.2
+   Compiling tokio v1.51.1
+   Compiling num-traits v0.2.19
+   Compiling percent-encoding v2.3.2
+   Compiling ecdsa v0.16.9
+   Compiling regex-syntax v0.8.10
+   Compiling darling_core v0.23.0
+   Compiling k256 v0.13.4
+   Compiling rustls-pki-types v1.14.0
+   Compiling alloy-sol-type-parser v1.5.7
+   Compiling untrusted v0.9.0
+   Compiling ring v0.17.14
+   Compiling tinystr v0.8.3
+   Compiling ppv-lite86 v0.2.21
+   Compiling aws-lc-sys v0.39.1
+   Compiling tower-service v0.3.3
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling httparse v1.10.1
+   Compiling icu_locale_core v2.2.0
+   Compiling zerotrie v0.2.4
+   Compiling potential_utf v0.1.5
+   Compiling aws-lc-rs v1.16.2
+   Compiling utf8_iter v1.0.4
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling http-body v1.0.1
+   Compiling regex-automata v0.4.14
+   Compiling form_urlencoded v1.2.2
+   Compiling num_cpus v1.17.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling threadpool v1.8.1
+   Compiling icu_provider v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling rustls-webpki v0.103.11
+   Compiling getrandom v0.3.4
+   Compiling getrandom v0.4.2
+   Compiling core-foundation v0.10.1
+   Compiling sync_wrapper v1.0.2
+   Compiling crc-catalog v2.4.0
+   Compiling rustls v0.23.38
+   Compiling tower-layer v0.3.3
+   Compiling idna_adapter v1.2.1
+   Compiling tokio-util v0.7.18
+   Compiling crc v3.4.0
+   Compiling blst v0.3.16
+   Compiling security-framework-sys v2.17.0
+   Compiling try-lock v0.2.5
+   Compiling hex v0.4.3
+   Compiling httpdate v1.0.3
+   Compiling atomic-waker v1.1.2
+   Compiling want v0.3.1
+   Compiling c-kzg v2.1.7
+   Compiling security-framework v3.7.0
+   Compiling idna v1.1.0
+   Compiling system-configuration-sys v0.6.0
+   Compiling h2 v0.4.13
+   Compiling tower v0.5.3
+   Compiling rand_core v0.9.5
+   Compiling nybbles v0.4.8
+   Compiling itertools v0.14.0
+   Compiling core-foundation v0.9.4
+   Compiling system-configuration v0.7.0
+   Compiling tokio-rustls v0.26.4
+   Compiling rand_chacha v0.9.0
+   Compiling url v2.5.8
+   Compiling regex v1.12.3
+   Compiling webpki-roots v1.0.6
+   Compiling unicase v2.9.0
+   Compiling ipnet v2.12.0
+   Compiling hyper v1.9.0
+   Compiling rand v0.9.3
+   Compiling http-body-util v0.1.3
+   Compiling mime v0.3.17
+   Compiling curve25519-dalek v4.1.3
+   Compiling mime_guess v2.0.5
+   Compiling futures-executor v0.3.32
+   Compiling ed25519 v2.2.3
+   Compiling iana-time-zone v0.1.65
+   Compiling hyper-util v0.1.20
+   Compiling chrono v0.4.44
+   Compiling ed25519-dalek v2.2.0
+   Compiling futures v0.3.32
+   Compiling uuid v1.23.0
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling sha1 v0.10.6
+   Compiling toml_write v0.1.2
+   Compiling utf-8 v0.7.6
+   Compiling data-encoding v2.10.0
+   Compiling futures-utils-wasm v0.1.0
+   Compiling toml_edit v0.22.27
+   Compiling rustls-native-certs v0.8.3
+   Compiling http-range-header v0.4.2
+   Compiling iri-string v0.7.12
+   Compiling ryu v1.0.23
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling blake3 v1.8.4
+   Compiling tower-http v0.6.8
+   Compiling toml v0.8.23
+   Compiling hyper-rustls v0.27.8
+   Compiling tungstenite v0.28.0
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling webpki-roots v0.26.11
+   Compiling tokio-stream v0.1.18
+   Compiling rand_chacha v0.3.1
+   Compiling bimap v0.6.3
+   Compiling tokio-tungstenite v0.28.0
+   Compiling rand v0.8.5
+   Compiling pin-project v1.1.11
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling interprocess v2.4.0
+   Compiling reqwest v0.13.2
+   Compiling rustix v1.1.4
+   Compiling hashbrown v0.14.5
+   Compiling fastrand v2.4.1
+   Compiling num_enum v0.7.6
+   Compiling strum v0.27.2
+   Compiling serde_urlencoded v0.7.1
+   Compiling tempfile v3.27.0
+   Compiling async-stream v0.3.6
+   Compiling lru v0.16.3
+   Compiling dashmap v6.1.0
+   Compiling native-tls v0.2.18
+   Compiling anyhow v1.0.102
+   Compiling tokio-native-tls v0.3.1
+   Compiling hyper-tls v0.6.0
+   Compiling encoding_rs v0.8.35
+   Compiling spin v0.9.8
+   Compiling web-time v1.1.0
+   Compiling portable-atomic v1.13.1
+   Compiling lazy_static v1.5.0
+   Compiling bstr v1.12.1
+   Compiling quanta v0.12.6
+   Compiling spinning_top v0.3.0
+   Compiling futures-timer v3.0.3
+   Compiling nonzero_ext v0.3.0
+   Compiling equator v0.4.2
+   Compiling governor v0.10.4
+   Compiling generator v0.8.8
+   Compiling aligned-vec v0.6.4
+   Compiling reqwest v0.12.28
+   Compiling ordered-float v5.3.0
+   Compiling darling_core v0.20.11
+   Compiling darling_macro v0.23.0
+   Compiling same-file v1.0.6
+   Compiling divrem v1.0.0
+   Compiling cmov v0.5.3
+   Compiling array-init v2.1.0
+   Compiling sorted-vec v0.8.10
+   Compiling az v1.3.0
+   Compiling walkdir v2.5.0
+   Compiling globset v0.4.18
+   Compiling kiddo v5.3.0
+   Compiling num-integer v0.1.46
+   Compiling powerfmt v0.2.0
+   Compiling num-conv v0.2.1
+   Compiling time-core v0.1.8
+   Compiling deranged v0.5.8
+   Compiling crossbeam-epoch v0.9.18
+   Compiling time-macros v0.2.27
+   Compiling minimal-lexical v0.2.1
+   Compiling darling v0.23.0
+   Compiling serde_with_macros v3.18.0
+   Compiling alloy-tx-macros v1.8.3
+   Compiling anstyle v1.0.14
+   Compiling nom v7.1.3
+   Compiling crossbeam-deque v0.8.6
+   Compiling bit-vec v0.8.0
+   Compiling utf8parse v0.2.2
+   Compiling bit-set v0.8.0
+   Compiling rayon-core v1.13.0
+   Compiling anstyle-parse v1.0.0
+   Compiling derive_more v2.1.1
+   Compiling sharded-slab v0.1.7
+   Compiling alloy-primitives v1.5.7
+   Compiling matchers v0.2.0
+   Compiling castaway v0.2.4
+   Compiling tracing-serde v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling nu-ansi-term v0.50.3
+   Compiling time v0.3.47
+   Compiling anstyle-query v1.1.5
+   Compiling static_assertions v1.1.0
+   Compiling colorchoice v1.0.5
+   Compiling tracing-subscriber v0.3.23
+   Compiling alloy-json-abi v1.5.7
+   Compiling anstream v1.0.0
+   Compiling alloy-serde v1.8.3
+   Compiling alloy-eip2124 v0.2.0
+   Compiling alloy-sol-macro-input v1.5.7
+   Compiling alloy-eip2930 v0.2.3
+   Compiling alloy-eip7702 v0.6.3
+   Compiling alloy-sol-macro-expander v1.5.7
+   Compiling alloy-eip7928 v0.3.3
+   Compiling alloy-trie v0.9.5
+   Compiling alloy-signer v1.8.3
+   Compiling alloy-chains v0.2.33
+   Compiling roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+   Compiling roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+   Compiling rayon v1.11.0
+   Compiling num-iter v0.1.45
+   Compiling num-bigint v0.4.6
+   Compiling serde_with v3.18.0
+   Compiling primeorder v0.13.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling fsevent-sys v4.1.0
+   Compiling clap_lex v1.1.0
+   Compiling clap_builder v4.6.0
+   Compiling cargo_metadata v0.23.1
+   Compiling simple_asn1 v0.6.4
+   Compiling num-bigint-dig v0.8.6
+   Compiling rustix v0.38.44
+   Compiling alloy-eips v1.8.3
+   Compiling alloy-rpc-types-debug v1.8.3
+   Compiling axum-core v0.5.6
+   Compiling alloy-consensus v1.8.3
+   Compiling crossbeam-channel v0.5.15
+   Compiling darling_macro v0.20.11
+   Compiling pkcs1 v0.7.5
+   Compiling pem v3.0.6
+   Compiling base64 v0.13.1
+   Compiling matchit v0.8.4
+   Compiling macro_rules_attribute v0.2.2
+   Compiling axum v0.8.8
+   Compiling octocrab v0.49.7
+   Compiling spm_precompiled v0.1.4
+   Compiling alloy-network-primitives v1.8.3
+   Compiling alloy-consensus-any v1.8.3
+   Compiling darling v0.20.11
+   Compiling monostate v0.1.18
+   Compiling thiserror v1.0.69
+   Compiling clap v4.6.0
+   Compiling rsa v0.9.10
+   Compiling derive_builder_core v0.20.2
+   Compiling rust-embed-utils v8.11.0
+   Compiling nix v0.29.0
+   Compiling ahash v0.8.12
+   Compiling esaxx-rs v0.1.10
+   Compiling signal-hook v0.3.18
+   Compiling rayon-cond v0.4.0
+   Compiling p256 v0.13.2
+   Compiling p384 v0.13.1
+   Compiling compact_str v0.9.0
+   Compiling cron v0.12.1
+   Compiling fancy-regex v0.17.0
+   Compiling fancy-regex v0.14.0
+   Compiling tungstenite v0.26.2
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling dary_heap v0.3.8
+   Compiling notify-types v2.1.0
+   Compiling rustc-hash v1.1.0
+   Compiling foldhash v0.1.5
+   Compiling predicates-core v1.0.10
+   Compiling unicode-width v0.2.0
+   Compiling unicode_categories v0.1.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling option-ext v0.2.0
+   Compiling notify v8.2.0
+   Compiling dirs-sys v0.5.0
+   Compiling hashbrown v0.15.5
+   Compiling tiktoken-rs v0.11.0
+   Compiling serde_yaml_ng v0.10.0
+   Compiling snafu v0.8.9
+   Compiling tokio-tungstenite v0.26.2
+   Compiling agent-relay v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/apps/agent-relay)
+   Compiling jsonwebtoken v10.3.0
+   Compiling signal-hook-mio v0.2.5
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+   Compiling rust-embed-impl v8.11.0
+   Compiling alloy-sol-macro v1.5.7
+   Compiling nix v0.28.0
+   Compiling validator_derive v0.20.0
+   Compiling filedescriptor v0.8.3
+   Compiling hyper-timeout v0.5.2
+   Compiling arc-swap v1.9.1
+   Compiling float-cmp v0.10.0
+   Compiling itertools v0.13.0
+   Compiling serial2 v0.2.36
+   Compiling filetime v0.2.27
+   Compiling secrecy v0.10.3
+warning: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-serve` (build script) generated 1 warning
+   Compiling difflib v0.4.0
+   Compiling symlink v0.1.0
+   Compiling unicode-width v0.1.14
+   Compiling downcast-rs v1.2.1
+   Compiling termtree v0.5.1
+   Compiling normalize-line-endings v0.3.0
+   Compiling assert_cmd v2.2.0
+   Compiling shell-words v1.1.1
+   Compiling instability v0.3.12
+   Compiling portable-pty v0.9.0
+   Compiling rust-embed v8.11.0
+   Compiling predicates-tree v1.0.13
+   Compiling derive_builder_macro v0.20.2
+   Compiling predicates v3.1.4
+   Compiling unicode-truncate v1.1.0
+   Compiling tracing-appender v0.2.5
+   Compiling utoipa v5.4.0
+   Compiling derive_builder v0.20.2
+   Compiling notify v6.1.1
+   Compiling strum v0.26.3
+   Compiling alloy-sol-types v1.5.7
+   Compiling crossterm v0.28.1
+   Compiling tokenizers v0.22.2
+   Compiling lru v0.12.5
+   Compiling roko-plugin v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-plugin)
+   Compiling dirs v6.0.0
+   Compiling getopts v0.2.24
+   Compiling alloy-json-rpc v1.8.3
+   Compiling alloy-rpc-types-eth v1.8.3
+   Compiling alloy-transport v1.8.3
+   Compiling alloy-dyn-abi v1.5.7
+   Compiling alloy-pubsub v1.8.3
+   Compiling alloy-rpc-types-any v1.8.3
+   Compiling alloy-rpc-types-txpool v1.8.3
+   Compiling alloy-network v1.8.3
+   Compiling alloy-rpc-types-anvil v1.8.3
+   Compiling alloy-rpc-types-trace v1.8.3
+   Compiling alloy-transport-ipc v1.8.3
+   Compiling alloy-transport-ws v1.8.3
+   Compiling alloy-transport-http v1.8.3
+   Compiling alloy-rpc-client v1.8.3
+   Compiling alloy-signer-local v1.8.3
+   Compiling alloy-core v1.5.7
+   Compiling validator v0.20.0
+   Compiling jsonwebtoken v9.3.1
+   Compiling alloy-provider v1.8.3
+   Compiling alloy-rpc-types v1.8.3
+   Compiling gethostname v0.5.0
+   Compiling roko-lang-typescript v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-typescript)
+   Compiling roko-lang-go v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-go)
+   Compiling roko-lang-rust v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-lang-rust)
+   Compiling compact_str v0.8.1
+   Compiling wait-timeout v0.2.1
+   Compiling pulldown-cmark-escape v0.11.0
+   Compiling file-id v0.2.3
+   Compiling cassowary v0.3.0
+   Compiling ratatui v0.29.0
+   Compiling roko-cli v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli)
+   Compiling notify-debouncer-full v0.3.2
+   Compiling pulldown-cmark v0.12.2
+   Compiling roko-index v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-index)
+   Compiling sysinfo v0.33.1
+   Compiling webbrowser v1.2.1
+   Compiling dotenvy v0.15.7
+   Compiling alloy-contract v1.8.3
+   Compiling alloy v1.8.3
+   Compiling roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+   Compiling roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+   Compiling roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+   Compiling roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+   Compiling roko-gate v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-gate)
+   Compiling roko-acp v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-acp)
+   Compiling roko-neuro v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-neuro)
+   Compiling roko-conductor v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-conductor)
+   Compiling roko-orchestrator v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-orchestrator)
+   Compiling roko-compose v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose)
+   Compiling roko-dreams v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-dreams)
+   Compiling roko-agent-server v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent-server)
+   Compiling roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve)
+error[E0425]: cannot find function `shared_state_hub` in crate `roko_core`
+    --> crates/roko-cli/src/tui/app.rs:3262:30
+     |
+3262 |         let hub = roko_core::shared_state_hub();
+     |                              ^^^^^^^^^^^^^^^^ not found in `roko_core`
+     |
+help: consider importing this function
+     |
+3227 +     use crate::state_hub::shared_state_hub;
+     |
+help: if you import `shared_state_hub`, refer to it directly
+     |
+3262 -         let hub = roko_core::shared_state_hub();
+3262 +         let hub = shared_state_hub();
+     |
+
+error[E0308]: mismatched types
+     --> crates/roko-cli/src/orchestrate.rs:20065:30
+      |
+20065 |         runner.set_state_hub(state.state_hub.sender());
+      |                ------------- ^^^^^^^^^^^^^^^^^^^^^^^^ expected `state_hub::StateHubSender`, found `StateHubSender`
+      |                |
+      |                arguments to this method are incorrect
+      |
+      = note: `StateHubSender` and `state_hub::StateHubSender` have similar names, but are actually distinct types
+note: `StateHubSender` is defined in crate `roko_serve`
+     --> crates/roko-serve/src/../../roko-core/src/state_hub.rs:276:1
+      |
+  276 | pub struct StateHubSender {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `state_hub::StateHubSender` is defined in the current crate
+     --> crates/roko-cli/src/../../roko-core/src/state_hub.rs:276:1
+      |
+  276 | pub struct StateHubSender {
+      | ^^^^^^^^^^^^^^^^^^^^^^^^^
+note: method defined here
+     --> crates/roko-cli/src/orchestrate.rs:4690:12
+      |
+ 4690 |     pub fn set_state_hub(&mut self, sender: crate::state_hub::StateHubSender) {
+      |            ^^^^^^^^^^^^^            ----------------------------------------
+
+Some errors have detailed explanations: E0308, E0425.
+For more information about an error, try `rustc --explain E0308`.
+error: could not compile `roko-cli` (lib test) due to 2 previous errors
+
+codex
+The focused test command failed during `roko-cli` test compilation, but not in `output_format.rs`: it hit existing `state_hub` type/path errors in `tui/app.rs` and `orchestrate.rs`, both outside the allowed write scope. I’m doing a final diff check so the close-out is precise.
+exec
+/bin/zsh -lc "nl -ba crates/roko-cli/src/output_format.rs | sed -n '30,190p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+    30	    format!("{FG_RED}{s}{RESET}")
+    31	}
+    32	
+    33	pub fn yellow(s: &str) -> String {
+    34	    format!("{FG_YELLOW}{s}{RESET}")
+    35	}
+    36	
+    37	pub fn cyan(s: &str) -> String {
+    38	    format!("{FG_CYAN}{s}{RESET}")
+    39	}
+    40	
+    41	pub fn magenta(s: &str) -> String {
+    42	    format!("{FG_MAGENTA}{s}{RESET}")
+    43	}
+    44	
+    45	/// Format a token count with thin-space thousands grouping.
+    46	/// 1234567 -> "1 234 567"
+    47	fn fmt_tokens(n: u64) -> String {
+    48	    let s = n.to_string();
+    49	    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    50	    for (i, ch) in s.chars().rev().enumerate() {
+    51	        if i > 0 && i % 3 == 0 {
+    52	            out.push('\u{202F}');
+    53	        }
+    54	        out.push(ch);
+    55	    }
+    56	    out.chars().rev().collect()
+    57	}
+    58	
+    59	/// Returns `true` if stdout is connected to a terminal.
+    60	///
+    61	/// When false, color helpers should be skipped. However, the current
+    62	/// implementation always emits ANSI codes — the caller can check `is_tty()`
+    63	/// and choose a plain-text path if needed.
+    64	pub fn is_tty() -> bool {
+    65	    use std::io::IsTerminal;
+    66	
+    67	    std::io::stdout().is_terminal()
+    68	}
+    69	
+    70	/// Print the intro line: `◆  <title>` in bold.
+    71	pub fn intro(title: &str) {
+    72	    println!("{} {}", symbols::START, bold(title));
+    73	}
+    74	
+    75	/// Print the agent identity block at the start of a run.
+    76	///
+    77	/// Prints:
+    78	/// ```text
+    79	/// ◆  <agent>
+    80	/// │  model    <model>
+    81	/// │  routing  <routing>
+    82	/// ```
+    83	///
+    84	/// `agent` is the agent name (e.g., `"researcher"`).
+    85	/// `model` is the resolved model string (e.g., `"claude-sonnet-4-6-20251001"`).
+    86	/// `routing` is a human-readable routing decision string such as
+    87	/// `"cascade-router → claude-sonnet-4-6-20251001"` or `"direct"`.
+    88	pub fn print_identity(agent: &str, model: &str, routing: &str) {
+    89	    intro(agent);
+    90	    bar(&format!("{}  {}", dim(&format!("{:<8}", "model")), cyan(model)));
+    91	
+    92	    let routing_display = if let Some((before, after)) = routing.split_once(" → ") {
+    93	        format!("{} {} {}", magenta(before), symbols::ARROW, cyan(after))
+    94	    } else {
+    95	        routing.to_string()
+    96	    };
+    97	    bar(&format!(
+    98	        "{}  {}",
+    99	        dim(&format!("{:<8}", "routing")),
+   100	        routing_display
+   101	    ));
+   102	}
+   103	
+   104	/// Print a cost prediction block before execution starts.
+   105	///
+   106	/// Prints:
+   107	/// ```text
+   108	/// ◇  Cost estimate
+   109	/// │  ~<tokens> tokens
+   110	/// │  ~$<cost> USD
+   111	/// ```
+   112	///
+   113	/// `estimated_tokens` is the predicted token count (input + output combined).
+   114	/// `estimated_cost_usd` is the predicted cost in US dollars.
+   115	pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
+   116	    step("Cost estimate", "");
+   117	    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
+   118	    bar(&format!(
+   119	        "~{} USD",
+   120	        yellow(&format!("${:.4}", estimated_cost_usd))
+   121	    ));
+   122	}
+   123	
+   124	/// Print a step line: `◇  <label>` with an optional value.
+   125	pub fn step(label: &str, value: &str) {
+   126	    if value.is_empty() {
+   127	        println!("{} {}", symbols::START_EMPTY, bold(label));
+   128	    } else {
+   129	        println!("{} {}  {}", symbols::START_EMPTY, bold(label), dim(value));
+   130	    }
+   131	}
+   132	
+   133	/// Print a continuation line: `│  <text>`.
+   134	pub fn bar(text: &str) {
+   135	    println!("{}  {}", symbols::BAR, text);
+   136	}
+   137	
+   138	/// Print a note line: `│  <text>` in dim style.
+   139	pub fn note(text: &str) {
+   140	    println!("{}  {}", symbols::BAR, dim(text));
+   141	}
+   142	
+   143	/// Print a success line: `✔  <msg>` in green.
+   144	pub fn success(msg: &str) {
+   145	    println!("{}  {}", green(symbols::PASS), green(msg));
+   146	}
+   147	
+   148	/// Print an error line: `✖  <msg>` in red.
+   149	pub fn error(msg: &str) {
+   150	    println!("{}  {}", red(symbols::FAIL), red(msg));
+   151	}
+   152	
+   153	/// Print a warning line: `⚠  <msg>` in yellow.
+   154	pub fn warning(msg: &str) {
+   155	    println!("{}  {}", yellow(symbols::WARN), yellow(msg));
+   156	}
+   157	
+   158	/// Print an empty `│` line (visual spacer between sections).
+   159	pub fn divider() {
+   160	    println!("{}", symbols::BAR);
+   161	}
+   162	
+   163	/// Print a branch line: `├  <text>`.
+   164	pub fn branch(text: &str) {
+   165	    println!("{}  {}", symbols::BRANCH, text);
+   166	}
+   167	
+   168	/// Print an end line: `└  <text>`.
+   169	pub fn end(text: &str) {
+   170	    println!("{}  {}", symbols::END, text);
+   171	}
+   172	
+   173	#[cfg(test)]
+   174	mod tests {
+   175	    use super::*;
+   176	
+   177	    #[test]
+   178	    fn routing_split_on_arrow() {
+   179	        // Smoke test: just ensure the function doesn't panic with typical inputs.
+   180	        // (We can't assert on exact output because ANSI codes vary.)
+   181	        print_identity(
+   182	            "researcher",
+   183	            "claude-sonnet-4-6",
+   184	            "cascade-router → claude-sonnet-4-6",
+   185	        );
+   186	        print_identity("coder", "gpt-4o", "direct");
+   187	    }
+   188	
+   189	    #[test]
+   190	    fn fmt_tokens_small() {
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-cli/src/output_format.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd..a6d3ac00 100644
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@ pub fn magenta(s: &str) -> String {
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@ pub fn print_identity(agent: &str, model: &str, routing: &str) {
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@ mod tests {
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-cli/src/output_format.rs
+
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+codex
+Implemented `print_cost_prediction` in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:115), plus the private `fmt_tokens` helper and unit tests in the existing test module.
+
+Verification:
+- `grep` checks for `print_cost_prediction`, `fmt_tokens`, and `~`: passed
+- `cargo check -p roko-cli`: passed
+- `cargo test -p roko-cli --lib output_format`: failed during test compilation on existing errors outside the allowed write scope:
+  - `crates/roko-cli/src/tui/app.rs:3262`: `roko_core::shared_state_hub()` not found
+  - `crates/roko-cli/src/orchestrate.rs:20065`: mismatched `StateHubSender` types
+
+Only `crates/roko-cli/src/output_format.rs` was modified.
+diff --git a/crates/roko-cli/src/output_format.rs b/crates/roko-cli/src/output_format.rs
+index 1fad73dd0bd2e742d86d5c004ec414189dcd6d93..a6d3ac002e7fb2e06c834be9006fd7bfdca79e88
+--- a/crates/roko-cli/src/output_format.rs
++++ b/crates/roko-cli/src/output_format.rs
+@@ -42,6 +42,20 @@
+     format!("{FG_MAGENTA}{s}{RESET}")
+ }
+ 
++/// Format a token count with thin-space thousands grouping.
++/// 1234567 -> "1 234 567"
++fn fmt_tokens(n: u64) -> String {
++    let s = n.to_string();
++    let mut out = String::with_capacity(s.len() + s.len() / 3);
++    for (i, ch) in s.chars().rev().enumerate() {
++        if i > 0 && i % 3 == 0 {
++            out.push('\u{202F}');
++        }
++        out.push(ch);
++    }
++    out.chars().rev().collect()
++}
++
+ /// Returns `true` if stdout is connected to a terminal.
+ ///
+ /// When false, color helpers should be skipped. However, the current
+@@ -87,6 +101,26 @@
+     ));
+ }
+ 
++/// Print a cost prediction block before execution starts.
++///
++/// Prints:
++/// ```text
++/// ◇  Cost estimate
++/// │  ~<tokens> tokens
++/// │  ~$<cost> USD
++/// ```
++///
++/// `estimated_tokens` is the predicted token count (input + output combined).
++/// `estimated_cost_usd` is the predicted cost in US dollars.
++pub fn print_cost_prediction(estimated_tokens: u64, estimated_cost_usd: f64) {
++    step("Cost estimate", "");
++    bar(&format!("~{} tokens", cyan(&fmt_tokens(estimated_tokens))));
++    bar(&format!(
++        "~{} USD",
++        yellow(&format!("${:.4}", estimated_cost_usd))
++    ));
++}
++
+ /// Print a step line: `◇  <label>` with an optional value.
+ pub fn step(label: &str, value: &str) {
+     if value.is_empty() {
+@@ -151,4 +185,23 @@
+         );
+         print_identity("coder", "gpt-4o", "direct");
+     }
++
++    #[test]
++    fn fmt_tokens_small() {
++        assert_eq!(fmt_tokens(0), "0");
++        assert_eq!(fmt_tokens(999), "999");
++    }
++
++    #[test]
++    fn fmt_tokens_thousands() {
++        assert_eq!(fmt_tokens(1_000), "1\u{202F}000");
++        assert_eq!(fmt_tokens(8_400), "8\u{202F}400");
++        assert_eq!(fmt_tokens(1_234_567), "1\u{202F}234\u{202F}567");
++    }
++
++    #[test]
++    fn cost_prediction_no_panic() {
++        print_cost_prediction(8_400, 0.042);
++        print_cost_prediction(0, 0.0);
++    }
+ }
+
+2026-04-28T11:50:55.476248Z ERROR codex_core::session: failed to record rollout items: thread 019dd3e7-609a-7e81-a28b-940416b09033 not found
+tokens used
+55,742
+Implemented `print_cost_prediction` in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:115), plus the private `fmt_tokens` helper and unit tests in the existing test module.
+
+Verification:
+- `grep` checks for `print_cost_prediction`, `fmt_tokens`, and `~`: passed
+- `cargo check -p roko-cli`: passed
+- `cargo test -p roko-cli --lib output_format`: failed during test compilation on existing errors outside the allowed write scope:
+  - `crates/roko-cli/src/tui/app.rs:3262`: `roko_core::shared_state_hub()` not found
+  - `crates/roko-cli/src/orchestrate.rs:20065`: mismatched `StateHubSender` types
+
+Only `crates/roko-cli/src/output_format.rs` was modified.
+
+=== Finished: 2026-04-28T13:50:55+02:00 ===
+=== Duration: 6m 46s ===
+=== Exit code: 0 ===
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared cargo check -p roko-cli
+warning: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-serve` (build script) generated 1 warning
+   Compiling roko-cli v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 4.89s

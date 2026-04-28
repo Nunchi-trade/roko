@@ -1,0 +1,11 @@
+Implemented R02 within scope.
+
+Changes:
+- [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/lib.rs:76) gates `pub mod orchestrate`
+- [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/lib.rs:125) gates the `orchestrate` re-export
+- [orchestrate.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/orchestrate.rs:1) now has a module-level `#![cfg(feature = "legacy-orchestrate")]` marker to satisfy the structural verifier
+
+Verification:
+- `grep` checks passed for `lib.rs` module gate, re-export gate, and `orchestrate.rs` cfg marker
+- `cargo check -p roko-cli --features legacy-orchestrate` passed
+- `cargo check -p roko-cli` failed as expected on the known out-of-scope R03/R04 references in `knowledge_helpers.rs:52` and `learning_helpers.rs:311`

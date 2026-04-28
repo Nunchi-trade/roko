@@ -1,0 +1,57 @@
+
+=== PREFLIGHT ===
+
+[OK]    preflight  codex CLI: /Users/will/.nvm/versions/node/v22.22.2/bin/codex
+[OK]    preflight  git repo detected
+[WARN]  preflight  main repo has 36 uncommitted change(s); worktree starts from committed HEAD only
+Preparing worktree (new branch 'codex/converge-run-20260428-045041')
+[INFO]  runner     Created run run-20260428-045041 in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+[INFO]  runner     Model: gpt-5.5 (reasoning: high)
+[INFO]  runner     Selected batches: F01,F02,F03,F04,F05,F06,S01,S02,S03,S04,S05,S06,S07,S08,S09,S10,S11,S12,S13,E01,E02,E03,E04,E05,E06,E07,E08,W01,W02,W03,W04,W05,W06,W07,W08,O01,O02,O03,O04,O05,O06,R01,R02,R03,R04,R05,C01,C02,C03,C04,C05,C06,C07,C08,C09,C10,C11,C12,T01,T02,T03,T04,T05,D01,D02,D03,D04,G01,G02,G03,G04,G05,G06,G07,G08,G09,K01,K02,K03,K04,K05,X01,X02,L01,L02,L03,L04
+
+=== F01 ATTEMPT 1/2 ===
+
+[OK]    F01        Codex completed in 2m 33s
+[OK]    F01        Verification passed (structural + compilation + anti-pattern)
+[OK]    F01        Committed: 618b3414 converge(F01): Invert crate dep: roko-core must not depend on roko-runtime
+
+=== F02 ATTEMPT 1/2 ===
+
+[OK]    F02        Codex completed in 3m 40s
+[OK]    F02        Verification passed (structural + compilation + anti-pattern)
+[OK]    F02        Committed: 7afab98c converge(F02): Remove local trait copies from effect_driver, use roko-core
+
+=== F03 ATTEMPT 1/2 ===
+
+[OK]    F03        Codex completed in 2m 21s
+[ERR]   F03        Structural check failed: grep -q 'use roko_core::runtime_event::RuntimeEvent' crates/roko-runtime/src/effect_driver.rs
+[WARN]  F03        Retrying with preserved failed-attempt changes
+
+=== F03 ATTEMPT 2/2 ===
+
+[INFO]  F03        Keeping failed-attempt changes for retry; skipping reset
+[OK]    F03        Codex completed in 2m 2s
+[ERR]   F03        Structural check failed: grep -q 'use roko_core::runtime_event::RuntimeEvent' crates/roko-runtime/src/effect_driver.rs
+[WARN]  F04        Blocked by failed dependency: F03
+[WARN]  F05        Blocked by failed dependency: F03
+[WARN]  F06        Blocked by failed dependency: F03
+
+=== S01 ATTEMPT 1/2 ===
+
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/spawn.sh: line 136: echo: write error: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/spawn.sh: line 137: echo: write error: No space left on device
+[ERR]   S01        Codex exited with code 101
+tmp/runners/converge/run-converge.sh: line 344: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/S01.result: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 14: echo: write error: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 15: echo: write error: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 16: echo: write error: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 28: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/backups/S01-attempt-1-spawn-failed.status: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 30: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/backups/S01-attempt-1-spawn-failed.patch: No space left on device
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/verify.sh: line 21: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/backups/S01-attempt-1-spawn-failed.meta: No space left on device
+[WARN]  S01        Retrying with preserved failed-attempt changes
+/Users/will/dev/nunchi/roko/roko/tmp/runners/converge/lib/common.sh: line 195: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/current-batch.env: No space left on device
+
+=== S01 ATTEMPT 2/2 ===
+
+[INFO]  S01        Keeping failed-attempt changes for retry; skipping reset
+mkdir: : [ERR]   S01        Codex exited with code 101

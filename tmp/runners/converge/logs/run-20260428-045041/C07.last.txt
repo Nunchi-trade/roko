@@ -1,0 +1,14 @@
+Implemented the share token/run persistence pieces in scope.
+
+Changed:
+- Added `roko_core::generate_share_token()` in [crates/roko-core/src/lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core/src/lib.rs:50).
+- Added `serde::Serialize` derive for `RunReport` and `write_shared_run()` in [crates/roko-cli/src/run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:65).
+- Added `write_shared_run_creates_file` unit test in [crates/roko-cli/src/run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:2148).
+
+Verification:
+- Grep done-criteria checks passed.
+- `cargo check -p roko-core` passed.
+- `cargo check -p roko-cli` passed.
+- `cargo test -p roko-cli share` did not complete because the existing `roko-cli` test build fails outside this batch’s write scope:
+  - `crates/roko-cli/src/tui/app.rs:3262`: `roko_core::shared_state_hub()` not found.
+  - `crates/roko-cli/src/orchestrate.rs:20065`: duplicated `StateHubSender` type mismatch between `roko-cli` and `roko-serve`.

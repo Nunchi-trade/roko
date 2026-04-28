@@ -1,0 +1,16 @@
+Implemented S10 in [feedback_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/feedback_service.rs:19).
+
+Changes:
+- Added optional `EpisodeLogger` support plus `with_episode_logger` and `from_roko_dir_with_episodes`.
+- Added `flush_async()` that keeps sync `flush()` for efficiency JSONL and appends workflow-complete episodes best-effort.
+- Wired `FeedbackSink::record` to use `flush_async()` when the buffer fills.
+- Added `build_episode_from_workflow`.
+- Added the requested tests for workflow episode recording and sync flush behavior.
+
+Verification passed:
+- `cargo check -p roko-learn`
+- `cargo test -p roko-learn feedback_service`
+- `cargo test -p roko-learn records_episode_on_workflow`
+- `cargo test -p roko-learn sync_flush_still_works`
+
+Cargo reported existing warnings outside this change (`verdict_scorer.rs` unused import and missing docs in an integration test), but all requested checks passed.

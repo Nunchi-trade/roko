@@ -1,0 +1,24 @@
+[INFO]  registry     Loaded 33 batches
+
+━━━ PREFLIGHT ━━━
+
+[ OK ]  preflight    codex codex-cli 0.125.0
+[ OK ]  preflight    rustc 1.95.0 (59807616e 2026-04-14)
+[ OK ]  preflight    Runner: converge-followup
+[INFO]  main         New run: run-20260428-224556
+[INFO]  main         Creating main worktree from d69d375d
+[ OK ]  main         Main worktree: converge-followup-run-20260428-224556-main
+
+━━━ PARALLEL RUNNER: converge-followup ━━━
+
+[INFO]  main         Run:      run-20260428-224556
+[INFO]  main         Batches:  33
+[INFO]  main         Parallel: 8
+[INFO]  main         Model:    gpt-5.5
+[INFO]  main         Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224556-main
+[INFO]  main         Source:   wp-arch2 (merge-back OFF)
+
+
+[WARN]  main         Run interrupted (exit 1)
+[WARN]  main         Main worktree preserved: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224556-main
+[WARN]  main         Resume with: --continue

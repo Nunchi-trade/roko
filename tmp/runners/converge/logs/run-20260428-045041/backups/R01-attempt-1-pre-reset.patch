@@ -1,0 +1,12 @@
+diff --git a/crates/roko-cli/src/lib.rs b/crates/roko-cli/src/lib.rs
+index 146de884..2b7c3d0b 100644
+--- a/crates/roko-cli/src/lib.rs
++++ b/crates/roko-cli/src/lib.rs
+@@ -67,6 +67,7 @@ pub(crate) mod knowledge_helpers;
+ pub(crate) mod learning_helpers;
+ pub mod oneshot;
+ pub mod orchestrate;
++pub mod output_format;
+ pub mod pipe;
+ pub mod plan;
+ pub mod plan_generate;

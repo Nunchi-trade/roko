@@ -1,0 +1,7 @@
+Implemented `PromptAssemblyService` in [prompt_assembly_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-compose/src/prompt_assembly_service.rs), including role resolution, convention detection from `workdir`, gate feedback injection, anti-pattern wiring, and inline tests.
+
+Updated [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-compose/src/lib.rs) with the module declaration and public re-export.
+
+Verification passed:
+- Done-criteria grep checks
+- `cargo check -p roko-compose`

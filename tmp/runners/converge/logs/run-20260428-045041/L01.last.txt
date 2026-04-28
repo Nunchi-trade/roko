@@ -1,0 +1,8 @@
+Added `[package.metadata.roko]` with the correct `layer = ...` value to all 30 crate-level `crates/*/Cargo.toml` files. No workspace-level manifest was changed.
+
+Verification passed:
+- Metadata coverage check: no missing files
+- `layer =` count check: no zero-count files
+- `cargo check --workspace`: passed in 2m 08s
+
+Only the 30 requested crate manifests are modified.

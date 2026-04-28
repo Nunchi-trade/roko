@@ -1,0 +1,14 @@
+Implemented UX34 force-backend learning wiring.
+
+Changed:
+- [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:27): added `ForceBackendOverrideRecorder`, optional router field, and `with_cascade_router(...)`.
+- [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:1076): records forced override outcomes on provider failure, convergence failure, and success.
+- [cascade_router.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs:110): added `RoutingContext::default()`.
+- [cascade_router.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs:133): implemented the recorder trait for `CascadeRouter`, forwarding to `record_override_outcome`.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- `cargo check -p roko-learn`
+- `cargo test -p roko-agent model_call_service`
+
+The targeted tests cover success recording, failure recording, and no-router no-op behavior.

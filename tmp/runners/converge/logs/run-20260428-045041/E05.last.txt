@@ -1,0 +1,7 @@
+Implemented `EffectDriver::save_checkpoint` in [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs:292).
+
+It now serializes `PipelineStateV2`, creates the parent directory, writes via `tokio::fs::write` to `path.with_extension("tmp")`, atomically renames into place, and emits both `FeedbackRecorded { kind: "checkpoint" }` and `StateCheckpointed`.
+
+Verification passed:
+- Done-criteria `grep` checks
+- `cargo check -p roko-runtime`

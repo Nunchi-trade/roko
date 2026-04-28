@@ -1,0 +1,12 @@
+Implemented the fail-closed contract fallback in [mod.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/safety/mod.rs:60).
+
+Changes:
+- Imported `ContractLoadMode`.
+- Switched `contract_for_role()` to `load_for_role_with_mode(..., RestrictedFallback)`.
+- Defensive error fallback now uses `AgentContract::restricted(...)`.
+- Changed the runtime default contract from `permissive("default")` to `restricted("default")` so no non-test permissive path remains.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- non-test `permissive` grep returned zero matches
+- `RestrictedFallback`, `load_for_role_with_mode`, and `ContractLoadMode` are present.

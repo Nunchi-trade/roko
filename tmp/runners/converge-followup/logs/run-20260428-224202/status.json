@@ -1,0 +1,17 @@
+{
+  "run_id": "run-20260428-224202",
+  "runner": "converge-followup",
+  "elapsed": "0s",
+  "elapsed_s": 0,
+  "total": 1,
+  "success": 0,
+  "failed": 0,
+  "in_progress": 1,
+  "pending": 0,
+  "blocked": 0,
+  "eta": "unknown",
+  "active": ["A01"],
+  "completed": [""],
+  "failed_list": [""],
+  "updated_at": "2026-04-28T22:42:02+02:00"
+}

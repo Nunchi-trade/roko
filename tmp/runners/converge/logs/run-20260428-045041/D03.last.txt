@@ -1,0 +1,12 @@
+Implemented Batch D03 in the scoped files.
+
+Changes:
+- Added local `AffectContext`, `DispatchModulation`, and `AffectPolicy` in [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs).
+- Added optional `affect_policy` to `EffectServices`.
+- Wired affect lifecycle hooks into agent dispatch, agent success/failure, gate verdicts, and workflow terminal persistence.
+- Threaded `affect_policy` through `WorkflowEngine` driver construction and test mock services.
+
+Verification passed:
+- `cargo fmt -p roko-runtime`
+- `cargo check -p roko-runtime`
+- All requested `grep` acceptance checks returned the expected matches.

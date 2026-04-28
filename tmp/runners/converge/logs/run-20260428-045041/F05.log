@@ -1,0 +1,3197 @@
+=== Batch: F05 (Update RuntimeProjection to parse all RuntimeEvent variants) ===
+=== Started: 2026-04-28T05:23:54+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/F05/codex-attempt-2 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/F05.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd21d-6500-7e61-a2a9-a03818bedbea
+--------
+user
+# Convergence Batch F05 — Update RuntimeProjection to parse all RuntimeEvent variants
+
+Run id: run-20260428-045041
+Attempt: 2
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Previous attempt failure context
+
+Structural verification failed — expected symbols not found.
+
+Recent log tail:
++    #[test]
++    fn tracks_agent_completed_and_costs() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
++            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
++            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
++        assert_eq!(summary.agents_spawned, 1);
++        assert_eq!(summary.agents_completed, 1);
++        assert_eq!(summary.total_tokens, 500);
++        assert_eq!(summary.total_cost_usd, 0.01);
++    }
+ }
+
+2026-04-28T03:23:54.568872Z ERROR codex_core::session: failed to record rollout items: thread 019dd21b-5d8b-7e00-ac1e-8dd548ff5098 not found
+tokens used
+54,964
+Implemented [projection.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/projection.rs).
+
+Changes:
+- Added `RunSummary` fields for completed/failed agents, total tokens, total cost, feedback count, last checkpoint, and agent errors.
+- Extended `apply_event` for `agent_completed`, `agent_failed`, `feedback_recorded`, and `state_checkpointed`.
+- Added scalar parsing for numeric debug fields like `tokens_used: 500`.
+- Added a unit test covering `agent_completed` usage/cost aggregation.
+
+Verification passed:
+- Required `grep` checks
+- `cargo test -p roko-runtime --lib -- projection`
+- `cargo check -p roko-runtime`
+
+=== Finished: 2026-04-28T05:23:54+02:00 ===
+=== Duration: 2m 13s ===
+=== Exit code: 0 ===
+[structural] grep -q 'AgentOutput\|FeedbackRecorded\|StateCheckpointed' crates/roko-runtime/src/projection.rs
+
+Use the above failure context to avoid repeating the same mistake.
+
+---
+
+## Batch F05: Update RuntimeProjection for all 12 RuntimeEvent variants
+
+### Write Scope
+- **MODIFY**: `crates/roko-runtime/src/projection.rs` (update apply_event and RunSummary for new variants)
+
+### Dependencies
+- F03 (canonical RuntimeEvent with 12 variants now used throughout roko-runtime)
+- F04 (jsonl_logger.rs now writes kind() labels from canonical RuntimeEvent)
+
+### DO NOT
+- Change the public API of `RuntimeProjection` (keep `from_file` and `for_run`)
+- Change the `Result` type alias — it uses `crate::effect_driver::Result` which is
+  `Box<dyn std::error::Error + Send + Sync>` and is fine to keep
+- Remove existing test cases — extend them or add new ones
+- Import RuntimeEvent directly into projection.rs — the projection reads JSONL, not
+  RuntimeEvent values; it works off string kind labels from the log
+
+### Existing Code Context
+
+`crates/roko-runtime/src/projection.rs` — current `RunSummary` fields (lines 12-33):
+```rust
+pub struct RunSummary {
+    pub run_id: String,
+    pub template: Option<String>,
+    pub prompt: Option<String>,
+    pub current_phase: Option<String>,
+    pub phases_visited: Vec<String>,
+    pub gates_passed: Vec<String>,
+    pub gates_failed: Vec<String>,
+    pub agents_spawned: u32,
+    pub is_complete: bool,
+    pub outcome: Option<String>,
+}
+```
+
+Current `apply_event` (lines 83-114) handles 6 kind labels:
+`workflow_started`, `phase_transition`, `gate_passed`, `gate_failed`, `agent_spawned`,
+`workflow_completed`.
+
+The canonical `RuntimeEvent` has 12 variants with these kind() labels:
+- `workflow_started` — already handled
+- `phase_transition` — already handled
+- `workflow_completed` — already handled
+- `agent_spawned` — already handled
+- `agent_output` — NEW: streaming chunk, useful to record agent output tail
+- `agent_completed` — NEW: has tokens_used, cost_usd
+- `agent_failed` — NEW: has error
+- `gate_started` — NEW: has gate_name, rung
+- `gate_passed` — already handled
+- `gate_failed` — already handled
+- `feedback_recorded` — NEW: has kind, summary
+- `state_checkpointed` — NEW: has path
+
+The JSONL format written by `JsonlLogger` is:
+```json
+{"ts":"...","kind":"agent_completed","run_id":"r1","event":"AgentCompleted { run_id: \"r1\", ... }"}
+```
+
+The `event_field(value, "field")` helper already exists and parses field values out of
+the debug-format string in the `event` key.
+
+### Task
+
+**Step 1** — add new fields to `RunSummary`:
+
+```rust
+pub struct RunSummary {
+    // existing fields (keep all)
+    pub run_id: String,
+    pub template: Option<String>,
+    pub prompt: Option<String>,
+    pub current_phase: Option<String>,
+    pub phases_visited: Vec<String>,
+    pub gates_passed: Vec<String>,
+    pub gates_failed: Vec<String>,
+    pub agents_spawned: u32,
+    pub is_complete: bool,
+    pub outcome: Option<String>,
+
+    // new fields for canonical variants
+    /// Number of completed agent turns observed.
+    pub agents_completed: u32,
+    /// Number of failed agent turns observed.
+    pub agents_failed: u32,
+    /// Cumulative tokens used across all agent calls (parsed from event log).
+    pub total_tokens: u64,
+    /// Cumulative cost in USD across all agent calls (parsed from event log).
+    pub total_cost_usd: f64,
+    /// Number of feedback_recorded events observed.
+    pub feedback_count: u32,
+    /// Last state checkpoint path recorded.
+    pub last_checkpoint: Option<String>,
+    /// Errors from agent_failed events.
+    pub agent_errors: Vec<String>,
+}
+```
+
+Update `Default` to zero-initialize all new fields (derive `Default` still works since all
+new types implement `Default`).
+
+**Step 2** — extend `apply_event` to handle new kind labels:
+
+```rust
+fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value) {
+    match kind {
+        // existing cases (keep unchanged):
+        "workflow_started" => {
+            summary.template = event_field(value, "template");
+            summary.prompt = event_field(value, "prompt");
+        }
+        "phase_transition" => {
+            if let Some(to) = event_field(value, "to") {
+                summary.current_phase = Some(to.clone());
+                summary.phases_visited.push(to);
+            }
+        }
+        "gate_passed" => {
+            if let Some(name) = event_field(value, "gate_name") {
+                summary.gates_passed.push(name);
+            }
+        }
+        "gate_failed" => {
+            if let Some(name) = event_field(value, "gate_name") {
+                summary.gates_failed.push(name);
+            }
+        }
+        "agent_spawned" => {
+            summary.agents_spawned += 1;
+        }
+        "workflow_completed" => {
+            summary.is_complete = true;
+            summary.outcome = event_field(value, "outcome")
+                .or_else(|| Some(kind.to_string()));
+        }
+
+        // new cases:
+        "agent_completed" => {
+            summary.agents_completed += 1;
+            if let Some(tokens_str) = event_field(value, "tokens_used") {
+                if let Ok(tokens) = tokens_str.parse::<u64>() {
+                    summary.total_tokens += tokens;
+                }
+            }
+            if let Some(cost_str) = event_field(value, "cost_usd") {
+                if let Ok(cost) = cost_str.parse::<f64>() {
+                    summary.total_cost_usd += cost;
+                }
+            }
+        }
+        "agent_failed" => {
+            summary.agents_failed += 1;
+            if let Some(error) = event_field(value, "error") {
+                summary.agent_errors.push(error);
+            }
+        }
+        "feedback_recorded" => {
+            summary.feedback_count += 1;
+        }
+        "state_checkpointed" => {
+            summary.last_checkpoint = event_field(value, "path");
+        }
+        // agent_output, gate_started: no summary fields, intentionally ignored
+        _ => {}
+    }
+}
+```
+
+**Step 3** — add a test that exercises at least one new variant:
+
+```rust
+#[test]
+fn tracks_agent_completed_and_costs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let lines = [
+        r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
+        r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+        r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
+    ]
+    .join("\n");
+    std::fs::write(&path, lines).unwrap();
+
+    let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
+    assert_eq!(summary.agents_spawned, 1);
+    assert_eq!(summary.agents_completed, 1);
+    assert_eq!(summary.total_tokens, 500);
+}
+```
+
+### Done Criteria
+```bash
+# new fields present in RunSummary
+grep -q 'agents_completed' crates/roko-runtime/src/projection.rs
+grep -q 'total_tokens' crates/roko-runtime/src/projection.rs
+grep -q 'total_cost_usd' crates/roko-runtime/src/projection.rs
+grep -q 'feedback_count' crates/roko-runtime/src/projection.rs
+grep -q 'last_checkpoint' crates/roko-runtime/src/projection.rs
+
+# new kind labels handled in apply_event
+grep -q '"agent_completed"' crates/roko-runtime/src/projection.rs
+grep -q '"agent_failed"' crates/roko-runtime/src/projection.rs
+grep -q '"feedback_recorded"' crates/roko-runtime/src/projection.rs
+grep -q '"state_checkpointed"' crates/roko-runtime/src/projection.rs
+
+# all tests pass
+cargo test -p roko-runtime --lib -- projection
+
+# full compile
+cargo check -p roko-runtime
+```
+
+codex
+I’ll inspect the current projection implementation first, then make the scoped change only in `crates/roko-runtime/src/projection.rs` and run the required checks.
+exec
+/bin/zsh -lc "sed -n '1,240p' crates/roko-runtime/src/projection.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! RuntimeProjection -- reconstructs workflow state from JSONL event logs.
+//!
+//! Reads the JSONL file written by JsonlLogger and builds a snapshot of the
+//! current state for each run_id. Used for resume and dashboard views.
+
+use crate::effect_driver::Result;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Summary of a workflow run reconstructed from events.
+#[derive(Debug, Clone, Default)]
+pub struct RunSummary {
+    /// Workflow run id.
+    pub run_id: String,
+    /// Workflow template label.
+    pub template: Option<String>,
+    /// Original user prompt.
+    pub prompt: Option<String>,
+    /// Current phase label.
+    pub current_phase: Option<String>,
+    /// Phase labels visited in event order.
+    pub phases_visited: Vec<String>,
+    /// Gate names that passed.
+    pub gates_passed: Vec<String>,
+    /// Gate names that failed.
+    pub gates_failed: Vec<String>,
+    /// Number of agent spawn events observed.
+    pub agents_spawned: u32,
+    /// Whether the workflow emitted a completion event.
+    pub is_complete: bool,
+    /// Final workflow outcome, when present.
+    pub outcome: Option<String>,
+    /// Number of completed agent turns observed.
+    pub agents_completed: u32,
+    /// Number of failed agent turns observed.
+    pub agents_failed: u32,
+    /// Cumulative tokens used across all agent calls (parsed from event log).
+    pub total_tokens: u64,
+    /// Cumulative cost in USD across all agent calls (parsed from event log).
+    pub total_cost_usd: f64,
+    /// Number of feedback_recorded events observed.
+    pub feedback_count: u32,
+    /// Last state checkpoint path recorded.
+    pub last_checkpoint: Option<String>,
+    /// Errors from agent_failed events.
+    pub agent_errors: Vec<String>,
+}
+
+/// Reads JSONL event logs and produces per-run summaries.
+pub struct RuntimeProjection;
+
+impl RuntimeProjection {
+    /// Read the event log and produce summaries for all runs.
+    pub fn from_file(path: &Path) -> Result<HashMap<String, RunSummary>> {
+        let mut runs: HashMap<String, RunSummary> = HashMap::new();
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+            Err(err) => return Err(err.into()),
+        };
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let value: serde_json::Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let run_id = value["run_id"].as_str().unwrap_or("unknown").to_string();
+            let kind = value["kind"].as_str().unwrap_or_default();
+            let summary = runs.entry(run_id.clone()).or_insert_with(|| RunSummary {
+                run_id: run_id.clone(),
+                ..Default::default()
+            });
+
+            apply_event(summary, kind, &value);
+        }
+
+        Ok(runs)
+    }
+
+    /// Get summary for a specific run.
+    pub fn for_run(path: &Path, run_id: &str) -> Result<Option<RunSummary>> {
+        let runs = Self::from_file(path)?;
+        Ok(runs.into_iter().find_map(
+            |(id, summary)| {
+                if id == run_id { Some(summary) } else { None }
+            },
+        ))
+    }
+}
+
+fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value) {
+    match kind {
+        "workflow_started" => {
+            summary.template = event_field(value, "template");
+            summary.prompt = event_field(value, "prompt");
+        }
+        "phase_transition" => {
+            if let Some(to) = event_field(value, "to") {
+                summary.current_phase = Some(to.clone());
+                summary.phases_visited.push(to);
+            }
+        }
+        "gate_passed" => {
+            if let Some(name) = event_field(value, "gate_name") {
+                summary.gates_passed.push(name);
+            }
+        }
+        "gate_failed" => {
+            if let Some(name) = event_field(value, "gate_name") {
+                summary.gates_failed.push(name);
+            }
+        }
+        "agent_spawned" => {
+            summary.agents_spawned += 1;
+        }
+        "workflow_completed" => {
+            summary.is_complete = true;
+            summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
+        }
+        "agent_completed" => {
+            summary.agents_completed += 1;
+            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
+                if let Ok(tokens) = tokens_str.parse::<u64>() {
+                    summary.total_tokens += tokens;
+                }
+            }
+            if let Some(cost_str) = event_scalar(value, "cost_usd") {
+                if let Ok(cost) = cost_str.parse::<f64>() {
+                    summary.total_cost_usd += cost;
+                }
+            }
+        }
+        "agent_failed" => {
+            summary.agents_failed += 1;
+            if let Some(error) = event_field(value, "error") {
+                summary.agent_errors.push(error);
+            }
+        }
+        "feedback_recorded" => {
+            summary.feedback_count += 1;
+        }
+        "state_checkpointed" => {
+            summary.last_checkpoint = event_field(value, "path");
+        }
+        _ => {}
+    }
+}
+
+fn event_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get("event")
+        .and_then(|event| event.get(field))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|event| debug_field(event, field))
+        })
+}
+
+fn debug_field(event: &str, field: &str) -> Option<String> {
+    let needle = format!("{field}: \"");
+    let start = event.find(&needle)? + needle.len();
+    let rest = &event[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get("event")
+        .and_then(|event| event.get(field))
+        .map(|value| match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        })
+        .or_else(|| {
+            value
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|event| debug_scalar(event, field))
+        })
+}
+
+fn debug_scalar(event: &str, field: &str) -> Option<String> {
+    let needle = format!("{field}: ");
+    let start = event.find(&needle)? + needle.len();
+    let rest = event[start..].trim_start();
+
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let runs = RuntimeProjection::from_file(&path).unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn handles_missing_file() {
+        let path = Path::new("/nonexistent/events.jsonl");
+        let runs = RuntimeProjection::from_file(path).unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn reconstructs_run_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"kind":"workflow_started","run_id":"r1","event":"WorkflowStarted { run_id: \"r1\", template: \"express\", prompt: \"fix\" }"}"#,
+            r#"{"kind":"phase_transition","run_id":"r1","event":"PhaseTransition { run_id: \"r1\", from: \"plan\", to: \"implement\" }"}"#,
+            r#"{"kind":"agent_spawned","run_id":"r1","event":"AgentSpawned { run_id: \"r1\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-runtime/src/projection.rs
+
+codex
+The file already contains most of the prior attempt’s edits, so the failure is likely from structural expectations around literal variant labels or missing coverage for ignored variants. I’m reading the rest of the tests before making a minimal adjustment.
+exec
+/bin/zsh -lc "sed -n '240,520p' crates/roko-runtime/src/projection.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+            r#"{"kind":"agent_spawned","run_id":"r1","event":"AgentSpawned { run_id: \"r1\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+            r#"{"kind":"gate_passed","run_id":"r1","event":"GatePassed { run_id: \"r1\", gate_name: \"compile\", duration_ms: 100 }"}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let summary = RuntimeProjection::for_run(&path, "r1").unwrap().unwrap();
+        assert_eq!(summary.template.as_deref(), Some("express"));
+        assert_eq!(summary.prompt.as_deref(), Some("fix"));
+        assert_eq!(summary.current_phase.as_deref(), Some("implement"));
+        assert_eq!(summary.agents_spawned, 1);
+        assert_eq!(summary.gates_passed, vec!["compile"]);
+    }
+
+    #[test]
+    fn tracks_agent_completed_and_costs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
+            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
+        ]
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
+        assert_eq!(summary.agents_spawned, 1);
+        assert_eq!(summary.agents_completed, 1);
+        assert_eq!(summary.total_tokens, 500);
+        assert_eq!(summary.total_cost_usd, 0.01);
+    }
+}
+
+codex
+I’m going to make the ignored variants explicit and add a focused test using the canonical Debug variant names for `AgentOutput`, `GateStarted`, `FeedbackRecorded`, and `StateCheckpointed`. That should satisfy both behavior and the structural scanner without changing the projection API.
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/projection.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index e6d0f453..c4e5fe4c 100644
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -30,6 +30,20 @@ pub struct RunSummary {
+     pub is_complete: bool,
+     /// Final workflow outcome, when present.
+     pub outcome: Option<String>,
++    /// Number of completed agent turns observed.
++    pub agents_completed: u32,
++    /// Number of failed agent turns observed.
++    pub agents_failed: u32,
++    /// Cumulative tokens used across all agent calls (parsed from event log).
++    pub total_tokens: u64,
++    /// Cumulative cost in USD across all agent calls (parsed from event log).
++    pub total_cost_usd: f64,
++    /// Number of feedback_recorded events observed.
++    pub feedback_count: u32,
++    /// Last state checkpoint path recorded.
++    pub last_checkpoint: Option<String>,
++    /// Errors from agent_failed events.
++    pub agent_errors: Vec<String>,
+ }
+ 
+ /// Reads JSONL event logs and produces per-run summaries.
+@@ -109,6 +123,31 @@ fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value)
+             summary.is_complete = true;
+             summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
+         }
++        "agent_completed" => {
++            summary.agents_completed += 1;
++            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
++                if let Ok(tokens) = tokens_str.parse::<u64>() {
++                    summary.total_tokens += tokens;
++                }
++            }
++            if let Some(cost_str) = event_scalar(value, "cost_usd") {
++                if let Ok(cost) = cost_str.parse::<f64>() {
++                    summary.total_cost_usd += cost;
++                }
++            }
++        }
++        "agent_failed" => {
++            summary.agents_failed += 1;
++            if let Some(error) = event_field(value, "error") {
++                summary.agent_errors.push(error);
++            }
++        }
++        "feedback_recorded" => {
++            summary.feedback_count += 1;
++        }
++        "state_checkpointed" => {
++            summary.last_checkpoint = event_field(value, "path");
++        }
+         _ => {}
+     }
+ }
+@@ -135,6 +174,41 @@ fn debug_field(event: &str, field: &str) -> Option<String> {
+     Some(rest[..end].to_string())
+ }
+ 
++fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
++    value
++        .get("event")
++        .and_then(|event| event.get(field))
++        .map(|value| match value {
++            serde_json::Value::String(value) => value.clone(),
++            other => other.to_string(),
++        })
++        .or_else(|| {
++            value
++                .get("event")
++                .and_then(serde_json::Value::as_str)
++                .and_then(|event| debug_scalar(event, field))
++        })
++}
++
++fn debug_scalar(event: &str, field: &str) -> Option<String> {
++    let needle = format!("{field}: ");
++    let start = event.find(&needle)? + needle.len();
++    let rest = event[start..].trim_start();
++
++    if let Some(rest) = rest.strip_prefix('"') {
++        let end = rest.find('"')?;
++        return Some(rest[..end].to_string());
++    }
++
++    let end = rest.find([',', '}']).unwrap_or(rest.len());
++    let value = rest[..end].trim();
++    if value.is_empty() {
++        None
++    } else {
++        Some(value.to_string())
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -176,4 +250,23 @@ mod tests {
+         assert_eq!(summary.agents_spawned, 1);
+         assert_eq!(summary.gates_passed, vec!["compile"]);
+     }
++
++    #[test]
++    fn tracks_agent_completed_and_costs() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
++            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
++            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
++        assert_eq!(summary.agents_spawned, 1);
++        assert_eq!(summary.agents_completed, 1);
++        assert_eq!(summary.total_tokens, 500);
++        assert_eq!(summary.total_cost_usd, 0.01);
++    }
+ }
+
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/projection.rs
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..f1a7afeb47cf4463d12904d4c29b5a1d65d5d2ce
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -148,6 +148,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +275,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..f1a7afeb47cf4463d12904d4c29b5a1d65d5d2ce
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -148,6 +148,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +275,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+codex
+The code now has explicit no-op arms for the two variants that do not contribute to aggregates, plus a test covering the remaining canonical Debug names. I’ll format the touched file and then run the required grep/test/check commands.
+exec
+/bin/zsh -lc 'rustfmt crates/roko-runtime/src/projection.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+exec
+/bin/zsh -lc "grep -q 'agents_completed' crates/roko-runtime/src/projection.rs && grep -q 'total_tokens' crates/roko-runtime/src/projection.rs && grep -q 'total_cost_usd' crates/roko-runtime/src/projection.rs && grep -q 'feedback_count' crates/roko-runtime/src/projection.rs && grep -q 'last_checkpoint' crates/roko-runtime/src/projection.rs && grep -q '\"agent_completed\"' crates/roko-runtime/src/projection.rs && grep -q '\"agent_failed\"' crates/roko-runtime/src/projection.rs && grep -q '\"feedback_recorded\"' crates/roko-runtime/src/projection.rs && grep -q '\"state_checkpointed\"' crates/roko-runtime/src/projection.rs && grep -q 'AgentOutput\\|FeedbackRecorded\\|StateCheckpointed' crates/roko-runtime/src/projection.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'cargo test -p roko-runtime --lib -- projection' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+codex
+The structural greps passed, including the one that failed before. The projection test target is compiling now; I’ll wait for that result before running the full `cargo check`.
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+ succeeded in 61345ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling serde v1.0.228
+   Compiling getrandom v0.4.2
+   Compiling memchr v2.8.0
+   Compiling semver v1.0.28
+   Compiling parking_lot_core v0.9.12
+   Compiling zmij v1.0.21
+   Compiling shlex v1.3.0
+   Compiling autocfg v1.5.0
+   Compiling rustc_version v0.4.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling cc v1.2.60
+   Compiling smallvec v1.15.1
+   Compiling scopeguard v1.2.0
+   Compiling once_cell v1.21.4
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling serde_json v1.0.149
+   Compiling lock_api v0.4.14
+   Compiling curve25519-dalek v4.1.3
+   Compiling aho-corasick v1.1.4
+   Compiling toml_write v0.1.2
+   Compiling generic-array v0.14.9
+   Compiling core-foundation-sys v0.8.7
+   Compiling signature v2.2.0
+   Compiling zeroize v1.8.2
+   Compiling indexmap v2.14.0
+   Compiling bitflags v2.11.0
+   Compiling num-traits v0.2.19
+   Compiling cfg_aliases v0.2.1
+   Compiling regex-syntax v0.8.10
+   Compiling syn v2.0.117
+   Compiling winnow v0.7.15
+   Compiling pin-project-lite v0.2.17
+   Compiling subtle v2.6.1
+   Compiling thiserror v2.0.18
+   Compiling rustix v1.1.4
+   Compiling itoa v1.0.18
+   Compiling nix v0.29.0
+   Compiling errno v0.3.14
+   Compiling cpufeatures v0.2.17
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling iana-time-zone v0.1.65
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.6
+   Compiling ed25519 v2.2.3
+   Compiling digest v0.10.7
+   Compiling tracing-core v0.1.36
+   Compiling sha2 v0.10.9
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling bytes v1.11.1
+   Compiling arrayvec v0.7.6
+   Compiling uuid v1.23.0
+   Compiling regex-automata v0.4.14
+   Compiling ed25519-dalek v2.2.0
+   Compiling fastrand v2.4.1
+   Compiling tempfile v3.27.0
+   Compiling blake3 v1.8.4
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.51.1
+   Compiling tracing v0.1.44
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling chrono v0.4.44
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 01s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/F05/codex-attempt-2/debug/deps/roko_runtime-0c58882bc064c5a6)
+
+running 5 tests
+test projection::tests::handles_missing_file ... ok
+test projection::tests::parses_empty_file ... ok
+test projection::tests::reconstructs_run_summary ... ok
+test projection::tests::tracks_failures_feedback_and_checkpoints ... ok
+test projection::tests::tracks_agent_completed_and_costs ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.00s
+
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+codex
+`cargo test -p roko-runtime --lib -- projection` passed. It emitted unrelated existing warnings in heartbeat test code; I’m leaving those alone because this batch’s write scope is limited to `projection.rs`.
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+ succeeded in 11535ms:
+    Checking libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking memchr v2.8.0
+    Checking serde_core v1.0.228
+    Checking typenum v1.19.0
+    Checking smallvec v1.15.1
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking scopeguard v1.2.0
+    Checking zmij v1.0.21
+    Checking zeroize v1.8.2
+    Checking itoa v1.0.18
+    Checking regex-syntax v0.8.10
+    Checking subtle v2.6.1
+    Checking toml_write v0.1.2
+    Checking once_cell v1.21.4
+    Checking lock_api v0.4.14
+    Checking pin-project-lite v0.2.17
+    Checking signature v2.2.0
+    Checking core-foundation-sys v0.8.7
+    Checking winnow v0.7.15
+    Checking num-traits v0.2.19
+    Checking constant_time_eq v0.4.2
+    Checking arrayvec v0.7.6
+    Checking ed25519 v2.2.3
+    Checking tracing-core v0.1.36
+    Checking arrayref v0.3.9
+    Checking aho-corasick v1.1.4
+    Checking iana-time-zone v0.1.65
+    Checking bytes v1.11.1
+    Checking thiserror v2.0.18
+    Checking generic-array v0.14.9
+    Checking bitflags v2.11.0
+    Checking blake3 v1.8.4
+    Checking indexmap v2.14.0
+    Checking tracing v0.1.44
+    Checking errno v0.3.14
+    Checking cpufeatures v0.2.17
+    Checking parking_lot_core v0.9.12
+    Checking getrandom v0.4.2
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking nix v0.29.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking tokio v1.51.1
+    Checking sha2 v0.10.9
+    Checking curve25519-dalek v4.1.3
+    Checking serde v1.0.228
+    Checking uuid v1.23.0
+    Checking serde_json v1.0.149
+    Checking regex-automata v0.4.14
+    Checking ed25519-dalek v2.2.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking regex v1.12.3
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 11.51s
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/projection.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index e6d0f453..d2ac6801 100644
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -30,6 +30,20 @@ pub struct RunSummary {
+     pub is_complete: bool,
+     /// Final workflow outcome, when present.
+     pub outcome: Option<String>,
++    /// Number of completed agent turns observed.
++    pub agents_completed: u32,
++    /// Number of failed agent turns observed.
++    pub agents_failed: u32,
++    /// Cumulative tokens used across all agent calls (parsed from event log).
++    pub total_tokens: u64,
++    /// Cumulative cost in USD across all agent calls (parsed from event log).
++    pub total_cost_usd: f64,
++    /// Number of feedback_recorded events observed.
++    pub feedback_count: u32,
++    /// Last state checkpoint path recorded.
++    pub last_checkpoint: Option<String>,
++    /// Errors from agent_failed events.
++    pub agent_errors: Vec<String>,
+ }
+ 
+ /// Reads JSONL event logs and produces per-run summaries.
+@@ -74,7 +88,11 @@ impl RuntimeProjection {
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -109,6 +127,37 @@ fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value)
+             summary.is_complete = true;
+             summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
+         }
++        "agent_completed" => {
++            summary.agents_completed += 1;
++            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
++                if let Ok(tokens) = tokens_str.parse::<u64>() {
++                    summary.total_tokens += tokens;
++                }
++            }
++            if let Some(cost_str) = event_scalar(value, "cost_usd") {
++                if let Ok(cost) = cost_str.parse::<f64>() {
++                    summary.total_cost_usd += cost;
++                }
++            }
++        }
++        "agent_failed" => {
++            summary.agents_failed += 1;
++            if let Some(error) = event_field(value, "error") {
++                summary.agent_errors.push(error);
++            }
++        }
++        "feedback_recorded" => {
++            summary.feedback_count += 1;
++        }
++        "state_checkpointed" => {
++            summary.last_checkpoint = event_field(value, "path");
++        }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -135,6 +184,41 @@ fn debug_field(event: &str, field: &str) -> Option<String> {
+     Some(rest[..end].to_string())
+ }
+ 
++fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
++    value
++        .get("event")
++        .and_then(|event| event.get(field))
++        .map(|value| match value {
++            serde_json::Value::String(value) => value.clone(),
++            other => other.to_string(),
++        })
++        .or_else(|| {
++            value
++                .get("event")
++                .and_then(serde_json::Value::as_str)
++                .and_then(|event| debug_scalar(event, field))
++        })
++}
++
++fn debug_scalar(event: &str, field: &str) -> Option<String> {
++    let needle = format!("{field}: ");
++    let start = event.find(&needle)? + needle.len();
++    let rest = event[start..].trim_start();
++
++    if let Some(rest) = rest.strip_prefix('"') {
++        let end = rest.find('"')?;
++        return Some(rest[..end].to_string());
++    }
++
++    let end = rest.find([',', '}']).unwrap_or(rest.len());
++    let value = rest[..end].trim();
++    if value.is_empty() {
++        None
++    } else {
++        Some(value.to_string())
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -176,4 +260,44 @@ mod tests {
+         assert_eq!(summary.agents_spawned, 1);
+         assert_eq!(summary.gates_passed, vec!["compile"]);
+     }
++
++    #[test]
++    fn tracks_agent_completed_and_costs() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
++            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
++            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
++        assert_eq!(summary.agents_spawned, 1);
++        assert_eq!(summary.agents_completed, 1);
++        assert_eq!(summary.total_tokens, 500);
++        assert_eq!(summary.total_cost_usd, 0.01);
++    }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-runtime/src/projection.rs
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+exec
+/bin/zsh -lc "nl -ba crates/roko-runtime/src/projection.rs | sed -n '1,230p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+     1	//! RuntimeProjection -- reconstructs workflow state from JSONL event logs.
+     2	//!
+     3	//! Reads the JSONL file written by JsonlLogger and builds a snapshot of the
+     4	//! current state for each run_id. Used for resume and dashboard views.
+     5	
+     6	use crate::effect_driver::Result;
+     7	use std::collections::HashMap;
+     8	use std::path::Path;
+     9	
+    10	/// Summary of a workflow run reconstructed from events.
+    11	#[derive(Debug, Clone, Default)]
+    12	pub struct RunSummary {
+    13	    /// Workflow run id.
+    14	    pub run_id: String,
+    15	    /// Workflow template label.
+    16	    pub template: Option<String>,
+    17	    /// Original user prompt.
+    18	    pub prompt: Option<String>,
+    19	    /// Current phase label.
+    20	    pub current_phase: Option<String>,
+    21	    /// Phase labels visited in event order.
+    22	    pub phases_visited: Vec<String>,
+    23	    /// Gate names that passed.
+    24	    pub gates_passed: Vec<String>,
+    25	    /// Gate names that failed.
+    26	    pub gates_failed: Vec<String>,
+    27	    /// Number of agent spawn events observed.
+    28	    pub agents_spawned: u32,
+    29	    /// Whether the workflow emitted a completion event.
+    30	    pub is_complete: bool,
+    31	    /// Final workflow outcome, when present.
+    32	    pub outcome: Option<String>,
+    33	    /// Number of completed agent turns observed.
+    34	    pub agents_completed: u32,
+    35	    /// Number of failed agent turns observed.
+    36	    pub agents_failed: u32,
+    37	    /// Cumulative tokens used across all agent calls (parsed from event log).
+    38	    pub total_tokens: u64,
+    39	    /// Cumulative cost in USD across all agent calls (parsed from event log).
+    40	    pub total_cost_usd: f64,
+    41	    /// Number of feedback_recorded events observed.
+    42	    pub feedback_count: u32,
+    43	    /// Last state checkpoint path recorded.
+    44	    pub last_checkpoint: Option<String>,
+    45	    /// Errors from agent_failed events.
+    46	    pub agent_errors: Vec<String>,
+    47	}
+    48	
+    49	/// Reads JSONL event logs and produces per-run summaries.
+    50	pub struct RuntimeProjection;
+    51	
+    52	impl RuntimeProjection {
+    53	    /// Read the event log and produce summaries for all runs.
+    54	    pub fn from_file(path: &Path) -> Result<HashMap<String, RunSummary>> {
+    55	        let mut runs: HashMap<String, RunSummary> = HashMap::new();
+    56	
+    57	        let content = match std::fs::read_to_string(path) {
+    58	            Ok(content) => content,
+    59	            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(runs),
+    60	            Err(err) => return Err(err.into()),
+    61	        };
+    62	
+    63	        for line in content.lines() {
+    64	            if line.trim().is_empty() {
+    65	                continue;
+    66	            }
+    67	
+    68	            let value: serde_json::Value = match serde_json::from_str(line) {
+    69	                Ok(value) => value,
+    70	                Err(_) => continue,
+    71	            };
+    72	
+    73	            let run_id = value["run_id"].as_str().unwrap_or("unknown").to_string();
+    74	            let kind = value["kind"].as_str().unwrap_or_default();
+    75	            let summary = runs.entry(run_id.clone()).or_insert_with(|| RunSummary {
+    76	                run_id: run_id.clone(),
+    77	                ..Default::default()
+    78	            });
+    79	
+    80	            apply_event(summary, kind, &value);
+    81	        }
+    82	
+    83	        Ok(runs)
+    84	    }
+    85	
+    86	    /// Get summary for a specific run.
+    87	    pub fn for_run(path: &Path, run_id: &str) -> Result<Option<RunSummary>> {
+    88	        let runs = Self::from_file(path)?;
+    89	        Ok(runs.into_iter().find_map(
+    90	            |(id, summary)| {
+    91	                if id == run_id {
+    92	                    Some(summary)
+    93	                } else {
+    94	                    None
+    95	                }
+    96	            },
+    97	        ))
+    98	    }
+    99	}
+   100	
+   101	fn apply_event(summary: &mut RunSummary, kind: &str, value: &serde_json::Value) {
+   102	    match kind {
+   103	        "workflow_started" => {
+   104	            summary.template = event_field(value, "template");
+   105	            summary.prompt = event_field(value, "prompt");
+   106	        }
+   107	        "phase_transition" => {
+   108	            if let Some(to) = event_field(value, "to") {
+   109	                summary.current_phase = Some(to.clone());
+   110	                summary.phases_visited.push(to);
+   111	            }
+   112	        }
+   113	        "gate_passed" => {
+   114	            if let Some(name) = event_field(value, "gate_name") {
+   115	                summary.gates_passed.push(name);
+   116	            }
+   117	        }
+   118	        "gate_failed" => {
+   119	            if let Some(name) = event_field(value, "gate_name") {
+   120	                summary.gates_failed.push(name);
+   121	            }
+   122	        }
+   123	        "agent_spawned" => {
+   124	            summary.agents_spawned += 1;
+   125	        }
+   126	        "workflow_completed" => {
+   127	            summary.is_complete = true;
+   128	            summary.outcome = event_field(value, "outcome").or_else(|| Some(kind.to_string()));
+   129	        }
+   130	        "agent_completed" => {
+   131	            summary.agents_completed += 1;
+   132	            if let Some(tokens_str) = event_scalar(value, "tokens_used") {
+   133	                if let Ok(tokens) = tokens_str.parse::<u64>() {
+   134	                    summary.total_tokens += tokens;
+   135	                }
+   136	            }
+   137	            if let Some(cost_str) = event_scalar(value, "cost_usd") {
+   138	                if let Ok(cost) = cost_str.parse::<f64>() {
+   139	                    summary.total_cost_usd += cost;
+   140	                }
+   141	            }
+   142	        }
+   143	        "agent_failed" => {
+   144	            summary.agents_failed += 1;
+   145	            if let Some(error) = event_field(value, "error") {
+   146	                summary.agent_errors.push(error);
+   147	            }
+   148	        }
+   149	        "feedback_recorded" => {
+   150	            summary.feedback_count += 1;
+   151	        }
+   152	        "state_checkpointed" => {
+   153	            summary.last_checkpoint = event_field(value, "path");
+   154	        }
+   155	        "agent_output" => {
+   156	            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
+   157	        }
+   158	        "gate_started" => {
+   159	            // GateStarted is informational; pass/fail events update gate summary fields.
+   160	        }
+   161	        _ => {}
+   162	    }
+   163	}
+   164	
+   165	fn event_field(value: &serde_json::Value, field: &str) -> Option<String> {
+   166	    value
+   167	        .get("event")
+   168	        .and_then(|event| event.get(field))
+   169	        .and_then(serde_json::Value::as_str)
+   170	        .map(ToOwned::to_owned)
+   171	        .or_else(|| {
+   172	            value
+   173	                .get("event")
+   174	                .and_then(serde_json::Value::as_str)
+   175	                .and_then(|event| debug_field(event, field))
+   176	        })
+   177	}
+   178	
+   179	fn debug_field(event: &str, field: &str) -> Option<String> {
+   180	    let needle = format!("{field}: \"");
+   181	    let start = event.find(&needle)? + needle.len();
+   182	    let rest = &event[start..];
+   183	    let end = rest.find('"')?;
+   184	    Some(rest[..end].to_string())
+   185	}
+   186	
+   187	fn event_scalar(value: &serde_json::Value, field: &str) -> Option<String> {
+   188	    value
+   189	        .get("event")
+   190	        .and_then(|event| event.get(field))
+   191	        .map(|value| match value {
+   192	            serde_json::Value::String(value) => value.clone(),
+   193	            other => other.to_string(),
+   194	        })
+   195	        .or_else(|| {
+   196	            value
+   197	                .get("event")
+   198	                .and_then(serde_json::Value::as_str)
+   199	                .and_then(|event| debug_scalar(event, field))
+   200	        })
+   201	}
+   202	
+   203	fn debug_scalar(event: &str, field: &str) -> Option<String> {
+   204	    let needle = format!("{field}: ");
+   205	    let start = event.find(&needle)? + needle.len();
+   206	    let rest = event[start..].trim_start();
+   207	
+   208	    if let Some(rest) = rest.strip_prefix('"') {
+   209	        let end = rest.find('"')?;
+   210	        return Some(rest[..end].to_string());
+   211	    }
+   212	
+   213	    let end = rest.find([',', '}']).unwrap_or(rest.len());
+   214	    let value = rest[..end].trim();
+   215	    if value.is_empty() {
+   216	        None
+   217	    } else {
+   218	        Some(value.to_string())
+   219	    }
+   220	}
+   221	
+   222	#[cfg(test)]
+   223	mod tests {
+   224	    use super::*;
+   225	
+   226	    #[test]
+   227	    fn parses_empty_file() {
+   228	        let dir = tempfile::tempdir().unwrap();
+   229	        let path = dir.path().join("events.jsonl");
+   230	        std::fs::write(&path, "").unwrap();
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+exec
+/bin/zsh -lc "nl -ba crates/roko-runtime/src/projection.rs | sed -n '230,340p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+   230	        std::fs::write(&path, "").unwrap();
+   231	
+   232	        let runs = RuntimeProjection::from_file(&path).unwrap();
+   233	        assert!(runs.is_empty());
+   234	    }
+   235	
+   236	    #[test]
+   237	    fn handles_missing_file() {
+   238	        let path = Path::new("/nonexistent/events.jsonl");
+   239	        let runs = RuntimeProjection::from_file(path).unwrap();
+   240	        assert!(runs.is_empty());
+   241	    }
+   242	
+   243	    #[test]
+   244	    fn reconstructs_run_summary() {
+   245	        let dir = tempfile::tempdir().unwrap();
+   246	        let path = dir.path().join("events.jsonl");
+   247	        let lines = [
+   248	            r#"{"kind":"workflow_started","run_id":"r1","event":"WorkflowStarted { run_id: \"r1\", template: \"express\", prompt: \"fix\" }"}"#,
+   249	            r#"{"kind":"phase_transition","run_id":"r1","event":"PhaseTransition { run_id: \"r1\", from: \"plan\", to: \"implement\" }"}"#,
+   250	            r#"{"kind":"agent_spawned","run_id":"r1","event":"AgentSpawned { run_id: \"r1\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+   251	            r#"{"kind":"gate_passed","run_id":"r1","event":"GatePassed { run_id: \"r1\", gate_name: \"compile\", duration_ms: 100 }"}"#,
+   252	        ]
+   253	        .join("\n");
+   254	        std::fs::write(&path, lines).unwrap();
+   255	
+   256	        let summary = RuntimeProjection::for_run(&path, "r1").unwrap().unwrap();
+   257	        assert_eq!(summary.template.as_deref(), Some("express"));
+   258	        assert_eq!(summary.prompt.as_deref(), Some("fix"));
+   259	        assert_eq!(summary.current_phase.as_deref(), Some("implement"));
+   260	        assert_eq!(summary.agents_spawned, 1);
+   261	        assert_eq!(summary.gates_passed, vec!["compile"]);
+   262	    }
+   263	
+   264	    #[test]
+   265	    fn tracks_agent_completed_and_costs() {
+   266	        let dir = tempfile::tempdir().unwrap();
+   267	        let path = dir.path().join("events.jsonl");
+   268	        let lines = [
+   269	            r#"{"kind":"workflow_started","run_id":"r2","event":"WorkflowStarted { run_id: \"r2\", template: \"express\", prompt: \"test\" }"}"#,
+   270	            r#"{"kind":"agent_spawned","run_id":"r2","event":"AgentSpawned { run_id: \"r2\", agent_id: \"a1\", role: \"implementer\", model: \"m\" }"}"#,
+   271	            r#"{"kind":"agent_completed","run_id":"r2","event":"AgentCompleted { run_id: \"r2\", agent_id: \"a1\", output: \"done\", tokens_used: 500, cost_usd: 0.01 }"}"#,
+   272	        ]
+   273	        .join("\n");
+   274	        std::fs::write(&path, lines).unwrap();
+   275	
+   276	        let summary = RuntimeProjection::for_run(&path, "r2").unwrap().unwrap();
+   277	        assert_eq!(summary.agents_spawned, 1);
+   278	        assert_eq!(summary.agents_completed, 1);
+   279	        assert_eq!(summary.total_tokens, 500);
+   280	        assert_eq!(summary.total_cost_usd, 0.01);
+   281	    }
+   282	
+   283	    #[test]
+   284	    fn tracks_failures_feedback_and_checkpoints() {
+   285	        let dir = tempfile::tempdir().unwrap();
+   286	        let path = dir.path().join("events.jsonl");
+   287	        let lines = [
+   288	            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
+   289	            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
+   290	            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
+   291	            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
+   292	            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
+   293	        ]
+   294	        .join("\n");
+   295	        std::fs::write(&path, lines).unwrap();
+   296	
+   297	        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
+   298	        assert_eq!(summary.agents_failed, 1);
+   299	        assert_eq!(summary.agent_errors, vec!["compile failed"]);
+   300	        assert_eq!(summary.feedback_count, 1);
+   301	        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
+   302	    }
+   303	}
+
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+codex
+Implemented F05 in [projection.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/projection.rs:12).
+
+Changes:
+- Added `RunSummary` fields for agent completion/failure counts, token/cost totals, feedback count, last checkpoint, and agent errors.
+- Extended `apply_event` for `agent_completed`, `agent_failed`, `feedback_recorded`, `state_checkpointed`, plus explicit no-op handling for `agent_output` and `gate_started`.
+- Added tests for agent cost aggregation and failure/feedback/checkpoint projection.
+
+Verification passed:
+- Required structural `grep` checks, including the previously failing `AgentOutput|FeedbackRecorded|StateCheckpointed` check.
+- `cargo test -p roko-runtime --lib -- projection`
+- `cargo check -p roko-runtime`
+
+The projection test run emitted unrelated existing warnings in heartbeat test files; no failures.
+diff --git a/crates/roko-runtime/src/projection.rs b/crates/roko-runtime/src/projection.rs
+index c4e5fe4c9eb68c963cd12fcf88d15a27340e9f37..d2ac68018015e48a29df5d1fa739c63d22ab7252
+--- a/crates/roko-runtime/src/projection.rs
++++ b/crates/roko-runtime/src/projection.rs
+@@ -88,7 +88,11 @@
+         let runs = Self::from_file(path)?;
+         Ok(runs.into_iter().find_map(
+             |(id, summary)| {
+-                if id == run_id { Some(summary) } else { None }
++                if id == run_id {
++                    Some(summary)
++                } else {
++                    None
++                }
+             },
+         ))
+     }
+@@ -148,6 +152,12 @@
+         "state_checkpointed" => {
+             summary.last_checkpoint = event_field(value, "path");
+         }
++        "agent_output" => {
++            // AgentOutput is a streaming event; no aggregate RunSummary field yet.
++        }
++        "gate_started" => {
++            // GateStarted is informational; pass/fail events update gate summary fields.
++        }
+         _ => {}
+     }
+ }
+@@ -269,4 +279,25 @@
+         assert_eq!(summary.total_tokens, 500);
+         assert_eq!(summary.total_cost_usd, 0.01);
+     }
++
++    #[test]
++    fn tracks_failures_feedback_and_checkpoints() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("events.jsonl");
++        let lines = [
++            r#"{"kind":"agent_output","run_id":"r3","event":"AgentOutput { run_id: \"r3\", agent_id: \"a1\", chunk: \"partial\" }"}"#,
++            r#"{"kind":"agent_failed","run_id":"r3","event":"AgentFailed { run_id: \"r3\", agent_id: \"a1\", error: \"compile failed\" }"}"#,
++            r#"{"kind":"gate_started","run_id":"r3","event":"GateStarted { run_id: \"r3\", gate_name: \"compile\", rung: 1 }"}"#,
++            r#"{"kind":"feedback_recorded","run_id":"r3","event":"FeedbackRecorded { run_id: \"r3\", kind: \"gate\", summary: \"compile failed\" }"}"#,
++            r#"{"kind":"state_checkpointed","run_id":"r3","event":"StateCheckpointed { run_id: \"r3\", path: \"/tmp/state.json\" }"}"#,
++        ]
++        .join("\n");
++        std::fs::write(&path, lines).unwrap();
++
++        let summary = RuntimeProjection::for_run(&path, "r3").unwrap().unwrap();
++        assert_eq!(summary.agents_failed, 1);
++        assert_eq!(summary.agent_errors, vec!["compile failed"]);
++        assert_eq!(summary.feedback_count, 1);
++        assert_eq!(summary.last_checkpoint.as_deref(), Some("/tmp/state.json"));
++    }
+ }
+
+2026-04-28T03:26:20.929467Z ERROR codex_core::session: failed to record rollout items: thread 019dd21d-6500-7e61-a2a9-a03818bedbea not found
+tokens used
+47,692
+Implemented F05 in [projection.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/projection.rs:12).
+
+Changes:
+- Added `RunSummary` fields for agent completion/failure counts, token/cost totals, feedback count, last checkpoint, and agent errors.
+- Extended `apply_event` for `agent_completed`, `agent_failed`, `feedback_recorded`, `state_checkpointed`, plus explicit no-op handling for `agent_output` and `gate_started`.
+- Added tests for agent cost aggregation and failure/feedback/checkpoint projection.
+
+Verification passed:
+- Required structural `grep` checks, including the previously failing `AgentOutput|FeedbackRecorded|StateCheckpointed` check.
+- `cargo test -p roko-runtime --lib -- projection`
+- `cargo check -p roko-runtime`
+
+The projection test run emitted unrelated existing warnings in heartbeat test files; no failures.
+
+=== Finished: 2026-04-28T05:26:21+02:00 ===
+=== Duration: 2m 27s ===
+=== Exit code: 0 ===
+[structural] grep -q 'AgentOutput\|FeedbackRecorded\|StateCheckpointed' crates/roko-runtime/src/projection.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/F05/verify-attempt-2 cargo check -p roko-runtime
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+   Compiling semver v1.0.28
+    Checking memchr v2.8.0
+   Compiling autocfg v1.5.0
+   Compiling getrandom v0.4.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling zmij v1.0.21
+   Compiling rustc_version v0.4.1
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.2.60
+    Checking smallvec v1.15.1
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+   Compiling serde_json v1.0.149
+    Checking scopeguard v1.2.0
+    Checking lock_api v0.4.14
+    Checking aho-corasick v1.1.4
+    Checking indexmap v2.14.0
+   Compiling generic-array v0.14.9
+   Compiling curve25519-dalek v4.1.3
+   Compiling num-traits v0.2.19
+    Checking zeroize v1.8.2
+    Checking winnow v0.7.15
+    Checking itoa v1.0.18
+    Checking regex-syntax v0.8.10
+   Compiling cfg_aliases v0.2.1
+    Checking once_cell v1.21.4
+   Compiling syn v2.0.117
+    Checking core-foundation-sys v0.8.7
+    Checking toml_write v0.1.2
+   Compiling thiserror v2.0.18
+    Checking signature v2.2.0
+    Checking subtle v2.6.1
+    Checking pin-project-lite v0.2.17
+    Checking ed25519 v2.2.3
+    Checking iana-time-zone v0.1.65
+    Checking tracing-core v0.1.36
+   Compiling nix v0.29.0
+    Checking bytes v1.11.1
+    Checking regex-automata v0.4.14
+    Checking arrayvec v0.7.6
+    Checking arrayref v0.3.9
+    Checking constant_time_eq v0.4.2
+    Checking bitflags v2.11.0
+    Checking cpufeatures v0.2.17
+    Checking errno v0.3.14
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking uuid v1.23.0
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking ed25519-dalek v2.2.0
+    Checking regex v1.12.3
+   Compiling blake3 v1.8.4
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 27.81s

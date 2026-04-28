@@ -1,0 +1,17 @@
+Implemented S08 in [prompt_assembly_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose/src/prompt_assembly_service.rs).
+
+Changes:
+- Added optional episode and playbook context sources to `PromptAssemblyService`.
+- Added `with_episode_context` and `with_playbook_context`.
+- Injects recent episode summaries into the context layer without overwriting existing workspace context.
+- Queries `PlaybookStore` and injects matching playbooks through the existing builder API.
+- Added `format_episode_context`.
+- Added tests for episode and playbook context assembly.
+
+Verification passed:
+- `cargo check -p roko-compose`
+- `grep` checks for both builder methods and `format_episode_context`
+- `cargo test -p roko-compose prompt_assembly_service`
+- `cargo test -p roko-compose assembly_includes_episode`
+- `cargo test -p roko-compose assembly_includes_playbook`
+- `cargo fmt -p roko-compose --check`

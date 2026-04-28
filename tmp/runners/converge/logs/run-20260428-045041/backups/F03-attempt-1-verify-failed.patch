@@ -1,0 +1,91 @@
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index f724ae76..0ee503ab 100644
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -17,6 +17,9 @@ use roko_core::foundation::{
+ pub use roko_core::foundation::{
+     ChatMessage, GateReport, MessageRole, ModelCallResponse, TokenUsage,
+ };
++// TODO(converge): jsonl_logger.rs still matches the legacy five-variant event set;
++// update that owned batch to handle the full roko_core::RuntimeEvent enum.
++pub use roko_core::RuntimeEvent;
+ 
+ use crate::event_bus::emit_runtime_event;
+ use crate::pipeline_state::PipelineInput;
+@@ -27,64 +30,6 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
+ /// Boxed future (kept for internal use).
+ pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+ 
+-/// Runtime events emitted by the effect driver.
+-#[derive(Debug, Clone)]
+-pub enum RuntimeEvent {
+-    /// An agent was spawned.
+-    AgentSpawned {
+-        /// Workflow run id.
+-        run_id: String,
+-        /// Agent instance id.
+-        agent_id: String,
+-        /// Agent role.
+-        role: String,
+-        /// Resolved or requested model.
+-        model: String,
+-    },
+-    /// An agent completed successfully.
+-    AgentCompleted {
+-        /// Workflow run id.
+-        run_id: String,
+-        /// Agent instance id.
+-        agent_id: String,
+-        /// Final output.
+-        output: String,
+-        /// Tokens used by the call.
+-        tokens_used: u64,
+-        /// Estimated call cost in USD.
+-        cost_usd: f64,
+-    },
+-    /// An agent failed.
+-    AgentFailed {
+-        /// Workflow run id.
+-        run_id: String,
+-        /// Agent instance id.
+-        agent_id: String,
+-        /// Error text.
+-        error: String,
+-    },
+-    /// A gate passed.
+-    GatePassed {
+-        /// Workflow run id.
+-        run_id: String,
+-        /// Gate name.
+-        gate_name: String,
+-        /// Gate runtime.
+-        duration_ms: u64,
+-    },
+-    /// A gate failed.
+-    GateFailed {
+-        /// Workflow run id.
+-        run_id: String,
+-        /// Gate name.
+-        gate_name: String,
+-        /// Gate output.
+-        output: String,
+-        /// Gate runtime.
+-        duration_ms: u64,
+-    },
+-}
+-
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
+     /// Model call service.
+diff --git a/crates/roko-runtime/src/lib.rs b/crates/roko-runtime/src/lib.rs
+index 9c330984..93ccf572 100644
+--- a/crates/roko-runtime/src/lib.rs
++++ b/crates/roko-runtime/src/lib.rs
+@@ -68,6 +68,7 @@ pub use roko_core::foundation::{
+     MessageRole, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
+     TokenUsage,
+ };
++pub use roko_core::RuntimeEvent;
+ pub use jsonl_logger::{EventConsumer, JsonlLogger};
+ pub use lifecycle::{
+     Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,

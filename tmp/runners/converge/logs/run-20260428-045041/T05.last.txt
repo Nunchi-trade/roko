@@ -1,0 +1,8 @@
+Implemented the three tests at [shared_runs.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/shared_runs.rs:334).
+
+Verification:
+- Presence greps: passed
+- `cargo test -p roko-serve shared_runs`: passed, 3 tests green
+- `cargo clippy -p roko-serve --no-deps -- -D warnings`: failed on existing `crates/roko-serve/build.rs` missing crate docs, outside this batch’s write scope
+
+Only `crates/roko-serve/src/routes/shared_runs.rs` is modified.

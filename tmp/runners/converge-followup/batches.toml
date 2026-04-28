@@ -1,0 +1,351 @@
+# Converge Followup — Batch Registry
+#
+# 6 waves, 33 batches. Derived from:
+#   tmp/subsystem-audits/converge-runner/DEEP-AUDIT.md (Section 6)
+#
+# Wave A: Contract Repair          (5 batches)  — foundation types, events, logs
+# Wave B: Engine Semantics          (6 batches)  — workflow engine correctness
+# Wave C: Service Wiring            (6 batches)  — service factory, completeness
+# Wave D: Entry Point Convergence   (5 batches)  — unified CLI/server/plan paths
+# Wave E: Legacy Retirement         (5 batches)  — feature-gate and delete old code
+# Wave F: Proof And Enforcement     (6 batches)  — integration tests, CI checks
+#
+# Fields:
+#   id        — Unique batch identifier
+#   title     — Human-readable description
+#   group     — Wave/track name (A-F)
+#   deps      — Batch ids that must succeed first
+#   scope     — Files this batch may MODIFY (injected into prompt as live content)
+#   also_read — Files to INCLUDE read-only (context for coherent decisions)
+#   verify    — "quick" (per-crate check + AP grep) or "full" (workspace + clippy)
+#
+# Anti-pattern checks (AP-1 through AP-7) run per-batch automatically.
+# Track gates (workspace check + clippy + duplicate trait detection) run per-wave.
+# End-of-run gate: cargo test --workspace.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE A — CONTRACT REPAIR
+# Goal: Make foundation types the single source of truth.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "A01"
+title = "RuntimeEvent serde envelope with run id, sequence, timestamp, schema version"
+group = "A"
+deps = []
+scope = ["crates/roko-core/src/runtime_event.rs"]
+also_read = ["crates/roko-core/src/foundation.rs"]
+verify = "quick"
+
+[[batch]]
+id = "A02"
+title = "Delete runtime-local AffectPolicy — use core foundation types directly"
+group = "A"
+deps = []
+scope = ["crates/roko-runtime/src/effect_driver.rs", "crates/roko-cli/src/run.rs"]
+also_read = ["crates/roko-core/src/foundation.rs", "crates/roko-daimon/src/policy.rs"]
+verify = "quick"
+
+[[batch]]
+id = "A03"
+title = "Extend ModelCallRequest and FeedbackEvent with caller, role, run id, prompt/knowledge ids"
+group = "A"
+deps = ["A01"]
+scope = ["crates/roko-core/src/foundation.rs"]
+also_read = ["crates/roko-agent/src/model_call_service.rs", "crates/roko-learn/src/feedback_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "A04"
+title = "Replace debug-string JSONL with typed event JSON serialization"
+group = "A"
+deps = ["A01"]
+scope = ["crates/roko-runtime/src/jsonl_logger.rs", "crates/roko-runtime/src/projection.rs"]
+also_read = ["crates/roko-core/src/runtime_event.rs"]
+verify = "quick"
+
+[[batch]]
+id = "A05"
+title = "Contract guard tests — no duplicate traits, no debug-string events"
+group = "A"
+deps = ["A01", "A02", "A03", "A04"]
+scope = ["crates/roko-runtime/src/lib.rs"]
+also_read = ["crates/roko-core/src/runtime_event.rs", "crates/roko-core/src/foundation.rs", "crates/roko-runtime/src/jsonl_logger.rs"]
+verify = "quick"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE B — ENGINE SEMANTICS
+# Goal: Make the v2 workflow engine semantically correct before retiring legacy.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "B01"
+title = "Agent event ownership — driver emits real lifecycle events, remove empty duplicates"
+group = "B"
+deps = ["A01", "A04"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs", "crates/roko-runtime/src/effect_driver.rs"]
+also_read = ["crates/roko-core/src/runtime_event.rs"]
+verify = "quick"
+
+[[batch]]
+id = "B02"
+title = "Apply affect modulation to model request, budget, temperature, retry"
+group = "B"
+deps = ["A02"]
+scope = ["crates/roko-runtime/src/effect_driver.rs"]
+also_read = ["crates/roko-core/src/foundation.rs", "crates/roko-daimon/src/policy.rs"]
+verify = "quick"
+
+[[batch]]
+id = "B03"
+title = "Typed gate config — fix shell/custom name mismatch, remove no-op custom gate"
+group = "B"
+deps = []
+scope = ["crates/roko-gate/src/gate_service.rs", "crates/roko-cli/src/commands/util.rs"]
+also_read = ["crates/roko-cli/src/orchestrate.rs"]
+verify = "quick"
+
+[[batch]]
+id = "B04"
+title = "Resume and checkpoint correctness — one schema, recovered phase event, non-empty path"
+group = "B"
+deps = ["A01", "B01"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs"]
+also_read = ["crates/roko-runtime/src/effect_driver.rs", "crates/roko-core/src/runtime_event.rs"]
+verify = "quick"
+
+[[batch]]
+id = "B05"
+title = "Emit workflow completion feedback and flush through feedback sink"
+group = "B"
+deps = ["A01"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs"]
+also_read = ["crates/roko-learn/src/feedback_service.rs", "crates/roko-core/src/foundation.rs"]
+verify = "quick"
+
+[[batch]]
+id = "B06"
+title = "Typed review and commit outcomes — no hardcoded approval, no error-as-hash"
+group = "B"
+deps = ["B01"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs", "crates/roko-runtime/src/effect_driver.rs"]
+also_read = ["crates/roko-core/src/runtime_event.rs"]
+verify = "quick"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE C — SERVICE WIRING
+# Goal: One service factory, complete services, mandatory feedback.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "C01"
+title = "Shared service factory for CLI, server, ACP — single construction path"
+group = "C"
+deps = ["A02", "A03"]
+scope = ["crates/roko-cli/src/run.rs", "crates/roko-serve/src/state.rs"]
+also_read = ["crates/roko-core/src/foundation.rs", "crates/roko-agent/src/model_call_service.rs", "crates/roko-compose/src/prompt_assembly_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "C02"
+title = "ModelCallService completeness — feedback, gateway writer, router, cascade, knowledge"
+group = "C"
+deps = ["C01"]
+scope = ["crates/roko-agent/src/model_call_service.rs"]
+also_read = ["crates/roko-cli/src/run.rs", "crates/roko-serve/src/state.rs", "crates/roko-learn/src/feedback_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "C03"
+title = "Gateway durability — GatewayEventWriter in CLI and server, durable stats"
+group = "C"
+deps = ["C01", "C02"]
+scope = ["crates/roko-serve/src/routes/gateway.rs", "crates/roko-agent/src/gateway_events.rs"]
+also_read = ["crates/roko-serve/src/state.rs", "crates/roko-agent/src/model_call_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "C04"
+title = "PromptAssemblyService live context — knowledge, episodes, playbooks, conventions"
+group = "C"
+deps = ["C01"]
+scope = ["crates/roko-compose/src/prompt_assembly_service.rs"]
+also_read = ["crates/roko-cli/src/run.rs", "crates/roko-core/src/foundation.rs"]
+verify = "quick"
+
+[[batch]]
+id = "C05"
+title = "Feedback and knowledge provenance — record prompt sections, knowledge ids, update scores"
+group = "C"
+deps = ["C02", "C04"]
+scope = ["crates/roko-learn/src/feedback_service.rs"]
+also_read = ["crates/roko-agent/src/model_call_service.rs", "crates/roko-compose/src/prompt_assembly_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "C06"
+title = "Cache key preserves message order, budget correctness"
+group = "C"
+deps = ["C02"]
+scope = ["crates/roko-agent/src/model_call_service.rs"]
+also_read = ["crates/roko-core/src/foundation.rs"]
+verify = "quick"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE D — ENTRY POINT CONVERGENCE
+# Goal: All CLI/server/plan paths use the same engine and report type.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "D01"
+title = "WorkflowRunReport — first-class report driving CLI, JSON, sharing, StateHub, feedback"
+group = "D"
+deps = ["B05", "B06"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs", "crates/roko-cli/src/run.rs"]
+also_read = ["crates/roko-core/src/runtime_event.rs"]
+verify = "quick"
+
+[[batch]]
+id = "D02"
+title = "roko run --share parity on v2 — share uses WorkflowRunReport"
+group = "D"
+deps = ["D01"]
+scope = ["crates/roko-cli/src/run.rs", "crates/roko-cli/src/commands/util.rs"]
+also_read = ["crates/roko-serve/src/routes/shared_runs.rs"]
+verify = "quick"
+
+[[batch]]
+id = "D03"
+title = "Plan execution on v2 — remove env-gated adapter, use same engine entry point"
+group = "D"
+deps = ["D01"]
+scope = ["crates/roko-cli/src/orchestrate.rs"]
+also_read = ["crates/roko-cli/src/run.rs", "crates/roko-runtime/src/workflow_engine.rs"]
+verify = "quick"
+
+[[batch]]
+id = "D04"
+title = "Server workflow execution — register engine event consumers with SSE/StateHub"
+group = "D"
+deps = ["D01"]
+scope = ["crates/roko-serve/src/routes/mod.rs", "crates/roko-serve/src/adapters.rs"]
+also_read = ["crates/roko-cli/src/run.rs", "crates/roko-serve/src/state.rs"]
+verify = "quick"
+
+[[batch]]
+id = "D05"
+title = "ACP session convergence — same engine, service factory, feedback, event stream"
+group = "D"
+deps = ["D01", "C01"]
+scope = ["crates/roko-serve/src/routes/shared_runs.rs"]
+also_read = ["crates/roko-serve/src/state.rs", "crates/roko-runtime/src/workflow_engine.rs"]
+verify = "quick"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE E — LEGACY RETIREMENT
+# Goal: Feature-gate old code, prove v2 compiles without it, clean up.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "E01"
+title = "Real legacy-orchestrate feature boundary — gate module declarations and exports"
+group = "E"
+deps = ["D03"]
+scope = ["crates/roko-cli/src/lib.rs", "crates/roko-cli/Cargo.toml"]
+also_read = ["crates/roko-cli/src/orchestrate.rs", "crates/roko-cli/src/run.rs"]
+verify = "quick"
+
+[[batch]]
+id = "E02"
+title = "Feature-gate or delete direct dispatch paths"
+group = "E"
+deps = ["D02", "E01"]
+scope = ["crates/roko-cli/src/run.rs", "crates/roko-cli/src/dispatch_direct.rs"]
+also_read = ["crates/roko-agent/src/model_call_service.rs"]
+verify = "quick"
+
+[[batch]]
+id = "E03"
+title = "Legacy-disabled compile check — cargo check --no-default-features compiles clean"
+group = "E"
+deps = ["E01", "E02"]
+scope = ["crates/roko-cli/Cargo.toml"]
+also_read = ["crates/roko-cli/src/lib.rs"]
+verify = "full"
+
+[[batch]]
+id = "E04"
+title = "Legacy-enabled compatibility — default features still compile and pass"
+group = "E"
+deps = ["E03"]
+scope = ["crates/roko-cli/Cargo.toml"]
+also_read = ["crates/roko-cli/src/lib.rs"]
+verify = "full"
+
+[[batch]]
+id = "E05"
+title = "Delete old prompt builders, hand-rolled report shims, duplicate parsers"
+group = "E"
+deps = ["E01", "D01"]
+scope = ["crates/roko-cli/src/run.rs"]
+also_read = ["crates/roko-compose/src/prompt_assembly_service.rs", "crates/roko-runtime/src/workflow_engine.rs"]
+verify = "quick"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WAVE F — PROOF AND ENFORCEMENT
+# Goal: Integration tests and CI checks that prevent convergence regressions.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[[batch]]
+id = "F01"
+title = "Default v2 run integration test — mock provider, real assembly, feedback, events, projection"
+group = "F"
+deps = ["D01", "C01"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs"]
+also_read = ["crates/roko-cli/src/run.rs", "crates/roko-core/src/runtime_event.rs"]
+verify = "full"
+
+[[batch]]
+id = "F02"
+title = "Share transcript integration test — v2 --share produces real transcript"
+group = "F"
+deps = ["D02"]
+scope = ["crates/roko-cli/src/run.rs"]
+also_read = ["crates/roko-serve/src/routes/shared_runs.rs"]
+verify = "full"
+
+[[batch]]
+id = "F03"
+title = "Resume integration test — checkpoint, resume, verify event sequence and report"
+group = "F"
+deps = ["B04", "D01"]
+scope = ["crates/roko-runtime/src/workflow_engine.rs"]
+also_read = ["crates/roko-runtime/src/effect_driver.rs", "crates/roko-core/src/runtime_event.rs"]
+verify = "full"
+
+[[batch]]
+id = "F04"
+title = "Gateway durability test — route hit, durable event, feedback, provider health, stats"
+group = "F"
+deps = ["C03"]
+scope = ["crates/roko-serve/src/routes/gateway.rs"]
+also_read = ["crates/roko-agent/src/gateway_events.rs", "crates/roko-serve/src/state.rs"]
+verify = "full"
+
+[[batch]]
+id = "F05"
+title = "Knowledge loop test — include in prompt, record usage, score, observe updated score"
+group = "F"
+deps = ["C04", "C05"]
+scope = ["crates/roko-learn/src/feedback_service.rs"]
+also_read = ["crates/roko-compose/src/prompt_assembly_service.rs", "crates/roko-agent/src/model_call_service.rs"]
+verify = "full"
+
+[[batch]]
+id = "F06"
+title = "Architecture negative CI checks — fail on duplicate traits, debug events, no-op gates, empty fields"
+group = "F"
+deps = ["A05"]
+scope = ["scripts/layer_check.rs"]
+also_read = ["crates/roko-core/src/foundation.rs", "crates/roko-runtime/src/jsonl_logger.rs"]
+verify = "full"

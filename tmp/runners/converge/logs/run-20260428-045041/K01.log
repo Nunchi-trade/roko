@@ -1,0 +1,4985 @@
+=== Batch: K01 (Add knowledge-aware routing method to CascadeRouter) ===
+=== Started: 2026-04-28T10:20:55+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/K01/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/K01.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd32d-5224-7bc0-9139-e31f6b148f1d
+--------
+user
+# Convergence Batch K01 — Add knowledge-aware routing method to CascadeRouter
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+# Batch K01 — Add knowledge-aware routing method to CascadeRouter
+
+## Write Scope
+- **MODIFY**: `crates/roko-learn/src/cascade_router.rs`
+
+## Task
+
+Add a new public method `route_with_knowledge()` to `CascadeRouter` that applies knowledge-informed score adjustments to the routing decision.
+
+### 1. Add method signature
+
+```rust
+pub fn route_with_knowledge(
+    &self,
+    ctx: &RoutingContext,
+    cfactor: Option<&CFactor>,
+    agent_id: Option<&str>,
+    knowledge: Option<&KnowledgeRoutingAdvice>,
+) -> CascadeModel
+```
+
+### 2. Implementation
+
+The method should:
+
+1. Call the existing `route_with_cfactor(ctx, cfactor, agent_id)` to get the baseline `CascadeModel`.
+2. If `knowledge` is `None` or `knowledge.has_signal` is `false`, return the baseline result unchanged.
+3. When knowledge has signal, check if there is a hint for the selected primary model via `knowledge.hint_for(&result.primary)`.
+4. Collect all candidate slugs from `self.model_slugs` and compute knowledge-adjusted scores for each:
+   - Start with the LinUCB score (or 0.0 if unavailable).
+   - Add the knowledge hint score (already clamped to +/-0.3 by the caller).
+5. If a different model now has the highest adjusted score AND the delta exceeds 0.1 (to avoid noisy flips), swap the primary model.
+6. Log the knowledge influence via `tracing::debug!`:
+   ```
+   tracing::debug!(
+       primary = %result.primary,
+       knowledge_hints = ?knowledge.hints.len(),
+       swapped = %swapped,
+       "knowledge-aware routing applied"
+   );
+   ```
+7. Return the (possibly updated) `CascadeModel`.
+
+### 3. Add a parallel `route_with_knowledge_among()` variant
+
+Same pattern but delegates to `route_with_cfactor_among()` instead. Signature:
+
+```rust
+pub fn route_with_knowledge_among(
+    &self,
+    ctx: &RoutingContext,
+    candidates: &[String],
+    cfactor: Option<&CFactor>,
+    agent_id: Option<&str>,
+    knowledge: Option<&KnowledgeRoutingAdvice>,
+) -> CascadeModel
+```
+
+### Existing Code Context
+
+`CascadeRouter` at `crates/roko-learn/src/cascade_router.rs` line 81:
+```rust
+pub struct CascadeRouter {
+    linucb: LinUCBRouter,
+    confidence_stats: Mutex<HashMap<String, ModelStats>>,
+    pareto_frontier: Mutex<ParetoFrontierState>,
+    role_table: Mutex<HashMap<AgentRole, String>>,
+    model_slugs: Vec<String>,
+    stage_tracking: Mutex<StageTracking>,
+    free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
+}
+```
+
+Existing routing methods at lines 718-752:
+```rust
+pub fn route_with_cfactor(
+    &self,
+    ctx: &RoutingContext,
+    cfactor: Option<&CFactor>,
+    agent_id: Option<&str>,
+) -> CascadeModel { ... }
+
+pub fn route_with_cfactor_among(
+    &self,
+    ctx: &RoutingContext,
+    candidates: &[String],
+    cfactor: Option<&CFactor>,
+    agent_id: Option<&str>,
+) -> CascadeModel { ... }
+```
+
+`KnowledgeRoutingAdvice` at `crates/roko-learn/src/cascade/types.rs` line 219:
+```rust
+pub struct KnowledgeRoutingAdvice {
+    pub hints: Vec<KnowledgeHint>,
+    pub has_signal: bool,
+}
+
+impl KnowledgeRoutingAdvice {
+    pub fn hint_for(&self, model_slug: &str) -> Option<&KnowledgeHint> { ... }
+    pub fn score_for(&self, model_slug: &str) -> f64 { ... }
+}
+```
+
+`KnowledgeRoutingAdvice` is already re-exported at line 42 of `cascade_router.rs`:
+```rust
+pub use crate::cascade::types::{
+    ..., KnowledgeRoutingAdvice, ...
+};
+```
+
+## DO NOT
+- Modify any file other than `crates/roko-learn/src/cascade_router.rs`
+- Change the behavior of existing `route_with_cfactor()` or `route_with_cfactor_among()` methods
+- Add new dependencies to `Cargo.toml`
+- Remove or rename any existing public API
+
+## Done Criteria
+- `cargo check -p roko-learn` passes
+- `grep -n 'fn route_with_knowledge' crates/roko-learn/src/cascade_router.rs` returns two matches (the base and the `_among` variant)
+- `grep -n 'KnowledgeRoutingAdvice' crates/roko-learn/src/cascade_router.rs` returns at least 4 matches (re-export + 2 method signatures + usage)
+
+codex
+I’ll make this narrowly in `crates/roko-learn/src/cascade_router.rs`, first reading the existing router methods and score helpers so the new methods preserve local behavior.
+exec
+/bin/zsh -lc "sed -n '1,140p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! Three-stage cascade router for model selection (section 13.8-13.11).
+//!
+//! The cascade combines three routing strategies, automatically transitioning
+//! as observation count grows:
+//!
+//! | Stage | Name | Observations | Strategy |
+//! |-------|------|-------------|----------|
+//! | 1 | Static | < 50 | Hardcoded role -> model table |
+//! | 2 | Confidence | 50 - 200 | Empirical pass rates + confidence interval |
+//! | 3 | UCB1 | > 200 | Full `LinUCB` contextual bandit |
+//!
+//! # [`CascadeModel`]
+//!
+//! The router returns a [`CascadeModel`] containing a primary model,
+//! an ordered fallback chain, an optional context-overflow fallback,
+//! and a latency SLA in milliseconds.
+//!
+//! # Thread safety
+//!
+//! The cascade wraps a [`LinUCBRouter`] and an additional
+//! [`parking_lot::Mutex`] for confidence-stage statistics.
+
+use chrono::Utc;
+use parking_lot::Mutex;
+use roko_agent::AgentResult;
+use roko_core::OperatingFrequency;
+use roko_core::agent::TaskRequirements;
+use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+use roko_core::config::schema::RewardWeights;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use crate::active_inference::{BeliefState, select_tier as select_tier_with_belief};
+// Re-export public types from cascade submodules so that
+// `crate::cascade_router::CascadeRouter` etc. still works for downstream crates.
+pub use crate::cascade::helpers::slug_family;
+pub use crate::cascade::types::{
+    CascadeCandidateScore, CascadeModel, CascadeObservationStats, CascadeRouteExplanation,
+    CascadeRoutingCandidate, CascadeRoutingExplanation, CascadeSelection, CascadeStage,
+    GeminiContextTier, GeminiObservation, KnowledgeHint, KnowledgeRoutingAdvice,
+    PerplexityObservation, RoutingBias, ShadowModelRunner, StageTransition,
+};
+
+use crate::cascade::helpers::{
+    ProviderHealthSnapshotKey, ThinkingPreference, apply_cache_affinity,
+    behavioral_state_tier_shift, conductor_load_tier_shift, context_overflow_fallback_for_model,
+    cost_pressure_factor, default_latency_sla, default_role_model_table, estimate_total_cost_usd,
+    fallback_chain_for_model, infer_shadow_routing_context, is_free_tier_gemini_model,
+    low_confidence_tier_bonus, model_tier_rank, pareto_adjusted_alpha, pareto_cost_proxy,
+    pareto_latency_proxy, parse_agent_role, pick_available_static_slug, pick_tier_extreme,
+    routing_tier_bias_factor, select_with_hysteresis, shadow_quality_score, slug_to_tier,
+    slugs_match, stage_for_observations, target_tier_rank, temperament_exploration_multiplier,
+    temperament_tier_shift, thinking_filtered_candidates, thinking_preference,
+};
+use crate::cascade::persistence::{
+    CascadeSnapshot, PersistedModelStats, detect_version_changes, migrated_confidence_stats,
+    remap_role_table_entry,
+};
+use crate::cascade::types::{
+    GeminiObservationTotals, HIGH_CFACTOR_THRESHOLD, LOW_AFFECT_CONFIDENCE_THRESHOLD,
+    LOW_CFACTOR_THRESHOLD, ModelStats, OVERRIDE_LEARNING_RATE, PARETO_RECOMPUTE_INTERVAL,
+    ParetoFrontierState, PerplexityObservationTotals, StageTracking,
+};
+use crate::cfactor::{AgentDispatchBias, CFactor};
+use crate::latency::LatencyTracker;
+use crate::model_experiment::ModelExperimentStore;
+use crate::model_router::{
+    CONTEXT_DIM, CandidateArmScore, LinUCBRouter, RoutingContext, compute_routing_reward_v2,
+};
+use crate::pareto::{ModelObservation, compute_pareto_frontier};
+use crate::provider_health::ProviderHealthRegistry;
+use crate::routing_log::{CandidateEntry, RoutingDecisionLog, RoutingDecisionMeta, RoutingLogger};
+
+// ─── CascadeRouter ──────────────────────────────────────────────────────────
+
+/// Three-stage cascade router: Static -> Confidence -> UCB.
+///
+/// Thread-safe: wrap in `Arc` for shared access.
+pub struct CascadeRouter {
+    /// The `LinUCB` router used for stage 3 (and observations from all stages).
+    linucb: LinUCBRouter,
+    /// Per-model statistics for the confidence stage.
+    confidence_stats: Mutex<HashMap<String, ModelStats>>,
+    /// Cached Pareto frontier used to down-weight dominated models during UCB.
+    pareto_frontier: Mutex<ParetoFrontierState>,
+    /// Static role -> model table for stage 1.
+    role_table: Mutex<HashMap<AgentRole, String>>,
+    /// Ordered list of model slugs (arms available to the router).
+    model_slugs: Vec<String>,
+    /// Active stage and recorded stage-transition history.
+    stage_tracking: Mutex<StageTracking>,
+    /// Optional free-tier Gemini runner used for shadow evaluation.
+    free_tier_shadow_runner: Option<Arc<dyn ShadowModelRunner>>,
+}
+
+impl roko_core::Cell for CascadeRouter {
+    fn cell_id(&self) -> &str {
+        "cascade-router"
+    }
+    fn cell_name(&self) -> &str {
+        "CascadeRouter"
+    }
+    fn protocols(&self) -> &[&str] {
+        &["Route"]
+    }
+}
+
+impl Default for RoutingContext {
+    fn default() -> Self {
+        Self {
+            task_category: TaskCategory::Implementation,
+            complexity: TaskComplexityBand::Standard,
+            iteration: 1,
+            role: AgentRole::Implementer,
+            crate_familiarity: 0.5,
+            has_prior_failure: false,
+            conductor_load: 0.0,
+            active_agents: 0,
+            ready_queue_depth: 0,
+            max_queue_wait_hours: 0.0,
+            daimon_policy: Default::default(),
+            thinking_level: None,
+            temperament: None,
+            previous_model: None,
+            plan_context_tokens: None,
+            tier_thresholds: None,
+        }
+    }
+}
+
+impl roko_agent::model_call_service::ForceBackendOverrideRecorder for CascadeRouter {
+    fn record_override_outcome(&self, model_slug: &str, success: bool) -> bool {
+        CascadeRouter::record_override_outcome(
+            self,
+            model_slug,
+            &RoutingContext::default(),
+            success,
+        )
+
+exec
+/bin/zsh -lc "sed -n '680,780p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+            .model_slugs
+            .iter()
+            .filter(|slug| !bias.deprioritize.iter().any(|d| slugs_match(slug, d)))
+            .cloned()
+            .collect();
+
+        if candidates.is_empty() {
+            return self.route(ctx);
+        }
+
+        self.route_with_cfactor_among(ctx, &candidates, None, None)
+    }
+
+    /// Load static routing overrides from a JSON map of role labels to model slugs.
+    pub fn load_static_overrides(&self, path: &Path) -> std::io::Result<usize> {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err),
+        };
+        let overrides = serde_json::from_str::<HashMap<String, String>>(&contents)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+        let mut applied = 0usize;
+        for (parameter, winning_value) in overrides {
+            if let Some(role) = parse_agent_role(&parameter) {
+                if self.update_static_table(role, winning_value) {
+                    applied += 1;
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Compute a latency penalty using actual wall-clock latency.
+    #[must_use]
+    pub fn latency_penalty(actual_ms: f64, expected_ms: f64) -> f64 {
+        if expected_ms <= 0.0 {
+            return 0.0;
+        }
+        0.1 * (actual_ms / expected_ms - 1.0).max(0.0)
+    }
+
+    /// Convert a quality score into a latency-adjusted reward.
+    #[must_use]
+    pub fn reward_with_latency(
+        quality_score: f64,
+        actual_ms: Option<f64>,
+        expected_ms: f64,
+    ) -> f64 {
+        let penalty = actual_ms
+            .map(|actual_ms| Self::latency_penalty(actual_ms, expected_ms))
+            .unwrap_or(0.0);
+        (quality_score - penalty).max(0.0)
+    }
+
+    /// Convert a tracker-backed latency observation into a reward signal.
+    #[must_use]
+    pub fn reward_with_tracker_latency(
+        &self,
+        quality_score: f64,
+        model: &str,
+        tracker: &LatencyTracker,
+        expected_ms: f64,
+    ) -> f64 {
+        let actual_ms = tracker
+            .mean_latency(model)
+            .or_else(|| tracker.p95_latency(model));
+        Self::reward_with_latency(quality_score, actual_ms, expected_ms)
+    }
+
+    /// Route a context through the cascade, optionally biasing by C-Factor.
+    pub fn route_with_cfactor(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        match self.current_stage() {
+            CascadeStage::Static => self.route_static(ctx, cfactor, agent_id),
+            CascadeStage::Confidence => self.route_confidence(ctx, cfactor, agent_id),
+            CascadeStage::Ucb => self.route_ucb(ctx, cfactor, agent_id),
+        }
+    }
+
+    /// Route a context through the cascade over a candidate subset.
+    pub fn route_with_cfactor_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let candidates = if candidates.is_empty() {
+            &self.model_slugs
+        } else {
+            candidates
+        };
+
+        match self.current_stage() {
+            CascadeStage::Static => self.route_static_among(ctx, candidates, cfactor, agent_id),
+
+exec
+/bin/zsh -lc 'rg -n "score|linucb|select|route_with_cfactor|KnowledgeRoutingAdvice" crates/roko-learn/src/cascade_router.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+1://! Three-stage cascade router for model selection (section 13.8-13.11).
+35:use crate::active_inference::{BeliefState, select_tier as select_tier_with_belief};
+42:    GeminiContextTier, GeminiObservation, KnowledgeHint, KnowledgeRoutingAdvice,
+53:    routing_tier_bias_factor, select_with_hysteresis, shadow_quality_score, slug_to_tier,
+83:    linucb: LinUCBRouter,
+156:            linucb: LinUCBRouter::new(model_slugs.clone()),
+197:    pub fn with_linucb(mut self, linucb: LinUCBRouter) -> Self {
+198:        self.linucb = linucb;
+224:        self.linucb.total_observations()
+268:    pub fn select(&self, context_vec: Vec<f64>) -> CascadeSelection {
+271:        let model = self.linucb.select_features(&context_vec);
+281:    pub fn select_for_frequency(
+291:                ctx.map(|ctx| self.route_with_cfactor(ctx, cfactor, agent_id).primary)
+301:    pub fn select_for_frequency_among(
+318:                self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id)
+332:    pub fn select_tier_with_active_inference(
+338:        select_tier_with_belief(belief, requirements)
+522:        self.linucb.model_index(slug)
+527:        self.route_with_cfactor(ctx, None, None)
+537:        let selected = self.route(ctx);
+540:            self.append_routing_log(log, meta, &selected.primary.slug, Some(&explanation))?;
+541:        Ok((selected, record))
+544:    /// Route a context, overriding selection when a model experiment is active.
+645:    /// Apply a routing bias to scored candidates.
+651:        for (slug, score) in candidates.iter_mut() {
+657:                *score *= 0.5;
+661:                *score *= routing_tier_bias_factor(slug_to_tier(slug));
+666:    /// Apply cost pressure to scored candidates.
+672:        for (slug, score) in candidates.iter_mut() {
+673:            *score *= cost_pressure_factor(slug_to_tier(slug));
+690:        self.route_with_cfactor_among(ctx, &candidates, None, None)
+723:    /// Convert a quality score into a latency-adjusted reward.
+726:        quality_score: f64,
+733:        (quality_score - penalty).max(0.0)
+740:        quality_score: f64,
+748:        Self::reward_with_latency(quality_score, actual_ms, expected_ms)
+752:    pub fn route_with_cfactor(
+766:    pub fn route_with_cfactor_among(
+808:        let scores = self.stage_scores(ctx, &candidates, frontier.as_deref());
+809:        let score_map: HashMap<_, _> = scores.into_iter().collect();
+818:                score: score_map.get(&slug).copied().unwrap_or(0.0),
+819:                selected: slugs_match(&slug, &route.primary.slug),
+825:            b.selected
+826:                .cmp(&a.selected)
+827:                .then_with(|| b.score.total_cmp(&a.score))
+833:            selected_model: route.primary.slug,
+985:        let quality = shadow_quality_score(prompt, primary_result, &shadow_result);
+1034:        self.linucb.update_features_multi_objective(
+1087:        self.linucb.update_features(context_vec, model_idx, reward);
+1092:        let obs = self.linucb.total_observations();
+1116:    pub const fn linucb(&self) -> &LinUCBRouter {
+1117:        &self.linucb
+1144:                let selected = if std::ptr::eq(candidates, self.model_slugs.as_slice()) {
+1149:                let mut scored = candidates
+1153:                        score: if slugs_match(slug, &selected) {
+1158:                        selected: slugs_match(slug, &selected),
+1164:                scored.sort_by(|a, b| {
+1165:                    b.score
+1166:                        .total_cmp(&a.score)
+1174:                    selected_slug: selected,
+1175:                    candidates: scored,
+1181:                let scores = self.confidence_scores(candidates, ctx);
+1182:                let selected = scores
+1187:                let mut scored_candidates = scores
+1189:                    .map(|(slug, score)| CascadeCandidateScore {
+1190:                        selected: slugs_match(&slug, &selected),
+1193:                        score,
+1198:                scored_candidates.sort_by(|a, b| {
+1199:                    b.score
+1200:                        .total_cmp(&a.score)
+1208:                    selected_slug: selected,
+1209:                    candidates: scored_candidates,
+1224:                let base_alpha = self.linucb.current_alpha();
+1225:                let arm_scores: Vec<CandidateArmScore> = self
+1226:                    .linucb
+1227:                    .score_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+1231:                let selected = arm_scores
+1234:                        left.score
+1235:                            .total_cmp(&right.score)
+1238:                    .map(|score| score.slug.clone())
+1241:                let mut scored = arm_scores
+1244:                        selected: slugs_match(&candidate.slug, &selected),
+1247:                        score: candidate.score,
+1252:                scored.sort_by(|a, b| {
+1253:                    b.score
+1254:                        .total_cmp(&a.score)
+1262:                    selected_slug: selected,
+1263:                    candidates: scored,
+1275:        advice: KnowledgeRoutingAdvice,
+1283:                let adjustment = hint.score.clamp(-0.20, 0.20);
+1284:                candidate.score += adjustment;
+1288:            b.score
+1289:                .total_cmp(&a.score)
+1293:            if !slugs_match(&new_top.slug, &explanation.selected_slug) {
+1295:                    previous = %explanation.selected_slug,
+1297:                    "knowledge advice changed routing selection"
+1302:                c.selected = slugs_match(&c.slug, &new_top_slug);
+1304:            explanation.selected_slug = new_top_slug;
+1309:    /// Append a routing decision log entry for a selected model.
+1314:        selected_model: &str,
+1325:                        score: candidate.score,
+1334:            .any(|candidate| candidate.model == selected_model)
+1339:                    model: selected_model.to_string(),
+1340:                    provider: log.provider_for_model(selected_model),
+1341:                    score: 1.0,
+1342:                    disqualified: log.disqualified_reason(selected_model),
+1348:                model: selected_model.to_string(),
+1349:                provider: log.provider_for_model(selected_model),
+1350:                score: 1.0,
+1351:                disqualified: log.disqualified_reason(selected_model),
+1363:            selected_provider: log.provider_for_model(selected_model),
+1364:            selected_model: selected_model.to_string(),
+1451:            total_observations: self.linucb.total_observations(),
+1535:                router.linucb.set_total_observations(total);
+1576:        if let Some(thinking_selected) = match thinking_preference(ctx) {
+1585:            let tier = slug_to_tier(&thinking_selected);
+1587:                primary: ModelSpec::from_slug(thinking_selected),
+1642:        if let Some(thinking_selected) = match thinking_preference(ctx) {
+1651:            let selected = ModelSpec::from_slug(thinking_selected);
+1652:            let tier = slug_to_tier(&selected.slug);
+1655:                primary: selected,
+1670:        let selected_slug = if candidates
+1692:        let selected = ModelSpec::from_slug(selected_slug);
+1693:        let tier = slug_to_tier(&selected.slug);
+1694:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1696:            context_overflow_fallback_for_model(candidates, &selected.slug);
+1699:            primary: selected,
+1725:        let scores = self.confidence_scores(&thinking_candidates, ctx);
+1726:        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+1748:        let scores = self.confidence_scores(&thinking_candidates, ctx);
+1749:        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+1751:        let selected = ModelSpec::from_slug(best_slug);
+1752:        let tier = slug_to_tier(&selected.slug);
+1753:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1755:            context_overflow_fallback_for_model(candidates, &selected.slug);
+1758:            primary: selected,
+1784:        let model = self.select_ucb_model(ctx, &thinking_candidates);
+1801:        let model = self.select_ucb_model(ctx, &thinking_candidates);
+1802:        let selected = model;
+1803:        let tier = slug_to_tier(&selected.slug);
+1804:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1806:            context_overflow_fallback_for_model(candidates, &selected.slug);
+1809:            primary: selected,
+1883:    fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
+1893:        let mut scores: Vec<(String, f64)> = candidates
+1897:                let base_score = if s.trials == 0 { 0.5 } else { s.upper_bound() };
+1903:                (slug.clone(), base_score + tier_bonus)
+1908:        apply_cache_affinity(&mut scores, ctx.previous_model.as_deref());
+1909:        scores
+1912:    fn select_ucb_model(&self, ctx: &RoutingContext, candidates: &[String]) -> ModelSpec {
+1914:        let scores = self.ucb_scores(ctx, candidates, frontier.as_deref());
+1915:        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+1953:    fn stage_scores(
+1961:                let selected = self.route_static_filtered(ctx, candidates).primary.slug;
+1967:                            if slugs_match(slug, &selected) {
+1978:                let score_map: HashMap<_, _> = self
+1979:                    .confidence_scores(&thinking_candidates, ctx)
+1984:                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+1989:                let score_map: HashMap<_, _> = self
+1990:                    .ucb_scores(ctx, &thinking_candidates, frontier)
+1995:                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+2001:    fn ucb_scores(
+2007:        let base_alpha = self.linucb.current_alpha() * temperament_exploration_multiplier(ctx);
+2009:        self.linucb
+2010:            .score_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+
+codex
+The existing file already has a knowledge adjustment helper for route explanations, but not for actual `CascadeModel` routing. I’m checking the model construction helpers and UCB score API so the new methods can adjust the primary without disturbing fallback behavior more than necessary.
+exec
+/bin/zsh -lc "sed -n '1240,1320p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "sed -n '780,850p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+
+                let mut scored = arm_scores
+                    .into_iter()
+                    .map(|candidate| CascadeCandidateScore {
+                        selected: slugs_match(&candidate.slug, &selected),
+                        on_pareto_frontier: frontier.iter().any(|entry| entry == &candidate.slug),
+                        slug: candidate.slug,
+                        score: candidate.score,
+                        exploitation: Some(candidate.exploitation),
+                        exploration: Some(candidate.exploration),
+                    })
+                    .collect::<Vec<_>>();
+                scored.sort_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.slug.cmp(&b.slug))
+                });
+
+                CascadeRouteExplanation {
+                    stage,
+                    observations,
+                    alpha: Some(base_alpha),
+                    selected_slug: selected,
+                    candidates: scored,
+                    pareto_frontier: frontier,
+                    knowledge_advice: None,
+                }
+            }
+        }
+    }
+
+    /// Apply knowledge-informed routing advice to a routing explanation.
+    pub fn apply_knowledge_advice(
+        &self,
+        explanation: &mut CascadeRouteExplanation,
+        advice: KnowledgeRoutingAdvice,
+    ) {
+        if !advice.has_signal || advice.hints.is_empty() {
+            explanation.knowledge_advice = Some(advice);
+            return;
+        }
+        for candidate in &mut explanation.candidates {
+            if let Some(hint) = advice.hint_for(&candidate.slug) {
+                let adjustment = hint.score.clamp(-0.20, 0.20);
+                candidate.score += adjustment;
+            }
+        }
+        explanation.candidates.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
+        if let Some(new_top) = explanation.candidates.first() {
+            if !slugs_match(&new_top.slug, &explanation.selected_slug) {
+                tracing::info!(
+                    previous = %explanation.selected_slug,
+                    new = %new_top.slug,
+                    "knowledge advice changed routing selection"
+                );
+            }
+            let new_top_slug = new_top.slug.clone();
+            for c in &mut explanation.candidates {
+                c.selected = slugs_match(&c.slug, &new_top_slug);
+            }
+            explanation.selected_slug = new_top_slug;
+        }
+        explanation.knowledge_advice = Some(advice);
+    }
+
+    /// Append a routing decision log entry for a selected model.
+    pub fn append_routing_log(
+        &self,
+        log: &RoutingLogger,
+        meta: &RoutingDecisionMeta,
+        selected_model: &str,
+        explanation: Option<&CascadeRouteExplanation>,
+    ) -> std::io::Result<RoutingDecisionLog> {
+        let mut candidates = explanation
+            .map(|explanation| {
+                explanation
+                    .candidates
+
+ succeeded in 0ms:
+            CascadeStage::Static => self.route_static_among(ctx, candidates, cfactor, agent_id),
+            CascadeStage::Confidence => {
+                self.route_confidence_among(ctx, candidates, cfactor, agent_id)
+            }
+            CascadeStage::Ucb => self.route_ucb_among(ctx, candidates, cfactor, agent_id),
+        }
+    }
+
+    /// Explain a routing decision over the supplied candidate set.
+    #[must_use]
+    pub fn explain_routing(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> CascadeRoutingExplanation {
+        let candidates = if candidates.is_empty() {
+            self.model_slugs.clone()
+        } else {
+            candidates.to_vec()
+        };
+
+        let route = match self.current_stage() {
+            CascadeStage::Static => self.route_static_filtered(ctx, &candidates),
+            CascadeStage::Confidence => self.route_confidence_filtered(ctx, &candidates),
+            CascadeStage::Ucb => self.route_ucb_filtered(ctx, &candidates),
+        };
+
+        let frontier = self.current_pareto_frontier();
+        let scores = self.stage_scores(ctx, &candidates, frontier.as_deref());
+        let score_map: HashMap<_, _> = scores.into_iter().collect();
+
+        let mut explained: Vec<_> = candidates
+            .into_iter()
+            .map(|slug| CascadeRoutingCandidate {
+                cache_affinity: ctx.previous_model.as_deref() == Some(slug.as_str()),
+                pareto_optimal: frontier
+                    .as_ref()
+                    .map(|frontier| frontier.iter().any(|frontier_slug| frontier_slug == &slug)),
+                score: score_map.get(&slug).copied().unwrap_or(0.0),
+                selected: slugs_match(&slug, &route.primary.slug),
+                model: slug,
+            })
+            .collect();
+
+        explained.sort_by(|a, b| {
+            b.selected
+                .cmp(&a.selected)
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+
+        CascadeRoutingExplanation {
+            stage: route.stage,
+            selected_model: route.primary.slug,
+            fallback_model: route.fallback_chain.first().map(|model| model.slug.clone()),
+            latency_sla_ms: route.latency_sla_ms,
+            candidates: explained,
+        }
+    }
+
+    /// Record an observation (updates both confidence stats and `LinUCB`).
+    pub fn record_observation(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        reward: f64,
+        success: bool,
+    ) {
+        let Some(model_idx) = self.model_index_for_slug(model_slug) else {
+            return;
+        };
+
+exec
+/bin/zsh -lc "sed -n '1880,2025p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "sed -n '1560,1820p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+        }
+    }
+
+    fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
+        let stats = self.confidence_stats.lock();
+
+        let prediction_error = 1.0 - ctx.daimon_policy.affect_confidence.clamp(0.0, 1.0);
+        let low_confidence = ctx
+            .tier_thresholds
+            .as_ref()
+            .map(|th| prediction_error > th.t0_ceiling)
+            .unwrap_or(ctx.daimon_policy.affect_confidence < LOW_AFFECT_CONFIDENCE_THRESHOLD);
+
+        let mut scores: Vec<(String, f64)> = candidates
+            .iter()
+            .map(|slug| {
+                let s = stats.get(slug).cloned().unwrap_or_default();
+                let base_score = if s.trials == 0 { 0.5 } else { s.upper_bound() };
+                let tier_bonus = if low_confidence {
+                    low_confidence_tier_bonus(slug_to_tier(slug))
+                } else {
+                    0.0
+                };
+                (slug.clone(), base_score + tier_bonus)
+            })
+            .collect();
+        drop(stats);
+
+        apply_cache_affinity(&mut scores, ctx.previous_model.as_deref());
+        scores
+    }
+
+    fn select_ucb_model(&self, ctx: &RoutingContext, candidates: &[String]) -> ModelSpec {
+        let frontier = self.current_pareto_frontier();
+        let scores = self.ucb_scores(ctx, candidates, frontier.as_deref());
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+        ModelSpec::from_slug(best_slug)
+    }
+
+    fn refresh_pareto_frontier_if_needed(&self) {
+        let total = self.total_observations();
+        if total < PARETO_RECOMPUTE_INTERVAL {
+            return;
+        }
+
+        let bucket = total / PARETO_RECOMPUTE_INTERVAL;
+        let needs_refresh = {
+            let state = self.pareto_frontier.lock();
+            state.bucket < bucket || state.frontier.is_empty()
+        };
+
+        if !needs_refresh {
+            return;
+        }
+
+        let frontier = self.recompute_pareto_frontier();
+        let mut state = self.pareto_frontier.lock();
+        if state.bucket < bucket || state.frontier.is_empty() {
+            state.frontier = frontier;
+            state.bucket = bucket;
+        }
+    }
+
+    fn current_pareto_frontier(&self) -> Option<Vec<String>> {
+        self.refresh_pareto_frontier_if_needed();
+        let state = self.pareto_frontier.lock();
+        if state.bucket == 0 || state.frontier.is_empty() {
+            None
+        } else {
+            Some(state.frontier.clone())
+        }
+    }
+
+    fn stage_scores(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        frontier: Option<&[String]>,
+    ) -> Vec<(String, f64)> {
+        match self.current_stage() {
+            CascadeStage::Static => {
+                let selected = self.route_static_filtered(ctx, candidates).primary.slug;
+                candidates
+                    .iter()
+                    .map(|slug| {
+                        (
+                            slug.clone(),
+                            if slugs_match(slug, &selected) {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        )
+                    })
+                    .collect()
+            }
+            CascadeStage::Confidence => {
+                let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+                let score_map: HashMap<_, _> = self
+                    .confidence_scores(&thinking_candidates, ctx)
+                    .into_iter()
+                    .collect();
+                candidates
+                    .iter()
+                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+                    .collect()
+            }
+            CascadeStage::Ucb => {
+                let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+                let score_map: HashMap<_, _> = self
+                    .ucb_scores(ctx, &thinking_candidates, frontier)
+                    .into_iter()
+                    .collect();
+                candidates
+                    .iter()
+                    .map(|slug| (slug.clone(), score_map.get(slug).copied().unwrap_or(0.0)))
+                    .collect()
+            }
+        }
+    }
+
+    fn ucb_scores(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        frontier: Option<&[String]>,
+    ) -> Vec<(String, f64)> {
+        let base_alpha = self.linucb.current_alpha() * temperament_exploration_multiplier(ctx);
+
+        self.linucb
+            .score_features_from_candidates_with_alpha_adjuster(ctx, candidates, |slug| {
+                frontier.map_or(base_alpha, |frontier| {
+                    pareto_adjusted_alpha(base_alpha, slug, frontier)
+                })
+            })
+    }
+
+    fn recompute_pareto_frontier(&self) -> Vec<String> {
+        let stats = self.confidence_stats.lock();
+        let mut observations = HashMap::new();
+        let mut unobserved = Vec::new();
+
+        for slug in &self.model_slugs {
+            match stats.get(slug) {
+                Some(model_stats) if model_stats.trials > 0 => {
+                    observations.insert(
+
+ succeeded in 0ms:
+    }
+
+    /// Return the current Pareto frontier slugs (for tests).
+    #[cfg(test)]
+    pub(crate) fn pareto_frontier_slugs(&self) -> Vec<String> {
+        self.pareto_frontier.lock().frontier.clone()
+    }
+
+    // ── Internal routing per stage ──────────────────────────────────────
+
+    fn route_static(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        if let Some(thinking_selected) = match thinking_preference(ctx) {
+            ThinkingPreference::PreferThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), true)
+            }
+            ThinkingPreference::PreferNonThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(&self.model_slugs, ctx), false)
+            }
+            ThinkingPreference::Neutral => None,
+        } {
+            let tier = slug_to_tier(&thinking_selected);
+            let route = CascadeModel {
+                primary: ModelSpec::from_slug(thinking_selected),
+                fallback_chain: Vec::new(),
+                context_overflow_fallback: None,
+                latency_sla_ms: default_latency_sla(tier),
+                stage: CascadeStage::Static,
+            };
+            return self.apply_context_biases_among(
+                route,
+                ctx,
+                &self.model_slugs,
+                cfactor,
+                agent_id,
+            );
+        }
+
+        let default_slug = self
+            .model_slugs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+        let slug = if ctx.task_category == TaskCategory::Research {
+            self.model_slugs
+                .iter()
+                .find(|s| s.as_str() == "sonar-pro" || s.as_str() == "sonar")
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.role_table
+                        .lock()
+                        .get(&ctx.role)
+                        .cloned()
+                        .unwrap_or_else(|| default_slug.clone())
+                })
+        } else {
+            self.role_table
+                .lock()
+                .get(&ctx.role)
+                .cloned()
+                .unwrap_or(default_slug)
+        };
+        let tier = slug_to_tier(&slug);
+
+        let route = CascadeModel {
+            primary: ModelSpec::from_slug(&slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &slug,
+            ),
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Static,
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+    }
+
+    fn route_static_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
+        if let Some(thinking_selected) = match thinking_preference(ctx) {
+            ThinkingPreference::PreferThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), true)
+            }
+            ThinkingPreference::PreferNonThinking => {
+                pick_tier_extreme(&thinking_filtered_candidates(candidates, ctx), false)
+            }
+            ThinkingPreference::Neutral => None,
+        } {
+            let selected = ModelSpec::from_slug(thinking_selected);
+            let tier = slug_to_tier(&selected.slug);
+
+            return CascadeModel {
+                primary: selected,
+                fallback_chain: Vec::new(),
+                context_overflow_fallback: None,
+                latency_sla_ms: default_latency_sla(tier),
+                stage: CascadeStage::Static,
+            };
+        }
+
+        let slug = self
+            .role_table
+            .lock()
+            .get(&ctx.role)
+            .cloned()
+            .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+        let selected_slug = if candidates
+            .iter()
+            .any(|candidate| slugs_match(candidate, &slug))
+        {
+            slug
+        } else {
+            let tier_candidates: &[&str] = match ctx.role.model_tier() {
+                ModelTier::Fast => &["gemini-2.5-flash-lite", "claude-haiku-3-5"],
+                ModelTier::Premium => {
+                    &["claude-opus-4", "gemini-3.1-pro-preview", "gemini-2.5-pro"]
+                }
+                _ => &[
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "kimi-k2.5",
+                    "kimi-k2-thinking",
+                    "claude-sonnet-4-6",
+                    "claude-sonnet-4-5",
+                ],
+            };
+            pick_available_static_slug(candidates, tier_candidates)
+        };
+        let selected = ModelSpec::from_slug(selected_slug);
+        let tier = slug_to_tier(&selected.slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback_chain,
+            context_overflow_fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Static,
+        }
+    }
+
+    fn route_static_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let route = self.route_static_filtered(ctx, candidates);
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+    }
+
+    fn route_confidence(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
+        let scores = self.confidence_scores(&thinking_candidates, ctx);
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+        let tier = slug_to_tier(&best_slug);
+
+        let route = CascadeModel {
+            primary: ModelSpec::from_slug(&best_slug),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &best_slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &best_slug,
+            ),
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Confidence,
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+    }
+
+    fn route_confidence_filtered(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> CascadeModel {
+        let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+        let scores = self.confidence_scores(&thinking_candidates, ctx);
+        let best_slug = select_with_hysteresis(&scores, ctx.previous_model.as_deref());
+
+        let selected = ModelSpec::from_slug(best_slug);
+        let tier = slug_to_tier(&selected.slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback_chain,
+            context_overflow_fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Confidence,
+        }
+    }
+
+    fn route_confidence_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let route = self.route_confidence_filtered(ctx, candidates);
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+    }
+
+    fn route_ucb(
+        &self,
+        ctx: &RoutingContext,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let thinking_candidates = thinking_filtered_candidates(&self.model_slugs, ctx);
+        let model = self.select_ucb_model(ctx, &thinking_candidates);
+        let tier = slug_to_tier(&model.slug);
+        let route = CascadeModel {
+            primary: model.clone(),
+            fallback_chain: fallback_chain_for_model(&self.model_slugs, &model.slug),
+            context_overflow_fallback: context_overflow_fallback_for_model(
+                &self.model_slugs,
+                &model.slug,
+            ),
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Ucb,
+        };
+        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+    }
+
+    fn route_ucb_filtered(&self, ctx: &RoutingContext, candidates: &[String]) -> CascadeModel {
+        let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+        let model = self.select_ucb_model(ctx, &thinking_candidates);
+        let selected = model;
+        let tier = slug_to_tier(&selected.slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback_chain,
+            context_overflow_fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Ucb,
+        }
+    }
+
+    fn route_ucb_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+
+exec
+/bin/zsh -lc "sed -n '1800,1885p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc 'rg -n "apply_context_biases|fallback_chain_for_model|latency_sla_ms" crates/roko-learn/src/cascade_router.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+50:    fallback_chain_for_model, infer_shadow_routing_context, is_free_tier_gemini_model,
+430:        route.fallback_chain = fallback_chain_for_model(candidates, &primary.slug);
+433:        route.latency_sla_ms = default_latency_sla(tier);
+498:    fn apply_context_biases_among(
+556:                latency_sla_ms: 30_000,
+835:            latency_sla_ms: route.latency_sla_ms,
+1590:                latency_sla_ms: default_latency_sla(tier),
+1593:            return self.apply_context_biases_among(
+1630:            fallback_chain: fallback_chain_for_model(&self.model_slugs, &slug),
+1635:            latency_sla_ms: default_latency_sla(tier),
+1638:        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+1658:                latency_sla_ms: default_latency_sla(tier),
+1694:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1702:            latency_sla_ms: default_latency_sla(tier),
+1715:        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+1731:            fallback_chain: fallback_chain_for_model(&self.model_slugs, &best_slug),
+1736:            latency_sla_ms: default_latency_sla(tier),
+1739:        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+1753:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1761:            latency_sla_ms: default_latency_sla(tier),
+1774:        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+1788:            fallback_chain: fallback_chain_for_model(&self.model_slugs, &model.slug),
+1793:            latency_sla_ms: default_latency_sla(tier),
+1796:        self.apply_context_biases_among(route, ctx, &self.model_slugs, cfactor, agent_id)
+1804:        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+1812:            latency_sla_ms: default_latency_sla(tier),
+1825:        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+
+ succeeded in 0ms:
+        let thinking_candidates = thinking_filtered_candidates(candidates, ctx);
+        let model = self.select_ucb_model(ctx, &thinking_candidates);
+        let selected = model;
+        let tier = slug_to_tier(&selected.slug);
+        let fallback_chain = fallback_chain_for_model(candidates, &selected.slug);
+        let context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &selected.slug);
+
+        CascadeModel {
+            primary: selected,
+            fallback_chain,
+            context_overflow_fallback,
+            latency_sla_ms: default_latency_sla(tier),
+            stage: CascadeStage::Ucb,
+        }
+    }
+
+    fn route_ucb_among(
+        &self,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let route = self.route_ucb_filtered(ctx, candidates);
+        self.apply_context_biases_among(route, ctx, candidates, cfactor, agent_id)
+    }
+
+    fn bias_model_for_cfactor(
+        &self,
+        model: ModelSpec,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> ModelSpec {
+        let Some(cfactor) = cfactor else {
+            return model;
+        };
+
+        if let Some(agent_id) = agent_id {
+            match cfactor.dispatch_bias_for_agent(agent_id) {
+                AgentDispatchBias::PreferStronger => return self.strongest_model(),
+                AgentDispatchBias::PreferCheaper => return self.cheapest_model(),
+                AgentDispatchBias::Neutral => {}
+            }
+        }
+
+        if cfactor.overall > HIGH_CFACTOR_THRESHOLD {
+            self.cheapest_model()
+        } else if cfactor.overall < LOW_CFACTOR_THRESHOLD {
+            self.strongest_model()
+        } else {
+            model
+        }
+    }
+
+    fn bias_model_for_cfactor_among(
+        &self,
+        model: ModelSpec,
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let Some(cfactor) = cfactor else {
+            return model;
+        };
+
+        if let Some(agent_id) = agent_id {
+            match cfactor.dispatch_bias_for_agent(agent_id) {
+                AgentDispatchBias::PreferStronger => return self.strongest_model_among(candidates),
+                AgentDispatchBias::PreferCheaper => return self.cheapest_model_among(candidates),
+                AgentDispatchBias::Neutral => {}
+            }
+        }
+
+        if cfactor.overall > HIGH_CFACTOR_THRESHOLD {
+            self.cheapest_model_among(candidates)
+        } else if cfactor.overall < LOW_CFACTOR_THRESHOLD {
+            self.strongest_model_among(candidates)
+        } else {
+            model
+        }
+    }
+
+    fn confidence_scores(&self, candidates: &[String], ctx: &RoutingContext) -> Vec<(String, f64)> {
+        let stats = self.confidence_stats.lock();
+
+
+exec
+/bin/zsh -lc "sed -n '210,245p' crates/roko-learn/src/cascade/types.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+    pub score: f64,
+    /// Number of knowledge entries that contributed to this hint.
+    pub supporting_entries: u32,
+    /// Brief human-readable reason (e.g. "2 insights: strong on research tasks").
+    pub reason: String,
+}
+
+/// Aggregate result of consulting the knowledge store for routing hints.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeRoutingAdvice {
+    /// Per-model hints derived from the knowledge store.
+    pub hints: Vec<KnowledgeHint>,
+    /// Whether any hints were found at all (false means the store was
+    /// empty or the query returned no relevant entries).
+    pub has_signal: bool,
+}
+
+impl KnowledgeRoutingAdvice {
+    /// Look up the hint for a specific model slug.
+    #[must_use]
+    pub fn hint_for(&self, model_slug: &str) -> Option<&KnowledgeHint> {
+        use crate::cascade::helpers::slugs_match;
+        self.hints
+            .iter()
+            .find(|h| slugs_match(&h.model_slug, model_slug))
+    }
+
+    /// Return the score adjustment for a model, or 0.0 if no hint exists.
+    #[must_use]
+    pub fn score_for(&self, model_slug: &str) -> f64 {
+        self.hint_for(model_slug).map_or(0.0, |h| h.score)
+    }
+}
+
+// ─── Confidence-stage stats ─────────────────────────────────────────────────
+
+
+exec
+/bin/zsh -lc "sed -n '400,525p' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+        ModelSpec::from_slug(best_slug)
+    }
+
+    /// Return the cheapest model from `candidates`.
+    #[must_use]
+    pub fn cheapest_model_among(&self, candidates: &[String]) -> ModelSpec {
+        let mut best_slug = candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.cheapest_model().slug);
+        let mut best_rank = model_tier_rank(slug_to_tier(&best_slug));
+
+        for slug in candidates.iter().skip(1) {
+            let rank = model_tier_rank(slug_to_tier(slug));
+            if rank < best_rank {
+                best_rank = rank;
+                best_slug.clone_from(slug);
+            }
+        }
+
+        ModelSpec::from_slug(best_slug)
+    }
+
+    fn retarget_route_primary(
+        &self,
+        mut route: CascadeModel,
+        candidates: &[String],
+        primary: ModelSpec,
+    ) -> CascadeModel {
+        let tier = slug_to_tier(&primary.slug);
+        route.fallback_chain = fallback_chain_for_model(candidates, &primary.slug);
+        route.context_overflow_fallback =
+            context_overflow_fallback_for_model(candidates, &primary.slug);
+        route.latency_sla_ms = default_latency_sla(tier);
+        route.primary = primary;
+        route
+    }
+
+    fn bias_model_for_behavioral_state_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = behavioral_state_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
+    fn bias_model_for_conductor_load_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = conductor_load_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
+    fn bias_model_for_temperament_among(
+        &self,
+        model: ModelSpec,
+        ctx: &RoutingContext,
+        candidates: &[String],
+    ) -> ModelSpec {
+        let shift = temperament_tier_shift(ctx);
+        if shift == 0 {
+            return model;
+        }
+
+        let current_rank = model_tier_rank(slug_to_tier(&model.slug));
+        let target_rank = target_tier_rank(current_rank, shift);
+        candidates
+            .iter()
+            .find(|slug| model_tier_rank(slug_to_tier(slug)) == target_rank)
+            .map(ModelSpec::from_slug)
+            .unwrap_or(model)
+    }
+
+    fn apply_context_biases_among(
+        &self,
+        route: CascadeModel,
+        ctx: &RoutingContext,
+        candidates: &[String],
+        cfactor: Option<&CFactor>,
+        agent_id: Option<&str>,
+    ) -> CascadeModel {
+        let primary =
+            self.bias_model_for_behavioral_state_among(route.primary.clone(), ctx, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary = self.bias_model_for_temperament_among(route.primary.clone(), ctx, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary =
+            self.bias_model_for_cfactor_among(route.primary.clone(), cfactor, agent_id, candidates);
+        let route = self.retarget_route_primary(route, candidates, primary);
+        let primary =
+            self.bias_model_for_conductor_load_among(route.primary.clone(), ctx, candidates);
+        self.retarget_route_primary(route, candidates, primary)
+    }
+
+    /// Return the index of `slug` in the router's model list.
+    #[must_use]
+    pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+        self.linucb.model_index(slug)
+    }
+
+    /// Route a context through the cascade, returning a recommendation.
+
+codex
+I found `retarget_route_primary()`, which updates the primary plus fallback chain and latency consistently. I’m going to add the knowledge-aware methods near the existing C-Factor methods and a small private helper to keep the base and `_among` variants identical.
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-learn/src/model_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc 'rg -n "score_features_from_candidates|struct LinUCBRouter|fn model_index" crates/roko-learn/src/model_router.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+681:pub struct LinUCBRouter {
+905:    pub fn score_features_from_candidates_with_alpha_adjuster<F>(
+1090:    pub fn model_index(&self, model_slug: &str) -> Option<usize> {
+
+ succeeded in 0ms:
+//! `LinUCB` contextual bandit router for model selection (section 13.3-13.7).
+//!
+//! This module implements the `LinUCB` algorithm (Li et al., 2010) for
+//! context-dependent model routing. Each model is an "arm" with its own
+//! A matrix (d x d) and b vector (d x 1). Given a context vector x,
+//! the algorithm selects the arm with the highest upper confidence bound:
+//!
+//! ```text
+//! score(a) = theta_a^T * x + alpha * sqrt(x^T * A_a^{-1} * x)
+//! ```
+//!
+//! where `theta_a = A_a^{-1} * b_a`.
+//!
+//! # Features
+//!
+//! The context vector encodes:
+//! - Task category (one-hot, 8 dimensions for [`TaskCategory`] variants)
+//! - Complexity band (scalar 0.0 / 0.5 / 1.0)
+//! - Iteration (normalized: iteration / 10, capped at 1.0)
+//! - Agent role (hashed to 4-dim float vector)
+//! - Crate familiarity for the crate being modified
+//!   (`success_count / total_count`, clamped to `[0.0, 1.0]`)
+//! - Has prior failure (0.0 or 1.0)
+//! - Bias term (always 1.0)
+//! - Cache affinity to the previous model (1.0 when the candidate matches)
+//!
+//! Total dimension: 8 + 1 + 1 + 4 + 1 + 1 + 1 + 1 = 18.
+//!
+//! # Cold start
+//!
+//! When observation count is below 50, the router falls back to a static
+//! mapping from [`ModelTier`] to a default model slug.
+//!
+//! # Alpha decay
+//!
+//! The exploration parameter alpha decays exponentially from 1.0 to 0.05
+//! over 200 observations: `alpha = 0.05 + 0.95 * exp(-observations / 60)`.
+//!
+//! # Thread safety
+//!
+//! All mutable state is behind a [`parking_lot::RwLock`] so the router can
+//! be shared across async tasks via `Arc<LinUCBRouter>` while allowing
+//! concurrent read-side routing.
+
+use crate::bandits::EwcRegularizer;
+use crate::cost_table::CostTable;
+use crate::provider_health::ProviderHealthTracker;
+use parking_lot::RwLock;
+use rand::Rng;
+use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
+pub use roko_core::config::schema::RewardWeights;
+use roko_core::task::{TaskCategory, TaskComplexityBand};
+use roko_core::{DaimonPolicy, Temperament};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/// Dimensionality of the context vector.
+pub const CONTEXT_DIM: usize = 18;
+
+/// Minimum observations before `LinUCB` is used (below this, static routing).
+pub const COLD_START_THRESHOLD: u64 = 50;
+
+/// Minimum alpha value (exploration floor).
+const ALPHA_MIN: f64 = 0.05;
+
+/// Maximum alpha value (exploration ceiling at cold start).
+const ALPHA_MAX: f64 = 1.0;
+
+/// Decay time constant: chosen so that at 200 observations,
+/// `exp(-200/60) ~ 0.036`, giving alpha ~ 0.084,
+/// and it effectively converges to `ALPHA_MIN`.
+const ALPHA_TAU: f64 = 60.0;
+/// Default discount factor for Thompson sampling in non-stationary environments.
+const THOMPSON_DEFAULT_DISCOUNT: f64 = 0.99;
+
+/// Simple phase-aware learning-rate schedule used to modulate LinUCB alpha.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LearningRateSchedule {
+    /// Exploration multiplier while the router is still cold.
+    pub cold_rate: f64,
+    /// Exploration multiplier while the router is warming up.
+    pub warm_rate: f64,
+    /// Exploration multiplier once the router is mature.
+    pub mature_rate: f64,
+    /// Observation count below which the cold rate applies.
+    pub cold_threshold: u64,
+    /// Observation count below which the warm rate applies.
+    pub warm_threshold: u64,
+}
+
+impl Default for LearningRateSchedule {
+    fn default() -> Self {
+        Self {
+            cold_rate: 1.0,
+            warm_rate: 0.85,
+            mature_rate: 0.7,
+            cold_threshold: 25,
+            warm_threshold: 100,
+        }
+    }
+}
+
+impl LearningRateSchedule {
+    /// Return the phase-specific multiplier for `observations`.
+    #[must_use]
+    pub fn multiplier_for_observations(&self, observations: u64) -> f64 {
+        if observations < self.cold_threshold {
+            self.cold_rate
+        } else if observations < self.warm_threshold {
+            self.warm_rate
+        } else {
+            self.mature_rate
+        }
+    }
+
+    /// Apply the phase multiplier to the existing exponential alpha decay.
+    #[must_use]
+    pub fn alpha_for_observations(&self, observations: u64) -> f64 {
+        self.multiplier_for_observations(observations) * base_alpha_for_observations(observations)
+    }
+}
+
+// ─── RoutingContext ─────────────────────────────────────────────────────────
+
+/// Input features for model selection.
+#[derive(Debug, Clone)]
+pub struct RoutingContext {
+    /// Broad category of the task.
+    pub task_category: TaskCategory,
+    /// Complexity band (Fast / Standard / Complex).
+    pub complexity: TaskComplexityBand,
+    /// Current iteration number (0-based).
+    pub iteration: u32,
+    /// Agent role requesting the model.
+    pub role: AgentRole,
+    /// Familiarity with the target crate (0.0 = unknown, 1.0 = very familiar).
+    pub crate_familiarity: f64,
+    /// Whether a prior attempt at this task has failed.
+    pub has_prior_failure: bool,
+    /// Normalized conductor pressure in `[0, 1]` derived from active agents,
+    /// ready-queue depth, and queue wait time.
+    pub conductor_load: f64,
+    /// Number of currently active agent processes.
+    pub active_agents: u32,
+    /// Number of ready tasks currently waiting in the queue.
+    pub ready_queue_depth: u32,
+    /// Longest observed ready-queue wait across queued tasks, in hours.
+    pub max_queue_wait_hours: f64,
+    /// First-class affect policy snapshot from the Daimon.
+    pub daimon_policy: DaimonPolicy,
+    /// Requested thinking / reasoning level for this task, if any.
+    pub thinking_level: Option<String>,
+    /// Optional typed temperament propagated from agent identity or config.
+    pub temperament: Option<Temperament>,
+    /// Model used for the previous task in the same plan.
+    pub previous_model: Option<String>,
+    /// Estimated shared prefix size for cached context reuse.
+    pub plan_context_tokens: Option<u64>,
+    /// Affect-adjusted tier thresholds from the Daimon behavioral state.
+    ///
+    /// When `Some`, the cascade router uses `t0_ceiling` / `t1_ceiling` to
+    /// determine how aggressively to shift tiers based on prediction error
+    /// (`1.0 - affect_confidence`).
+    pub tier_thresholds: Option<roko_daimon::TierThresholds>,
+}
+
+impl RoutingContext {
+    /// Attach a typed temperament to the routing context.
+    #[must_use]
+    pub fn with_temperament(mut self, temperament: Temperament) -> Self {
+        self.temperament = Some(temperament);
+        self
+    }
+
+    /// Parse and attach a temperament label to the routing context.
+    #[must_use]
+    pub fn with_temperament_label(mut self, label: &str) -> Self {
+        self.temperament = Temperament::from_label(label);
+        self
+    }
+
+    /// Encode into a fixed-length feature vector of dimension [`CONTEXT_DIM`].
+    #[must_use]
+    pub fn to_features(&self) -> Vec<f64> {
+        self.to_features_for_model(self.previous_model.as_deref())
+    }
+
+    /// Encode into a fixed-length feature vector for a specific candidate model.
+    #[must_use]
+    pub fn to_features_for_model(&self, candidate_model: Option<&str>) -> Vec<f64> {
+        let mut x = vec![0.0; CONTEXT_DIM];
+        let mut idx = 0;
+
+        // One-hot for TaskCategory (8 variants)
+        let cat_idx = task_category_index(self.task_category);
+        x[cat_idx] = 1.0;
+        idx += 8;
+
+        // Complexity scalar
+        x[idx] = complexity_to_float(self.complexity);
+        idx += 1;
+
+        // Iteration (normalized, capped at 1.0)
+        x[idx] = (f64::from(self.iteration) / 10.0).min(1.0);
+        idx += 1;
+
+        // Role hash (4 float features from the role label hash)
+        let role_hash = hash_role(self.role);
+        x[idx..idx + 4].copy_from_slice(&role_hash);
+        idx += 4;
+
+        // Per-crate familiarity score for the crate being modified.
+        x[idx] = self.crate_familiarity.clamp(0.0, 1.0);
+        idx += 1;
+
+        // Has prior failure
+        x[idx] = if self.has_prior_failure { 1.0 } else { 0.0 };
+
+exec
+/bin/zsh -lc "sed -n '860,940p' crates/roko-learn/src/model_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+            return self.select_model(ctx);
+        }
+
+        let state = self.state.read();
+
+        // Cold start: use the filtered static table.
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = complexity_to_tier(ctx.complexity);
+            let slug = pick_static_from_candidates(candidate_slugs, tier);
+            return ModelSpec::from_slug(slug);
+        }
+
+        let mut best_slug: Option<String> = None;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for arm in &state.arms {
+            if !candidate_slugs
+                .iter()
+                .any(|candidate| slugs_match(&arm.slug, candidate))
+            {
+                continue;
+            }
+
+            let x = ctx.to_features_for_model(Some(&arm.slug));
+            let score = linucb_score(arm, &x, alpha_for_slug(&arm.slug));
+            if score > best_score {
+                best_score = score;
+                best_slug = Some(arm.slug.clone());
+            }
+        }
+
+        if let Some(slug) = best_slug {
+            drop(state);
+            return ModelSpec::from_slug(slug);
+        }
+
+        drop(state);
+        ModelSpec::from_slug(candidate_slugs[0].clone())
+    }
+
+    /// Compute raw LinUCB scores for a filtered candidate set.
+    ///
+    /// The returned scores use the same candidate filtering and per-arm feature
+    /// encoding as [`select_features_from_candidates_with_alpha_adjuster`].
+    #[must_use]
+    pub fn score_features_from_candidates_with_alpha_adjuster<F>(
+        &self,
+        ctx: &RoutingContext,
+        candidate_slugs: &[String],
+        mut alpha_for_slug: F,
+    ) -> Vec<(String, f64)>
+    where
+        F: FnMut(&str) -> f64,
+    {
+        if candidate_slugs.is_empty() {
+            return Vec::new();
+        }
+
+        let state = self.state.read();
+
+        if state.total_observations < COLD_START_THRESHOLD {
+            let tier = complexity_to_tier(ctx.complexity);
+            let selected = pick_static_from_candidates(candidate_slugs, tier);
+            return candidate_slugs
+                .iter()
+                .map(|slug| {
+                    (
+                        slug.clone(),
+                        if slugs_match(slug, &selected) {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                    )
+                })
+                .collect();
+        }
+
+        candidate_slugs
+            .iter()
+            .map(|candidate| {
+
+exec
+/bin/zsh -lc "sed -n '940,1015p' crates/roko-learn/src/model_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+            .map(|candidate| {
+                let score = state
+                    .arms
+                    .iter()
+                    .find(|arm| slugs_match(&arm.slug, candidate))
+                    .map(|arm| {
+                        let x = ctx.to_features_for_model(Some(&arm.slug));
+                        linucb_score(arm, &x, alpha_for_slug(&arm.slug))
+                    })
+                    .unwrap_or(f64::NEG_INFINITY);
+                (candidate.clone(), score)
+            })
+            .collect()
+    }
+
+    /// Update the arm's A matrix and b vector after observing a reward.
+    ///
+    /// `LinUCB` update rules:
+    /// - `A_a = A_a + x * x^T`
+    /// - `b_a = b_a + reward * x`
+    pub fn update(&self, ctx: &RoutingContext, model_slug: &str, reward: f64) {
+        let x = ctx.to_features_for_model(Some(model_slug));
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features(&x, model_idx, reward);
+    }
+
+    /// Update the router with explicit multi-objective reward components.
+    pub fn update_with_metrics(
+        &self,
+        ctx: &RoutingContext,
+        model_slug: &str,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let x = ctx.to_features_for_model(Some(model_slug));
+        let Some(model_idx) = self.model_index(model_slug) else {
+            return;
+        };
+        self.update_features_multi_objective(
+            &x,
+            model_idx,
+            quality,
+            normalized_cost,
+            normalized_latency,
+            weights,
+        );
+    }
+
+    /// Update the arm identified by `model_idx` with a precomputed feature vector.
+    ///
+    /// This is the lower-level observation entry point used by the cascade router
+    /// when it already has the raw context vector.
+    ///
+    /// If a `persist_path` is configured, the router state is automatically
+    /// saved to disk after each update. Save errors are silently ignored so
+    /// that a filesystem hiccup never breaks the update flow.
+    pub fn update_features(&self, x: &[f64], model_idx: usize, reward: f64) {
+        self.update_features_internal(x, model_idx, reward, None);
+    }
+
+    /// Update the router and track the underlying reward vector.
+    pub fn update_features_multi_objective(
+        &self,
+        x: &[f64],
+        model_idx: usize,
+        quality: f64,
+        normalized_cost: f64,
+        normalized_latency: f64,
+        weights: &RewardWeights,
+    ) {
+        let reward = compute_routing_reward_with_weights(
+            quality,
+
+exec
+/bin/zsh -lc 'rg -n "struct ModelSpec|impl .*Display.*ModelSpec|impl ModelSpec" crates/roko-core/src crates | head -40' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+crates/roko-core/src/agent.rs:192:pub struct ModelSpec {
+crates/roko-core/src/agent.rs:202:impl ModelSpec {
+crates/roko-core/src/agent.rs:192:pub struct ModelSpec {
+crates/roko-core/src/agent.rs:202:impl ModelSpec {
+
+exec
+/bin/zsh -lc "sed -n '188,230p' crates/roko-core/src/agent.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+///
+/// Mirrors Mori's `ModelSpec` in `apps/mori/src/agent/roles.rs`. Create
+/// from any model string; the backend is always derived from the slug.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelSpec {
+    /// The model slug (e.g. `"claude-sonnet-4-5"`, `"gpt-5"`).
+    pub slug: String,
+    /// The backend inferred from the slug.
+    pub backend: AgentBackend,
+    /// Reasoning effort hint.
+    #[serde(default)]
+    pub effort: ReasoningEffort,
+}
+
+impl ModelSpec {
+    /// Construct from a slug, inferring the backend.
+    #[must_use]
+    pub fn from_slug(slug: impl Into<String>) -> Self {
+        let slug = slug.into();
+        let backend = AgentBackend::from_model(&slug);
+        Self {
+            slug,
+            backend,
+            effort: ReasoningEffort::default(),
+        }
+    }
+
+    /// Set the reasoning effort.
+    #[must_use]
+    pub const fn with_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// Compact display label (strips common prefixes for TUI columns).
+    #[must_use]
+    pub fn short(&self) -> String {
+        self.slug
+            .replace("composer-", "cx-")
+            .replace("claude-", "cl-")
+            .replace("gpt-", "")
+    }
+}
+
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..dbc6a089ee2ea7a8ac84e4f5e1d6b94ec6f09b26
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -762,6 +762,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +797,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..dbc6a089ee2ea7a8ac84e4f5e1d6b94ec6f09b26
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -762,6 +762,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +797,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+codex
+The public methods are now in place. Next I’m adding the helper that computes adjusted scores, applies the 0.1 margin before swapping, and logs whether knowledge changed the route.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+exec
+/bin/zsh -lc 'cargo fmt --check -p roko-learn' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+ succeeded in 512ms:
+codex
+Formatting is already clean. I’m running `cargo check -p roko-learn` now; if the helper has any type-level mismatch with the existing router internals, I’ll fix it in the same file.
+exec
+/bin/zsh -lc 'cargo check -p roko-learn' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+codex
+`cargo check` is still compiling dependencies; no errors from the changed file yet. I’m letting it complete before doing the grep checks from the batch criteria.
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+ succeeded in 63076ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.15.1
+    Checking pin-project-lite v0.2.17
+    Checking memchr v2.8.0
+   Compiling parking_lot_core v0.9.12
+    Checking scopeguard v1.2.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+    Checking once_cell v1.21.4
+    Checking bytes v1.11.1
+    Checking core-foundation-sys v0.8.7
+    Checking lock_api v0.4.14
+    Checking itoa v1.0.18
+   Compiling serde_core v1.0.228
+   Compiling cc v1.2.60
+    Checking futures-core v0.3.32
+    Checking equivalent v1.0.2
+    Checking stable_deref_trait v1.2.1
+    Checking futures-sink v0.3.32
+   Compiling serde v1.0.228
+    Checking zeroize v1.8.2
+   Compiling getrandom v0.4.2
+    Checking hashbrown v0.17.0
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+    Checking slab v0.4.12
+    Checking futures-channel v0.3.32
+    Checking tracing-core v0.1.36
+    Checking bitflags v2.11.0
+    Checking subtle v2.6.1
+    Checking futures-task v0.3.32
+    Checking futures-io v0.3.32
+   Compiling autocfg v1.5.0
+    Checking http v1.4.0
+   Compiling zmij v1.0.21
+   Compiling semver v1.0.28
+    Checking writeable v0.6.3
+   Compiling serde_json v1.0.149
+    Checking litemap v0.8.2
+    Checking indexmap v2.14.0
+   Compiling rustc_version v0.4.1
+    Checking aho-corasick v1.1.4
+   Compiling icu_normalizer_data v2.2.0
+    Checking regex-syntax v0.8.10
+   Compiling generic-array v0.14.9
+   Compiling rustix v1.1.4
+    Checking http-body v1.0.1
+   Compiling syn v2.0.117
+   Compiling curve25519-dalek v4.1.3
+   Compiling icu_properties_data v2.2.0
+   Compiling system-configuration-sys v0.6.0
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking getrandom v0.2.17
+   Compiling num-traits v0.2.19
+    Checking parking_lot v0.12.5
+    Checking utf8_iter v1.0.4
+    Checking percent-encoding v2.3.2
+   Compiling httparse v1.10.1
+   Compiling zerocopy v0.8.48
+    Checking cpufeatures v0.2.17
+    Checking rustls-pki-types v1.14.0
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking try-lock v0.2.5
+    Checking signature v2.2.0
+    Checking atomic-waker v1.1.2
+    Checking digest v0.10.7
+    Checking toml_write v0.1.2
+    Checking tower-service v0.3.3
+   Compiling thiserror v2.0.18
+    Checking untrusted v0.9.0
+    Checking fnv v1.0.7
+    Checking winnow v0.7.15
+    Checking sha2 v0.10.9
+    Checking ed25519 v2.2.3
+    Checking want v0.3.1
+    Checking uuid v1.23.0
+    Checking regex-automata v0.4.14
+    Checking core-foundation v0.9.4
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking iana-time-zone v0.1.65
+   Compiling getrandom v0.3.4
+   Compiling native-tls v0.2.18
+    Checking fastrand v2.4.1
+    Checking constant_time_eq v0.4.2
+    Checking log v0.4.29
+    Checking arrayvec v0.7.6
+   Compiling rustls v0.23.38
+    Checking arrayref v0.3.9
+   Compiling rustversion v1.0.22
+    Checking security-framework v3.7.0
+    Checking system-configuration v0.7.0
+    Checking ed25519-dalek v2.2.0
+    Checking base64 v0.22.1
+   Compiling crossbeam-utils v0.8.21
+    Checking tempfile v3.27.0
+    Checking ipnet v2.12.0
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking webpki-roots v1.0.6
+    Checking http-body-util v0.1.3
+    Checking iri-string v0.7.12
+   Compiling portable-atomic v1.13.1
+    Checking ryu v1.0.23
+    Checking rand_core v0.6.4
+    Checking encoding_rs v0.8.35
+    Checking allocator-api2 v0.2.21
+    Checking foldhash v0.2.0
+   Compiling anyhow v1.0.102
+    Checking rand_core v0.9.5
+    Checking hashbrown v0.14.5
+    Checking mime v0.3.17
+    Checking hashbrown v0.16.1
+    Checking ordered-float v5.3.0
+    Checking spinning_top v0.3.0
+    Checking quanta v0.12.6
+    Checking az v1.3.0
+    Checking sorted-vec v0.8.10
+    Checking dashmap v6.1.0
+    Checking divrem v1.0.0
+    Checking array-init v2.1.0
+    Checking cmov v0.5.3
+    Checking futures-timer v3.0.3
+    Checking nonzero_ext v0.3.0
+    Checking web-time v1.1.0
+    Checking bstr v1.12.1
+    Checking regex v1.12.3
+    Checking globset v0.4.18
+   Compiling synstructure v0.13.2
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.4
+   Compiling generator v0.8.8
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.5
+    Checking rand v0.9.3
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling equator-macro v0.4.2
+    Checking rustls-webpki v0.103.11
+    Checking equator v0.4.2
+    Checking aligned-vec v0.6.4
+    Checking kiddo v5.3.0
+    Checking tokio v1.51.1
+    Checking futures-util v0.3.32
+    Checking futures-executor v0.3.32
+    Checking zerofrom v0.1.7
+    Checking futures v0.3.32
+    Checking governor v0.10.4
+    Checking yoke v0.8.2
+    Checking tokio-util v0.7.18
+    Checking tokio-native-tls v0.3.1
+    Checking tokio-rustls v0.26.4
+    Checking tracing v0.1.44
+    Checking zerovec v0.11.6
+    Checking zerotrie v0.2.4
+    Checking tower v0.5.3
+    Checking h2 v0.4.13
+    Checking tower-http v0.6.8
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking icu_provider v2.2.0
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking toml_edit v0.22.27
+    Checking hyper v1.9.0
+    Checking idna_adapter v1.2.1
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking hyper-util v0.1.20
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking hyper-rustls v0.27.8
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.12.28
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Checking roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1m 03s
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+codex
+`cargo check -p roko-learn` passed. I’m running the two explicit batch greps now to confirm the requested API surface is present.
+exec
+/bin/zsh -lc "grep -n 'fn route_with_knowledge' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "grep -n 'KnowledgeRoutingAdvice' crates/roko-learn/src/cascade_router.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+828:    pub fn route_with_knowledge(
+863:    pub fn route_with_knowledge_among(
+
+ succeeded in 0ms:
+42:    GeminiContextTier, GeminiObservation, KnowledgeHint, KnowledgeRoutingAdvice,
+524:        knowledge: Option<&KnowledgeRoutingAdvice>,
+833:        knowledge: Option<&KnowledgeRoutingAdvice>,
+869:        knowledge: Option<&KnowledgeRoutingAdvice>,
+1367:        advice: KnowledgeRoutingAdvice,
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-learn/src/cascade_router.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c1531044..9c48a29e 100644
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@ impl CascadeRouter {
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@ impl CascadeRouter {
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@ impl CascadeRouter {
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-learn/src/cascade_router.rs
+
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+codex
+Implemented `route_with_knowledge()` and `route_with_knowledge_among()` in [cascade_router.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs:828).
+
+The new helper preserves the existing C-Factor route as baseline, applies knowledge score adjustments over the relevant candidate set, only swaps primary when the adjusted margin exceeds `0.1`, and logs the applied influence with `tracing::debug!`.
+
+Verification passed:
+- `cargo fmt --check -p roko-learn`
+- `cargo check -p roko-learn`
+- `grep -n 'fn route_with_knowledge' ...` returned 2 matches
+- `grep -n 'KnowledgeRoutingAdvice' ...` returned 5 matches
+diff --git a/crates/roko-learn/src/cascade_router.rs b/crates/roko-learn/src/cascade_router.rs
+index c15310446f481a96e64bc1e89da241a972def0a2..9c48a29e51267a563990c0141e11638e89ac34b8
+--- a/crates/roko-learn/src/cascade_router.rs
++++ b/crates/roko-learn/src/cascade_router.rs
+@@ -516,6 +516,68 @@
+         self.retarget_route_primary(route, candidates, primary)
+     }
+ 
++    fn apply_knowledge_to_route(
++        &self,
++        ctx: &RoutingContext,
++        route: CascadeModel,
++        candidates: &[String],
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let Some(knowledge) = knowledge else {
++            return route;
++        };
++        if !knowledge.has_signal {
++            return route;
++        }
++
++        let _primary_hint = knowledge.hint_for(&route.primary.slug);
++        let frontier = self.current_pareto_frontier();
++        let linucb_scores: HashMap<_, _> = self
++            .ucb_scores(ctx, candidates, frontier.as_deref())
++            .into_iter()
++            .collect();
++
++        let adjusted_score = |slug: &str| {
++            let base = linucb_scores
++                .get(slug)
++                .copied()
++                .filter(|score| score.is_finite())
++                .unwrap_or(0.0);
++            base + knowledge.score_for(slug)
++        };
++
++        let current_score = adjusted_score(&route.primary.slug);
++        let best = candidates
++            .iter()
++            .map(|slug| (slug, adjusted_score(slug)))
++            .max_by(|(left_slug, left_score), (right_slug, right_score)| {
++                left_score
++                    .total_cmp(right_score)
++                    .then_with(|| right_slug.cmp(left_slug))
++            });
++
++        let mut swapped = false;
++        let route = if let Some((best_slug, best_score)) = best {
++            if !slugs_match(best_slug, &route.primary.slug) && best_score - current_score > 0.1 {
++                swapped = true;
++                self.retarget_route_primary(route, candidates, ModelSpec::from_slug(best_slug))
++            } else {
++                route
++            }
++        } else {
++            route
++        };
++
++        tracing::debug!(
++            primary = %route.primary.slug,
++            knowledge_hints = ?knowledge.hints.len(),
++            swapped = %swapped,
++            "knowledge-aware routing applied"
++        );
++
++        route
++    }
++
+     /// Return the index of `slug` in the router's model list.
+     #[must_use]
+     pub fn model_index_for_slug(&self, slug: &str) -> Option<usize> {
+@@ -762,6 +824,18 @@
+         }
+     }
+ 
++    /// Route a context through the cascade, optionally biasing by C-Factor and knowledge hints.
++    pub fn route_with_knowledge(
++        &self,
++        ctx: &RoutingContext,
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor(ctx, cfactor, agent_id);
++        self.apply_knowledge_to_route(ctx, route, &self.model_slugs, knowledge)
++    }
++
+     /// Route a context through the cascade over a candidate subset.
+     pub fn route_with_cfactor_among(
+         &self,
+@@ -785,6 +859,24 @@
+         }
+     }
+ 
++    /// Route a context through the cascade over a candidate subset with knowledge hints.
++    pub fn route_with_knowledge_among(
++        &self,
++        ctx: &RoutingContext,
++        candidates: &[String],
++        cfactor: Option<&CFactor>,
++        agent_id: Option<&str>,
++        knowledge: Option<&KnowledgeRoutingAdvice>,
++    ) -> CascadeModel {
++        let route = self.route_with_cfactor_among(ctx, candidates, cfactor, agent_id);
++        let candidates = if candidates.is_empty() {
++            &self.model_slugs
++        } else {
++            candidates
++        };
++        self.apply_knowledge_to_route(ctx, route, candidates, knowledge)
++    }
++
+     /// Explain a routing decision over the supplied candidate set.
+     #[must_use]
+     pub fn explain_routing(
+
+2026-04-28T08:24:41.887735Z ERROR codex_core::session: failed to record rollout items: thread 019dd32d-5224-7bc0-9139-e31f6b148f1d not found
+tokens used
+92,726
+Implemented `route_with_knowledge()` and `route_with_knowledge_among()` in [cascade_router.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs:828).
+
+The new helper preserves the existing C-Factor route as baseline, applies knowledge score adjustments over the relevant candidate set, only swaps primary when the adjusted margin exceeds `0.1`, and logs the applied influence with `tracing::debug!`.
+
+Verification passed:
+- `cargo fmt --check -p roko-learn`
+- `cargo check -p roko-learn`
+- `grep -n 'fn route_with_knowledge' ...` returned 2 matches
+- `grep -n 'KnowledgeRoutingAdvice' ...` returned 5 matches
+
+=== Finished: 2026-04-28T10:24:42+02:00 ===
+=== Duration: 3m 46s ===
+=== Exit code: 0 ===
+[structural] grep -q 'route_with_knowledge' crates/roko-learn/src/cascade_router.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/K01/verify-attempt-1 cargo check -p roko-learn
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.15.1
+    Checking pin-project-lite v0.2.17
+   Compiling find-msvc-tools v0.1.9
+    Checking scopeguard v1.2.0
+   Compiling parking_lot_core v0.9.12
+    Checking memchr v2.8.0
+   Compiling shlex v1.3.0
+    Checking once_cell v1.21.4
+    Checking bytes v1.11.1
+    Checking core-foundation-sys v0.8.7
+    Checking itoa v1.0.18
+   Compiling serde_core v1.0.228
+    Checking futures-core v0.3.32
+    Checking lock_api v0.4.14
+   Compiling cc v1.2.60
+    Checking equivalent v1.0.2
+    Checking stable_deref_trait v1.2.1
+    Checking futures-sink v0.3.32
+   Compiling serde v1.0.228
+    Checking hashbrown v0.17.0
+   Compiling getrandom v0.4.2
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+    Checking zeroize v1.8.2
+    Checking slab v0.4.12
+    Checking futures-channel v0.3.32
+    Checking tracing-core v0.1.36
+    Checking bitflags v2.11.0
+    Checking futures-task v0.3.32
+    Checking subtle v2.6.1
+   Compiling autocfg v1.5.0
+    Checking futures-io v0.3.32
+    Checking http v1.4.0
+   Compiling semver v1.0.28
+   Compiling zmij v1.0.21
+    Checking writeable v0.6.3
+    Checking indexmap v2.14.0
+    Checking litemap v0.8.2
+   Compiling serde_json v1.0.149
+   Compiling rustc_version v0.4.1
+    Checking aho-corasick v1.1.4
+   Compiling generic-array v0.14.9
+    Checking regex-syntax v0.8.10
+   Compiling system-configuration-sys v0.6.0
+    Checking http-body v1.0.1
+   Compiling rustix v1.1.4
+    Checking utf8_iter v1.0.4
+   Compiling zerocopy v0.8.48
+   Compiling icu_properties_data v2.2.0
+   Compiling syn v2.0.117
+   Compiling curve25519-dalek v4.1.3
+   Compiling icu_normalizer_data v2.2.0
+   Compiling num-traits v0.2.19
+    Checking percent-encoding v2.3.2
+   Compiling httparse v1.10.1
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.0
+    Checking parking_lot v0.12.5
+    Checking socket2 v0.6.3
+    Checking getrandom v0.2.17
+    Checking cpufeatures v0.2.17
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking rustls-pki-types v1.14.0
+   Compiling thiserror v2.0.18
+    Checking fnv v1.0.7
+    Checking toml_write v0.1.2
+    Checking atomic-waker v1.1.2
+    Checking winnow v0.7.15
+    Checking tower-service v0.3.3
+    Checking untrusted v0.9.0
+    Checking signature v2.2.0
+    Checking try-lock v0.2.5
+    Checking ed25519 v2.2.3
+    Checking want v0.3.1
+    Checking sha2 v0.10.9
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking core-foundation v0.9.4
+    Checking iana-time-zone v0.1.65
+    Checking uuid v1.23.0
+    Checking log v0.4.29
+    Checking regex-automata v0.4.14
+   Compiling native-tls v0.2.18
+   Compiling rustls v0.23.38
+    Checking arrayref v0.3.9
+    Checking arrayvec v0.7.6
+    Checking constant_time_eq v0.4.2
+   Compiling rustversion v1.0.22
+    Checking fastrand v2.4.1
+   Compiling getrandom v0.3.4
+    Checking ed25519-dalek v2.2.0
+    Checking system-configuration v0.7.0
+    Checking security-framework v3.7.0
+    Checking base64 v0.22.1
+   Compiling crossbeam-utils v0.8.21
+    Checking tempfile v3.27.0
+    Checking ipnet v2.12.0
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking webpki-roots v1.0.6
+    Checking http-body-util v0.1.3
+    Checking iri-string v0.7.12
+    Checking ryu v1.0.23
+   Compiling portable-atomic v1.13.1
+    Checking rand_core v0.6.4
+    Checking encoding_rs v0.8.35
+   Compiling anyhow v1.0.102
+    Checking allocator-api2 v0.2.21
+    Checking mime v0.3.17
+    Checking hashbrown v0.14.5
+    Checking rand_core v0.9.5
+    Checking foldhash v0.2.0
+    Checking quanta v0.12.6
+    Checking ordered-float v5.3.0
+    Checking hashbrown v0.16.1
+    Checking spinning_top v0.3.0
+    Checking nonzero_ext v0.3.0
+    Checking az v1.3.0
+    Checking web-time v1.1.0
+    Checking array-init v2.1.0
+    Checking dashmap v6.1.0
+    Checking sorted-vec v0.8.10
+    Checking divrem v1.0.0
+    Checking futures-timer v3.0.3
+    Checking cmov v0.5.3
+    Checking bstr v1.12.1
+    Checking regex v1.12.3
+    Checking globset v0.4.18
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.4
+   Compiling generator v0.8.8
+   Compiling synstructure v0.13.2
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking rand_chacha v0.3.1
+    Checking rand v0.9.3
+    Checking rand v0.8.5
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling equator-macro v0.4.2
+    Checking rustls-webpki v0.103.11
+    Checking futures-util v0.3.32
+    Checking equator v0.4.2
+    Checking aligned-vec v0.6.4
+    Checking kiddo v5.3.0
+    Checking tokio v1.51.1
+    Checking futures-executor v0.3.32
+    Checking futures v0.3.32
+    Checking governor v0.10.4
+    Checking zerofrom v0.1.7
+    Checking yoke v0.8.2
+    Checking zerovec v0.11.6
+    Checking tracing v0.1.44
+    Checking zerotrie v0.2.4
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking icu_provider v2.2.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking icu_normalizer v2.2.0
+    Checking icu_properties v2.2.0
+    Checking toml_edit v0.22.27
+    Checking tokio-util v0.7.18
+    Checking tokio-native-tls v0.3.1
+    Checking tower v0.5.3
+    Checking tokio-rustls v0.26.4
+    Checking tower-http v0.6.8
+    Checking idna_adapter v1.2.1
+    Checking h2 v0.4.13
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking hyper v1.9.0
+    Checking hyper-util v0.1.20
+    Checking hyper-tls v0.6.0
+    Checking hyper-rustls v0.27.8
+    Checking reqwest v0.12.28
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Checking roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 56.75s

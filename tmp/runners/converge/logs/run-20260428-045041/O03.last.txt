@@ -1,0 +1,13 @@
+Implemented in [crates/roko-cli/src/run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:104).
+
+Added `StateHubBridge`, mapping workflow lifecycle `RuntimeEvent`s into `DashboardEvent`s:
+- start -> `PlanStarted` + `TaskStarted`
+- phase transition -> `PhaseTransition`
+- completion -> `TaskCompleted` + `PlanCompleted`
+
+I also added a hub-aware `run_with_workflow_engine_with_hub(..., external_hub)` path and kept the existing four-argument `run_with_workflow_engine` wrapper because the only current call site is outside this batch’s write scope.
+
+Verification passed:
+- Required grep checks passed
+- `cargo fmt -p roko-cli`
+- `cargo check -p roko-cli`

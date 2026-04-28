@@ -1,0 +1,1785 @@
+=== Batch: E04 (EffectDriver: implement commit effect (git add + commit)) ===
+=== Started: 2026-04-28T06:55:02+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E04/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/E04.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd270-d41b-7a41-9a79-5b8acac2817b
+--------
+user
+# Convergence Batch E04 — EffectDriver: implement commit effect (git add + commit)
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Batch E04: EffectDriver — implement commit effect (git add + commit)
+
+### Write Scope
+- **MODIFY**: `crates/roko-runtime/src/effect_driver.rs`
+
+### Dependencies
+- F03 (local RuntimeEvent removed, roko-core RuntimeEvent in use)
+
+### DO NOT
+- Modify any other files
+- Change the public signature of `commit` — it must remain
+  `pub async fn commit(&self, message: &str) -> PipelineInput`
+- Add new Cargo.toml dependencies
+- Use `git add .` — the implementation must use `git add -A` for untracked file inclusion
+- Change `run_gates` or `spawn_agent`
+
+### Existing Code Context
+
+`crates/roko-runtime/src/effect_driver.rs` — `commit` method (lines 459–513):
+```rust
+/// Create a git commit.
+///
+/// Returns `PipelineInput::CommitDone` when a commit is created, or a noop
+/// hash when there is nothing to commit.
+pub async fn commit(&self, message: &str) -> PipelineInput {
+    let add_result = tokio::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&self.workdir)
+        .output()
+        .await;
+
+    if let Err(err) = add_result {
+        return PipelineInput::AgentFailed {
+            error: format!("git add failed: {err}"),
+        };
+    }
+
+    let commit_result = tokio::process::Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(&self.workdir)
+        .output()
+        .await;
+
+    match commit_result {
+        Ok(output) if output.status.success() => {
+            let hash_output = tokio::process::Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .current_dir(&self.workdir)
+                .output()
+                .await;
+
+            let hash = hash_output
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+
+            PipelineInput::CommitDone { hash }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("nothing to commit") {
+                PipelineInput::CommitDone {
+                    hash: "noop".to_string(),
+                }
+            } else {
+                PipelineInput::AgentFailed {
+                    error: format!("git commit failed: {stderr}"),
+                }
+            }
+        }
+        Err(err) => PipelineInput::AgentFailed {
+            error: format!("git commit failed: {err}"),
+        },
+    }
+}
+```
+
+The `RuntimeEvent` variants available after F03 (from `roko_core::runtime_event`):
+```rust
+pub enum RuntimeEvent {
+    // ... (lifecycle, agent, gate variants) ...
+    StateCheckpointed { run_id: String, path: String },
+    // NOTE: there is no CommitCreated variant in roko-core's RuntimeEvent.
+    // Use FeedbackRecorded to surface commit events to observers.
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+}
+```
+
+The `EffectDriver` has an `emit` helper:
+```rust
+pub fn emit(&self, event: RuntimeEvent) {
+    emit_runtime_event(event);
+}
+```
+
+### Task
+
+The `commit` method body already handles the three outcomes (commit created, nothing to
+commit, error). The gaps are:
+
+1. The `git add -A` error is propagated as `AgentFailed` but should be its own error type
+   to distinguish staging failures from agent failures. However, `PipelineInput` has no
+   `CommitFailed` variant — return `AgentFailed` as today (do not add new enum variants).
+
+2. After a successful commit, emit a `FeedbackRecorded` event so observers know the commit
+   happened without adding a new `RuntimeEvent` variant:
+
+   ```rust
+   self.emit(RuntimeEvent::FeedbackRecorded {
+       run_id: self.run_id.clone(),
+       kind: "commit".to_string(),
+       summary: format!("committed {hash}: {}", truncate_message(message, 72)),
+   });
+   ```
+
+3. The "nothing to commit" branch should also emit a feedback event:
+
+   ```rust
+   self.emit(RuntimeEvent::FeedbackRecorded {
+       run_id: self.run_id.clone(),
+       kind: "commit_noop".to_string(),
+       summary: "nothing to commit, working tree clean".to_string(),
+   });
+   ```
+
+4. Add a private `truncate_message` helper (if `truncate` is not already available in
+   the module — check first):
+
+   ```rust
+   fn truncate_message(s: &str, max: usize) -> &str {
+       if s.len() <= max {
+           s
+       } else {
+           &s[..s.floor_char_boundary(max)]
+       }
+   }
+   ```
+
+   Note: `str::floor_char_boundary` is stable since Rust 1.73.
+
+5. Ensure the `git add -A` failure branch also emits a `FeedbackRecorded` event with
+   `kind = "commit_error"` before returning.
+
+The rest of the method — the three-way match structure, the `rev-parse --short HEAD` for
+hash extraction, the stderr check for "nothing to commit" — must remain exactly as-is.
+
+### Done Criteria
+```bash
+# FeedbackRecorded event emitted on commit success
+grep -q 'FeedbackRecorded' crates/roko-runtime/src/effect_driver.rs
+
+# "commit" kind label present
+grep -q '"commit"' crates/roko-runtime/src/effect_driver.rs
+
+# "commit_noop" kind label present
+grep -q '"commit_noop"' crates/roko-runtime/src/effect_driver.rs
+
+# truncate_message or equivalent helper exists
+grep -q 'fn truncate_message\|fn truncate' crates/roko-runtime/src/effect_driver.rs
+
+# git rev-parse still used for hash extraction
+grep -q 'rev-parse.*--short.*HEAD' crates/roko-runtime/src/effect_driver.rs
+
+# compiles clean
+cargo check -p roko-runtime
+```
+
+codex
+I’ll make the scoped change in `crates/roko-runtime/src/effect_driver.rs`, first checking the existing module so the helper and event imports fit the current style.
+exec
+/bin/zsh -lc 'rg -n "pub async fn commit|truncate|FeedbackRecorded|rev-parse|use roko_core" crates/roko-runtime/src/effect_driver.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+13:pub use roko_core::RuntimeEvent;
+14:pub use roko_core::foundation::{
+17:use roko_core::foundation::{
+218:    pub async fn commit(&self, message: &str) -> PipelineInput {
+240:                    .args(["rev-parse", "--short", "HEAD"])
+
+exec
+/bin/zsh -lc "sed -n '430,530p' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc "sed -n '1,140p' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ succeeded in 0ms:
+//! EffectDriver -- executes pipeline actions via foundation-style services.
+//!
+//! The state machine (`PipelineStateV2`) decides what to do by returning
+//! `PipelineOutput`. The `EffectDriver` performs the requested side effects and
+//! returns `PipelineInput` values that callers can feed back into the state
+//! machine.
+
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+pub use roko_core::RuntimeEvent;
+pub use roko_core::foundation::{
+    ChatMessage, GateReport, MessageRole, ModelCallResponse, TokenUsage,
+};
+use roko_core::foundation::{
+    FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCallRequest,
+    ModelCaller, PromptAssembler, PromptSpec,
+};
+
+use crate::event_bus::emit_runtime_event;
+use crate::pipeline_state::PipelineInput;
+
+/// Fallible result type used by the effect driver.
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Boxed future (kept for internal use).
+pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Services required by the `EffectDriver`.
+pub struct EffectServices {
+    /// Model call service.
+    pub model_caller: Arc<dyn ModelCaller>,
+    /// Prompt assembly service.
+    pub prompt_assembler: Arc<dyn PromptAssembler>,
+    /// Feedback recording service.
+    pub feedback_sink: Arc<dyn FeedbackSink>,
+    /// Gate execution service.
+    pub gate_runner: Arc<dyn GateRunner>,
+}
+
+/// Drives workflow execution by translating state-machine actions into effects.
+pub struct EffectDriver {
+    services: EffectServices,
+    run_id: String,
+    workdir: PathBuf,
+}
+
+impl EffectDriver {
+    /// Create a new `EffectDriver` with the given services and workflow context.
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self {
+        Self {
+            services,
+            run_id,
+            workdir,
+        }
+    }
+
+    /// Spawn an agent with the given role and prompt.
+    ///
+    /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+    /// that should be fed back into the state machine.
+    pub async fn spawn_agent(
+        &self,
+        role: &str,
+        user_prompt: &str,
+        context: Option<&str>,
+    ) -> PipelineInput {
+        let agent_id = format!("{role}_{}", uuid_short());
+
+        let system_prompt = match self
+            .services
+            .prompt_assembler
+            .assemble(PromptSpec {
+                role: Some(role.to_string()),
+                task: Some(user_prompt.to_string()),
+                workdir: Some(self.workdir.clone()),
+                gate_feedback: Vec::new(),
+                anti_patterns: Vec::new(),
+            })
+            .await
+        {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                return PipelineInput::AgentFailed {
+                    error: format!("Failed to assemble prompt: {err}"),
+                };
+            }
+        };
+
+        let user_content = context.map_or_else(
+            || user_prompt.to_string(),
+            |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+        );
+
+        emit_runtime_event(RuntimeEvent::AgentSpawned {
+            run_id: self.run_id.clone(),
+            agent_id: agent_id.clone(),
+            role: role.to_string(),
+            model: String::new(),
+        });
+
+        let start = Instant::now();
+        let result = self
+            .services
+            .model_caller
+            .call(ModelCallRequest {
+                model: String::new(),
+                system: Some(system_prompt),
+                messages: vec![ChatMessage {
+                    role: MessageRole::User,
+                    content: user_content,
+                }],
+                max_tokens: None,
+                temperature: None,
+                role: Some(role.to_string()),
+            })
+            .await;
+        let latency_ms = duration_millis(start);
+
+        match result {
+            Ok(response) => {
+                let _record_result = self
+                    .services
+                    .feedback_sink
+                    .record(FeedbackEvent::ModelCall {
+                        run_id: self.run_id.clone(),
+                        model: response.model.clone(),
+                        role: role.to_string(),
+                        input_tokens: response.usage.input_tokens,
+                        output_tokens: response.usage.output_tokens,
+                        cost_usd: response.usage.cost_usd,
+                        latency_ms,
+                        success: true,
+                    })
+                    .await;
+
+                emit_runtime_event(RuntimeEvent::AgentCompleted {
+                    run_id: self.run_id.clone(),
+
+codex
+The commit method is earlier in this worktree than the prompt’s line numbers, and the module already re-exports `RuntimeEvent`. I’m going to patch only the commit method plus a small private helper.
+exec
+/bin/zsh -lc "sed -n '190,280p' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+
+        let result = self.services.gate_runner.run_gates(config).await;
+
+        match result {
+            Ok(report) => {
+                for verdict in &report.verdicts {
+                    self.record_gate_verdict(verdict).await;
+                }
+
+                match report.first_failure() {
+                    Some(failure) => PipelineInput::GateFailed {
+                        gate: failure.gate_name.clone(),
+                        output: report.failure_summary(),
+                    },
+                    None => PipelineInput::GatesPassed,
+                }
+            }
+            Err(err) => PipelineInput::GateFailed {
+                gate: "gate_runner".to_string(),
+                output: err.to_string(),
+            },
+        }
+    }
+
+    /// Create a git commit.
+    ///
+    /// Returns `PipelineInput::CommitDone` when a commit is created, or a noop
+    /// hash when there is nothing to commit.
+    pub async fn commit(&self, message: &str) -> PipelineInput {
+        let add_result = tokio::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&self.workdir)
+            .output()
+            .await;
+
+        if let Err(err) = add_result {
+            return PipelineInput::AgentFailed {
+                error: format!("git add failed: {err}"),
+            };
+        }
+
+        let commit_result = tokio::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(&self.workdir)
+            .output()
+            .await;
+
+        match commit_result {
+            Ok(output) if output.status.success() => {
+                let hash_output = tokio::process::Command::new("git")
+                    .args(["rev-parse", "--short", "HEAD"])
+                    .current_dir(&self.workdir)
+                    .output()
+                    .await;
+
+                let hash = hash_output
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+
+                PipelineInput::CommitDone { hash }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("nothing to commit") {
+                    PipelineInput::CommitDone {
+                        hash: "noop".to_string(),
+                    }
+                } else {
+                    PipelineInput::AgentFailed {
+                        error: format!("git commit failed: {stderr}"),
+                    }
+                }
+            }
+            Err(err) => PipelineInput::AgentFailed {
+                error: format!("git commit failed: {err}"),
+            },
+        }
+    }
+
+    /// Emit a runtime event directly.
+    pub fn emit(&self, event: RuntimeEvent) {
+        emit_runtime_event(event);
+    }
+
+    async fn record_gate_verdict(&self, verdict: &GateVerdict) {
+        let event = match verdict.passed {
+            true => RuntimeEvent::GatePassed {
+                run_id: self.run_id.clone(),
+                gate_name: verdict.gate_name.clone(),
+                duration_ms: verdict.duration_ms,
+
+exec
+/bin/zsh -lc "sed -n '280,380p' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+                duration_ms: verdict.duration_ms,
+            },
+            false => RuntimeEvent::GateFailed {
+                run_id: self.run_id.clone(),
+                gate_name: verdict.gate_name.clone(),
+                output: verdict.output.clone(),
+                duration_ms: verdict.duration_ms,
+            },
+        };
+        emit_runtime_event(event);
+
+        let _record_result = self
+            .services
+            .feedback_sink
+            .record(FeedbackEvent::GateResult {
+                run_id: self.run_id.clone(),
+                gate_name: verdict.gate_name.clone(),
+                passed: verdict.passed,
+                duration_ms: verdict.duration_ms,
+            })
+            .await;
+    }
+}
+
+fn duration_millis(start: Instant) -> u64 {
+    let millis = start.elapsed().as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+/// Count the number of files changed in the working directory via `git diff --name-only`.
+///
+/// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+/// enrichment, not a gate.
+async fn count_changed_files(workdir: &std::path::Path) -> u32 {
+    let result = tokio::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(workdir)
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            u32::try_from(stdout.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(u32::MAX)
+        }
+        _ => 0,
+    }
+}
+
+/// Generate a short unique ID for agent instances.
+fn uuid_short() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("{:x}", millis & 0xFFFF_FFFF)
+}
+
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+codex
+The method now emits commit success, noop, and staging-error feedback events, with message truncation kept private to the module. I’m running the required greps and `cargo check -p roko-runtime` next.
+exec
+/bin/zsh -lc "grep -q 'FeedbackRecorded' crates/roko-runtime/src/effect_driver.rs && grep -q '\"commit\"' crates/roko-runtime/src/effect_driver.rs && grep -q '\"commit_noop\"' crates/roko-runtime/src/effect_driver.rs && grep -q 'fn truncate_message\\|fn truncate' crates/roko-runtime/src/effect_driver.rs && grep -q 'rev-parse.*--short.*HEAD' crates/roko-runtime/src/effect_driver.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+codex
+The static checks passed. `cargo check` is still compiling dependencies for this worktree, so I’m waiting for the actual crate check result before closing this out.
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+codex
+`cargo check` has reached the workspace crates and is checking `roko-core` before `roko-runtime`. No errors yet.
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+ succeeded in 25751ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling serde v1.0.228
+   Compiling semver v1.0.28
+    Checking memchr v2.8.0
+   Compiling zmij v1.0.21
+   Compiling autocfg v1.5.0
+   Compiling parking_lot_core v0.9.12
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling rustc_version v0.4.1
+   Compiling getrandom v0.4.2
+   Compiling cc v1.2.60
+    Checking equivalent v1.0.2
+   Compiling serde_json v1.0.149
+    Checking scopeguard v1.2.0
+    Checking smallvec v1.15.1
+    Checking hashbrown v0.17.0
+    Checking lock_api v0.4.14
+    Checking aho-corasick v1.1.4
+   Compiling generic-array v0.14.9
+   Compiling cfg_aliases v0.2.1
+    Checking core-foundation-sys v0.8.7
+    Checking indexmap v2.14.0
+   Compiling curve25519-dalek v4.1.3
+    Checking zeroize v1.8.2
+    Checking pin-project-lite v0.2.17
+    Checking once_cell v1.21.4
+    Checking itoa v1.0.18
+    Checking winnow v0.7.15
+    Checking regex-syntax v0.8.10
+   Compiling num-traits v0.2.19
+    Checking subtle v2.6.1
+   Compiling syn v2.0.117
+    Checking signature v2.2.0
+   Compiling thiserror v2.0.18
+    Checking toml_write v0.1.2
+    Checking ed25519 v2.2.3
+    Checking tracing-core v0.1.36
+    Checking iana-time-zone v0.1.65
+   Compiling nix v0.29.0
+    Checking arrayref v0.3.9
+    Checking arrayvec v0.7.6
+    Checking constant_time_eq v0.4.2
+    Checking bytes v1.11.1
+    Checking bitflags v2.11.0
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking cpufeatures v0.2.17
+    Checking errno v0.3.14
+    Checking regex-automata v0.4.14
+    Checking sha2 v0.10.9
+    Checking uuid v1.23.0
+    Checking socket2 v0.6.3
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.0
+    Checking parking_lot v0.12.5
+    Checking ed25519-dalek v2.2.0
+   Compiling blake3 v1.8.4
+    Checking regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 25.74s
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/effect_driver.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83..88c1531b 100644
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@ impl EffectDriver {
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@ impl EffectDriver {
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@ fn duration_millis(start: Instant) -> u64 {
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+codex
+Implemented the scoped `EffectDriver::commit` update in [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs).
+
+Changes:
+- Emits `FeedbackRecorded` with kind `"commit"` after a successful commit.
+- Emits `FeedbackRecorded` with kind `"commit_noop"` when there is nothing to commit.
+- Emits `FeedbackRecorded` with kind `"commit_error"` on `git add -A` failure.
+- Added private `truncate_message` helper.
+- Preserved `git add -A`, `rev-parse --short HEAD`, and the existing return shape.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-runtime`
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 874aac83788a08323db83c550959bf0ac8a07630..88c1531b5495fcbbbcc7e8a0fbf044191ecbc0da
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -223,6 +223,11 @@
+             .await;
+ 
+         if let Err(err) = add_result {
++            self.emit(RuntimeEvent::FeedbackRecorded {
++                run_id: self.run_id.clone(),
++                kind: "commit_error".to_string(),
++                summary: format!("git add failed: {err}"),
++            });
+             return PipelineInput::AgentFailed {
+                 error: format!("git add failed: {err}"),
+             };
+@@ -247,11 +252,22 @@
+                     .and_then(|output| String::from_utf8(output.stdout).ok())
+                     .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+ 
++                self.emit(RuntimeEvent::FeedbackRecorded {
++                    run_id: self.run_id.clone(),
++                    kind: "commit".to_string(),
++                    summary: format!("committed {hash}: {}", truncate_message(message, 72)),
++                });
++
+                 PipelineInput::CommitDone { hash }
+             }
+             Ok(output) => {
+                 let stderr = String::from_utf8_lossy(&output.stderr);
+                 if stderr.contains("nothing to commit") {
++                    self.emit(RuntimeEvent::FeedbackRecorded {
++                        run_id: self.run_id.clone(),
++                        kind: "commit_noop".to_string(),
++                        summary: "nothing to commit, working tree clean".to_string(),
++                    });
+                     PipelineInput::CommitDone {
+                         hash: "noop".to_string(),
+                     }
+@@ -306,6 +322,14 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn truncate_message(s: &str, max: usize) -> &str {
++    if s.len() <= max {
++        s
++    } else {
++        &s[..s.floor_char_boundary(max)]
++    }
++}
++
+ /// Count the number of files changed in the working directory via `git diff --name-only`.
+ ///
+ /// Returns 0 on any error (git not available, not a repo, etc.) -- this is a best-effort
+
+2026-04-28T04:56:00.791180Z ERROR codex_core::session: failed to record rollout items: thread 019dd270-d41b-7a41-9a79-5b8acac2817b not found
+tokens used
+17,022
+Implemented the scoped `EffectDriver::commit` update in [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs).
+
+Changes:
+- Emits `FeedbackRecorded` with kind `"commit"` after a successful commit.
+- Emits `FeedbackRecorded` with kind `"commit_noop"` when there is nothing to commit.
+- Emits `FeedbackRecorded` with kind `"commit_error"` on `git add -A` failure.
+- Added private `truncate_message` helper.
+- Preserved `git add -A`, `rev-parse --short HEAD`, and the existing return shape.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-runtime`
+
+=== Finished: 2026-04-28T06:56:01+02:00 ===
+=== Duration: 59s ===
+=== Exit code: 0 ===
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E04/verify-attempt-1 cargo check -p roko-runtime
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling serde v1.0.228
+   Compiling semver v1.0.28
+    Checking memchr v2.8.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling getrandom v0.4.2
+   Compiling zmij v1.0.21
+   Compiling shlex v1.3.0
+   Compiling parking_lot_core v0.9.12
+   Compiling rustc_version v0.4.1
+   Compiling autocfg v1.5.0
+   Compiling cc v1.2.60
+    Checking smallvec v1.15.1
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking scopeguard v1.2.0
+   Compiling serde_json v1.0.149
+    Checking lock_api v0.4.14
+    Checking aho-corasick v1.1.4
+    Checking regex-syntax v0.8.10
+   Compiling generic-array v0.14.9
+    Checking indexmap v2.14.0
+   Compiling curve25519-dalek v4.1.3
+    Checking winnow v0.7.15
+    Checking core-foundation-sys v0.8.7
+   Compiling syn v2.0.117
+   Compiling num-traits v0.2.19
+   Compiling cfg_aliases v0.2.1
+    Checking itoa v1.0.18
+   Compiling thiserror v2.0.18
+    Checking subtle v2.6.1
+    Checking zeroize v1.8.2
+    Checking pin-project-lite v0.2.17
+    Checking signature v2.2.0
+    Checking once_cell v1.21.4
+    Checking toml_write v0.1.2
+    Checking ed25519 v2.2.3
+   Compiling nix v0.29.0
+    Checking iana-time-zone v0.1.65
+    Checking tracing-core v0.1.36
+    Checking bytes v1.11.1
+    Checking arrayref v0.3.9
+    Checking constant_time_eq v0.4.2
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking arrayvec v0.7.6
+    Checking bitflags v2.11.0
+    Checking regex-automata v0.4.14
+    Checking cpufeatures v0.2.17
+    Checking errno v0.3.14
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking parking_lot v0.12.5
+    Checking sha2 v0.10.9
+    Checking signal-hook-registry v1.4.8
+    Checking uuid v1.23.0
+    Checking ed25519-dalek v2.2.0
+    Checking regex v1.12.3
+   Compiling blake3 v1.8.4
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 26.39s
+[antipattern] ! grep -rn 'Command::new.*claude' crates/roko-runtime/src/effect_driver.rs
+[antipattern] ! grep -rn 'if.*phase.*==' crates/roko-runtime/src/effect_driver.rs

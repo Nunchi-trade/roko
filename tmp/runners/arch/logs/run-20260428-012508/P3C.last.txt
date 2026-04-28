@@ -1,0 +1,16 @@
+Implemented P3C within the requested scope.
+
+Changed:
+- Added [jsonl_logger.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/jsonl_logger.rs)
+- Added [projection.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/projection.rs)
+- Updated [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/lib.rs) with module declarations and re-exports
+
+Important note: `roko-runtime` currently cannot import `roko_core::foundation::EventConsumer` because this checkout has `roko-core -> roko-runtime`, creating a dependency cycle. I added a scoped compatibility `EventConsumer` trait with a `TODO(arch)` comment, matching the existing architecture TODO pattern already present in runtime.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-runtime`
+- `cargo test -p roko-runtime jsonl_logger`
+- `cargo test -p roko-runtime projection`
+
+The test runs reported existing unrelated warnings in heartbeat files.

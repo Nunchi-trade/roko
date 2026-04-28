@@ -1,0 +1,12 @@
+Implemented the scoped `EffectDriver::commit` update in [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/effect_driver.rs).
+
+Changes:
+- Emits `FeedbackRecorded` with kind `"commit"` after a successful commit.
+- Emits `FeedbackRecorded` with kind `"commit_noop"` when there is nothing to commit.
+- Emits `FeedbackRecorded` with kind `"commit_error"` on `git add -A` failure.
+- Added private `truncate_message` helper.
+- Preserved `git add -A`, `rev-parse --short HEAD`, and the existing return shape.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-runtime`

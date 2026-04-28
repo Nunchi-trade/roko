@@ -1,0 +1,8 @@
+Implemented the Clack-style CLI progress printer in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs) and exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/lib.rs:77).
+
+One implementation note: `is_tty()` uses `std::io::IsTerminal` instead of the requested unsafe `libc::isatty`, because `roko-cli` is compiled with `-D unsafe-code`.
+
+Verification:
+- Function/module grep checks passed.
+- `cargo check -p roko-cli` passed.
+- No `Cargo.toml` changes were made. The provided “no deps” grep already matches pre-existing `crossterm` at `crates/roko-cli/Cargo.toml:65`.

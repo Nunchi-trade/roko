@@ -1,0 +1,11 @@
+Implemented scoped P3B changes:
+
+- Added [adapters.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-serve/src/adapters.rs) with `SseEvent`, `SseAdapter`, `subscribe()`, `RuntimeEvent` to SSE conversion, `EventConsumer` implementation, and inline unit tests.
+- Exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-serve/src/lib.rs:52) via `pub mod adapters;`.
+
+Verification:
+- `grep -q 'pub struct SseAdapter' crates/roko-serve/src/adapters.rs` passed
+- `grep -q 'impl EventConsumer for SseAdapter' crates/roko-serve/src/adapters.rs` passed
+- `cargo check -p roko-serve` passed
+
+I also tried `cargo test -p roko-serve adapters::tests`, but the test build is blocked by existing out-of-scope errors in `crates/roko-serve/src/dreams.rs` where `DreamCycleReport` initializers are missing `cross_episode_report` and `routing_recommendations`. I left those untouched per the write-scope rule.

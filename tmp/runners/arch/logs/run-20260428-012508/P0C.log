@@ -1,0 +1,2603 @@
+=== Batch: P0C (EventBus RuntimeEvent support) ===
+=== Started: 2026-04-28T01:31:53+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-arch-targets/run-20260428-012508/P0C/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/arch/logs/run-20260428-012508/prompts/P0C.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd148-fa56-7702-a676-211508d927d2
+--------
+user
+# Architecture Batch P0C — EventBus RuntimeEvent support
+
+Run id: run-20260428-012508
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(arch): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(arch)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+14. **NEVER `Command::new("claude")`** — use `InferenceProvider` / `ModelCallService`.
+15. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+16. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+17. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+18. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+19. **NEVER copy code between entry points** — extract shared services.
+20. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the target architecture. Your implementation must conform to these types and traits.
+
+### RuntimeEvent enum (P0A creates this)
+
+```rust
+/// Every event the workflow engine can emit or consume.
+/// Observers (ACP adapter, SSE adapter, JSONL logger, TUI) subscribe to these
+/// via EventBus<RuntimeEvent>.
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    // ── lifecycle ──
+    WorkflowStarted {
+        run_id: String,
+        template: String,
+        prompt: String,
+    },
+    PhaseTransition {
+        run_id: String,
+        from: String,
+        to: String,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        outcome: WorkflowOutcome,
+    },
+
+    // ── agent ──
+    AgentSpawned {
+        run_id: String,
+        agent_id: String,
+        role: String,
+        model: String,
+    },
+    AgentOutput {
+        run_id: String,
+        agent_id: String,
+        chunk: String,
+    },
+    AgentCompleted {
+        run_id: String,
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+    },
+    AgentFailed {
+        run_id: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // ── gates ──
+    GateStarted {
+        run_id: String,
+        gate_name: String,
+        rung: u8,
+    },
+    GatePassed {
+        run_id: String,
+        gate_name: String,
+        duration_ms: u64,
+    },
+    GateFailed {
+        run_id: String,
+        gate_name: String,
+        output: String,
+        duration_ms: u64,
+    },
+
+    // ── feedback ──
+    FeedbackRecorded {
+        run_id: String,
+        kind: String,
+        summary: String,
+    },
+
+    // ── persistence ──
+    StateCheckpointed {
+        run_id: String,
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+```
+
+### Foundation Traits (P0B creates these)
+
+```rust
+/// Call an LLM model. Wraps provider selection, streaming, cost tracking.
+#[async_trait]
+pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+    async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream>;
+}
+
+/// Assemble a system prompt for a given role and context.
+#[async_trait]
+pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+
+/// Record feedback from model calls, gate results, and workflow outcomes.
+#[async_trait]
+pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+
+/// Run a set of verification gates against a working directory.
+#[async_trait]
+pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+
+/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+
+/// Execute a side-effect (spawn agent, run gate, commit, etc).
+/// The effect driver calls these; the state machine decides WHAT to do,
+/// the EffectExecutor decides HOW.
+#[async_trait]
+pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+```
+
+### Crate Dependency Map
+
+```
+roko-core          (no internal deps — kernel types + traits)
+    ↑
+roko-runtime       (depends on: roko-core)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-serve)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Types
+
+These types already exist in `roko-core` and should be used, not recreated:
+
+- `Engram` — universal signal type (hash, content, metadata, lineage)
+- `Context` — execution context (working directory, config, cancel token)
+- `AgentRole` — enum of agent roles (Implementer, Strategist, Reviewer, etc.)
+- `Verdict` — gate verdict (pass/fail/skip with details)
+- `ModelTier` — model capability tier (Fast, Standard, Premium, Research)
+- `ProviderKind` — LLM provider (Claude, OpenAi, Ollama, Gemini, Perplexity)
+- `Temperament` — agent behavior dial (Conservative, Balanced, Aggressive, Exploratory)
+- `CancelToken` — cooperative cancellation (in roko-runtime)
+
+### Key Existing Infrastructure
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `Verify` trait in `roko-gate` — gate execution trait
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with learning
+- `PipelineState` in `roko-acp::pipeline` — existing 9-state machine (ACP-specific)
+- `WorkflowRun` in `roko-acp::workflow` — existing run tracking struct
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: AgentRole::Implementer,
+    task_context: task.clone(),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+// in roko-cli/src/run.rs
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile", "test"],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: If gate logic lives in the CLI, the ACP server and HTTP API can't use it. Extract
+to a shared service so all entry points (CLI, ACP, HTTP) get the same behavior.
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        } else {
+            self.halt("too many failures"); // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+// State machine decides:
+let action = pipeline_state.step(PipelineEvent::GatesPassed);
+// Effect driver executes:
+match action {
+    PipelineAction::SpawnReviewer { .. } => effect_driver.spawn_agent(...).await,
+    PipelineAction::SpawnAutoFixer { .. } => effect_driver.spawn_agent(...).await,
+    PipelineAction::Halt { reason } => effect_driver.halt(reason).await,
+}
+```
+
+**Why**: When decisions are in the effect driver, the state machine becomes meaningless and
+the workflow can't be tested without real side-effects. Pure state machines are testable.
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    complexity: spec.complexity,
+    ..Default::default()
+});
+```
+
+**Why**: Hardcoded roles break when users configure different models or add custom roles.
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+// Just use the response directly, no recording
+process_response(response);
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+// Or explicitly:
+feedback_sink.record(FeedbackEvent::ModelCall {
+    model: request.model.clone(),
+    tokens: response.usage.total_tokens,
+    cost_usd: response.usage.cost_usd,
+    latency_ms: elapsed.as_millis() as u64,
+}).await?;
+```
+
+**Why**: Without feedback, the cascade router can't learn, efficiency metrics are wrong,
+and cost tracking is blind.
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines of gate logic */ }
+
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+// roko-gate/src/gate_service.rs
+pub struct GateService { /* ... */ }
+impl GateRunner for GateService { /* ... */ }
+
+// Both CLI and ACP use:
+let report = gate_service.run_gates(config).await?;
+```
+
+**Why**: Duplicated code drifts. When one copy gets a fix, the other doesn't.
+
+---
+
+### AP-8: Never modify files outside your write scope
+
+Your prompt specifies an exact write scope (e.g., "create `model_call_service.rs`, add mod
+decl to `lib.rs`"). Do not modify other files, even if they would benefit from it.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories. If you think
+you need a new crate, you are wrong — find the right existing crate.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD — return an error or basic implementation
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    // Streaming not yet implemented; fall back to single call
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Batch P0C: EventBus RuntimeEvent Support
+
+### Write Scope
+- **MODIFY**: `crates/roko-runtime/src/event_bus.rs` (add runtime_event_bus singleton)
+- **MODIFY**: `crates/roko-runtime/src/lib.rs` (if needed for re-export)
+
+### Dependencies
+- P0A must be complete (RuntimeEvent exists in `roko-core`)
+
+### DO NOT
+- Modify any other files
+- Replace or reorganize existing EventBus code
+- Remove the existing `global_event_bus()` singleton
+- Add Cargo.toml dependencies (roko-core is already a dependency of roko-runtime)
+
+### Existing Code (inlined for reference)
+
+The current `event_bus.rs` already has a generic `EventBus<E>` and a singleton for
+`RokoEvent`. You are adding a parallel singleton for `RuntimeEvent`.
+
+```rust
+// Existing (DO NOT MODIFY):
+pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+    static BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+    BUS.get_or_init(|| EventBus::new(1024))
+}
+```
+
+### Task
+
+Add a new function `runtime_event_bus()` that returns a singleton `EventBus<RuntimeEvent>`.
+This is the bus that the workflow engine publishes to and all observers subscribe to.
+
+#### Add to `crates/roko-runtime/src/event_bus.rs`:
+
+```rust
+use roko_core::RuntimeEvent;
+
+/// Global event bus for workflow runtime events.
+///
+/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
+/// subscribe to receive them.
+pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
+    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
+    BUS.get_or_init(|| EventBus::new(2048))
+}
+```
+
+Also add a convenience helper for emitting events:
+
+```rust
+/// Emit a RuntimeEvent to the global runtime bus.
+/// Convenience wrapper around `runtime_event_bus().emit(event)`.
+pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
+    runtime_event_bus().emit(event)
+}
+```
+
+#### Ensure re-export in `crates/roko-runtime/src/lib.rs`:
+
+If `event_bus` is already `pub mod`, the new functions are automatically accessible
+as `roko_runtime::event_bus::runtime_event_bus()`. If it's not re-exported, add:
+
+```rust
+pub use event_bus::{runtime_event_bus, emit_runtime_event};
+```
+
+### Done Criteria
+```bash
+grep -q 'runtime_event_bus' crates/roko-runtime/src/event_bus.rs
+grep -q 'emit_runtime_event' crates/roko-runtime/src/event_bus.rs
+grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs
+cargo check -p roko-runtime
+```
+
+codex
+I’ll make the scoped runtime crate change only, then run the requested grep checks and `cargo check -p roko-runtime`.
+exec
+/bin/zsh -lc "sed -n '1,240p' crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+//! Typed, bounded broadcast event bus with replay support.
+//!
+//! This generalises the pattern used in `golem-core::event::EventFabric` and the
+//! ad-hoc `mpsc::UnboundedSender<AgentEvent>` channels in `apps/mori/src/agent/`.
+//!
+//! # Architecture
+//!
+//! ```text
+//!   Producer ──emit()──► EventBus ──broadcast──► Subscriber₁
+//!                           │                    Subscriber₂
+//!                           │                    Subscriber₃
+//!                           ▼
+//!                      ReplayRing (bounded deque)
+//! ```
+//!
+//! The bus is parameterised over a single event type `E: Clone + Send + Sync + 'static`.
+//! It combines:
+//! - A `tokio::sync::broadcast` channel for live fan-out to all subscribers.
+//! - A bounded `VecDeque` ring for durable replay (new subscribers can catch up).
+//! - Monotonic sequence numbering for gap detection and ordered replay.
+//!
+//! # Example
+//!
+//! ```
+//! use roko_runtime::event_bus::EventBus;
+//!
+//! #[derive(Debug, Clone)]
+//! enum MyEvent {
+//!     Tick(u64),
+//!     Message(String),
+//! }
+//!
+//! let bus = EventBus::<MyEvent>::new(1024);
+//! let mut rx = bus.subscribe();
+//!
+//! bus.emit(MyEvent::Tick(1));
+//! bus.emit(MyEvent::Message("hello".into()));
+//!
+//! // Replay all events from sequence 0
+//! let events = bus.replay_from(0);
+//! assert_eq!(events.len(), 2);
+//! ```
+
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use tokio::sync::broadcast;
+use tracing::trace;
+
+use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+use crate::lifecycle::LifecycleTransition;
+
+/// A sequenced, timestamped envelope wrapping a user event.
+#[derive(Debug, Clone)]
+pub struct Envelope<E> {
+    /// Monotonically increasing sequence number (bus-scoped).
+    pub seq: u64,
+    /// Unix timestamp in milliseconds when the event was emitted.
+    pub ts_millis: u64,
+    /// The wrapped event payload.
+    pub payload: E,
+}
+
+/// A compact summary of a gate verdict included in plan-revision events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateVerdictSummary {
+    /// The gate name that produced the verdict.
+    pub gate: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Optional structured failure classification, such as `type_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// Stable failure pattern ids associated with this verdict.
+    #[serde(default)]
+    pub failure_pattern_ids: Vec<String>,
+    /// Blocking findings that make same-prompt retry insufficient.
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
+    /// Optional free-form details from the gate or logger.
+    pub details: Option<String>,
+}
+
+/// Why a plan revision event was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanRevisionReason {
+    /// The task exhausted its gate-failure retry budget.
+    GateFailureLimit {
+        /// The number of gate attempts that were allowed before revision.
+        attempts: u32,
+    },
+}
+
+/// Why a PRD publish event was emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishOrigin {
+    /// The publish happened through the CLI.
+    Cli,
+    /// The publish happened through HTTP.
+    Http,
+    /// The publish happened while importing content.
+    Import,
+}
+
+/// Events shared across the runtime event bus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RokoEvent {
+    /// Emitted when repeated gate failures should trigger a plan revision.
+    PlanRevision {
+        /// Durable request id for the future planner agent.
+        request_id: String,
+        /// The plan being revised.
+        plan_id: String,
+        /// The task that exhausted its retries.
+        task_id: String,
+        /// The reason the plan revision was requested.
+        reason: PlanRevisionReason,
+        /// Structured next action that produced this event.
+        required_next_action: String,
+        /// De-duplicated failure pattern ids across the request.
+        failure_pattern_ids: Vec<String>,
+        /// Blocking findings the planner must address.
+        blocking_findings: Vec<String>,
+        /// Summaries of the failing gate verdicts.
+        failing_verdicts: Vec<GateVerdictSummary>,
+        /// Tail of the task log captured at the point of failure.
+        log_tail: String,
+        /// UTC timestamp for when the revision event was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when a PRD is promoted into the published state.
+    PrdPublished {
+        /// The published PRD slug.
+        slug: String,
+        /// The published PRD path.
+        path: std::path::PathBuf,
+        /// UTC timestamp for when the PRD was published.
+        published_at: chrono::DateTime<chrono::Utc>,
+        /// Where the publish originated.
+        origin: PublishOrigin,
+    },
+    /// Emitted when the runtime heartbeat policy publishes a cognitive tick.
+    HeartbeatTick(HeartbeatTick),
+    /// Emitted when an urgent condition bypasses normal heartbeat cadence.
+    HeartbeatWakeup {
+        /// Wakeup condition that triggered the early gamma tick.
+        condition: WakeupCondition,
+        /// UTC timestamp for when the wakeup was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when heartbeat meta-cognition or scheduling requests loop control.
+    CognitiveSignal {
+        /// Control signal produced by heartbeat governance.
+        signal: CognitiveSignal,
+        /// UTC timestamp for when the signal was emitted.
+        issued_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Emitted when an agent lifecycle state changes.
+    AgentLifecycleTransition(LifecycleTransition),
+    /// BEAT-05 BROADCAST step: published after PERSIST to notify downstream
+    /// consumers (dashboard, watchers, other agents) of tick outcomes.
+    TickBroadcast {
+        /// Tick sequence number.
+        tick_id: u64,
+        /// Agent that produced the tick.
+        agent_id: String,
+        /// Selected inference tier.
+        tier: roko_primitives::tier::InferenceTier,
+        /// Whether the tick outcome passed verification.
+        passed: Option<bool>,
+        /// Total cost of this tick in USD.
+        cost_usd: f64,
+        /// UTC timestamp of the broadcast.
+        broadcast_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// BEAT-05 REACT step: emitted when the React.decide() react hook fires.
+    ReactDecision {
+        /// Tick that triggered the react.
+        tick_id: u64,
+        /// Decision made by the policy.
+        decision: String,
+        /// Cognitive signals generated by the react step.
+        signals: Vec<CognitiveSignal>,
+        /// UTC timestamp.
+        decided_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+/// Shared interior state backing both [`EventBus`] and [`BusSender`].
+struct Shared<E> {
+    tx: broadcast::Sender<Envelope<E>>,
+    ring: Mutex<VecDeque<Envelope<E>>>,
+    seq: AtomicU64,
+    capacity: usize,
+}
+
+impl<E: Clone + Send + Sync + 'static> Shared<E> {
+    fn emit_inner(&self, event: E) {
+        let envelope = Envelope {
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
+            ts_millis: current_ts_millis(),
+            payload: event,
+        };
+
+        // Append to replay ring (short lock).
+        {
+            let mut ring = self.ring.lock();
+            if ring.len() >= self.capacity {
+                ring.pop_front();
+            }
+            ring.push_back(envelope.clone());
+        }
+
+        trace!(seq = envelope.seq, "event emitted");
+        let _ = self.tx.send(envelope);
+    }
+}
+
+/// A typed, bounded broadcast event bus with replay ring.
+///
+/// Generic over any `E: Clone + Send + Sync + 'static`. The bus never blocks
+/// producers: if a subscriber falls behind, it will miss events on the live
+/// broadcast channel (but can always catch up via [`replay_from`]).
+pub struct EventBus<E: Clone + Send + Sync + 'static> {
+    shared: Arc<Shared<E>>,
+}
+
+impl<E: Clone + Send + Sync + 'static> EventBus<E> {
+    /// Creates a new event bus with the given capacity for both the broadcast
+    /// channel and the replay ring.
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+
+exec
+/bin/zsh -lc "sed -n '1,200p' crates/roko-runtime/src/lib.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+//! `roko-runtime` — shared async runtime primitives for Roko.
+//!
+//! This crate extracts the foundational runtime concerns that Mori (and other Roko
+//! applications) depend on:
+//!
+//! - **[`event_bus`]**: A typed, bounded broadcast channel with replay support.
+//!   Generalises the ad-hoc `mpsc` channels scattered through `apps/mori`.
+//!
+//! - **[`process`]**: Process lifecycle management — spawn, track, kill, reap.
+//!   Extracts the core supervision patterns from `agent/connection.rs`.
+//!
+//! - **[`cancel`]**: Cooperative cancellation tokens and shutdown coordination.
+//!
+//! - **[`metrics`]**: Append-only structured metric recording (JSONL).
+//!
+//! # Design principles
+//!
+//! 1. **No domain types.** This crate knows nothing about agents, plans, gates, or TUI.
+//!    It provides generic infrastructure that higher layers parameterise.
+//! 2. **Tokio-native.** All primitives are `Send + Sync + 'static` and designed for
+//!    multi-task Tokio runtimes.
+//! 3. **Zero unsafe.** All concurrency goes through `tokio::sync` or `std::sync::atomic`.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_map_or,
+    clippy::doc_markdown,
+    clippy::too_long_first_doc_paragraph,
+    clippy::suboptimal_flops,
+    clippy::needless_range_loop,
+    clippy::match_same_arms,
+    clippy::derive_partial_eq_without_eq,
+    clippy::return_self_not_must_use,
+    clippy::map_unwrap_or
+)]
+
+pub mod cancel;
+pub mod delta_consumer;
+pub mod demurrage_consumer;
+/// Cognitive energy model -- metabolic costs for cognitive operations.
+pub mod energy;
+pub mod event_bus;
+pub mod heartbeat;
+pub mod heartbeat_attention;
+pub mod heartbeat_probes;
+pub mod lifecycle;
+pub mod metrics;
+pub mod process;
+pub mod resource;
+pub mod theta_consumer;
+
+pub use lifecycle::{
+    Agent, AgentLifecycleState, AgentState, ConfigDrift, DegradationStage, GitOpsConfig,
+    GitOpsRetryPolicy, HealthProbeConfig, HookSpec, LifecycleHooks, LifecycleTransition,
+    LifecycleTransitionReason, MachineLifecycleState, MeshRegistered, NeuroInitialized,
+    ProbeHandler, ProbeSpec, Ready, ResourcesAllocated, RestartBackoff, RoutingConfigured,
+    ToolsLoaded, Unvalidated, Validated,
+};
+
+exec
+/bin/zsh -lc 'rg "RuntimeEvent|global_event_bus|pub mod event_bus|pub use event_bus" crates/roko-runtime/src crates/roko-core/src' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+crates/roko-runtime/src/event_bus.rs:pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+crates/roko-runtime/src/lib.rs:pub mod event_bus;
+crates/roko-core/src/foundation.rs:use crate::runtime_event::RuntimeEvent;
+crates/roko-core/src/foundation.rs:/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+crates/roko-core/src/foundation.rs:    fn consume(&self, event: &RuntimeEvent);
+crates/roko-core/src/lib.rs:pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+crates/roko-core/src/runtime_event.rs://! consume these via `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:/// `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:pub enum RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:impl RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:impl fmt::Display for RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:        let event = RuntimeEvent::WorkflowStarted {
+
+codex
+`event_bus` is already public from `lib.rs`, so the scoped work is adding the `RuntimeEvent` import plus the parallel singleton/helper in the existing module.
+exec
+/bin/zsh -lc "sed -n '240,520p' crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+        let (tx, _) = broadcast::channel(capacity);
+        Self {
+            shared: Arc::new(Shared {
+                tx,
+                ring: Mutex::new(VecDeque::with_capacity(capacity)),
+                seq: AtomicU64::new(0),
+                capacity,
+            }),
+        }
+    }
+
+    /// Emits an event to all live subscribers and appends it to the replay ring.
+    ///
+    /// This never blocks. If the ring is full, the oldest event is evicted.
+    /// If all subscribers have dropped, the event is still recorded in the ring.
+    pub fn emit(&self, event: E) {
+        self.shared.emit_inner(event);
+    }
+
+    /// Subscribes to live events. Returns a broadcast receiver.
+    ///
+    /// Events emitted before this call are not received on this channel —
+    /// use [`replay_from`] to catch up.
+    pub fn subscribe(&self) -> broadcast::Receiver<Envelope<E>> {
+        self.shared.tx.subscribe()
+    }
+
+    /// Returns a snapshot of all events in the replay ring with `seq >= after_seq`.
+    pub fn replay_from(&self, after_seq: u64) -> Vec<Envelope<E>> {
+        self.shared
+            .ring
+            .lock()
+            .iter()
+            .filter(|e| e.seq >= after_seq)
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the total number of events ever emitted (including evicted ones).
+    pub fn total_emitted(&self) -> u64 {
+        self.shared.seq.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current number of events in the replay ring.
+    pub fn ring_len(&self) -> usize {
+        self.shared.ring.lock().len()
+    }
+
+    /// Returns the capacity of the event bus.
+    pub fn capacity(&self) -> usize {
+        self.shared.capacity
+    }
+
+    /// Returns a sender handle that can be shared across tasks/threads.
+    ///
+    /// The `BusSender` only supports `emit()` — it cannot subscribe or replay.
+    /// This is useful for passing to subsystems that only produce events.
+    pub fn sender(&self) -> BusSender<E> {
+        BusSender {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+/// A cloneable, send-safe handle for emitting events into an [`EventBus`].
+///
+/// Created via [`EventBus::sender`]. Only supports emitting — cannot subscribe
+/// or replay. Safe to send across threads and tasks.
+#[derive(Clone)]
+pub struct BusSender<E: Clone + Send + Sync + 'static> {
+    shared: Arc<Shared<E>>,
+}
+
+impl<E: Clone + Send + Sync + 'static> BusSender<E> {
+    /// Emit an event. Same semantics as [`EventBus::emit`].
+    pub fn emit(&self, event: E) {
+        self.shared.emit_inner(event);
+    }
+}
+
+static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+
+/// Returns the process-local shared runtime event bus for `RokoEvent`.
+pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+    ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn current_ts_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum TestEvent {
+        Ping(u32),
+        Pong(String),
+    }
+
+    #[test]
+    fn emit_and_replay() {
+        let bus = EventBus::new(16);
+        bus.emit(TestEvent::Ping(1));
+        bus.emit(TestEvent::Pong("hello".into()));
+        bus.emit(TestEvent::Ping(2));
+
+        let all = bus.replay_from(0);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].seq, 0);
+        assert_eq!(all[1].seq, 1);
+        assert_eq!(all[2].seq, 2);
+
+        // Replay from midpoint.
+        let partial = bus.replay_from(2);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].payload, TestEvent::Ping(2));
+    }
+
+    #[test]
+    fn ring_eviction() {
+        let bus = EventBus::new(3);
+        bus.emit(TestEvent::Ping(1));
+        bus.emit(TestEvent::Ping(2));
+        bus.emit(TestEvent::Ping(3));
+        bus.emit(TestEvent::Ping(4)); // evicts Ping(1)
+
+        assert_eq!(bus.ring_len(), 3);
+        assert_eq!(bus.total_emitted(), 4);
+
+        let all = bus.replay_from(0);
+        // seq 0 (Ping(1)) was evicted, so only seq 1, 2, 3 remain.
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_live_events() {
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        bus.emit(TestEvent::Ping(42));
+
+        let env = rx
+            .recv()
+            .await
+            .expect("invariant: subscriber should receive the emitted live event");
+        assert_eq!(env.payload, TestEvent::Ping(42));
+        assert_eq!(env.seq, 0);
+        assert!(env.ts_millis > 0);
+    }
+
+    #[test]
+    fn sender_handle() {
+        let bus = EventBus::new(16);
+        let sender = bus.sender();
+        sender.emit(TestEvent::Pong("from sender".into()));
+
+        let all = bus.replay_from(0);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].payload, TestEvent::Pong("from sender".into()));
+    }
+
+    #[test]
+    fn plan_revision_event_round_trips_through_json() {
+        let event = RokoEvent::PlanRevision {
+            request_id: "replan-abc".into(),
+            plan_id: "plan-123".into(),
+            task_id: "task-abc".into(),
+            reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            required_next_action: "needs_replan".into(),
+            failure_pattern_ids: vec!["E0277::src/lib.rs".into()],
+            blocking_findings: vec!["failure requires plan shape revision".into()],
+            failing_verdicts: vec![
+                GateVerdictSummary {
+                    gate: "compile".into(),
+                    passed: false,
+                    classification: Some("type_error".into()),
+                    failure_pattern_ids: vec!["E0277::src/lib.rs".into()],
+                    blocking_findings: vec!["failure requires plan shape revision".into()],
+                    details: Some("E0277".into()),
+                },
+                GateVerdictSummary {
+                    gate: "clippy".into(),
+                    passed: false,
+                    classification: None,
+                    failure_pattern_ids: Vec::new(),
+                    blocking_findings: Vec::new(),
+                    details: None,
+                },
+            ],
+            log_tail: "line 1\nline 2".into(),
+            issued_at: chrono::Utc::now(),
+        };
+
+        let json = serde_json::to_string(&event)
+            .expect("invariant: plan revision event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized plan revision event should deserialize");
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn plan_revision_event_flows_through_bus() {
+        let bus = EventBus::new(8);
+        let event = RokoEvent::PlanRevision {
+            request_id: "replan-def".into(),
+            plan_id: "plan-123".into(),
+            task_id: "task-abc".into(),
+            reason: PlanRevisionReason::GateFailureLimit { attempts: 3 },
+            required_next_action: "needs_replan".into(),
+            failure_pattern_ids: vec!["test::panic".into()],
+            blocking_findings: vec!["repeated test failure exhausted retry budget".into()],
+            failing_verdicts: vec![GateVerdictSummary {
+                gate: "test".into(),
+                passed: false,
+                classification: Some("test_expectation_failure".into()),
+                failure_pattern_ids: vec!["test::panic".into()],
+                blocking_findings: vec!["repeated test failure exhausted retry budget".into()],
+                details: Some("tests failed".into()),
+            }],
+            log_tail: "tail".into(),
+            issued_at: chrono::Utc::now(),
+        };
+
+        bus.emit(event.clone());
+
+        let replayed = bus.replay_from(0);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, event);
+    }
+
+    #[test]
+    fn prd_published_event_round_trips_through_json() {
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Cli,
+        };
+
+        let json = serde_json::to_string(&event)
+            .expect("invariant: PRD published event should serialize to JSON");
+        let decoded: RokoEvent = serde_json::from_str(&json)
+            .expect("invariant: serialized PRD published event should deserialize");
+
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn prd_published_event_flows_through_bus() {
+        let bus = EventBus::new(8);
+        let event = RokoEvent::PrdPublished {
+            slug: "demo".into(),
+            path: std::path::PathBuf::from(".roko/prd/published/demo.md"),
+            published_at: chrono::Utc::now(),
+            origin: PublishOrigin::Http,
+        };
+
+        bus.emit(event.clone());
+
+        let replayed = bus.replay_from(0);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, event);
+    }
+}
+
+exec
+/bin/zsh -lc "rg -n \"global_event_bus|impl EventBus|pub fn emit|#\\[cfg\\(test\\)\\]\" crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+255:    pub fn emit(&self, event: E) {
+315:    pub fn emit(&self, event: E) {
+323:pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+334:#[cfg(test)]
+
+codex
+I’m going to keep the generic `EventBus` API intact and add the runtime helper beside the existing `global_event_bus()`. Since `emit()` currently returns `()`, the helper will return the sequence number it reserves from the bus count before emitting.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/event_bus.rs
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+The scoped edit is in place. I’m running the exact done-criteria checks now, including the package compile.
+exec
+/bin/zsh -lc "grep -q 'runtime_event_bus' crates/roko-runtime/src/event_bus.rs && grep -q 'emit_runtime_event' crates/roko-runtime/src/event_bus.rs && grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+`grep` passed. `cargo check -p roko-runtime` is still compiling workspace dependencies, so I’m waiting for the final result before closing this out.
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+ exited 101 in 25793ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling unicode-ident v1.0.24
+    Checking cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling parking_lot_core v0.9.12
+   Compiling autocfg v1.5.0
+   Compiling getrandom v0.4.2
+    Checking smallvec v1.15.1
+   Compiling serde_json v1.0.149
+    Checking scopeguard v1.2.0
+   Compiling cfg_aliases v0.2.1
+    Checking lock_api v0.4.14
+    Checking itoa v1.0.18
+   Compiling nix v0.29.0
+    Checking core-foundation-sys v0.8.7
+    Checking memchr v2.8.0
+    Checking pin-project-lite v0.2.17
+    Checking once_cell v1.21.4
+   Compiling thiserror v2.0.18
+    Checking tracing-core v0.1.36
+    Checking iana-time-zone v0.1.65
+    Checking bitflags v2.11.0
+    Checking bytes v1.11.1
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.117
+    Checking errno v0.3.14
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking uuid v1.23.0
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime)
+error[E0432]: unresolved import `roko_core`
+  --> crates/roko-runtime/src/event_bus.rs:58:5
+   |
+58 | use roko_core::RuntimeEvent;
+   |     ^^^^^^^^^ use of unresolved module or unlinked crate `roko_core`
+   |
+   = help: if you wanted to use a crate named `roko_core`, use `cargo add roko_core` to add it to your `Cargo.toml`
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `roko-runtime` (lib) due to 1 previous error
+
+codex
+`cargo check` failed because `roko-runtime` does not currently link `roko_core`, despite the batch dependency note. I’m checking the manifest names before deciding the least invasive scoped fix.
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-runtime/Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+[package]
+name = "roko-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared async runtime primitives for Bardo: typed event bus, process supervision, and cancellation."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["sync", "time", "process", "macros", "rt"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+roko-primitives = { path = "../roko-primitives" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+exec
+/bin/zsh -lc "sed -n '1,160p' crates/roko-core/Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+[package]
+name = "roko-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Roko kernel: Signal type and the six universal traits (Substrate, Scorer, Gate, Router, Composer, Policy)."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-primitives = { path = "../roko-primitives" }
+roko-runtime = { path = "../roko-runtime" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+blake3 = "1"
+ed25519-dalek = "2"
+async-trait = "0.1"
+parking_lot = "0.12"
+regex = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+rkyv = { version = "0.8", optional = true }
+
+[features]
+default = []
+rkyv = ["dep:rkyv"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name = "engram_bench"
+harness = false
+
+exec
+/bin/zsh -lc 'rg -n "roko-core|roko_core|RuntimeEvent" Cargo.toml crates/*/Cargo.toml crates/roko-runtime/src crates/roko-core/src' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+crates/roko-chain/Cargo.toml:21:roko-core = { path = "../roko-core" }
+Cargo.toml:9:    "crates/roko-core",
+Cargo.toml:32:    # Opt-in `roko` feature bridges to roko-core traits (Gate, Substrate).
+crates/roko-agent/Cargo.toml:17:roko-core = { path = "../roko-core" }
+crates/roko-acp/Cargo.toml:20:roko-core = { path = "../roko-core" }
+crates/roko-core/Cargo.toml:2:name = "roko-core"
+crates/roko-compose/Cargo.toml:15:roko-core = { path = "../roko-core" }
+crates/roko-cli/Cargo.toml:18:roko-core = { path = "../roko-core" }
+crates/roko-agent-server/Cargo.toml:19:roko-core = { path = "../roko-core" }
+crates/roko-lang-go/Cargo.toml:8:description = "Go language provider and build system for roko-core traits."
+crates/roko-lang-go/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-lang-rust/Cargo.toml:8:description = "Rust/Cargo language provider and build system for roko-core traits."
+crates/roko-lang-rust/Cargo.toml:18:roko-core = { path = "../roko-core" }
+crates/roko-daimon/Cargo.toml:16:roko-core = { path = "../roko-core" }
+crates/roko-fs/Cargo.toml:18:roko-core = { path = "../roko-core" }
+crates/roko-gate/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-dreams/Cargo.toml:16:roko-core = { path = "../roko-core" }
+crates/roko-conductor/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-plugin/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-orchestrator/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-lang-typescript/Cargo.toml:8:description = "TypeScript/JavaScript language provider and build systems (npm/pnpm/yarn) for roko-core traits."
+crates/roko-lang-typescript/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-mcp-code/Cargo.toml:19:roko-core = { path = "../roko-core" }
+crates/roko-learn/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-serve/Cargo.toml:18:roko-core = { path = "../roko-core" }
+crates/roko-serve/Cargo.toml:73:roko-core = { path = "../roko-core" }
+crates/roko-neuro/Cargo.toml:20:roko-core = { path = "../roko-core" }
+crates/roko-std/Cargo.toml:14:roko-core = { path = "../roko-core" }
+crates/roko-index/Cargo.toml:15:roko-core = { path = "../roko-core" }
+crates/roko-index/Cargo.toml:30:rkyv = ["dep:rkyv", "roko-core/rkyv"]
+crates/roko-runtime/src/heartbeat_probes.rs:132:/// This is distinct from [`roko_core::obs::health::Probe`], which is a
+crates/roko-runtime/src/event_bus.rs:58:use roko_core::RuntimeEvent;
+crates/roko-runtime/src/event_bus.rs:331:/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
+crates/roko-runtime/src/event_bus.rs:333:pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
+crates/roko-runtime/src/event_bus.rs:334:    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
+crates/roko-runtime/src/event_bus.rs:338:/// Emit a RuntimeEvent to the global runtime bus.
+crates/roko-runtime/src/event_bus.rs:340:pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
+crates/roko-core/src/datum.rs:20:/// use roko_core::{Body, Datum, Engram, Kind, Pulse, Topic};
+crates/roko-core/src/dashboard_snapshot.rs:21:/// `roko-serve`. The conversion happens at the call-site so that `roko-core`
+crates/roko-core/src/tool/role_allowlist.rs:74:        // and no write. See roko-core::agent::ToolPermissions::networked.
+crates/roko-core/src/phase.rs:265:/// outside `roko-core` (e.g. `roko-orchestrator::progress`).
+crates/roko-core/src/shutdown.rs:9://! This module is deliberately **runtime-agnostic**: `roko-core` does not
+crates/roko-core/src/shutdown.rs:51:/// use roko_core::shutdown::GracefulShutdown;
+crates/roko-core/src/shutdown.rs:300:/// # use roko_core::shutdown::drain_after;
+crates/roko-core/src/shutdown.rs:340:/// # use roko_core::shutdown::LeakSentinel;
+crates/roko-core/src/pulse_bus.rs:4://! [`Bus`] trait from `roko-core::traits`, bridging the typed event bus with
+crates/roko-core/src/build.rs:8://! This design keeps roko-core free of `std::process` and `std::fs` so it
+crates/roko-core/src/build.rs:107:    /// that roko-core stays I/O-free.
+crates/roko-core/src/traits.rs:384:/// - `PulseBus` (roko-core) — wraps `EventBus<Pulse>` with topic filtering
+crates/roko-core/src/foundation.rs:12:use crate::runtime_event::RuntimeEvent;
+crates/roko-core/src/foundation.rs:201:/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+crates/roko-core/src/foundation.rs:207:    fn consume(&self, event: &RuntimeEvent);
+crates/roko-core/src/affect.rs:8:/// Previously roko-core defined its own `PadVector` (f64) and roko-runtime
+crates/roko-core/src/lib.rs:219:pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+crates/roko-core/src/lib.rs:229:// `roko_core::tool::FailureKind`.
+crates/roko-core/src/lib.rs:259:// via `roko_core::traits::Score` or import with an alias.
+crates/roko-core/src/pulse.rs:24:/// use roko_core::Topic;
+crates/roko-core/src/pulse.rs:68:/// use roko_core::{Body, Kind, Pulse, Topic};
+crates/roko-core/src/pulse.rs:190:/// use roko_core::{Topic, TopicFilter};
+crates/roko-core/src/pulse.rs:229:/// use roko_core::{Body, Engram, Kind, PolicyOutputs, Pulse, Topic};
+crates/roko-core/src/kind.rs:157:    /// use roko_core::Kind;
+crates/roko-core/src/kind.rs:174:    /// use roko_core::Kind;
+crates/roko-core/src/obs/schema.rs:71:/// The canonical metric schema for `roko-core`, `roko-serve`, and sidecars.
+crates/roko-core/src/runtime_event.rs:4://! consume these via `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:23:/// `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:25:pub enum RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:99:impl RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:137:impl fmt::Display for RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:162:        let event = RuntimeEvent::WorkflowStarted {
+crates/roko-core/src/builtin_roles/core_roles.toml:233:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:234:owner = "roko-core"
+crates/roko-core/src/builtin_roles/core_roles.toml:281:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:282:owner = "roko-core"
+crates/roko-core/src/builtin_roles/core_roles.toml:329:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:330:owner = "roko-core"
+crates/roko-core/src/builtin_roles/core_roles.toml:377:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:378:owner = "roko-core"
+crates/roko-core/src/builtin_roles/core_roles.toml:425:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:426:owner = "roko-core"
+crates/roko-core/src/builtin_roles/core_roles.toml:473:path = "crates/roko-core/src/builtin_roles/core_roles.toml"
+crates/roko-core/src/builtin_roles/core_roles.toml:474:owner = "roko-core"
+crates/roko-core/src/engram.rs:55:/// use roko_core::{Body, Engram, Kind};
+crates/roko-core/src/obs/mod.rs:19:// probe systems through roko-core.
+crates/roko-core/src/policy_manifest.rs:21:    "crates/roko-core/src/builtin_roles/core_roles.toml";
+crates/roko-core/src/policy_manifest.rs:1186:owner = "roko-core"
+crates/roko-core/src/tool/handler.rs:10://! than concrete tokio types so `roko-core` stays runtime-agnostic. The
+crates/roko-core/src/tool/handler.rs:134:/// objects so `roko-core` remains runtime-agnostic — the real tokio-backed
+crates/roko-core/src/obs/metrics.rs:9://! Manual implementation (no `prometheus` crate dep) keeps roko-core's
+crates/roko-core/src/prediction.rs:601:/// use roko_core::prediction::crps;
+
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+There is a real architecture mismatch in this checkout: `roko-core` already depends on `roko-runtime`, so adding or using `roko_core::RuntimeEvent` from `roko-runtime` would create or require a cycle. I’m going to keep the code compiling inside the allowed file scope and mark the architectural blocker directly in the implementation.
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-core/src/runtime_event.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+//! Runtime events emitted by the workflow engine.
+//!
+//! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+//! consume these via `EventBus<RuntimeEvent>`.
+
+use std::fmt;
+
+/// Outcome of a completed workflow run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowOutcome {
+    /// Workflow completed successfully, optionally with a commit hash.
+    Success { commit_hash: Option<String> },
+    /// Workflow halted due to an error or resource limit.
+    Halted { reason: String },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+/// Every event the workflow engine can emit.
+///
+/// These events are fire-and-forget: the engine emits them and does not wait
+/// for observers to process them. Observers subscribe via
+/// `EventBus<RuntimeEvent>`.
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    // Lifecycle
+    WorkflowStarted {
+        run_id: String,
+        template: String,
+        prompt: String,
+    },
+    PhaseTransition {
+        run_id: String,
+        from: String,
+        to: String,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        outcome: WorkflowOutcome,
+    },
+
+    // Agent
+    AgentSpawned {
+        run_id: String,
+        agent_id: String,
+        role: String,
+        model: String,
+    },
+    AgentOutput {
+        run_id: String,
+        agent_id: String,
+        chunk: String,
+    },
+    AgentCompleted {
+        run_id: String,
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+    },
+    AgentFailed {
+        run_id: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // Gates
+    GateStarted {
+        run_id: String,
+        gate_name: String,
+        rung: u8,
+    },
+    GatePassed {
+        run_id: String,
+        gate_name: String,
+        duration_ms: u64,
+    },
+    GateFailed {
+        run_id: String,
+        gate_name: String,
+        output: String,
+        duration_ms: u64,
+    },
+
+    // Feedback
+    FeedbackRecorded {
+        run_id: String,
+        kind: String,
+        summary: String,
+    },
+
+    // Persistence
+    StateCheckpointed {
+        run_id: String,
+        path: String,
+    },
+}
+
+impl RuntimeEvent {
+    /// Returns the run_id common to all event variants.
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::WorkflowStarted { run_id, .. }
+            | Self::PhaseTransition { run_id, .. }
+            | Self::WorkflowCompleted { run_id, .. }
+            | Self::AgentSpawned { run_id, .. }
+            | Self::AgentOutput { run_id, .. }
+            | Self::AgentCompleted { run_id, .. }
+            | Self::AgentFailed { run_id, .. }
+            | Self::GateStarted { run_id, .. }
+            | Self::GatePassed { run_id, .. }
+            | Self::GateFailed { run_id, .. }
+            | Self::FeedbackRecorded { run_id, .. }
+            | Self::StateCheckpointed { run_id, .. } => run_id,
+        }
+    }
+
+    /// Human-readable event kind label.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkflowStarted { .. } => "workflow_started",
+            Self::PhaseTransition { .. } => "phase_transition",
+            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::AgentSpawned { .. } => "agent_spawned",
+            Self::AgentOutput { .. } => "agent_output",
+            Self::AgentCompleted { .. } => "agent_completed",
+            Self::AgentFailed { .. } => "agent_failed",
+            Self::GateStarted { .. } => "gate_started",
+            Self::GatePassed { .. } => "gate_passed",
+            Self::GateFailed { .. } => "gate_failed",
+            Self::FeedbackRecorded { .. } => "feedback_recorded",
+            Self::StateCheckpointed { .. } => "state_checkpointed",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.run_id(), self.kind())
+    }
+}
+
+impl fmt::Display for WorkflowOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success {
+                commit_hash: Some(hash),
+            } => write!(f, "success ({hash})"),
+            Self::Success { commit_hash: None } => write!(f, "success"),
+            Self::Halted { reason } => write!(f, "halted: {reason}"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_accessor() {
+        let event = RuntimeEvent::WorkflowStarted {
+            run_id: "r1".into(),
+            template: "express".into(),
+            prompt: "fix bug".into(),
+        };
+
+        assert_eq!(event.run_id(), "r1");
+        assert_eq!(event.kind(), "workflow_started");
+    }
+
+    #[test]
+    fn display_formats() {
+        let outcome = WorkflowOutcome::Success {
+            commit_hash: Some("abc123".into()),
+        };
+
+        assert!(outcome.to_string().contains("abc123"));
+    }
+}
+
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..eeca0a4cd274ef39e091bb7594727555bd9a0843
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -55,6 +55,8 @@
+ use tokio::sync::broadcast;
+ use tracing::trace;
+ 
++use roko_core::RuntimeEvent;
++
+ use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+ use crate::lifecycle::LifecycleTransition;
+ 
+@@ -324,6 +326,24 @@
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus() -> &'static EventBus<RuntimeEvent> {
++    static BUS: OnceLock<EventBus<RuntimeEvent>> = OnceLock::new();
++    BUS.get_or_init(|| EventBus::new(2048))
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event(event: RuntimeEvent) -> u64 {
++    let bus = runtime_event_bus();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+To keep the package buildable without changing manifests, I’m replacing the direct `roko_core` import with a typed singleton registry. Callers that can name `roko_core::RuntimeEvent` still get a process-local `EventBus<roko_core::RuntimeEvent>`, while `roko-runtime` avoids a direct cyclic dependency.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/event_bus.rs
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+The fallback is now confined to `event_bus.rs` and includes the required `TODO(arch)` marker explaining why the canonical direct import cannot compile in this checkout. I’m formatting the crate file and rerunning verification.
+exec
+/bin/zsh -lc "sed -n '48,92p' crates/roko-runtime/src/event_bus.rs && sed -n '318,372p' crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+    collections::{HashMap, VecDeque},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use tokio::sync::broadcast;
+use tracing::trace;
+
+use crate::heartbeat::{CognitiveSignal, HeartbeatTick, WakeupCondition};
+use crate::lifecycle::LifecycleTransition;
+
+/// A sequenced, timestamped envelope wrapping a user event.
+#[derive(Debug, Clone)]
+pub struct Envelope<E> {
+    /// Monotonically increasing sequence number (bus-scoped).
+    pub seq: u64,
+    /// Unix timestamp in milliseconds when the event was emitted.
+    pub ts_millis: u64,
+    /// The wrapped event payload.
+    pub payload: E,
+}
+
+/// A compact summary of a gate verdict included in plan-revision events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateVerdictSummary {
+    /// The gate name that produced the verdict.
+    pub gate: String,
+    /// Whether the gate passed.
+    pub passed: bool,
+    /// Optional structured failure classification, such as `type_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// Stable failure pattern ids associated with this verdict.
+    #[serde(default)]
+    pub failure_pattern_ids: Vec<String>,
+    /// Blocking findings that make same-prompt retry insufficient.
+    #[serde(default)]
+    pub blocking_findings: Vec<String>,
+    /// Optional free-form details from the gate or logger.
+    pub details: Option<String>,
+}
+
+    }
+}
+
+static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
+static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
+    OnceLock::new();
+
+/// Returns the process-local shared runtime event bus for `RokoEvent`.
+pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+    ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+}
+
+/// Global event bus for workflow runtime events.
+///
+/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
+/// subscribe to receive them.
+pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
+where
+    RuntimeEvent: Clone + Send + Sync + 'static,
+{
+    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut buses = buses.lock();
+    let type_id = TypeId::of::<RuntimeEvent>();
+
+    if let Some(bus) = buses.get(&type_id) {
+        return bus
+            .downcast_ref::<EventBus<RuntimeEvent>>()
+            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
+    }
+
+    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
+    // dependency direction matches the architecture reference. In this checkout,
+    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
+    // import `roko_core::RuntimeEvent` without a crate cycle.
+    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
+    buses.insert(type_id, bus);
+    bus
+}
+
+/// Emit a RuntimeEvent to the global runtime bus.
+/// Convenience wrapper around `runtime_event_bus().emit(event)`.
+pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
+where
+    RuntimeEvent: Clone + Send + Sync + 'static,
+{
+    let bus = runtime_event_bus::<RuntimeEvent>();
+    let seq = bus.total_emitted();
+    bus.emit(event);
+    seq
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn current_ts_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+
+exec
+/bin/zsh -lc 'cargo fmt -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+ succeeded in 262ms:
+exec
+/bin/zsh -lc "grep -q 'runtime_event_bus' crates/roko-runtime/src/event_bus.rs && grep -q 'emit_runtime_event' crates/roko-runtime/src/event_bus.rs && grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+The required grep checks passed again. `cargo check -p roko-runtime` is now checking the edited crate with the cycle-avoiding fallback.
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+ succeeded in 4205ms:
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 4.18s
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/event_bus.rs crates/roko-runtime/src/lib.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82..2ffae21e 100644
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@ impl<E: Clone + Send + Sync + 'static> BusSender<E> {
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508
+ succeeded in 0ms:
+ M crates/roko-runtime/src/event_bus.rs
+
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+codex
+Implemented within scope in [event_bus.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/event_bus.rs).
+
+Added:
+- `runtime_event_bus()`
+- `emit_runtime_event()`
+- process-local typed singleton storage for runtime event buses
+
+Important caveat: `roko-runtime` cannot currently import `roko_core::RuntimeEvent` directly because this checkout has `roko-core` depending on `roko-runtime`, which would create a crate cycle. I left a `// TODO(arch): ...` marker and implemented the maximum compile-safe version: callers can still get an `EventBus<roko_core::RuntimeEvent>` via type inference from crates that can name that type.
+
+Verification passed:
+- `grep -q 'runtime_event_bus' crates/roko-runtime/src/event_bus.rs`
+- `grep -q 'emit_runtime_event' crates/roko-runtime/src/event_bus.rs`
+- `grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs`
+- `cargo check -p roko-runtime`
+diff --git a/crates/roko-runtime/src/event_bus.rs b/crates/roko-runtime/src/event_bus.rs
+index 6cea3b82d7176acf9d0c485234b2bdfdb0360ab4..2ffae21e3875c78caab0d7125ce7559d740ab42e
+--- a/crates/roko-runtime/src/event_bus.rs
++++ b/crates/roko-runtime/src/event_bus.rs
+@@ -44,7 +44,8 @@
+ use parking_lot::Mutex;
+ use serde::{Deserialize, Serialize};
+ use std::{
+-    collections::VecDeque,
++    any::{Any, TypeId},
++    collections::{HashMap, VecDeque},
+     sync::{
+         Arc, OnceLock,
+         atomic::{AtomicU64, Ordering},
+@@ -318,12 +319,53 @@
+ }
+ 
+ static ROKO_EVENT_BUS: OnceLock<EventBus<RokoEvent>> = OnceLock::new();
++static RUNTIME_EVENT_BUSES: OnceLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
++    OnceLock::new();
+ 
+ /// Returns the process-local shared runtime event bus for `RokoEvent`.
+ pub fn global_event_bus() -> &'static EventBus<RokoEvent> {
+     ROKO_EVENT_BUS.get_or_init(|| EventBus::new(1024))
+ }
+ 
++/// Global event bus for workflow runtime events.
++///
++/// The workflow engine emits `RuntimeEvent`s here; adapters (ACP, SSE, JSONL, TUI)
++/// subscribe to receive them.
++pub fn runtime_event_bus<RuntimeEvent>() -> &'static EventBus<RuntimeEvent>
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let buses = RUNTIME_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()));
++    let mut buses = buses.lock();
++    let type_id = TypeId::of::<RuntimeEvent>();
++
++    if let Some(bus) = buses.get(&type_id) {
++        return bus
++            .downcast_ref::<EventBus<RuntimeEvent>>()
++            .expect("invariant: runtime event bus registry stores EventBus by TypeId");
++    }
++
++    // TODO(arch): switch this to `roko_core::RuntimeEvent` once the manifest
++    // dependency direction matches the architecture reference. In this checkout,
++    // `roko-core` depends on `roko-runtime`, so `roko-runtime` cannot directly
++    // import `roko_core::RuntimeEvent` without a crate cycle.
++    let bus: &'static EventBus<RuntimeEvent> = Box::leak(Box::new(EventBus::new(2048)));
++    buses.insert(type_id, bus);
++    bus
++}
++
++/// Emit a RuntimeEvent to the global runtime bus.
++/// Convenience wrapper around `runtime_event_bus().emit(event)`.
++pub fn emit_runtime_event<RuntimeEvent>(event: RuntimeEvent) -> u64
++where
++    RuntimeEvent: Clone + Send + Sync + 'static,
++{
++    let bus = runtime_event_bus::<RuntimeEvent>();
++    let seq = bus.total_emitted();
++    bus.emit(event);
++    seq
++}
++
+ #[allow(clippy::cast_possible_truncation)]
+ fn current_ts_millis() -> u64 {
+     SystemTime::now()
+
+2026-04-27T23:34:00.107719Z ERROR codex_core::session: failed to record rollout items: thread 019dd148-fa56-7702-a676-211508d927d2 not found
+tokens used
+39,355
+Implemented within scope in [event_bus.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/event_bus.rs).
+
+Added:
+- `runtime_event_bus()`
+- `emit_runtime_event()`
+- process-local typed singleton storage for runtime event buses
+
+Important caveat: `roko-runtime` cannot currently import `roko_core::RuntimeEvent` directly because this checkout has `roko-core` depending on `roko-runtime`, which would create a crate cycle. I left a `// TODO(arch): ...` marker and implemented the maximum compile-safe version: callers can still get an `EventBus<roko_core::RuntimeEvent>` via type inference from crates that can name that type.
+
+Verification passed:
+- `grep -q 'runtime_event_bus' crates/roko-runtime/src/event_bus.rs`
+- `grep -q 'emit_runtime_event' crates/roko-runtime/src/event_bus.rs`
+- `grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs`
+- `cargo check -p roko-runtime`
+
+=== Finished: 2026-04-28T01:34:00+02:00 ===
+=== Duration: 2m 7s ===
+=== Exit code: 0 ===
+[structural] grep -q 'RuntimeEvent' crates/roko-runtime/src/event_bus.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-arch-targets/run-20260428-012508/P0C/verify-attempt-1 cargo check -p roko-runtime
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling quote v1.0.45
+    Checking cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.0
+   Compiling getrandom v0.4.2
+   Compiling zmij v1.0.21
+   Compiling parking_lot_core v0.9.12
+    Checking scopeguard v1.2.0
+   Compiling serde_json v1.0.149
+   Compiling cfg_aliases v0.2.1
+    Checking smallvec v1.15.1
+    Checking lock_api v0.4.14
+   Compiling nix v0.29.0
+   Compiling thiserror v2.0.18
+    Checking core-foundation-sys v0.8.7
+    Checking itoa v1.0.18
+    Checking memchr v2.8.0
+    Checking once_cell v1.21.4
+    Checking pin-project-lite v0.2.17
+    Checking tracing-core v0.1.36
+    Checking iana-time-zone v0.1.65
+    Checking bitflags v2.11.0
+    Checking bytes v1.11.1
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.117
+    Checking errno v0.3.14
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking uuid v1.23.0
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking chrono v0.4.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-primitives)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 26.26s

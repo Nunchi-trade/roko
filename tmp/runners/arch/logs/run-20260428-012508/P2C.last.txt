@@ -1,0 +1,13 @@
+Implemented P2C within scope.
+
+Changes:
+- Added [effect_driver.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/effect_driver.rs:1) with `EffectDriver`, `EffectServices`, agent spawning, gate running, commit handling, event emission, and feedback recording.
+- Updated [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/lib.rs:46) to expose `effect_driver` and re-export its public API.
+
+One architecture note: `roko-core` currently depends on `roko-runtime`, so importing `roko_core::foundation` from `roko-runtime` would create a crate cycle. Since Cargo.toml edits were forbidden, I added a `TODO(arch)` and kept foundation-compatible contracts local to the new module.
+
+Verified:
+- Required grep checks passed.
+- `cargo check -p roko-runtime` passed.
+- No `Command::new("claude")`.
+- No `if.*phase.*==` pattern in `effect_driver.rs`.

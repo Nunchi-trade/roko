@@ -1,0 +1,9 @@
+Implemented the three `engine_flag_*` tests in [run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:2239).
+
+Verification:
+- `cargo clippy -p roko-cli --no-deps` passed.
+- `cargo test -p roko-cli engine_flag` did not complete because `roko-cli` test compilation fails in existing code outside this batch’s write scope:
+  - `crates/roko-cli/src/tui/app.rs:3262`: `roko_core::shared_state_hub()` not found.
+  - `crates/roko-cli/src/orchestrate.rs:20065`: mismatched `StateHubSender` types.
+
+Only `crates/roko-cli/src/run.rs` was modified.

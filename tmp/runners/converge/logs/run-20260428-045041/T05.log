@@ -1,0 +1,4492 @@
+=== Batch: T05 (Integration test: share URL generation + retrieval) ===
+=== Started: 2026-04-28T14:55:10+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/T05.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd428-662c-7711-aeda-6ce3ce14608c
+--------
+user
+# Convergence Batch T05 — Integration test: share URL generation + retrieval
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Batch T05: Integration test — share URL generation + retrieval
+
+### Write Scope
+
+Add tests to the **bottom** of:
+
+```
+crates/roko-serve/src/routes/shared_runs.rs
+```
+
+Extend or create a `#[cfg(test)] mod tests { ... }` block at the end of the file.
+Do not create a new file.
+
+### Dependencies
+- C08 (share endpoint wired in roko-serve)
+
+### DO NOT
+- Modify any other file
+- Add new crate dependencies to any `Cargo.toml`
+- Modify the handler functions or `RunTranscript` struct
+- Call real HTTP endpoints — test the handler functions directly using axum's
+  test utilities or by calling the underlying functions
+- Touch the filesystem in production paths — use `tempfile::TempDir` for the
+  workdir
+
+### Existing Code Context
+
+`crates/roko-serve/src/routes/shared_runs.rs` — the module under test:
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunTranscript {
+    pub id: String,
+    pub agent: String,
+    pub role: String,
+    pub prompt: String,
+    pub success: bool,
+    pub gates: Vec<(String, bool)>,
+    pub output: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub model: Option<String>,
+    pub duration_s: Option<f64>,
+    pub episode_id: Option<String>,
+    pub timestamp: String,
+}
+
+pub async fn get_run_json(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response { ... }
+
+pub async fn get_run_html(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response { ... }
+
+fn load_transcript(state: &AppState, id: &str) -> Option<RunTranscript> {
+    let path = state.workdir.join(".roko").join("shared").join(format!("{id}.json"));
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn render_html(t: &RunTranscript) -> String { ... }
+
+pub fn routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route("/api/runs/{id}", axum::routing::get(get_run_json))
+        .route("/runs/{id}", axum::routing::get(get_run_html))
+}
+```
+
+`crates/roko-serve/src/state.rs` — `AppState` construction:
+```rust
+pub struct AppState {
+    pub workdir: PathBuf,
+    pub layout: RokoLayout,
+    pub state_hub: StateHub,
+    pub scrubber: Arc<SecretScrubber>,
+    pub cancel: CancellationToken,
+    // ... more fields
+}
+```
+
+To construct a minimal `AppState` for tests, look at existing test patterns in
+`roko-serve`. If `AppState::new(...)` or a test helper exists, use it. Otherwise,
+create a minimal construction using `Default` or manual field initialization.
+
+For simplicity, the tests can bypass `AppState` entirely and test the underlying
+`load_transcript` function directly by creating the expected file structure in
+a temp directory.
+
+### Task
+
+Implement three tests:
+
+#### 1. `create_and_retrieve_share`
+
+Create a `RunTranscript` in a temp directory and verify it can be loaded:
+
+```rust
+#[test]
+fn create_and_retrieve_share() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared_dir = dir.path().join(".roko").join("shared");
+    std::fs::create_dir_all(&shared_dir).unwrap();
+
+    let transcript = RunTranscript {
+        id: "test_run_abc123".to_string(),
+        agent: "implementer".to_string(),
+        role: "implementer".to_string(),
+        prompt: "fix the bug".to_string(),
+        success: true,
+        gates: vec![
+            ("compile".to_string(), true),
+            ("test".to_string(), true),
+        ],
+        output: Some("Fixed the null pointer dereference.".to_string()),
+        cost_usd: Some(0.0042),
+        input_tokens: Some(1500),
+        output_tokens: Some(350),
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        duration_s: Some(3.2),
+        episode_id: Some("ep_001".to_string()),
+        timestamp: "2026-04-28T12:00:00Z".to_string(),
+    };
+
+    // Write the transcript to the expected path
+    let json = serde_json::to_string(&transcript).unwrap();
+    let path = shared_dir.join("test_run_abc123.json");
+    std::fs::write(&path, &json).unwrap();
+
+    // Verify the file exists and is valid JSON
+    let loaded: RunTranscript = serde_json::from_str(
+        &std::fs::read_to_string(&path).unwrap()
+    ).unwrap();
+
+    assert_eq!(loaded.id, "test_run_abc123");
+    assert_eq!(loaded.agent, "implementer");
+    assert!(loaded.success);
+    assert_eq!(loaded.gates.len(), 2);
+    assert_eq!(loaded.output.as_deref(), Some("Fixed the null pointer dereference."));
+    assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
+}
+```
+
+#### 2. `retrieve_share_renders_html`
+
+Create a transcript and verify `render_html` produces valid output:
+
+```rust
+#[test]
+fn retrieve_share_renders_html() {
+    let transcript = RunTranscript {
+        id: "run_html_test".to_string(),
+        agent: "reviewer".to_string(),
+        role: "reviewer".to_string(),
+        prompt: "review the changes".to_string(),
+        success: false,
+        gates: vec![("clippy".to_string(), false)],
+        output: Some("Found 3 lint warnings.".to_string()),
+        cost_usd: Some(0.0018),
+        input_tokens: Some(800),
+        output_tokens: Some(200),
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        duration_s: Some(1.5),
+        episode_id: Some("ep_002".to_string()),
+        timestamp: "2026-04-28T13:00:00Z".to_string(),
+    };
+
+    let html = render_html(&transcript);
+
+    // Verify it's valid HTML with expected content
+    assert!(html.contains("<!DOCTYPE html>"));
+    assert!(html.contains("run_html_test"));
+    assert!(html.contains("reviewer"));
+    assert!(html.contains("review the changes"));
+    assert!(html.contains("clippy"));
+    assert!(html.contains("Found 3 lint warnings."));
+    assert!(html.contains("failed")); // success=false renders "failed"
+}
+```
+
+#### 3. `unknown_share_returns_none`
+
+Verify that loading a nonexistent share returns `None`:
+
+```rust
+#[test]
+fn unknown_share_returns_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared_dir = dir.path().join(".roko").join("shared");
+    std::fs::create_dir_all(&shared_dir).unwrap();
+
+    // Try to load a transcript that doesn't exist
+    let path = shared_dir.join("nonexistent_run.json");
+    let data = std::fs::read_to_string(path);
+    assert!(data.is_err());
+
+    // Also verify with malformed JSON
+    let bad_path = shared_dir.join("bad_run.json");
+    std::fs::write(&bad_path, "not valid json").unwrap();
+    let result: Result<RunTranscript, _> = serde_json::from_str(
+        &std::fs::read_to_string(&bad_path).unwrap()
+    );
+    assert!(result.is_err());
+}
+```
+
+### Done Criteria
+```bash
+# Test module exists
+grep -q '#\[cfg(test)\]' crates/roko-serve/src/routes/shared_runs.rs
+
+# All three tests present
+grep -q 'fn create_and_retrieve_share' crates/roko-serve/src/routes/shared_runs.rs
+grep -q 'fn retrieve_share_renders_html' crates/roko-serve/src/routes/shared_runs.rs
+grep -q 'fn unknown_share_returns_none' crates/roko-serve/src/routes/shared_runs.rs
+
+# Tests pass
+cargo test -p roko-serve shared_runs
+
+# No new warnings
+cargo clippy -p roko-serve --no-deps -- -D warnings
+
+# No other files modified
+# (only shared_runs.rs should be changed)
+```
+
+codex
+I’ll add the requested tests only in `shared_runs.rs`, first checking the file’s existing structure and test patterns so the new module fits cleanly.
+exec
+/bin/zsh -lc "sed -n '1,260p' crates/roko-serve/src/routes/shared_runs.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! Shareable run transcript routes.
+//!
+//! `GET /api/runs/{id}` — JSON transcript.
+//! `GET /runs/{id}` — Self-contained HTML page.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::state::AppState;
+
+/// A persisted run transcript for sharing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunTranscript {
+    /// Unique run ID.
+    pub id: String,
+    /// Agent name.
+    pub agent: String,
+    /// Agent role.
+    pub role: String,
+    /// The original prompt.
+    pub prompt: String,
+    /// Whether the run succeeded.
+    pub success: bool,
+    /// Gate verdicts: (name, passed).
+    pub gates: Vec<(String, bool)>,
+    /// Agent output text.
+    pub output: Option<String>,
+    /// Cost in USD.
+    pub cost_usd: Option<f64>,
+    /// Input tokens.
+    pub input_tokens: Option<u64>,
+    /// Output tokens.
+    pub output_tokens: Option<u64>,
+    /// Model used.
+    pub model: Option<String>,
+    /// Duration in seconds.
+    pub duration_s: Option<f64>,
+    /// Episode ID.
+    pub episode_id: Option<String>,
+    /// Timestamp (ISO 8601).
+    pub timestamp: String,
+}
+
+/// `GET /api/runs/{id}` — JSON transcript.
+pub async fn get_run_json(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    match load_transcript(&state, &id) {
+        Some(transcript) => Json(json!(transcript)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `GET /api/shared/{token}` — JSON transcript for a shared token.
+pub async fn get_shared_run(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Response {
+    match load_transcript(&state, &token) {
+        Some(t) => Json(json!(t)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `POST /api/runs/{id}/share` — create a shared run token.
+pub async fn create_share(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let token = format!("{}-{:04x}", id, std::process::id() as u16);
+    let shared_dir = state.workdir.join(".roko").join("shared");
+    if let Some(existing) = load_transcript(&state, &token) {
+        return Json(json!({
+            "token": token,
+            "url": format!("/runs/{}", token),
+            "transcript": existing
+        }))
+        .into_response();
+    }
+    if let Err(e) = std::fs::create_dir_all(&shared_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("mkdir failed: {e}")})),
+        )
+            .into_response();
+    }
+    let transcript = RunTranscript {
+        id: token.clone(),
+        agent: String::new(),
+        role: String::new(),
+        prompt: String::new(),
+        success: false,
+        gates: vec![],
+        output: None,
+        cost_usd: None,
+        input_tokens: None,
+        output_tokens: None,
+        model: None,
+        duration_s: None,
+        episode_id: Some(id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let path = shared_dir.join(format!("{token}.json"));
+    match serde_json::to_string_pretty(&transcript) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("write failed: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize failed: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    Json(json!({"token": token, "url": format!("/runs/{}", token)})).into_response()
+}
+
+/// `GET /runs/{id}` — Self-contained HTML page.
+pub async fn get_run_html(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    match load_transcript(&state, &id) {
+        Some(transcript) => {
+            let html = render_html(&transcript);
+            Html(html).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn load_transcript(state: &AppState, id: &str) -> Option<RunTranscript> {
+    let path = state
+        .workdir
+        .join(".roko")
+        .join("shared")
+        .join(format!("{id}.json"));
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn render_html(t: &RunTranscript) -> String {
+    let gates_html: String = t
+        .gates
+        .iter()
+        .map(|(name, passed)| {
+            let icon = if *passed { "✔" } else { "✖" };
+            let color = if *passed { "#7d9e8c" } else { "#c36e55" };
+            format!("<span style=\"color:{color}\">{icon} {name}</span>  ")
+        })
+        .collect();
+
+    let output_html = t
+        .output
+        .as_deref()
+        .unwrap_or("")
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+
+    let cost_str = t
+        .cost_usd
+        .map(|c| format!("${c:.4}"))
+        .unwrap_or_else(|| "—".into());
+    let model_str = t.model.as_deref().unwrap_or("—");
+    let duration_str = t
+        .duration_s
+        .map(|d| format!("{d:.1}s"))
+        .unwrap_or_else(|| "—".into());
+    let result_icon = if t.success { "✔" } else { "✖" };
+    let result_color = if t.success { "#7d9e8c" } else { "#c36e55" };
+
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>roko run · {id}</title>
+<style>
+  :root {{
+    --bg: #16121a;
+    --fg: #a58e9e;
+    --dim: #916e8a;
+    --rose: #b97894;
+    --sage: #7d9e8c;
+    --ember: #c36e55;
+    --bone: #d7c69e;
+    --dream: #7873a5;
+    --ghost: #372a37;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Geist Mono', 'SF Mono', 'Menlo', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 2rem;
+    max-width: 800px;
+    margin: 0 auto;
+  }}
+  .header {{
+    border-bottom: 1px solid var(--ghost);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+  }}
+  .header h1 {{
+    color: var(--rose);
+    font-size: 1.1rem;
+    font-weight: 600;
+  }}
+  .header .meta {{
+    color: var(--dim);
+    font-size: 0.85rem;
+    margin-top: 0.3rem;
+  }}
+  .section {{
+    margin-bottom: 1.5rem;
+  }}
+  .section-title {{
+    color: var(--dim);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+  }}
+  .row {{
+    display: flex;
+    gap: 2rem;
+    margin-bottom: 0.3rem;
+  }}
+  .label {{
+    color: var(--dim);
+    min-width: 80px;
+  }}
+  .value {{
+    color: var(--fg);
+  }}
+  .gates {{
+    font-size: 0.9rem;
+  }}
+  .output {{
+    background: #0e0c10;
+    border: 1px solid var(--ghost);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    color: var(--bone);
+    max-height: 500px;
+    overflow-y: auto;
+  }}
+
+exec
+/bin/zsh -lc "rg -n \"tempfile|AppState::new|#\\[cfg\\(test\\)\\]\" crates/roko-serve/src -S" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+crates/roko-serve/src/parity.rs:550:#[cfg(test)]
+crates/roko-serve/src/error.rs:199:#[cfg(test)]
+crates/roko-serve/src/retention.rs:516:#[cfg(test)]
+crates/roko-serve/src/retention.rs:520:    use tempfile::tempdir;
+crates/roko-serve/src/relay.rs:390:#[cfg(test)]
+crates/roko-serve/src/extract.rs:89:#[cfg(test)]
+crates/roko-serve/src/templates.rs:721:#[cfg(test)]
+crates/roko-serve/src/templates.rs:734:        let tempdir = tempfile::tempdir().unwrap();
+crates/roko-serve/src/templates.rs:964:        let tempdir = tempfile::tempdir().unwrap();
+crates/roko-serve/src/event_bus.rs:110:#[cfg(test)]
+crates/roko-serve/src/adapters.rs:185:#[cfg(test)]
+crates/roko-serve/src/truth_map.rs:277:#[cfg(test)]
+crates/roko-serve/src/events.rs:381:#[cfg(test)]
+crates/roko-serve/src/routes/secrets.rs:269:#[cfg(test)]
+crates/roko-serve/src/routes/secrets.rs:284:        Arc::new(AppState::new(
+crates/roko-serve/src/routes/secrets.rs:294:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/secrets.rs:321:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/secrets.rs:366:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/secrets.rs:393:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/lib.rs:637:    let state = AppState::new(workdir, runtime, roko_config, deploy_backend);
+crates/roko-serve/src/deploy/mod.rs:176:#[cfg(test)]
+crates/roko-serve/src/sanitize.rs:40:#[cfg(test)]
+crates/roko-serve/src/config_watcher.rs:123:#[cfg(test)]
+crates/roko-serve/src/config_watcher.rs:135:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/job_runner.rs:1029:#[cfg(test)]
+crates/roko-serve/src/state.rs:938:#[cfg(test)]
+crates/roko-serve/src/state.rs:942:    use tempfile::tempdir;
+crates/roko-serve/src/state.rs:954:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/integrations.rs:330:#[cfg(test)]
+crates/roko-serve/src/routes/connectors.rs:129:#[cfg(test)]
+crates/roko-serve/src/routes/connectors.rs:144:        Arc::new(AppState::new(
+crates/roko-serve/src/routes/connectors.rs:154:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/connectors.rs:182:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/connectors.rs:240:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/connectors.rs:283:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/connectors.rs:304:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/connectors.rs:347:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/dreams.rs:543:#[cfg(test)]
+crates/roko-serve/src/openapi.rs:569:#[cfg(test)]
+crates/roko-serve/src/openapi.rs:578:    use tempfile::tempdir;
+crates/roko-serve/src/openapi.rs:591:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/auth.rs:193:#[cfg(test)]
+crates/roko-serve/src/routes/webhooks.rs:358:#[cfg(test)]
+crates/roko-serve/src/routes/config.rs:267:#[cfg(test)]
+crates/roko-serve/src/routes/config.rs:330:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/config.rs:334:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/feeds.rs:157:#[cfg(test)]
+crates/roko-serve/src/routes/feeds.rs:172:        Arc::new(AppState::new(
+crates/roko-serve/src/routes/feeds.rs:182:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:209:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:267:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:318:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:368:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:416:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/feeds.rs:437:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/research.rs:565:#[cfg(test)]
+crates/roko-serve/src/routes/research.rs:576:    use tempfile::tempdir;
+crates/roko-serve/src/routes/research.rs:634:    fn test_state_with_runtime() -> (tempfile::TempDir, Arc<AppState>, Arc<CapturingRuntime>) {
+crates/roko-serve/src/routes/research.rs:641:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/integrations.rs:57:#[cfg(test)]
+crates/roko-serve/src/routes/integrations.rs:69:        let dir = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/routes/integrations.rs:72:        Arc::new(AppState::new(
+crates/roko-serve/src/feedback.rs:870:#[cfg(test)]
+crates/roko-serve/src/routes/aggregator.rs:1112:#[cfg(test)]
+crates/roko-serve/src/routes/aggregator.rs:1123:    use tempfile::tempdir;
+crates/roko-serve/src/routes/aggregator.rs:1290:        Arc::new(AppState::new(
+crates/roko-serve/src/routes/middleware.rs:499:#[cfg(test)]
+crates/roko-serve/src/routes/middleware.rs:509:    use tempfile::tempdir;
+crates/roko-serve/src/routes/middleware.rs:551:        Arc::new(AppState::new(
+crates/roko-serve/src/routes/learning/mod.rs:392:#[cfg(test)]
+crates/roko-serve/src/routes/learning/mod.rs:403:    use tempfile::tempdir;
+crates/roko-serve/src/routes/learning/mod.rs:545:    fn test_state() -> Result<(tempfile::TempDir, Arc<AppState>), Box<dyn Error>> {
+crates/roko-serve/src/routes/learning/mod.rs:552:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/jobs.rs:1346:#[cfg(test)]
+crates/roko-serve/src/routes/jobs.rs:1350:    use tempfile::tempdir;
+crates/roko-serve/src/routes/jobs.rs:1357:    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/jobs.rs:1359:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/gateway.rs:904:#[cfg(test)]
+crates/roko-serve/src/routes/gateway.rs:914:    use tempfile::tempdir;
+crates/roko-serve/src/routes/gateway.rs:921:    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/gateway.rs:926:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/gateway.rs:1287:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/dispatch.rs:2456:#[cfg(test)]
+crates/roko-serve/src/dispatch.rs:2679:        let tmp = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/dispatch.rs:2753:        let tmp = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/dispatch.rs:2778:        let tmp = tempfile::tempdir().expect("tempdir");
+crates/roko-serve/src/dispatch.rs:2826:        let global_dir = tempfile::tempdir().expect("global tempdir");
+crates/roko-serve/src/dispatch.rs:2827:        let repo_dir = tempfile::tempdir().expect("repo tempdir");
+crates/roko-serve/src/dispatch.rs:2846:        let session_root = tempfile::tempdir().expect("session tempdir");
+crates/roko-serve/src/routes/templates.rs:319:#[cfg(test)]
+crates/roko-serve/src/routes/templates.rs:329:    use tempfile::tempdir;
+crates/roko-serve/src/routes/templates.rs:537:        Arc::new(AppState::new(
+crates/roko-serve/src/runtime.rs:106:#[cfg(test)]
+crates/roko-serve/src/runtime.rs:109:#[cfg(test)]
+crates/roko-serve/src/routes/plans.rs:1353:#[cfg(test)]
+crates/roko-serve/src/routes/plans.rs:1367:    use tempfile::tempdir;
+crates/roko-serve/src/routes/plans.rs:1421:    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/plans.rs:1426:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/plans.rs:1435:    fn test_state_with_runtime(runtime: Arc<dyn CliRuntime>) -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/plans.rs:1440:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/prds.rs:50:#[cfg(test)]
+crates/roko-serve/src/routes/prds.rs:951:#[cfg(test)]
+crates/roko-serve/src/routes/prds.rs:964:    use tempfile::tempdir;
+crates/roko-serve/src/routes/prds.rs:1018:    fn test_state(auto_plan: bool) -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/prds.rs:1023:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/prds.rs:1032:    fn test_state_with_runtime(runtime: Arc<dyn CliRuntime>) -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/prds.rs:1037:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:40:#[cfg(test)]
+crates/roko-serve/src/routes/providers.rs:612:#[cfg(test)]
+crates/roko-serve/src/routes/providers.rs:623:    use tempfile::tempdir;
+crates/roko-serve/src/routes/providers.rs:757:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:842:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:1006:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:1088:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:1214:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/providers.rs:1304:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/team.rs:358:#[cfg(test)]
+crates/roko-serve/src/routes/team.rs:361:    use tempfile::tempdir;
+crates/roko-serve/src/projection_contract.rs:2747:#[cfg(test)]
+crates/roko-serve/src/routes/agents.rs:1686:#[cfg(test)]
+crates/roko-serve/src/routes/agents.rs:1702:    use tempfile::tempdir;
+crates/roko-serve/src/routes/agents.rs:1784:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/agents.rs:1835:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/agents.rs:1880:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/agents.rs:1948:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/agents.rs:2005:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/agents.rs:2035:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/status/mod.rs:48:#[cfg(test)]
+crates/roko-serve/src/routes/status/mod.rs:56:    use tempfile::tempdir;
+crates/roko-serve/src/routes/status/mod.rs:237:    fn test_state() -> (tempfile::TempDir, Arc<AppState>) {
+crates/roko-serve/src/routes/status/mod.rs:242:        let state = Arc::new(AppState::new(
+crates/roko-serve/src/routes/deployments.rs:566:#[cfg(test)]
+crates/roko-serve/src/routes/deployments.rs:577:    use tempfile::{TempDir, tempdir};
+crates/roko-serve/src/routes/deployments.rs:687:        let state = Arc::new(AppState::new(
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+codex
+The route file has no tests yet and already exposes `render_html` privately in the same module, so a bottom `#[cfg(test)]` block can exercise serialization and HTML rendering without touching handlers or broader state construction.
+exec
+/bin/zsh -lc "sed -n '260,560p' crates/roko-serve/src/routes/shared_runs.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+  }}
+  .result {{
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 0.5rem 0;
+  }}
+  .footer {{
+    border-top: 1px solid var(--ghost);
+    padding-top: 1rem;
+    margin-top: 2rem;
+    color: var(--ghost);
+    font-size: 0.75rem;
+  }}
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>◆ roko run</h1>
+    <div class="meta">{agent} · {role} · {timestamp}</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">prompt</div>
+    <div style="color:var(--bone)">{prompt}</div>
+  </div>
+
+  <div class="section">
+    <div class="row"><span class="label">cost</span><span class="value" style="color:var(--sage)">{cost}</span></div>
+    <div class="row"><span class="label">model</span><span class="value" style="color:var(--dream)">{model}</span></div>
+    <div class="row"><span class="label">duration</span><span class="value">{duration}</span></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">gates</div>
+    <div class="gates">{gates}</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">output</div>
+    <div class="output">{output}</div>
+  </div>
+
+  <div class="result" style="color:{result_color}">{result_icon} {result_text}</div>
+
+  <div class="footer">
+    roko · episode {episode} · generated by the roko agent runtime
+  </div>
+</body>
+</html>"##,
+        id = t.id,
+        agent = t.agent,
+        role = t.role,
+        timestamp = t.timestamp,
+        prompt = t.prompt.replace('<', "&lt;").replace('>', "&gt;"),
+        cost = cost_str,
+        model = model_str,
+        duration = duration_str,
+        gates = gates_html,
+        output = output_html,
+        result_color = result_color,
+        result_icon = result_icon,
+        result_text = if t.success { "completed" } else { "failed" },
+        episode = t.episode_id.as_deref().unwrap_or("—"),
+    )
+}
+
+/// Register the shared-run routes on a router.
+pub fn routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route("/api/runs/{id}", axum::routing::get(get_run_json))
+        .route("/api/runs/{id}/share", axum::routing::post(create_share))
+        .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+        .route("/runs/{id}", axum::routing::get(get_run_html))
+}
+
+codex
+I’m going to append the three focused tests now. They stay within this module, use `tempfile::tempdir`, and avoid constructing `AppState` or calling real HTTP endpoints.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/shared_runs.rs
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+The test block is in place. I’ll run the required presence checks, then the package test target and clippy with warnings denied.
+exec
+/bin/zsh -lc "grep -q '#\\[cfg(test)\\]' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn create_and_retrieve_share' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn retrieve_share_renders_html' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn unknown_share_returns_none' crates/roko-serve/src/routes/shared_runs.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'git diff -- crates/roko-serve/src/routes/shared_runs.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92..dd5287e8 100644
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+exec
+/bin/zsh -lc 'cargo test -p roko-serve shared_runs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+`cargo test -p roko-serve shared_runs` is running now; it may take a bit because the package has a broad dependency graph.
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+The test build is still compiling dependencies. I saw an existing build-script missing-docs warning during compilation, but the targeted tests are still running, so I’ll wait for the actual result before deciding whether anything in this file needs adjustment.
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+The targeted test command is still in the compile phase. Nothing so far points to the new tests, just normal first-build dependency work.
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+Compilation is taking a while inside `roko-compose`/serve dependencies with no new output. I’m keeping the test process open and will move to clippy only after it exits.
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+ succeeded in 368056ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling cfg-if v1.0.4
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling itoa v1.0.18
+   Compiling subtle v2.6.1
+   Compiling const-oid v0.9.6
+   Compiling memchr v2.8.0
+   Compiling once_cell v1.21.4
+   Compiling equivalent v1.0.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling base64ct v1.8.3
+   Compiling log v0.4.29
+   Compiling pin-project-lite v0.2.17
+   Compiling zmij v1.0.21
+   Compiling pem-rfc7468 v0.7.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling thiserror v2.0.18
+   Compiling base16ct v0.2.0
+   Compiling paste v1.0.15
+   Compiling generic-array v0.14.9
+   Compiling tracing-core v0.1.36
+   Compiling arrayvec v0.7.6
+   Compiling hashbrown v0.17.0
+   Compiling convert_case v0.10.0
+   Compiling syn v2.0.117
+   Compiling dunce v1.0.5
+   Compiling unicode-xid v0.2.6
+   Compiling ruint-macro v1.2.1
+   Compiling serde_json v1.0.149
+   Compiling parking_lot_core v0.9.12
+   Compiling jobserver v0.1.34
+   Compiling scopeguard v1.2.0
+   Compiling getrandom v0.2.17
+   Compiling cpufeatures v0.2.17
+   Compiling errno v0.3.14
+   Compiling cc v1.2.60
+   Compiling rand_core v0.6.4
+   Compiling lock_api v0.4.14
+   Compiling allocator-api2 v0.2.21
+   Compiling ff v0.13.1
+   Compiling foldhash v0.2.0
+   Compiling group v0.13.0
+   Compiling keccak v0.1.6
+   Compiling futures-core v0.3.32
+   Compiling const-hex v1.18.1
+   Compiling rustc-hash v2.1.2
+   Compiling hashbrown v0.16.1
+   Compiling base64 v0.22.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling strsim v0.11.1
+   Compiling bitflags v2.11.0
+   Compiling heck v0.5.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling futures-sink v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling futures-channel v0.3.32
+   Compiling ident_case v1.0.1
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling winnow v0.7.15
+   Compiling ruint v1.17.2
+   Compiling cmake v0.1.58
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling fs_extra v1.3.0
+   Compiling digest v0.10.7
+   Compiling stable_deref_trait v1.2.1
+   Compiling sha3 v0.10.8
+   Compiling zerocopy v0.8.48
+   Compiling indexmap v2.14.0
+   Compiling fnv v1.0.7
+   Compiling percent-encoding v2.3.2
+   Compiling aws-lc-rs v1.16.2
+   Compiling httparse v1.10.1
+   Compiling untrusted v0.9.0
+   Compiling synstructure v0.13.2
+   Compiling proc-macro-error2 v2.0.1
+   Compiling syn-solidity v1.5.7
+   Compiling macro-string v0.1.4
+   Compiling tower-service v0.3.3
+   Compiling autocfg v1.5.0
+   Compiling libm v0.2.16
+   Compiling rustls v0.23.38
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling icu_properties_data v2.2.0
+   Compiling num_cpus v1.17.0
+   Compiling threadpool v1.8.1
+   Compiling form_urlencoded v1.2.2
+   Compiling num-traits v0.2.19
+   Compiling sync_wrapper v1.0.2
+   Compiling aho-corasick v1.1.4
+   Compiling crc-catalog v2.4.0
+   Compiling tower-layer v0.3.3
+   Compiling system-configuration-sys v0.6.0
+   Compiling regex-syntax v0.8.10
+   Compiling rustversion v1.0.22
+   Compiling crc v3.4.0
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling hex v0.4.3
+   Compiling httpdate v1.0.3
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling want v0.3.1
+   Compiling security-framework v3.7.0
+   Compiling rand_core v0.9.5
+   Compiling semver v1.0.28
+   Compiling core-foundation v0.9.4
+   Compiling getrandom v0.4.2
+   Compiling ipnet v2.12.0
+   Compiling regex-automata v0.4.14
+   Compiling system-configuration v0.7.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling ppv-lite86 v0.2.21
+   Compiling mime v0.3.17
+   Compiling unicase v2.9.0
+   Compiling rand_chacha v0.9.0
+   Compiling mime_guess v2.0.5
+   Compiling rand v0.9.3
+   Compiling rustc_version v0.4.1
+   Compiling aws-lc-sys v0.39.1
+   Compiling ring v0.17.14
+   Compiling blst v0.3.16
+   Compiling c-kzg v2.1.7
+   Compiling data-encoding v2.10.0
+   Compiling futures-utils-wasm v0.1.0
+   Compiling utf-8 v0.7.6
+   Compiling curve25519-dalek v4.1.3
+   Compiling http-range-header v0.4.2
+   Compiling iri-string v0.7.12
+   Compiling regex v1.12.3
+   Compiling iana-time-zone v0.1.65
+   Compiling ryu v1.0.23
+   Compiling blake3 v1.8.4
+   Compiling rand_chacha v0.3.1
+   Compiling uuid v1.23.0
+   Compiling toml_write v0.1.2
+   Compiling rustix v1.1.4
+   Compiling bimap v0.6.3
+   Compiling rand v0.8.5
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling doctest-file v1.1.1
+   Compiling fastrand v2.4.1
+   Compiling hashbrown v0.14.5
+   Compiling native-tls v0.2.18
+   Compiling lru v0.16.3
+   Compiling tempfile v3.27.0
+   Compiling anyhow v1.0.102
+   Compiling encoding_rs v0.8.35
+   Compiling portable-atomic v1.13.1
+   Compiling generator v0.8.8
+   Compiling spin v0.9.8
+   Compiling web-time v1.1.0
+   Compiling lazy_static v1.5.0
+   Compiling bstr v1.12.1
+   Compiling quanta v0.12.6
+   Compiling spinning_top v0.3.0
+   Compiling nonzero_ext v0.3.0
+   Compiling futures-timer v3.0.3
+   Compiling ordered-float v5.3.0
+   Compiling darling_core v0.20.11
+   Compiling array-init v2.1.0
+   Compiling cmov v0.5.3
+   Compiling divrem v1.0.0
+   Compiling az v1.3.0
+   Compiling sorted-vec v0.8.10
+   Compiling globset v0.4.18
+   Compiling num-integer v0.1.46
+   Compiling same-file v1.0.6
+   Compiling minimal-lexical v0.2.1
+   Compiling walkdir v2.5.0
+   Compiling nom v7.1.3
+   Compiling crossbeam-epoch v0.9.18
+   Compiling bit-vec v0.8.0
+   Compiling rayon-core v1.13.0
+   Compiling utf8parse v0.2.2
+   Compiling camino v1.2.2
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.1
+   Compiling deranged v0.5.8
+   Compiling anstyle-parse v1.0.0
+   Compiling time-macros v0.2.27
+   Compiling crossbeam-deque v0.8.6
+   Compiling bit-set v0.8.0
+   Compiling num-bigint-dig v0.8.6
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle-query v1.1.5
+   Compiling anstream v1.0.0
+   Compiling num-iter v0.1.45
+   Compiling num-bigint v0.4.6
+   Compiling cargo-platform v0.3.2
+   Compiling serde_path_to_error v0.1.20
+   Compiling ahash v0.8.12
+   Compiling esaxx-rs v0.1.10
+   Compiling cfg_aliases v0.1.1
+   Compiling thiserror v1.0.69
+   Compiling clap_lex v1.1.0
+   Compiling cfg_aliases v0.2.1
+   Compiling nix v0.29.0
+   Compiling clap_builder v4.6.0
+   Compiling nix v0.28.0
+   Compiling sharded-slab v0.1.7
+   Compiling matchers v0.2.0
+   Compiling castaway v0.2.4
+   Compiling sha2 v0.10.9
+   Compiling pem v3.0.6
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling base64 v0.13.1
+   Compiling static_assertions v1.1.0
+   Compiling nu-ansi-term v0.50.3
+   Compiling matchit v0.8.4
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling rustix v0.38.44
+   Compiling time v0.3.47
+   Compiling rust-embed-utils v8.11.0
+   Compiling fancy-regex v0.14.0
+   Compiling fancy-regex v0.17.0
+   Compiling notify-types v2.1.0
+   Compiling fsevent-sys v4.1.0
+   Compiling rustc-hash v1.1.0
+   Compiling unicode_categories v0.1.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling macro_rules_attribute v0.2.2
+   Compiling option-ext v0.2.0
+   Compiling dirs-sys v0.5.0
+   Compiling tiktoken-rs v0.11.0
+   Compiling notify v8.2.0
+   Compiling arc-swap v1.9.1
+   Compiling serial2 v0.2.36
+   Compiling downcast-rs v1.2.1
+   Compiling roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve)
+warning: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+   Compiling shell-words v1.1.1
+warning: `roko-serve` (build script) generated 1 warning
+   Compiling gethostname v0.5.0
+   Compiling dirs v6.0.0
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.4.3
+   Compiling thiserror-impl v2.0.18
+   Compiling derive_more-impl v2.1.1
+   Compiling tracing-attributes v0.1.31
+   Compiling alloy-rlp-derive v0.3.15
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling zeroize v1.8.2
+   Compiling der v0.7.10
+   Compiling rustls-pki-types v1.14.0
+   Compiling crypto-bigint v0.5.5
+   Compiling signature v2.2.0
+   Compiling spki v0.7.3
+   Compiling pkcs8 v0.10.2
+   Compiling hmac v0.12.1
+   Compiling hkdf v0.12.4
+   Compiling rfc6979 v0.4.0
+   Compiling futures-util v0.3.32
+   Compiling displaydoc v0.2.5
+   Compiling auto_impl v1.3.0
+   Compiling webpki-roots v1.0.6
+   Compiling async-trait v0.1.89
+   Compiling zerofrom v0.1.7
+   Compiling sha1 v0.10.6
+   Compiling rustls-native-certs v0.8.3
+   Compiling webpki-roots v0.26.11
+   Compiling futures-executor v0.3.32
+   Compiling ed25519 v2.2.3
+   Compiling tracing v0.1.44
+   Compiling futures v0.3.32
+   Compiling yoke v0.8.2
+   Compiling pin-project-internal v1.1.11
+   Compiling num_enum_derive v0.7.6
+   Compiling zerovec v0.11.6
+   Compiling ed25519-dalek v2.2.0
+   Compiling strum_macros v0.27.2
+   Compiling async-stream-impl v0.3.6
+   Compiling potential_utf v0.1.5
+   Compiling equator-macro v0.4.2
+   Compiling darling_macro v0.20.11
+   Compiling simple_asn1 v0.6.4
+   Compiling pkcs1 v0.7.5
+   Compiling tinystr v0.8.3
+   Compiling icu_locale_core v2.2.0
+   Compiling zerotrie v0.2.4
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling bytes v1.11.1
+   Compiling smallvec v1.15.1
+   Compiling serdect v0.2.0
+   Compiling alloy-sol-type-parser v1.5.7
+   Compiling sec1 v0.7.3
+   Compiling elliptic-curve v0.13.8
+   Compiling alloy-rlp v0.3.15
+   Compiling parking_lot v0.12.5
+   Compiling http v1.4.0
+   Compiling either v1.15.0
+   Compiling tokio v1.51.1
+   Compiling ecdsa v0.16.9
+   Compiling darling_core v0.23.0
+   Compiling k256 v0.13.4
+   Compiling http-body v1.0.1
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling nybbles v0.4.8
+   Compiling itertools v0.14.0
+   Compiling http-body-util v0.1.3
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling chrono v0.4.44
+   Compiling url v2.5.8
+   Compiling toml_edit v0.22.27
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling num_enum v0.7.6
+   Compiling dashmap v6.1.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling async-stream v0.3.6
+   Compiling equator v0.4.2
+   Compiling governor v0.10.4
+   Compiling tokio-util v0.7.18
+   Compiling pin-project v1.1.11
+   Compiling interprocess v2.4.0
+   Compiling toml v0.8.23
+   Compiling tokio-native-tls v0.3.1
+   Compiling h2 v0.4.13
+   Compiling tower v0.5.3
+   Compiling tokio-stream v0.1.18
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling tower-http v0.6.8
+   Compiling aligned-vec v0.6.4
+   Compiling darling v0.20.11
+   Compiling kiddo v5.3.0
+   Compiling derive_builder_core v0.20.2
+   Compiling primeorder v0.13.6
+   Compiling axum-core v0.5.6
+   Compiling rayon v1.11.0
+   Compiling strum v0.27.2
+   Compiling derive_more v2.1.1
+   Compiling alloy-primitives v1.5.7
+   Compiling cargo_metadata v0.23.1
+   Compiling alloy-json-abi v1.5.7
+   Compiling alloy-serde v1.8.3
+   Compiling alloy-sol-macro-input v1.5.7
+   Compiling alloy-sol-macro-expander v1.5.7
+   Compiling alloy-eip7928 v0.3.3
+   Compiling alloy-eip2930 v0.2.3
+   Compiling alloy-eip7702 v0.6.3
+   Compiling alloy-eip2124 v0.2.0
+   Compiling alloy-trie v0.9.5
+   Compiling hyper v1.9.0
+   Compiling alloy-signer v1.8.3
+   Compiling alloy-chains v0.2.33
+   Compiling tracing-serde v0.2.0
+   Compiling thiserror-impl v1.0.69
+   Compiling monostate-impl v0.1.18
+   Compiling clap_derive v4.6.0
+   Compiling hyper-util v0.1.20
+   Compiling tracing-subscriber v0.3.23
+   Compiling octocrab v0.49.7
+   Compiling monostate v0.1.18
+   Compiling rayon-cond v0.4.0
+   Compiling rsa v0.9.10
+   Compiling p256 v0.13.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling p384 v0.13.1
+   Compiling hyper-tls v0.6.0
+   Compiling cron v0.12.1
+   Compiling darling_macro v0.23.0
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling spm_precompiled v0.1.4
+   Compiling derive_builder v0.20.2
+   Compiling roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+   Compiling roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+   Compiling compact_str v0.9.0
+   Compiling dary_heap v0.3.8
+   Compiling snafu-derive v0.8.9
+   Compiling tokenizers v0.22.2
+   Compiling jsonwebtoken v10.3.0
+   Compiling hyper-timeout v0.5.2
+   Compiling darling v0.23.0
+   Compiling validator_derive v0.20.0
+   Compiling serde_yaml_ng v0.10.0
+   Compiling serde_with_macros v3.18.0
+   Compiling alloy-tx-macros v1.8.3
+   Compiling filedescriptor v0.8.3
+   Compiling secrecy v0.10.3
+   Compiling utoipa-gen v5.4.0
+   Compiling rust-embed-impl v8.11.0
+   Compiling clap v4.6.0
+   Compiling portable-pty v0.9.0
+   Compiling roko-plugin v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-plugin)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+   Compiling rust-embed v8.11.0
+   Compiling alloy-sol-macro v1.5.7
+   Compiling jsonwebtoken v9.3.1
+   Compiling snafu v0.8.9
+   Compiling serde_with v3.18.0
+   Compiling validator v0.20.0
+   Compiling alloy-sol-types v1.5.7
+   Compiling alloy-eips v1.8.3
+   Compiling alloy-rpc-types-debug v1.8.3
+   Compiling alloy-consensus v1.8.3
+   Compiling alloy-json-rpc v1.8.3
+   Compiling alloy-dyn-abi v1.5.7
+   Compiling alloy-transport v1.8.3
+   Compiling alloy-core v1.5.7
+   Compiling alloy-pubsub v1.8.3
+   Compiling alloy-network-primitives v1.8.3
+   Compiling alloy-consensus-any v1.8.3
+   Compiling alloy-rpc-types-eth v1.8.3
+   Compiling alloy-transport-ipc v1.8.3
+   Compiling alloy-rpc-types-any v1.8.3
+   Compiling alloy-network v1.8.3
+   Compiling alloy-rpc-types-txpool v1.8.3
+   Compiling alloy-rpc-types-anvil v1.8.3
+   Compiling alloy-rpc-types-trace v1.8.3
+   Compiling alloy-signer-local v1.8.3
+   Compiling utoipa v5.4.0
+   Compiling rustls-webpki v0.103.11
+   Compiling alloy-rpc-types v1.8.3
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.28.0
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling tungstenite v0.26.2
+   Compiling hyper-rustls v0.27.8
+   Compiling reqwest v0.13.2
+   Compiling reqwest v0.12.28
+   Compiling tokio-tungstenite v0.26.2
+   Compiling tokio-tungstenite v0.28.0
+   Compiling alloy-transport-ws v1.8.3
+   Compiling axum v0.8.8
+   Compiling alloy-transport-http v1.8.3
+   Compiling alloy-rpc-client v1.8.3
+   Compiling agent-relay v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/apps/agent-relay)
+   Compiling alloy-provider v1.8.3
+   Compiling alloy-contract v1.8.3
+   Compiling alloy v1.8.3
+   Compiling roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+   Compiling roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+   Compiling roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+   Compiling roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+   Compiling roko-gate v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-gate)
+   Compiling roko-neuro v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-neuro)
+   Compiling roko-conductor v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-conductor)
+   Compiling roko-orchestrator v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-orchestrator)
+   Compiling roko-dreams v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-dreams)
+   Compiling roko-agent-server v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent-server)
+   Compiling roko-compose v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6m 03s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/roko_serve-118890522bf2de90)
+
+running 3 tests
+test routes::shared_runs::tests::retrieve_share_renders_html ... ok
+test routes::shared_runs::tests::unknown_share_returns_none ... ok
+test routes::shared_runs::tests::create_and_retrieve_share ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 286 filtered out; finished in 0.00s
+
+     Running tests/api_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/api_integration-1f6ec4e9f612c47d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+     Running tests/job_lifecycle.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/job_lifecycle-e6bbba137af1948d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.00s
+
+     Running tests/job_runner_integration.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/job_runner_integration-0a5a271f1773bf3e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/prd_publish.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/prd_publish-4f6314f47c35533f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/sanitize_xml.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared/debug/deps/sanitize_xml-0c3d3a1c2d60399e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+
+codex
+The targeted tests passed: all three new `shared_runs` tests are green. I’m running the required clippy command now.
+exec
+/bin/zsh -lc 'cargo clippy -p roko-serve --no-deps -- -D warnings' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+ exited 101 in 28413ms:
+    Checking cfg-if v1.0.4
+    Checking subtle v2.6.1
+    Checking itoa v1.0.18
+    Checking const-oid v0.9.6
+    Checking memchr v2.8.0
+    Checking once_cell v1.21.4
+    Checking libc v0.2.185
+    Checking serde_core v1.0.228
+    Checking typenum v1.19.0
+    Checking equivalent v1.0.2
+    Checking base64ct v1.8.3
+    Checking zeroize v1.8.2
+    Checking log v0.4.29
+    Checking pin-project-lite v0.2.17
+    Checking base16ct v0.2.0
+   Compiling unicode-segmentation v1.13.2
+    Checking arrayvec v0.7.6
+    Checking thiserror v2.0.18
+    Checking zmij v1.0.21
+    Checking tracing-core v0.1.36
+    Checking scopeguard v1.2.0
+    Checking foldhash v0.2.0
+    Checking allocator-api2 v0.2.21
+    Checking futures-core v0.3.32
+    Checking lock_api v0.4.14
+    Checking base64 v0.22.1
+    Checking rustc-hash v2.1.2
+    Checking pem-rfc7468 v0.7.0
+    Checking core-foundation-sys v0.8.7
+    Checking bitflags v2.11.0
+   Compiling cpufeatures v0.2.17
+    Checking futures-sink v0.3.32
+    Checking der v0.7.10
+    Checking futures-io v0.3.32
+    Checking tracing v0.1.44
+    Checking generic-array v0.14.9
+   Compiling convert_case v0.10.0
+    Checking futures-task v0.3.32
+    Checking futures-channel v0.3.32
+    Checking slab v0.4.12
+   Compiling strsim v0.11.1
+    Checking winnow v0.7.15
+    Checking getrandom v0.2.17
+    Checking errno v0.3.14
+    Checking socket2 v0.6.3
+    Checking mio v1.2.0
+    Checking rand_core v0.6.4
+    Checking futures-util v0.3.32
+    Checking signal-hook-registry v1.4.8
+    Checking keccak v0.1.6
+   Compiling serde_json v1.0.149
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking ff v0.13.1
+    Checking crypto-bigint v0.5.5
+    Checking group v0.13.0
+    Checking zerofrom v0.1.7
+   Compiling const-hex v1.18.1
+    Checking spki v0.7.3
+    Checking digest v0.10.7
+    Checking stable_deref_trait v1.2.1
+   Compiling derive_more-impl v2.1.1
+    Checking hashbrown v0.17.0
+    Checking yoke v0.8.2
+    Checking pkcs8 v0.10.2
+    Checking zerocopy v0.8.48
+    Checking signature v2.2.0
+    Checking sha2 v0.10.9
+    Checking hmac v0.12.1
+    Checking sha3 v0.10.8
+    Checking serde v1.0.228
+    Checking hkdf v0.12.4
+    Checking rfc6979 v0.4.0
+    Checking hashbrown v0.16.1
+    Checking zerovec v0.11.6
+    Checking indexmap v2.14.0
+    Checking rustls-pki-types v1.14.0
+    Checking percent-encoding v2.3.2
+    Checking untrusted v0.9.0
+    Checking aws-lc-sys v0.39.1
+    Checking ring v0.17.14
+   Compiling darling_core v0.23.0
+    Checking bytes v1.11.1
+    Checking smallvec v1.15.1
+    Checking serdect v0.2.0
+    Checking either v1.15.0
+    Checking alloy-sol-type-parser v1.5.7
+    Checking tower-service v0.3.3
+    Checking parking_lot_core v0.9.12
+    Checking aws-lc-rs v1.16.2
+    Checking sec1 v0.7.3
+    Checking alloy-rlp v0.3.15
+    Checking http v1.4.0
+    Checking tinystr v0.8.3
+    Checking parking_lot v0.12.5
+    Checking ruint v1.17.2
+    Checking elliptic-curve v0.13.8
+    Checking httparse v1.10.1
+    Checking writeable v0.6.3
+    Checking litemap v0.8.2
+    Checking ecdsa v0.16.9
+    Checking tokio v1.51.1
+    Checking libm v0.2.16
+    Checking potential_utf v0.1.5
+    Checking zerotrie v0.2.4
+    Checking utf8_iter v1.0.4
+    Checking icu_locale_core v2.2.0
+    Checking num_cpus v1.17.0
+    Checking http-body v1.0.1
+    Checking k256 v0.13.4
+    Checking icu_normalizer_data v2.2.0
+    Checking icu_collections v2.2.0
+    Checking threadpool v1.8.1
+    Checking icu_properties_data v2.2.0
+    Checking getrandom v0.3.4
+    Checking form_urlencoded v1.2.2
+    Checking rustls-webpki v0.103.11
+    Checking aho-corasick v1.1.4
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking regex-syntax v0.8.10
+    Checking crc-catalog v2.4.0
+    Checking blst v0.3.16
+    Checking crc v3.4.0
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking httpdate v1.0.3
+    Checking try-lock v0.2.5
+    Checking atomic-waker v1.1.2
+    Checking fnv v1.0.7
+    Checking rustls v0.23.38
+    Checking hex v0.4.3
+    Checking num-traits v0.2.19
+    Checking want v0.3.1
+    Checking security-framework v3.7.0
+    Checking icu_provider v2.2.0
+    Checking system-configuration-sys v0.6.0
+    Checking rand_core v0.9.5
+    Checking nybbles v0.4.8
+    Checking itertools v0.14.0
+    Checking ppv-lite86 v0.2.21
+    Checking core-foundation v0.9.4
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking c-kzg v2.1.7
+    Checking webpki-roots v1.0.6
+    Checking ipnet v2.12.0
+    Checking rand_chacha v0.9.0
+    Checking system-configuration v0.7.0
+    Checking getrandom v0.4.2
+    Checking http-body-util v0.1.3
+    Checking rand v0.9.3
+    Checking mime v0.3.17
+   Compiling unicase v2.9.0
+    Checking crossbeam-utils v0.8.21
+    Checking futures-executor v0.3.32
+    Checking sha1 v0.10.6
+    Checking data-encoding v2.10.0
+    Checking futures-utils-wasm v0.1.0
+    Checking futures v0.3.32
+    Checking regex-automata v0.4.14
+   Compiling mime_guess v2.0.5
+    Checking utf-8 v0.7.6
+    Checking rustls-native-certs v0.8.3
+    Checking http-range-header v0.4.2
+    Checking idna_adapter v1.2.1
+    Checking iri-string v0.7.12
+    Checking curve25519-dalek v4.1.3
+    Checking webpki-roots v0.26.11
+    Checking idna v1.1.0
+    Checking ed25519 v2.2.3
+    Checking iana-time-zone v0.1.65
+    Checking ryu v1.0.23
+    Checking uuid v1.23.0
+    Checking rand_chacha v0.3.1
+    Checking chrono v0.4.44
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking bimap v0.6.3
+    Checking url v2.5.8
+    Checking toml_write v0.1.2
+    Checking pin-project v1.1.11
+    Checking rand v0.8.5
+    Checking constant_time_eq v0.4.2
+    Checking toml_edit v0.22.27
+    Checking arrayref v0.3.9
+    Checking ed25519-dalek v2.2.0
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking blake3 v1.8.4
+    Checking rustix v1.1.4
+    Checking fastrand v2.4.1
+    Checking hashbrown v0.14.5
+    Checking num_enum v0.7.6
+    Checking strum v0.27.2
+    Checking serde_urlencoded v0.7.1
+    Checking async-stream v0.3.6
+    Checking lru v0.16.3
+    Checking encoding_rs v0.8.35
+    Checking anyhow v1.0.102
+    Checking spin v0.9.8
+    Checking web-time v1.1.0
+    Checking equator v0.4.2
+    Checking portable-atomic v1.13.1
+    Checking dashmap v6.1.0
+    Checking lazy_static v1.5.0
+    Checking tokio-util v0.7.18
+    Checking interprocess v2.4.0
+    Checking quanta v0.12.6
+    Checking spinning_top v0.3.0
+    Checking futures-timer v3.0.3
+    Checking nonzero_ext v0.3.0
+    Checking aligned-vec v0.6.4
+    Checking generator v0.8.8
+    Checking ordered-float v5.3.0
+   Compiling darling_core v0.20.11
+    Checking sorted-vec v0.8.10
+    Checking governor v0.10.4
+    Checking divrem v1.0.0
+    Checking tempfile v3.27.0
+    Checking tokio-rustls v0.26.4
+    Checking tungstenite v0.28.0
+    Checking rustls-platform-verifier v0.6.2
+    Checking cmov v0.5.3
+    Checking tower v0.5.3
+    Checking h2 v0.4.13
+    Checking tokio-stream v0.1.18
+    Checking toml v0.8.23
+    Checking native-tls v0.2.18
+    Checking az v1.3.0
+    Checking array-init v2.1.0
+    Checking num-integer v0.1.46
+    Checking regex v1.12.3
+    Checking bstr v1.12.1
+    Checking minimal-lexical v0.2.1
+    Checking crossbeam-epoch v0.9.18
+    Checking tokio-tungstenite v0.28.0
+    Checking tokio-native-tls v0.3.1
+    Checking bit-vec v0.8.0
+   Compiling time-core v0.1.8
+    Checking nom v7.1.3
+    Checking powerfmt v0.2.0
+    Checking tower-http v0.6.8
+   Compiling num-conv v0.2.1
+    Checking utf8parse v0.2.2
+    Checking deranged v0.5.8
+    Checking bit-set v0.8.0
+    Checking crossbeam-deque v0.8.6
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking anstyle-parse v1.0.0
+    Checking globset v0.4.18
+    Checking anstyle v1.0.14
+    Checking kiddo v5.3.0
+   Compiling time-macros v0.2.27
+    Checking anstyle-query v1.1.5
+    Checking colorchoice v1.0.5
+    Checking same-file v1.0.6
+    Checking is_terminal_polyfill v1.70.2
+    Checking rayon-core v1.13.0
+    Checking num-bigint v0.4.6
+    Checking num-iter v0.1.45
+    Checking walkdir v2.5.0
+    Checking primeorder v0.13.6
+    Checking serde_path_to_error v0.1.20
+    Checking anstream v1.0.0
+    Checking clap_lex v1.1.0
+    Checking num-bigint-dig v0.8.6
+    Checking rayon v1.11.0
+    Checking matchers v0.2.0
+    Checking sharded-slab v0.1.7
+   Compiling cargo_metadata v0.23.1
+    Checking clap_builder v4.6.0
+    Checking axum-core v0.5.6
+    Checking castaway v0.2.4
+    Checking tracing-serde v0.2.0
+    Checking pkcs1 v0.7.5
+    Checking pem v3.0.6
+    Checking tracing-log v0.2.0
+    Checking thread_local v1.1.9
+    Checking nu-ansi-term v0.50.3
+    Checking static_assertions v1.1.0
+    Checking base64 v0.13.1
+    Checking hyper v1.9.0
+    Checking matchit v0.8.4
+    Checking tracing-subscriber v0.3.23
+    Checking rayon-cond v0.4.0
+    Checking compact_str v0.9.0
+    Checking macro_rules_attribute v0.2.2
+    Checking monostate v0.1.18
+    Checking clap v4.6.0
+    Checking thiserror v1.0.69
+    Checking rsa v0.9.10
+    Checking spm_precompiled v0.1.4
+   Compiling rust-embed-utils v8.11.0
+    Checking p256 v0.13.2
+    Checking p384 v0.13.1
+    Checking ahash v0.8.12
+    Checking esaxx-rs v0.1.10
+    Checking cron v0.12.1
+    Checking fancy-regex v0.14.0
+    Checking fancy-regex v0.17.0
+    Checking tungstenite v0.26.2
+    Checking unicode-normalization-alignments v0.1.12
+    Checking dary_heap v0.3.8
+    Checking fsevent-sys v4.1.0
+    Checking notify-types v2.1.0
+    Checking hyper-util v0.1.20
+    Checking rustc-hash v1.1.0
+    Checking time v0.3.47
+    Checking option-ext v0.2.0
+    Checking unicode_categories v0.1.1
+    Checking unsafe-libyaml v0.2.11
+    Checking tiktoken-rs v0.11.0
+    Checking dirs-sys v0.5.0
+    Checking notify v8.2.0
+    Checking snafu v0.8.9
+    Checking tokio-tungstenite v0.26.2
+   Compiling rust-embed-impl v8.11.0
+    Checking nix v0.29.0
+    Checking nix v0.28.0
+    Checking filedescriptor v0.8.3
+    Checking serde_yaml_ng v0.10.0
+    Checking rustix v0.38.44
+    Checking arc-swap v1.9.1
+    Checking serial2 v0.2.36
+    Checking secrecy v0.10.3
+    Checking shell-words v1.1.1
+    Checking downcast-rs v1.2.1
+   Compiling roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve)
+    Checking utoipa v5.4.0
+    Checking hyper-rustls v0.27.8
+    Checking hyper-tls v0.6.0
+    Checking axum v0.8.8
+error: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: `-D missing-docs` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(missing_docs)]`
+
+error: could not compile `roko-serve` (build script) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+
+codex
+The required clippy command failed before reaching the route code because `roko-serve/build.rs` has a crate-level `missing_docs` warning promoted to an error by `-D warnings`. That file is outside this batch’s write scope, so I’m leaving it untouched and checking the final diff/status now.
+exec
+/bin/zsh -lc "grep -q '#\\[cfg(test)\\]' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn create_and_retrieve_share' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn retrieve_share_renders_html' crates/roko-serve/src/routes/shared_runs.rs && grep -q 'fn unknown_share_returns_none' crates/roko-serve/src/routes/shared_runs.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'git diff --stat' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ crates/roko-serve/src/routes/shared_runs.rs | 96 +++++++++++++++++++++++++++++
+ 1 file changed, 96 insertions(+)
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-serve/src/routes/shared_runs.rs
+
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+codex
+Implemented the three tests at [shared_runs.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/shared_runs.rs:334).
+
+Verification:
+- Presence greps: passed
+- `cargo test -p roko-serve shared_runs`: passed, 3 tests green
+- `cargo clippy -p roko-serve --no-deps -- -D warnings`: failed on existing `crates/roko-serve/build.rs` missing crate docs, outside this batch’s write scope
+
+Only `crates/roko-serve/src/routes/shared_runs.rs` is modified.
+diff --git a/crates/roko-serve/src/routes/shared_runs.rs b/crates/roko-serve/src/routes/shared_runs.rs
+index 657c6a92683e1e514fe29d3dfd31a76ab13f2289..dd5287e8ba9b4d46720e96658c8e6011f8f791ad
+--- a/crates/roko-serve/src/routes/shared_runs.rs
++++ b/crates/roko-serve/src/routes/shared_runs.rs
+@@ -331,3 +331,99 @@
+         .route("/api/shared/{token}", axum::routing::get(get_shared_run))
+         .route("/runs/{id}", axum::routing::get(get_run_html))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_and_retrieve_share() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let transcript = RunTranscript {
++            id: "test_run_abc123".to_string(),
++            agent: "implementer".to_string(),
++            role: "implementer".to_string(),
++            prompt: "fix the bug".to_string(),
++            success: true,
++            gates: vec![
++                ("compile".to_string(), true),
++                ("test".to_string(), true),
++            ],
++            output: Some("Fixed the null pointer dereference.".to_string()),
++            cost_usd: Some(0.0042),
++            input_tokens: Some(1500),
++            output_tokens: Some(350),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(3.2),
++            episode_id: Some("ep_001".to_string()),
++            timestamp: "2026-04-28T12:00:00Z".to_string(),
++        };
++
++        let json = serde_json::to_string(&transcript).unwrap();
++        let path = shared_dir.join("test_run_abc123.json");
++        std::fs::write(&path, &json).unwrap();
++
++        let loaded: RunTranscript =
++            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
++
++        assert_eq!(loaded.id, "test_run_abc123");
++        assert_eq!(loaded.agent, "implementer");
++        assert!(loaded.success);
++        assert_eq!(loaded.gates.len(), 2);
++        assert_eq!(
++            loaded.output.as_deref(),
++            Some("Fixed the null pointer dereference.")
++        );
++        assert!((loaded.cost_usd.unwrap() - 0.0042).abs() < f64::EPSILON);
++    }
++
++    #[test]
++    fn retrieve_share_renders_html() {
++        let transcript = RunTranscript {
++            id: "run_html_test".to_string(),
++            agent: "reviewer".to_string(),
++            role: "reviewer".to_string(),
++            prompt: "review the changes".to_string(),
++            success: false,
++            gates: vec![("clippy".to_string(), false)],
++            output: Some("Found 3 lint warnings.".to_string()),
++            cost_usd: Some(0.0018),
++            input_tokens: Some(800),
++            output_tokens: Some(200),
++            model: Some("claude-sonnet-4-20250514".to_string()),
++            duration_s: Some(1.5),
++            episode_id: Some("ep_002".to_string()),
++            timestamp: "2026-04-28T13:00:00Z".to_string(),
++        };
++
++        let html = render_html(&transcript);
++
++        assert!(html.contains("<!DOCTYPE html>"));
++        assert!(html.contains("run_html_test"));
++        assert!(html.contains("reviewer"));
++        assert!(html.contains("review the changes"));
++        assert!(html.contains("clippy"));
++        assert!(html.contains("Found 3 lint warnings."));
++        assert!(html.contains("failed"));
++    }
++
++    #[test]
++    fn unknown_share_returns_none() {
++        let dir = tempfile::tempdir().unwrap();
++        let shared_dir = dir.path().join(".roko").join("shared");
++        std::fs::create_dir_all(&shared_dir).unwrap();
++
++        let path = shared_dir.join("nonexistent_run.json");
++        let data = std::fs::read_to_string(path);
++        assert!(data.is_err());
++
++        let bad_path = shared_dir.join("bad_run.json");
++        std::fs::write(&bad_path, "not valid json").unwrap();
++        let result: Result<RunTranscript, _> =
++            serde_json::from_str(&std::fs::read_to_string(&bad_path).unwrap());
++        assert!(result.is_err());
++    }
++}
+
+2026-04-28T13:02:53.734251Z ERROR codex_core::session: failed to record rollout items: thread 019dd428-662c-7711-aeda-6ce3ce14608c not found
+tokens used
+83,204
+Implemented the three tests at [shared_runs.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/shared_runs.rs:334).
+
+Verification:
+- Presence greps: passed
+- `cargo test -p roko-serve shared_runs`: passed, 3 tests green
+- `cargo clippy -p roko-serve --no-deps -- -D warnings`: failed on existing `crates/roko-serve/build.rs` missing crate docs, outside this batch’s write scope
+
+Only `crates/roko-serve/src/routes/shared_runs.rs` is modified.
+
+=== Finished: 2026-04-28T15:02:53+02:00 ===
+=== Duration: 7m 43s ===
+=== Exit code: 0 ===
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared cargo check -p roko-serve
+    Checking derive_more v2.1.1
+   Compiling darling_macro v0.23.0
+    Checking reqwest v0.13.2
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking reqwest v0.12.28
+   Compiling darling_macro v0.20.11
+    Checking simple_asn1 v0.6.4
+   Compiling octocrab v0.49.7
+    Checking agent-relay v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/apps/agent-relay)
+    Checking hyper-timeout v0.5.2
+warning: missing documentation for the crate
+  --> crates/roko-serve/build.rs:1:1
+   |
+ 1 | / use std::env;
+ 2 | | use std::path::Path;
+ 3 | | use std::process::Command;
+...  |
+55 | |     println!("cargo:rerun-if-changed=../../demo/demo-app/tsconfig.json");
+56 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-docs`
+
+warning: `roko-serve` (build script) generated 1 warning
+    Checking portable-pty v0.9.0
+    Checking gethostname v0.5.0
+    Checking rust-embed v8.11.0
+    Checking dirs v6.0.0
+    Checking jsonwebtoken v10.3.0
+    Checking jsonwebtoken v9.3.1
+    Checking alloy-primitives v1.5.7
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking alloy-json-abi v1.5.7
+    Checking alloy-eip7702 v0.6.3
+    Checking alloy-eip2930 v0.2.3
+    Checking alloy-serde v1.8.3
+    Checking alloy-eip2124 v0.2.0
+    Checking alloy-eip7928 v0.3.3
+    Checking alloy-trie v0.9.5
+    Checking alloy-signer v1.8.3
+    Checking alloy-chains v0.2.33
+   Compiling darling v0.20.11
+   Compiling darling v0.23.0
+   Compiling derive_builder_core v0.20.2
+   Compiling validator_derive v0.20.0
+   Compiling serde_with_macros v3.18.0
+   Compiling alloy-tx-macros v1.8.3
+   Compiling alloy-sol-macro-input v1.5.7
+   Compiling alloy-sol-macro-expander v1.5.7
+    Checking serde_with v3.18.0
+   Compiling derive_builder_macro v0.20.2
+    Checking alloy-eips v1.8.3
+    Checking alloy-rpc-types-debug v1.8.3
+    Checking validator v0.20.0
+    Checking alloy-consensus v1.8.3
+    Checking derive_builder v0.20.2
+    Checking tokenizers v0.22.2
+   Compiling alloy-sol-macro v1.5.7
+    Checking alloy-network-primitives v1.8.3
+    Checking alloy-consensus-any v1.8.3
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-daimon)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Checking roko-plugin v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-plugin)
+    Checking alloy-sol-types v1.5.7
+    Checking alloy-json-rpc v1.8.3
+    Checking alloy-rpc-types-eth v1.8.3
+    Checking alloy-dyn-abi v1.5.7
+    Checking alloy-transport v1.8.3
+    Checking alloy-core v1.5.7
+    Checking alloy-pubsub v1.8.3
+    Checking alloy-transport-http v1.8.3
+    Checking alloy-transport-ipc v1.8.3
+    Checking alloy-transport-ws v1.8.3
+    Checking alloy-rpc-client v1.8.3
+    Checking alloy-rpc-types-any v1.8.3
+    Checking alloy-rpc-types-anvil v1.8.3
+    Checking alloy-rpc-types-txpool v1.8.3
+    Checking alloy-rpc-types-trace v1.8.3
+    Checking alloy-network v1.8.3
+    Checking alloy-signer-local v1.8.3
+    Checking alloy-provider v1.8.3
+    Checking alloy-rpc-types v1.8.3
+    Checking alloy-contract v1.8.3
+    Checking alloy v1.8.3
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Checking roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn)
+    Checking roko-gate v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-gate)
+    Checking roko-neuro v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-neuro)
+    Checking roko-conductor v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-conductor)
+    Checking roko-orchestrator v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-orchestrator)
+    Checking roko-agent-server v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent-server)
+    Checking roko-compose v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose)
+    Checking roko-dreams v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-dreams)
+    Checking roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 49.06s

@@ -1,0 +1,3646 @@
+=== Batch: T02 (Integration test: WorkflowEngine standard with gate) ===
+=== Started: 2026-04-28T09:03:52+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/T02/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/T02.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd2e6-c56c-7602-9489-280ce05e89f8
+--------
+user
+# Convergence Batch T02 — Integration test: WorkflowEngine standard with gate
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+# T02: Integration test — WorkflowEngine standard workflow with gate
+
+## Write Scope
+
+Add tests to the **bottom** of:
+
+```
+crates/roko-runtime/src/workflow_engine.rs
+```
+
+Extend the existing `#[cfg(test)] mod tests { ... }` block. This prompt builds
+on top of whatever mocks T01 introduced; reuse them rather than redefining.
+
+## Dependencies
+
+Same as T01. If T01 has not been applied yet, define the four mock structs
+(`MockModelCaller`, `MockPromptAssembler`, `MockFeedbackSink`, `MockGateRunner`)
+as part of this batch.
+
+For this test the `MockGateRunner` needs a variant that returns a single passing
+verdict so the gate pipeline continues to the review phase. If T01's
+`MockGateRunner` returns an empty verdict list that is fine — empty means all
+passed and the logic is identical.
+
+## DO NOT
+
+- Do not modify `pipeline_state.rs` or any other file.
+- Do not introduce real I/O, real processes, or real LLM calls.
+- Do not add new crate dependencies.
+- The review phase (`SpawnReviewer`) must be handled by `MockModelCaller` — the
+  engine calls `spawn_agent("reviewer", ...)` which internally calls
+  `model_caller.call()`. The mock's single `Ok` response is sufficient; the
+  engine maps `AgentCompleted` back to `ReviewApproved` via `reviewer_input()`.
+
+## Existing Code Context
+
+```rust
+// crates/roko-runtime/src/workflow_engine.rs (abridged)
+
+// Standard workflow phases (from pipeline_state.rs):
+// Pending -> Implementing -> Gating -> Reviewing -> Committing -> Complete
+//
+// WorkflowConfig::standard() produces:
+//   WorkflowConfig { has_strategy: false, has_review: true,
+//                    max_iterations: 2, max_autofix_attempts: 2 }
+//
+// The engine dispatches:
+//   PipelineOutput::SpawnImplementer  -> driver.spawn_agent("implementer", ...) -> ModelCaller::call()
+//   PipelineOutput::RunGates          -> driver.run_gates()                     -> GateRunner::run_gates()
+//   PipelineOutput::SpawnReviewer     -> driver.spawn_agent("reviewer", ...)    -> ModelCaller::call()
+//   PipelineOutput::Commit            -> driver.commit()  (runs `git` — SKIP with a real git repo)
+//
+// NOTE: driver.commit() calls `git add -A` and `git commit` in the workdir.
+// When workdir is "." inside a test the commit will fail with
+// "nothing to commit" which returns PipelineInput::CommitDone { hash: "noop" }
+// — that is fine; the state machine still transitions to Complete.
+
+fn reviewer_input(input: PipelineInput) -> PipelineInput {
+    match input {
+        PipelineInput::AgentCompleted { output, .. } => {
+            PipelineInput::ReviewApproved { summary: output }
+        }
+        input => input,
+    }
+}
+```
+
+Key facts:
+- `GateReport { verdicts: vec![] }` means all gates passed (no failures).
+- Returning a single `GateVerdict { gate_name: "compile".into(), passed: true,
+  output: "".into(), duration_ms: 0 }` is also acceptable and makes the test
+  more explicit.
+- After gates pass, because `has_review: true`, the engine spawns a reviewer.
+  `MockModelCaller::call()` returns the same canned response for all roles.
+  The `reviewer_input()` adapter converts `AgentCompleted` to `ReviewApproved`.
+- After review approves, `Commit` is requested. The `driver.commit()` method
+  runs real `git` commands but handles "nothing to commit" gracefully by
+  returning `CommitDone { hash: "noop" }`.
+
+## Task
+
+Implement two tests inside the existing `mod tests` block:
+
+### `workflow_engine_standard_passes_through_review`
+
+1. Reuse or define the four mock service structs.
+2. Build `EffectServices` and `WorkflowRunConfig` with
+   `workflow: WorkflowConfig::standard()`.
+3. Call `engine.run(config).await`.
+4. Assert:
+   - `result.is_ok()`.
+   - `result.outcome` matches `WorkflowOutcome::Success { .. }`.
+   - `result.iterations == 1` (gates passed first time, no replan needed).
+
+### `workflow_engine_standard_gate_pass_triggers_review_phase`
+
+Same setup. Attach an event consumer that records `PhaseTransition` events.
+After the run, assert the collected transitions include both
+`from: "implementing"` -> `to: "gating"` and `from: "gating"` -> `to: "reviewing"`.
+
+Hint: filter the collected events for `WorkflowEvent::PhaseTransition { from, to, .. }`
+and check that both expected transitions appear (order does not need to be
+contiguous, just present).
+
+## Done Criteria
+
+- `cargo test -p roko-runtime workflow_engine_standard` passes.
+- No new warnings from `cargo clippy -p roko-runtime`.
+- Tests live in the existing `mod tests` block inside `workflow_engine.rs`.
+- No other files are modified.
+
+codex
+I’ll add only the requested integration-style tests in `workflow_engine.rs`, first checking the existing test helpers so I can reuse them instead of redefining mocks.
+exec
+/bin/zsh -lc "sed -n '1,260p' crates/roko-runtime/src/workflow_engine.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! WorkflowEngine -- top-level workflow execution facade.
+//!
+//! Ties together `PipelineStateV2` (decisions) and `EffectDriver` (effects)
+//! into a run loop. This is the shared entry point for CLI, ACP, and HTTP.
+//!
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use roko_core::RuntimeEvent;
+use roko_core::foundation::EventConsumer;
+
+use crate::cancel::CancelToken;
+use crate::effect_driver::{EffectDriver, EffectServices, Result};
+use crate::event_bus::emit_runtime_event;
+pub use crate::pipeline_state::WorkflowOutcome;
+use crate::pipeline_state::{
+    Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig,
+};
+
+/// Configuration for a workflow run.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunConfig {
+    /// User prompt.
+    pub prompt: String,
+    /// Working directory.
+    pub workdir: PathBuf,
+    /// Workflow configuration (express/standard/full).
+    pub workflow: WorkflowConfig,
+    /// Which gates to run.
+    pub enabled_gates: Vec<String>,
+    /// Commit message prefix.
+    pub commit_prefix: Option<String>,
+}
+
+/// Result of a workflow run.
+#[derive(Debug, Clone)]
+pub struct WorkflowResult {
+    /// Workflow run id.
+    pub run_id: String,
+    /// Final workflow outcome.
+    pub outcome: WorkflowOutcome,
+    /// Number of implementation iterations used.
+    pub iterations: u32,
+}
+
+/// The top-level workflow execution engine.
+///
+/// Usage:
+/// ```ignore
+/// let engine = WorkflowEngine::new(services);
+/// let result = engine.run(config).await?;
+/// ```
+pub struct WorkflowEngine {
+    services: EffectServices,
+    /// Optional event consumers to notify.
+    consumers: Vec<Arc<dyn EventConsumer>>,
+}
+
+impl WorkflowEngine {
+    /// Create a new `WorkflowEngine` with the given services.
+    pub fn new(services: EffectServices) -> Self {
+        Self {
+            services,
+            consumers: Vec::new(),
+        }
+    }
+
+    /// Add an event consumer that will be notified of workflow lifecycle events.
+    pub fn add_consumer(&mut self, consumer: Arc<dyn EventConsumer>) {
+        self.consumers.push(consumer);
+    }
+
+    /// Execute a workflow run.
+    ///
+    /// This is the main entry point. It:
+    /// 1. Creates a `PipelineStateV2` from the config.
+    /// 2. Creates an `EffectDriver` from the services.
+    /// 3. Runs the state machine loop: step -> execute -> feed back -> repeat.
+    /// 4. Returns the outcome.
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult> {
+        self.run_with_cancel(config, CancelToken::new()).await
+    }
+
+    /// Execute a workflow run with cooperative cancellation.
+    ///
+    /// The token is checked at the top of each iteration of the run loop. If the
+    /// token is cancelled, the pipeline transitions to `Cancelled` state and the
+    /// method returns with `WorkflowOutcome::Cancelled`. Any in-flight effect
+    /// (agent call, gate run) is awaited to completion before the cancellation
+    /// check takes effect -- this is cooperative, not preemptive.
+    ///
+    /// If `token` is already cancelled before the call, the workflow starts and
+    /// then cancels at the first iteration check.
+    pub async fn run_with_cancel(
+        &self,
+        config: WorkflowRunConfig,
+        token: CancelToken,
+    ) -> Result<WorkflowResult> {
+        let run_id = generate_run_id();
+
+        let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+
+        let driver = EffectDriver::new(
+            EffectServices {
+                model_caller: Arc::clone(&self.services.model_caller),
+                prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                feedback_sink: Arc::clone(&self.services.feedback_sink),
+                gate_runner: Arc::clone(&self.services.gate_runner),
+            },
+            run_id.clone(),
+            config.workdir.clone(),
+        );
+
+        self.emit(RuntimeEvent::WorkflowStarted {
+            run_id: run_id.clone(),
+            template: template_name(&config.workflow).to_string(),
+            prompt: config.prompt.clone(),
+        });
+
+        let mut output = pipeline.step(PipelineInput::Start);
+
+        loop {
+            if token.is_cancelled() {
+                let cancel_output = pipeline.step(PipelineInput::UserCancel);
+                if let PipelineOutput::Done { outcome } = cancel_output {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+                }
+            }
+
+            let old_phase = pipeline.phase.label();
+
+            let input = match &output {
+                PipelineOutput::SpawnStrategist { prompt } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "strategist".to_string(),
+                        model: String::new(),
+                    });
+                    strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                }
+                PipelineOutput::SpawnImplementer { prompt, context } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "implementer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("implementer", prompt, context.as_deref())
+                        .await
+                }
+                PipelineOutput::SpawnAutoFixer { error_output } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "autofix".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                        .await
+                }
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "reviewer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                        .await
+                }),
+                PipelineOutput::RunGates => {
+                    self.emit(RuntimeEvent::GateStarted {
+                        run_id: run_id.clone(),
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver.run_gates(&config.enabled_gates).await
+                }
+                PipelineOutput::Commit => {
+                    let message = commit_message(&config);
+                    driver.commit(&message).await
+                }
+                PipelineOutput::Done { outcome } => {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
+                    });
+
+                    // TODO(arch): Record final workflow feedback once the local
+                    // `FeedbackEvent` includes `WorkflowComplete`.
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome: outcome.clone(),
+                        iterations: pipeline.iteration,
+                    });
+                }
+                PipelineOutput::Halt { reason } => {
+                    let outcome = WorkflowOutcome::Halted {
+                        reason: reason.clone(),
+                    };
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+
+                    // TODO(arch): Record final workflow feedback once the local
+                    // `FeedbackEvent` includes `WorkflowComplete`.
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+                }
+            };
+
+            output = pipeline.step(input);
+            let new_phase = pipeline.phase.label();
+
+            if old_phase != new_phase {
+                self.emit(RuntimeEvent::PhaseTransition {
+                    run_id: run_id.clone(),
+                    from: old_phase.to_string(),
+                    to: new_phase.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Resume a workflow run from a checkpoint.
+    ///
+    /// Deserializes the pipeline state from `checkpoint` JSON (produced by
+    /// `PipelineStateV2::checkpoint()`) and continues the run loop from the
+    /// saved phase. If the checkpoint is in a terminal phase (`Complete`,
+    /// `Halted`, `Cancelled`), returns immediately with the terminal outcome.
+    ///
+    /// The `config` provides the working directory and enabled gates for the
+    /// resumed run. The workflow config (template, max iterations) comes from
+    /// the checkpoint itself, not from `config` -- this ensures the resumed
+    /// run uses the same settings as the original.
+    ///
+    /// Returns an error if the checkpoint JSON is malformed.
+    pub async fn resume(
+        &self,
+        config: WorkflowRunConfig,
+        checkpoint: &str,
+    ) -> Result<WorkflowResult> {
+        let pipeline = PipelineStateV2::from_checkpoint(checkpoint).map_err(|err| {
+
+exec
+/bin/zsh -lc "sed -n '260,620p' crates/roko-runtime/src/workflow_engine.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+        let pipeline = PipelineStateV2::from_checkpoint(checkpoint).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid checkpoint: {err}"),
+            )
+        })?;
+
+        if pipeline.phase.is_terminal() {
+            let outcome = match &pipeline.phase {
+                Phase::Complete => WorkflowOutcome::Success {
+                    commit_hash: pipeline.commit_hash.clone(),
+                },
+                Phase::Halted { reason } => WorkflowOutcome::Halted {
+                    reason: reason.clone(),
+                },
+                Phase::Cancelled => WorkflowOutcome::Cancelled,
+                _ => unreachable!(),
+            };
+
+            return Ok(WorkflowResult {
+                run_id: generate_run_id(),
+                outcome,
+                iterations: pipeline.iteration,
+            });
+        }
+
+        let run_id = generate_run_id();
+
+        let driver = EffectDriver::new(
+            EffectServices {
+                model_caller: Arc::clone(&self.services.model_caller),
+                prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                feedback_sink: Arc::clone(&self.services.feedback_sink),
+                gate_runner: Arc::clone(&self.services.gate_runner),
+            },
+            run_id.clone(),
+            config.workdir.clone(),
+        );
+
+        self.emit(RuntimeEvent::WorkflowStarted {
+            run_id: run_id.clone(),
+            template: "resumed".to_string(),
+            prompt: pipeline.original_prompt.clone(),
+        });
+
+        let mut pipeline = pipeline;
+        let mut output = resumed_output(&mut pipeline);
+
+        loop {
+            let old_phase = pipeline.phase.label();
+
+            let input = match &output {
+                PipelineOutput::SpawnStrategist { prompt } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "strategist".to_string(),
+                        model: String::new(),
+                    });
+                    strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                }
+                PipelineOutput::SpawnImplementer { prompt, context } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "implementer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("implementer", prompt, context.as_deref())
+                        .await
+                }
+                PipelineOutput::SpawnAutoFixer { error_output } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "autofix".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                        .await
+                }
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "reviewer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                        .await
+                }),
+                PipelineOutput::RunGates => {
+                    self.emit(RuntimeEvent::GateStarted {
+                        run_id: run_id.clone(),
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver.run_gates(&config.enabled_gates).await
+                }
+                PipelineOutput::Commit => {
+                    let message = commit_message_for(
+                        &pipeline.original_prompt,
+                        config.commit_prefix.as_deref(),
+                    );
+                    driver.commit(&message).await
+                }
+                PipelineOutput::Done { outcome } => {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
+                    });
+
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome: outcome.clone(),
+                        iterations: pipeline.iteration,
+                    });
+                }
+                PipelineOutput::Halt { reason } => {
+                    let outcome = WorkflowOutcome::Halted {
+                        reason: reason.clone(),
+                    };
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+                }
+            };
+
+            output = pipeline.step(input);
+            let new_phase = pipeline.phase.label();
+
+            if old_phase != new_phase {
+                self.emit(RuntimeEvent::PhaseTransition {
+                    run_id: run_id.clone(),
+                    from: old_phase.to_string(),
+                    to: new_phase.to_string(),
+                });
+
+                if pipeline.checkpoint().is_ok() {
+                    self.emit(RuntimeEvent::StateCheckpointed {
+                        run_id: run_id.clone(),
+                        path: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn emit(&self, event: RuntimeEvent) {
+        for consumer in &self.consumers {
+            consumer.consume(&event);
+        }
+
+        emit_runtime_event(event);
+    }
+}
+
+fn runtime_workflow_outcome(
+    outcome: &WorkflowOutcome,
+) -> roko_core::runtime_event::WorkflowOutcome {
+    // TODO(converge): Remove this adapter once PipelineStateV2 uses
+    // roko_core::runtime_event::WorkflowOutcome directly.
+    match outcome {
+        WorkflowOutcome::Success { commit_hash } => {
+            roko_core::runtime_event::WorkflowOutcome::Success {
+                commit_hash: commit_hash.clone(),
+            }
+        }
+        WorkflowOutcome::Halted { reason } => roko_core::runtime_event::WorkflowOutcome::Halted {
+            reason: reason.clone(),
+        },
+        WorkflowOutcome::Cancelled => roko_core::runtime_event::WorkflowOutcome::Cancelled,
+    }
+}
+
+fn strategy_input(input: PipelineInput) -> PipelineInput {
+    match input {
+        PipelineInput::AgentCompleted { output, .. } => {
+            PipelineInput::StrategyComplete { brief: output }
+        }
+        input => input,
+    }
+}
+
+fn reviewer_input(input: PipelineInput) -> PipelineInput {
+    match input {
+        PipelineInput::AgentCompleted { output, .. } => {
+            // TODO(arch): Replace this default approval with a structured reviewer
+            // effect outcome that can also express `ReviewRevise`.
+            PipelineInput::ReviewApproved { summary: output }
+        }
+        input => input,
+    }
+}
+
+fn resumed_output(pipeline: &mut PipelineStateV2) -> PipelineOutput {
+    match &pipeline.phase {
+        Phase::Pending => pipeline.step(PipelineInput::Start),
+        Phase::Strategizing => PipelineOutput::SpawnStrategist {
+            prompt: pipeline.original_prompt.clone(),
+        },
+        Phase::Implementing => PipelineOutput::SpawnImplementer {
+            prompt: pipeline.original_prompt.clone(),
+            context: resumed_implementer_context(pipeline),
+        },
+        Phase::Gating => PipelineOutput::RunGates,
+        Phase::AutoFixing => PipelineOutput::SpawnAutoFixer {
+            error_output: pipeline.last_gate_failure.clone().unwrap_or_default(),
+        },
+        Phase::Reviewing => PipelineOutput::SpawnReviewer { diff_context: None },
+        Phase::Committing => PipelineOutput::Commit,
+        Phase::Complete | Phase::Halted { .. } | Phase::Cancelled => PipelineOutput::Halt {
+            reason: format!("cannot resume from phase {:?}", pipeline.phase),
+        },
+    }
+}
+
+fn resumed_implementer_context(pipeline: &PipelineStateV2) -> Option<String> {
+    if !pipeline.review_findings.is_empty() {
+        let feedback = pipeline.review_findings.join("\n- ");
+        Some(format!("Review findings:\n- {feedback}"))
+    } else if let Some(gate_failure) = &pipeline.last_gate_failure {
+        Some(gate_failure.clone())
+    } else {
+        pipeline.strategist_brief.clone()
+    }
+}
+
+fn commit_message(config: &WorkflowRunConfig) -> String {
+    commit_message_for(&config.prompt, config.commit_prefix.as_deref())
+}
+
+fn commit_message_for(prompt: &str, prefix: Option<&str>) -> String {
+    let prompt = truncate(prompt, 60);
+    prefix.map_or_else(
+        || format!("feat: {prompt}"),
+        |prefix| format!("{prefix}: {prompt}"),
+    )
+}
+
+fn template_name(config: &WorkflowConfig) -> &'static str {
+    if config.has_strategy {
+        "full"
+    } else if config.has_review {
+        "standard"
+    } else {
+        "express"
+    }
+}
+
+fn generate_run_id() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("run_{ts:x}")
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..s.floor_char_boundary(max)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::process::Command;
+
+    use parking_lot::Mutex;
+    use roko_core::foundation::{
+        FeedbackEvent, FeedbackSink, GateConfig, GateReport, GateRunner, ModelCallRequest,
+        ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec, TokenUsage,
+    };
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("éclair", 1), "");
+        assert_eq!(truncate("éclair", 2), "é");
+    }
+
+    #[test]
+    fn commit_message_uses_prefix_when_present() {
+        let config = WorkflowRunConfig {
+            prompt: "short prompt".to_string(),
+            workdir: PathBuf::from("."),
+            workflow: WorkflowConfig::express(),
+            enabled_gates: Vec::new(),
+            commit_prefix: Some("fix".to_string()),
+        };
+
+        assert_eq!(commit_message(&config), "fix: short prompt");
+    }
+
+    struct MockModelCaller;
+
+    impl ModelCaller for MockModelCaller {
+        fn call<'life0, 'async_trait>(
+            &'life0 self,
+            _req: ModelCallRequest,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Ok(ModelCallResponse {
+                    content: "done".into(),
+                    model: "mock".into(),
+                    usage: TokenUsage::default(),
+                    stop_reason: None,
+                })
+            })
+        }
+    }
+
+    struct MockPromptAssembler;
+
+    impl PromptAssembler for MockPromptAssembler {
+        fn assemble<'life0, 'async_trait>(
+            &'life0 self,
+            _spec: PromptSpec,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok("system prompt".to_string()) })
+        }
+    }
+
+    struct MockFeedbackSink;
+
+    impl FeedbackSink for MockFeedbackSink {
+        fn record<'life0, 'async_trait>(
+            &'life0 self,
+            _event: FeedbackEvent,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+
+exec
+/bin/zsh -lc 'rg -n "mod tests|MockModelCaller|MockGateRunner|WorkflowRunConfig|PhaseTransition" crates/roko-runtime/src/workflow_engine.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+23:pub struct WorkflowRunConfig {
+81:    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult> {
+97:        config: WorkflowRunConfig,
+233:                self.emit(RuntimeEvent::PhaseTransition {
+257:        config: WorkflowRunConfig,
+402:                self.emit(RuntimeEvent::PhaseTransition {
+498:fn commit_message(config: &WorkflowRunConfig) -> String {
+537:mod tests {
+558:        let config = WorkflowRunConfig {
+569:    struct MockModelCaller;
+571:    impl ModelCaller for MockModelCaller {
+621:    struct MockGateRunner;
+623:    impl GateRunner for MockGateRunner {
+693:                .any(|event| matches!(event, RuntimeEvent::PhaseTransition { .. }))
+712:            model_caller: Arc::new(MockModelCaller),
+715:            gate_runner: Arc::new(MockGateRunner),
+719:    fn workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+721:        let config = WorkflowRunConfig {
+
+exec
+/bin/zsh -lc "sed -n '620,820p' crates/roko-runtime/src/workflow_engine.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+
+    struct MockGateRunner;
+
+    impl GateRunner for MockGateRunner {
+        fn run_gates<'life0, 'async_trait>(
+            &'life0 self,
+            _config: GateConfig,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Ok(GateReport {
+                    verdicts: Vec::new(),
+                })
+            })
+        }
+    }
+
+    struct RecordingConsumer {
+        events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    }
+
+    impl EventConsumer for RecordingConsumer {
+        fn consume(&self, event: &RuntimeEvent) {
+            self.events.lock().push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_express_completes_with_success() {
+        let (config, _tempdir) = workflow_config();
+        let engine = WorkflowEngine::new(mock_services());
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => panic!("workflow should complete successfully: {err}"),
+        };
+        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
+        assert_eq!(result.iterations, 1);
+        assert!(result.run_id.starts_with("run_"));
+    }
+
+    #[tokio::test]
+    async fn workflow_engine_express_emits_lifecycle_events() {
+        let (config, _tempdir) = workflow_config();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = WorkflowEngine::new(mock_services());
+        engine.add_consumer(Arc::new(RecordingConsumer {
+            events: Arc::clone(&events),
+        }));
+
+        let result = engine.run(config).await;
+
+        assert!(result.is_ok());
+        let events = events.lock().clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::WorkflowStarted { template, .. } if template == "express"
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::PhaseTransition { .. }))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::WorkflowCompleted {
+                        outcome: roko_core::runtime_event::WorkflowOutcome::Success { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    fn mock_services() -> EffectServices {
+        EffectServices {
+            model_caller: Arc::new(MockModelCaller),
+            prompt_assembler: Arc::new(MockPromptAssembler),
+            feedback_sink: Arc::new(MockFeedbackSink),
+            gate_runner: Arc::new(MockGateRunner),
+        }
+    }
+
+    fn workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+        let tempdir = isolated_git_workdir();
+        let config = WorkflowRunConfig {
+            prompt: "fix the bug".into(),
+            workdir: tempdir.path().to_path_buf(),
+            workflow: WorkflowConfig::express(),
+            enabled_gates: Vec::new(),
+            commit_prefix: None,
+        };
+        (config, tempdir)
+    }
+
+    fn isolated_git_workdir() -> tempfile::TempDir {
+        let tempdir = match tempfile::tempdir() {
+            Ok(tempdir) => tempdir,
+            Err(err) => panic!("create temp dir: {err}"),
+        };
+        let workdir = tempdir.path();
+
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.email", "test@example.com"]);
+        run_git(workdir, &["config", "user.name", "Roko Test"]);
+
+        if let Err(err) = std::fs::write(workdir.join("change.txt"), "change\n") {
+            panic!("write test change: {err}");
+        }
+        tempdir
+    }
+
+    fn run_git(workdir: &std::path::Path, args: &[&str]) {
+        let output = match Command::new("git").args(args).current_dir(workdir).output() {
+            Ok(output) => output,
+            Err(err) => panic!("run git command: {err}"),
+        };
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+codex
+The file already has the T01-style mocks and a recording consumer, so this is a small extension: I’m adding standard workflow configs and two tests that exercise the gate-to-review path without touching the state machine.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/workflow_engine.rs
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+codex
+The tests are in place. I’m running the targeted runtime test now, then I’ll run the requested clippy check and fix anything that surfaces.
+exec
+/bin/zsh -lc 'cargo test -p roko-runtime workflow_engine_standard' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+codex
+The workspace is compiling dependencies for the targeted test run; no test failures yet, just first-build output.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+codex
+The targeted test build has reached `roko-runtime`. It is showing pre-existing warnings in unrelated runtime files, but nothing from the new tests so far.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+ succeeded in 56477ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.0
+   Compiling getrandom v0.4.2
+   Compiling semver v1.0.28
+   Compiling zmij v1.0.21
+   Compiling shlex v1.3.0
+   Compiling rustc_version v0.4.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling parking_lot_core v0.9.12
+   Compiling autocfg v1.5.0
+   Compiling cc v1.2.60
+   Compiling hashbrown v0.17.0
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling smallvec v1.15.1
+   Compiling equivalent v1.0.2
+   Compiling generic-array v0.14.9
+   Compiling serde_json v1.0.149
+   Compiling lock_api v0.4.14
+   Compiling aho-corasick v1.1.4
+   Compiling indexmap v2.14.0
+   Compiling zeroize v1.8.2
+   Compiling regex-syntax v0.8.10
+   Compiling syn v2.0.117
+   Compiling num-traits v0.2.19
+   Compiling winnow v0.7.15
+   Compiling pin-project-lite v0.2.17
+   Compiling subtle v2.6.1
+   Compiling cfg_aliases v0.2.1
+   Compiling toml_write v0.1.2
+   Compiling core-foundation-sys v0.8.7
+   Compiling thiserror v2.0.18
+   Compiling bitflags v2.11.0
+   Compiling signature v2.2.0
+   Compiling itoa v1.0.18
+   Compiling ed25519 v2.2.3
+   Compiling errno v0.3.14
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.6
+   Compiling cpufeatures v0.2.17
+   Compiling digest v0.10.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling sha2 v0.10.9
+   Compiling parking_lot v0.12.5
+   Compiling regex-automata v0.4.14
+   Compiling iana-time-zone v0.1.65
+   Compiling uuid v1.23.0
+   Compiling nix v0.29.0
+   Compiling tracing-core v0.1.36
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling rustix v1.1.4
+   Compiling bytes v1.11.1
+   Compiling arrayvec v0.7.6
+   Compiling ed25519-dalek v2.2.0
+   Compiling fastrand v2.4.1
+   Compiling blake3 v1.8.4
+   Compiling regex v1.12.3
+   Compiling tempfile v3.27.0
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.51.1
+   Compiling tracing v0.1.44
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling chrono v0.4.44
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 55.59s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/T02/codex-attempt-1/debug/deps/roko_runtime-0c58882bc064c5a6)
+
+running 2 tests
+test workflow_engine::tests::workflow_engine_standard_passes_through_review ... ok
+test workflow_engine::tests::workflow_engine_standard_gate_pass_triggers_review_phase ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.19s
+
+     Running tests/process_supervisor.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/T02/codex-attempt-1/debug/deps/process_supervisor-201533cdae75bfaa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+codex
+The targeted tests passed. I’m running `cargo clippy -p roko-runtime` next; if it reports only unrelated existing issues, I’ll call that out clearly.
+exec
+/bin/zsh -lc 'cargo clippy -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+ succeeded in 15563ms:
+    Checking cfg-if v1.0.4
+    Checking memchr v2.8.0
+    Checking libc v0.2.185
+    Checking serde_core v1.0.228
+    Checking typenum v1.19.0
+    Checking scopeguard v1.2.0
+    Checking hashbrown v0.17.0
+    Checking equivalent v1.0.2
+    Checking smallvec v1.15.1
+    Checking zmij v1.0.21
+    Checking once_cell v1.21.4
+    Checking zeroize v1.8.2
+    Checking itoa v1.0.18
+    Checking subtle v2.6.1
+    Checking toml_write v0.1.2
+    Checking signature v2.2.0
+    Checking lock_api v0.4.14
+    Checking regex-syntax v0.8.10
+    Checking pin-project-lite v0.2.17
+    Checking winnow v0.7.15
+    Checking core-foundation-sys v0.8.7
+    Checking tracing-core v0.1.36
+    Checking num-traits v0.2.19
+    Checking ed25519 v2.2.3
+    Checking bytes v1.11.1
+    Checking arrayvec v0.7.6
+    Checking constant_time_eq v0.4.2
+    Checking iana-time-zone v0.1.65
+    Checking arrayref v0.3.9
+    Checking thiserror v2.0.18
+    Checking bitflags v2.11.0
+    Checking aho-corasick v1.1.4
+    Checking blake3 v1.8.4
+    Checking tracing v0.1.44
+    Checking indexmap v2.14.0
+    Checking generic-array v0.14.9
+    Checking errno v0.3.14
+    Checking getrandom v0.4.2
+    Checking cpufeatures v0.2.17
+    Checking parking_lot_core v0.9.12
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking nix v0.29.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking tokio v1.51.1
+    Checking curve25519-dalek v4.1.3
+    Checking sha2 v0.10.9
+    Checking regex-automata v0.4.14
+    Checking serde v1.0.228
+    Checking uuid v1.23.0
+    Checking serde_json v1.0.149
+    Checking ed25519-dalek v2.2.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking chrono v0.4.44
+    Checking toml_edit v0.22.27
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking regex v1.12.3
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: this function has too many lines (102/100)
+  --> crates/roko-runtime/src/effect_driver.rs:64:5
+   |
+64 | /     pub async fn spawn_agent(
+65 | |         &self,
+66 | |         role: &str,
+67 | |         user_prompt: &str,
+68 | |         context: Option<&str>,
+69 | |     ) -> PipelineInput {
+   | |______________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#too_many_lines
+   = note: `-W clippy::too-many-lines` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+warning: use Option::map_or instead of an if let/else
+   --> crates/roko-runtime/src/effect_driver.rs:199:17
+    |
+199 | /                 match report.first_failure() {
+200 | |                     Some(failure) => PipelineInput::GateFailed {
+201 | |                         gate: failure.gate_name.clone(),
+202 | |                         output: report.failure_summary(),
+203 | |                     },
+204 | |                     None => PipelineInput::GatesPassed,
+205 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#option_if_let_else
+    = note: `-W clippy::option-if-let-else` implied by `-W clippy::nursery`
+    = help: to override `-W clippy::nursery` add `#[allow(clippy::option_if_let_else)]`
+help: try
+    |
+199 ~                 report.first_failure().map_or(PipelineInput::GatesPassed, |failure| PipelineInput::GateFailed {
+200 +                         gate: failure.gate_name.clone(),
+201 +                         output: report.failure_summary(),
+202 +                     })
+    |
+
+warning: `match` on a boolean expression
+   --> crates/roko-runtime/src/effect_driver.rs:326:21
+    |
+326 |           let event = match verdict.passed {
+    |  _____________________^
+327 | |             true => RuntimeEvent::GatePassed {
+328 | |                 run_id: self.run_id.clone(),
+329 | |                 gate_name: verdict.gate_name.clone(),
+...   |
+337 | |             },
+338 | |         };
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#match_bool
+    = note: `-W clippy::match-bool` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::match_bool)]`
+help: consider using an `if`/`else` expression
+    |
+326 ~         let event = if verdict.passed { RuntimeEvent::GatePassed {
+327 +             run_id: self.run_id.clone(),
+328 +             gate_name: verdict.gate_name.clone(),
+329 +             duration_ms: verdict.duration_ms,
+330 +         } } else { RuntimeEvent::GateFailed {
+331 +             run_id: self.run_id.clone(),
+332 +             gate_name: verdict.gate_name.clone(),
+333 +             output: verdict.output.clone(),
+334 +             duration_ms: verdict.duration_ms,
+335 ~         } };
+    |
+
+warning: current MSRV (Minimum Supported Rust Version) is `1.85.0` but this item is stable since `1.91.0`
+   --> crates/roko-runtime/src/effect_driver.rs:363:16
+    |
+363 |         &s[..s.floor_char_boundary(max)]
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#incompatible_msrv
+    = note: `#[warn(clippy::incompatible_msrv)]` on by default
+
+warning: used `expect()` on an `Option` value
+   --> crates/roko-runtime/src/event_bus.rs:343:16
+    |
+343 |           return bus
+    |  ________________^
+344 | |             .downcast_ref::<EventBus<RuntimeEvent>>()
+345 | |             .expect("invariant: runtime event bus registry stores EventBus by TypeId");
+    | |______________________________________________________________________________________^
+    |
+    = note: if this value is `None`, it will panic
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#expect_used
+    = note: requested on the command line with `-W clippy::expect-used`
+
+warning: temporary with significant `Drop` can be early dropped
+  --> crates/roko-runtime/src/jsonl_logger.rs:39:17
+   |
+38 |       fn ensure_writer(&self) -> std::io::Result<()> {
+   |  ____________________________________________________-
+39 | |         let mut writer = self
+   | |                 ^^^^^^
+40 | |             .writer
+41 | |             .lock()
+...  |
+55 | |         Ok(())
+56 | |     }
+   | |_____- temporary `writer` is currently being dropped at the end of its contained scope
+   |
+   = note: this might lead to unnecessary resource contention
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#significant_drop_tightening
+   = note: `-W clippy::significant-drop-tightening` implied by `-W clippy::nursery`
+   = help: to override `-W clippy::nursery` add `#[allow(clippy::significant_drop_tightening)]`
+help: drop the temporary after the end of its last usage
+   |
+52 ~             *writer = Some(std::io::BufWriter::new(file));
+53 +             drop(writer);
+   |
+
+warning: used `expect()` on a `Result` value
+  --> crates/roko-runtime/src/jsonl_logger.rs:39:26
+   |
+39 |           let mut writer = self
+   |  __________________________^
+40 | |             .writer
+41 | |             .lock()
+42 | |             .expect("jsonl logger writer lock poisoned");
+   | |________________________________________________________^
+   |
+   = note: if this value is an `Err`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#expect_used
+
+warning: used `expect()` on a `Result` value
+  --> crates/roko-runtime/src/jsonl_logger.rs:70:26
+   |
+70 |           let mut writer = self
+   |  __________________________^
+71 | |             .writer
+72 | |             .lock()
+73 | |             .expect("jsonl logger writer lock poisoned");
+   | |________________________________________________________^
+   |
+   = note: if this value is an `Err`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#expect_used
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:404:13
+    |
+404 |             Phase::Complete | Phase::Halted { .. } | Phase::Cancelled
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+    = note: `-W clippy::use-self` implied by `-W clippy::nursery`
+    = help: to override `-W clippy::nursery` add `#[allow(clippy::use_self)]`
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:404:31
+    |
+404 |             Phase::Complete | Phase::Halted { .. } | Phase::Cancelled
+    |                               ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:404:54
+    |
+404 |             Phase::Complete | Phase::Halted { .. } | Phase::Cancelled
+    |                                                      ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:411:13
+    |
+411 |             Phase::Pending => "pending",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:412:13
+    |
+412 |             Phase::Strategizing => "strategizing",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:413:13
+    |
+413 |             Phase::Implementing => "implementing",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:414:13
+    |
+414 |             Phase::Gating => "gating",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:415:13
+    |
+415 |             Phase::AutoFixing => "auto_fixing",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:416:13
+    |
+416 |             Phase::Reviewing => "reviewing",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:417:13
+    |
+417 |             Phase::Committing => "committing",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:418:13
+    |
+418 |             Phase::Complete => "complete",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:419:13
+    |
+419 |             Phase::Halted { .. } => "halted",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: unnecessary structure name repetition
+   --> crates/roko-runtime/src/pipeline_state.rs:420:13
+    |
+420 |             Phase::Cancelled => "cancelled",
+    |             ^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#use_self
+
+warning: this function has too many lines (162/100)
+   --> crates/roko-runtime/src/pipeline_state.rs:594:5
+    |
+594 |     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#too_many_lines
+
+warning: variables can be used directly in the `format!` string
+   --> crates/roko-runtime/src/pipeline_state.rs:672:39
+    |
+672 |                           context: Some(format!(
+    |  _______________________________________^
+673 | |                             "Previous attempt failed gate '{}'. Error:\n{}",
+674 | |                             gate, output
+675 | |                         )),
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#uninlined_format_args
+    = note: `-W clippy::uninlined-format-args` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::uninlined_format_args)]`
+
+warning: this function has too many lines (127/100)
+  --> crates/roko-runtime/src/workflow_engine.rs:95:5
+   |
+95 | /     pub async fn run_with_cancel(
+96 | |         &self,
+97 | |         config: WorkflowRunConfig,
+98 | |         token: CancelToken,
+99 | |     ) -> Result<WorkflowResult> {
+   | |_______________________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#too_many_lines
+
+warning: this function has too many lines (145/100)
+   --> crates/roko-runtime/src/workflow_engine.rs:255:5
+    |
+255 | /     pub async fn resume(
+256 | |         &self,
+257 | |         config: WorkflowRunConfig,
+258 | |         checkpoint: &str,
+259 | |     ) -> Result<WorkflowResult> {
+    | |_______________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#too_many_lines
+
+warning: current MSRV (Minimum Supported Rust Version) is `1.85.0` but this item is stable since `1.91.0`
+   --> crates/roko-runtime/src/workflow_engine.rs:532:16
+    |
+532 |         &s[..s.floor_char_boundary(max)]
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#incompatible_msrv
+
+warning: `roko-runtime` (lib) generated 26 warnings (run `cargo clippy --fix --lib -p roko-runtime -- ` to apply 15 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 15.49s
+
+codex
+Clippy is running and reporting existing warnings in `effect_driver.rs`; these are outside the allowed write scope. I’m waiting for completion to confirm there are no warnings tied to the new tests.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/workflow_engine.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc5146..ec320660 100644
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@ mod tests {
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-runtime/src/workflow_engine.rs
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+exec
+/bin/zsh -lc "nl -ba crates/roko-runtime/src/workflow_engine.rs | sed -n '700,790p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+   700	                    RuntimeEvent::WorkflowCompleted {
+   701	                        outcome: roko_core::runtime_event::WorkflowOutcome::Success { .. },
+   702	                        ..
+   703	                    }
+   704	                ))
+   705	                .count(),
+   706	            1
+   707	        );
+   708	    }
+   709	
+   710	    #[tokio::test]
+   711	    async fn workflow_engine_standard_passes_through_review() {
+   712	        let (config, _tempdir) = standard_workflow_config();
+   713	        let engine = WorkflowEngine::new(mock_services());
+   714	
+   715	        let result = engine.run(config).await;
+   716	
+   717	        assert!(result.is_ok());
+   718	        let result = match result {
+   719	            Ok(result) => result,
+   720	            Err(err) => panic!("workflow should complete successfully: {err}"),
+   721	        };
+   722	        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
+   723	        assert_eq!(result.iterations, 1);
+   724	    }
+   725	
+   726	    #[tokio::test]
+   727	    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
+   728	        let (config, _tempdir) = standard_workflow_config();
+   729	        let events = Arc::new(Mutex::new(Vec::new()));
+   730	        let mut engine = WorkflowEngine::new(mock_services());
+   731	        engine.add_consumer(Arc::new(RecordingConsumer {
+   732	            events: Arc::clone(&events),
+   733	        }));
+   734	
+   735	        let result = engine.run(config).await;
+   736	
+   737	        assert!(result.is_ok());
+   738	        let events = events.lock().clone();
+   739	        assert!(events.iter().any(|event| matches!(
+   740	            event,
+   741	            RuntimeEvent::PhaseTransition { from, to, .. }
+   742	                if from == "implementing" && to == "gating"
+   743	        )));
+   744	        assert!(events.iter().any(|event| matches!(
+   745	            event,
+   746	            RuntimeEvent::PhaseTransition { from, to, .. }
+   747	                if from == "gating" && to == "reviewing"
+   748	        )));
+   749	    }
+   750	
+   751	    fn mock_services() -> EffectServices {
+   752	        EffectServices {
+   753	            model_caller: Arc::new(MockModelCaller),
+   754	            prompt_assembler: Arc::new(MockPromptAssembler),
+   755	            feedback_sink: Arc::new(MockFeedbackSink),
+   756	            gate_runner: Arc::new(MockGateRunner),
+   757	        }
+   758	    }
+   759	
+   760	    fn workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+   761	        let tempdir = isolated_git_workdir();
+   762	        let config = WorkflowRunConfig {
+   763	            prompt: "fix the bug".into(),
+   764	            workdir: tempdir.path().to_path_buf(),
+   765	            workflow: WorkflowConfig::express(),
+   766	            enabled_gates: Vec::new(),
+   767	            commit_prefix: None,
+   768	        };
+   769	        (config, tempdir)
+   770	    }
+   771	
+   772	    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
+   773	        let tempdir = isolated_git_workdir();
+   774	        let config = WorkflowRunConfig {
+   775	            prompt: "fix the bug".into(),
+   776	            workdir: tempdir.path().to_path_buf(),
+   777	            workflow: WorkflowConfig::standard(),
+   778	            enabled_gates: vec!["compile".to_string()],
+   779	            commit_prefix: None,
+   780	        };
+   781	        (config, tempdir)
+   782	    }
+   783	
+   784	    fn isolated_git_workdir() -> tempfile::TempDir {
+   785	        let tempdir = match tempfile::tempdir() {
+   786	            Ok(tempdir) => tempdir,
+   787	            Err(err) => panic!("create temp dir: {err}"),
+   788	        };
+   789	        let workdir = tempdir.path();
+   790	
+
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+codex
+Implemented the two standard workflow tests in [workflow_engine.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/workflow_engine.rs:710), reusing the existing mocks and recording consumer.
+
+Verification:
+- `cargo test -p roko-runtime workflow_engine_standard` passed: 2 tests passed.
+- `cargo clippy -p roko-runtime` completed successfully. It still reports existing warnings in unrelated/pre-existing runtime code, but nothing from the new test additions.
+
+Only modified `crates/roko-runtime/src/workflow_engine.rs`.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index 89cc51461aae1179d1c4fe82da8b2172e50c9d2f..ec320660dc1218070920c0008282cbc63bc9e55a
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -707,6 +707,47 @@
+         );
+     }
+ 
++    #[tokio::test]
++    async fn workflow_engine_standard_passes_through_review() {
++        let (config, _tempdir) = standard_workflow_config();
++        let engine = WorkflowEngine::new(mock_services());
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let result = match result {
++            Ok(result) => result,
++            Err(err) => panic!("workflow should complete successfully: {err}"),
++        };
++        assert!(matches!(result.outcome, WorkflowOutcome::Success { .. }));
++        assert_eq!(result.iterations, 1);
++    }
++
++    #[tokio::test]
++    async fn workflow_engine_standard_gate_pass_triggers_review_phase() {
++        let (config, _tempdir) = standard_workflow_config();
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let mut engine = WorkflowEngine::new(mock_services());
++        engine.add_consumer(Arc::new(RecordingConsumer {
++            events: Arc::clone(&events),
++        }));
++
++        let result = engine.run(config).await;
++
++        assert!(result.is_ok());
++        let events = events.lock().clone();
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "implementing" && to == "gating"
++        )));
++        assert!(events.iter().any(|event| matches!(
++            event,
++            RuntimeEvent::PhaseTransition { from, to, .. }
++                if from == "gating" && to == "reviewing"
++        )));
++    }
++
+     fn mock_services() -> EffectServices {
+         EffectServices {
+             model_caller: Arc::new(MockModelCaller),
+@@ -728,6 +769,18 @@
+         (config, tempdir)
+     }
+ 
++    fn standard_workflow_config() -> (WorkflowRunConfig, tempfile::TempDir) {
++        let tempdir = isolated_git_workdir();
++        let config = WorkflowRunConfig {
++            prompt: "fix the bug".into(),
++            workdir: tempdir.path().to_path_buf(),
++            workflow: WorkflowConfig::standard(),
++            enabled_gates: vec!["compile".to_string()],
++            commit_prefix: None,
++        };
++        (config, tempdir)
++    }
++
+     fn isolated_git_workdir() -> tempfile::TempDir {
+         let tempdir = match tempfile::tempdir() {
+             Ok(tempdir) => tempdir,
+
+2026-04-28T07:05:41.048658Z ERROR codex_core::session: failed to record rollout items: thread 019dd2e6-c56c-7602-9489-280ce05e89f8 not found
+tokens used
+69,619
+Implemented the two standard workflow tests in [workflow_engine.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/workflow_engine.rs:710), reusing the existing mocks and recording consumer.
+
+Verification:
+- `cargo test -p roko-runtime workflow_engine_standard` passed: 2 tests passed.
+- `cargo clippy -p roko-runtime` completed successfully. It still reports existing warnings in unrelated/pre-existing runtime code, but nothing from the new test additions.
+
+Only modified `crates/roko-runtime/src/workflow_engine.rs`.
+
+=== Finished: 2026-04-28T09:05:41+02:00 ===
+=== Duration: 1m 49s ===
+=== Exit code: 0 ===
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/T02/verify-attempt-1 cargo test -p roko-runtime --lib -- workflow_engine
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.0
+   Compiling semver v1.0.28
+   Compiling getrandom v0.4.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling zmij v1.0.21
+   Compiling autocfg v1.5.0
+   Compiling shlex v1.3.0
+   Compiling rustc_version v0.4.1
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.2.60
+   Compiling hashbrown v0.17.0
+   Compiling generic-array v0.14.9
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling serde_json v1.0.149
+   Compiling equivalent v1.0.2
+   Compiling smallvec v1.15.1
+   Compiling indexmap v2.14.0
+   Compiling lock_api v0.4.14
+   Compiling aho-corasick v1.1.4
+   Compiling num-traits v0.2.19
+   Compiling rustix v1.1.4
+   Compiling itoa v1.0.18
+   Compiling toml_write v0.1.2
+   Compiling syn v2.0.117
+   Compiling regex-syntax v0.8.10
+   Compiling signature v2.2.0
+   Compiling bitflags v2.11.0
+   Compiling subtle v2.6.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling zeroize v1.8.2
+   Compiling pin-project-lite v0.2.17
+   Compiling thiserror v2.0.18
+   Compiling cfg_aliases v0.2.1
+   Compiling winnow v0.7.15
+   Compiling nix v0.29.0
+   Compiling iana-time-zone v0.1.65
+   Compiling ed25519 v2.2.3
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling tracing-core v0.1.36
+   Compiling digest v0.10.7
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayvec v0.7.6
+   Compiling arrayref v0.3.9
+   Compiling bytes v1.11.1
+   Compiling fastrand v2.4.1
+   Compiling errno v0.3.14
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling uuid v1.23.0
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling regex-automata v0.4.14
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling blake3 v1.8.4
+   Compiling tempfile v3.27.0
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling async-trait v0.1.89
+   Compiling tokio v1.51.1
+   Compiling tracing v0.1.44
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling chrono v0.4.44
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 52.64s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/T02/verify-attempt-1/debug/deps/roko_runtime-0c58882bc064c5a6)
+
+running 6 tests
+test workflow_engine::tests::truncate_respects_char_boundaries ... ok
+test workflow_engine::tests::commit_message_uses_prefix_when_present ... ok
+test workflow_engine::tests::workflow_engine_express_emits_lifecycle_events ... ok
+test workflow_engine::tests::workflow_engine_express_completes_with_success ... ok
+test workflow_engine::tests::workflow_engine_standard_gate_pass_triggers_review_phase ... ok
+test workflow_engine::tests::workflow_engine_standard_passes_through_review ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 0.22s
+

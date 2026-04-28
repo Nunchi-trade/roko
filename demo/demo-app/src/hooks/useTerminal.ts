@@ -21,7 +21,7 @@ export interface TerminalHandle {
   /** Send a command instantly and wait for shell prompt */
   execCmd(cmd: string, timeout?: number): Promise<boolean>;
   /** Type a command char-by-char then wait for prompt */
-  typeCmd(cmd: string, speed?: number): Promise<boolean>;
+  typeCmd(cmd: string, speed?: number, timeout?: number): Promise<boolean>;
   /** Wait for a shell prompt to appear in output buffer */
   waitForPrompt(timeout?: number): Promise<boolean>;
   /** Wait for a specific marker string in output */
@@ -79,12 +79,12 @@ export function useTerminal(sessionId?: string) {
 
     requestAnimationFrame(() => fitAddon.fit());
 
-    // Internal output buffer — capped at 4096 chars
+    // Internal output buffer, capped high enough for artifact scraping.
     let outBuf = '';
 
     function appendOutput(text: string) {
       outBuf += text;
-      if (outBuf.length > 4096) outBuf = outBuf.slice(-2048);
+      if (outBuf.length > 60000) outBuf = outBuf.slice(-40000);
     }
 
     // Build handle using defineProperties for outputBuffer getter/setter
@@ -107,6 +107,7 @@ export function useTerminal(sessionId?: string) {
 
     handle.clearTerminal = () => {
       term.clear();
+      term.write('\x1b[2J\x1b[3J\x1b[H');
       outBuf = '';
     };
 
@@ -150,7 +151,7 @@ export function useTerminal(sessionId?: string) {
       return handle.waitForMarker(marker, timeout);
     };
 
-    handle.typeCmd = async (cmd: string, charDelay = 12): Promise<boolean> => {
+    handle.typeCmd = async (cmd: string, charDelay = 12, timeout = 60000): Promise<boolean> => {
       if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
       for (const ch of cmd) {
         handle.ws.send(ch);
@@ -158,7 +159,7 @@ export function useTerminal(sessionId?: string) {
       }
       await sleep(40);
       handle.ws.send('\r');
-      return handle.waitForPrompt();
+      return handle.waitForPrompt(timeout);
     };
 
     handleRef.current = handle;

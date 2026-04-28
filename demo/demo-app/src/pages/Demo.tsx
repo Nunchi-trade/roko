@@ -10,6 +10,19 @@ import Timeline from '../components/Timeline';
 import CommandLog from '../components/CommandLog';
 import GateBar from '../components/GateBar';
 import ConnectScreen from '../components/ConnectScreen';
+import PrdPipelinePanel from '../components/PrdPipelinePanel';
+import {
+  EMPTY_PIPELINE_STATE,
+  type PipelineDemoState,
+  type PipelineEvent,
+  type PipelineTask,
+} from '../lib/prd-pipeline-types';
+import {
+  createPipelineIntroState,
+  DEFAULT_PIPELINE_EXAMPLE_ID,
+  getPipelineExample,
+  PIPELINE_EXAMPLES,
+} from '../lib/prd-pipeline-sample';
 import '@xterm/xterm/css/xterm.css';
 import '../components/Terminal/TerminalPane.css';
 import './Demo.css';
@@ -37,6 +50,11 @@ export default function Demo() {
   const [timelineSteps, setTimelineSteps] = useState<TimelineStepState[]>([]);
   const [progressText, setProgressText] = useState('press Play to begin');
   const [progressLabel, setProgressLabel] = useState('--');
+  const [pipelineExampleId, setPipelineExampleId] = useState(DEFAULT_PIPELINE_EXAMPLE_ID);
+  const selectedPipelineExample = getPipelineExample(pipelineExampleId);
+  const [pipeline, setPipeline] = useState<PipelineDemoState>(
+    createPipelineIntroState(selectedPipelineExample),
+  );
 
   const pausedRef = useRef(false);
   const runningRef = useRef(false);
@@ -46,12 +64,42 @@ export default function Demo() {
   useEffect(() => {
     timeline.onChange((steps) => setTimelineSteps(steps));
     playback.onProgress((step, total, cmd) => {
-      setProgressLabel(`Step ${step}/${total}`);
+      setProgressLabel(step <= 0 ? 'Preparing' : `Step ${step}/${total}`);
       setProgressText(cmd);
     });
   }, []);
 
   // Build scenario context matching ScenarioContext from scenarios.ts
+  const patchPipeline = useCallback((patch: Partial<PipelineDemoState>) => {
+    setPipeline((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const updatePipelineTask = useCallback((
+    planId: string,
+    taskId: string,
+    patch: Partial<PipelineTask>,
+  ) => {
+    setPipeline((prev) => ({
+      ...prev,
+      plans: prev.plans.map((plan) => {
+        if (plan.id !== planId) return plan;
+        return {
+          ...plan,
+          tasks: plan.tasks.map((task) =>
+            task.id === taskId ? { ...task, ...patch } : task,
+          ),
+        };
+      }),
+    }));
+  }, []);
+
+  const appendPipelineEvent = useCallback((event: PipelineEvent) => {
+    setPipeline((prev) => ({
+      ...prev,
+      events: [...prev.events, event].slice(-30),
+    }));
+  }, []);
+
   const buildContext = useCallback((): ScenarioContext => {
     const entries = handleRefs.current
       .map((ref) => ref.current)
@@ -88,10 +136,15 @@ export default function Demo() {
           { ts, text: desc || lookupCmdDesc(cmd) || 'Executing...', type: 'success' as const },
         ]);
       },
+      setPipeline,
+      patchPipeline,
+      updatePipelineTask,
+      appendPipelineEvent,
+      pipelineExample: selectedPipelineExample,
       paused: pausedRef,
       running: runningRef,
     };
-  }, []);
+  }, [appendPipelineEvent, patchPipeline, selectedPipelineExample, updatePipelineTask]);
 
   // ── Scenario lifecycle ──────────────────────────────────────
 
@@ -110,6 +163,20 @@ export default function Demo() {
     setTimelineSteps([]);
     setProgressText('press Play to begin');
     setProgressLabel('--');
+    setPipeline(SCENARIOS[idx]?.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
+  }, [selectedPipelineExample]);
+
+  const handlePipelineExampleSelect = useCallback((id: string) => {
+    if (runningRef.current) return;
+    const example = getPipelineExample(id);
+    setPipelineExampleId(example.id);
+    setPipeline(createPipelineIntroState(example));
+    setProgressText('press Play to begin');
+    setProgressLabel('--');
+    setGates([]);
+    setLogEntries([]);
+    setTimelineSteps([]);
+    setShowIntro(true);
   }, []);
 
   const handlePlay = useCallback(async () => {
@@ -124,6 +191,7 @@ export default function Demo() {
     setLogEntries([]);
     setStats({ model: '--', cost: '--', tokens: '--', time: '--' });
     setGates([]);
+    setPipeline(scenario.id === 'prd-pipeline' ? createPipelineIntroState(selectedPipelineExample) : EMPTY_PIPELINE_STATE);
 
     const ctx = buildContext();
     try {
@@ -135,7 +203,7 @@ export default function Demo() {
     runningRef.current = false;
     setIsRunning(false);
     setIsPaused(false);
-  }, [scenario, serverHealth, buildContext]);
+  }, [scenario, serverHealth, buildContext, selectedPipelineExample]);
 
   const handlePauseResume = useCallback(() => {
     pausedRef.current = !isPaused;
@@ -264,7 +332,7 @@ export default function Demo() {
       </div>
 
       {/* ── Main content ── */}
-      <div className="demo-main">
+      <div className={`demo-main${scenario.id === 'prd-pipeline' ? ' demo-main-pipeline' : ''}`}>
         {/* Terminal zone */}
         <div className="demo-terminals">
           {showIntro && (
@@ -298,30 +366,42 @@ export default function Demo() {
         {/* Sidebar */}
         {scenario.panel && (
           <div className="demo-sidebar">
-            <Pane title="TIMELINE" flat>
-              <Timeline steps={timelineDisplay} />
-            </Pane>
+            {scenario.id === 'prd-pipeline' ? (
+              <PrdPipelinePanel
+                state={pipeline}
+                examples={PIPELINE_EXAMPLES}
+                selectedExampleId={pipelineExampleId}
+                onSelectExample={handlePipelineExampleSelect}
+                selectorDisabled={isRunning}
+              />
+            ) : (
+              <>
+                <Pane title="TIMELINE" flat>
+                  <Timeline steps={timelineDisplay} />
+                </Pane>
 
-            <div className="demo-stats-mosaic">
-              <Mosaic columns={2}>
-                <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
-                <MosaicCell label="COST" value={stats.cost} mono color="bone" />
-                <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
-                <MosaicCell label="TIME" value={stats.time} mono color="warning" />
-              </Mosaic>
-            </div>
-
-            {gates.length > 0 && (
-              <Pane title="GATES" flat>
-                <div style={{ padding: '12px 16px' }}>
-                  <GateBar gates={gates} />
+                <div className="demo-stats-mosaic">
+                  <Mosaic columns={2}>
+                    <MosaicCell label="MODEL" value={stats.model} mono color="rose" />
+                    <MosaicCell label="COST" value={stats.cost} mono color="bone" />
+                    <MosaicCell label="TOKENS" value={stats.tokens} mono color="dream" />
+                    <MosaicCell label="TIME" value={stats.time} mono color="warning" />
+                  </Mosaic>
                 </div>
-              </Pane>
-            )}
 
-            <Pane title="LOG" flat>
-              <CommandLog entries={logEntries} maxHeight="240px" />
-            </Pane>
+                {gates.length > 0 && (
+                  <Pane title="GATES" flat>
+                    <div style={{ padding: '12px 16px' }}>
+                      <GateBar gates={gates} />
+                    </div>
+                  </Pane>
+                )}
+
+                <Pane title="LOG" flat>
+                  <CommandLog entries={logEntries} maxHeight="240px" />
+                </Pane>
+              </>
+            )}
           </div>
         )}
       </div>

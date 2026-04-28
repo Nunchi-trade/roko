@@ -1,0 +1,7 @@
+Implemented `GateService` in [gate_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-gate/src/gate_service.rs:1) and exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-gate/src/lib.rs:100).
+
+The service builds a `GatePayload` signal from `GateConfig.workdir`, detects the build system, runs supported gates in rung order (`compile`, `clippy`, `test`), honors `max_rung`, and stops on first failure.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-gate`

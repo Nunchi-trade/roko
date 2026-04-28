@@ -1,0 +1,11 @@
+Implemented the v2 `roko run` progress output in [run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:455).
+
+Changed:
+- Added `crate::output_format` usage.
+- Printed intro, prompt, workflow, model, and starting status before `engine.run`.
+- Replaced the old completion `println!` lines with structured success/error/warning outcome handling.
+- Added final run id output via `output_format::end`.
+
+Verification:
+- All requested grep checks passed.
+- `cargo check -p roko-cli` passed.

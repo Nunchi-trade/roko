@@ -1,0 +1,13 @@
+Implemented F05 in [projection.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/projection.rs:12).
+
+Changes:
+- Added `RunSummary` fields for agent completion/failure counts, token/cost totals, feedback count, last checkpoint, and agent errors.
+- Extended `apply_event` for `agent_completed`, `agent_failed`, `feedback_recorded`, `state_checkpointed`, plus explicit no-op handling for `agent_output` and `gate_started`.
+- Added tests for agent cost aggregation and failure/feedback/checkpoint projection.
+
+Verification passed:
+- Required structural `grep` checks, including the previously failing `AgentOutput|FeedbackRecorded|StateCheckpointed` check.
+- `cargo test -p roko-runtime --lib -- projection`
+- `cargo check -p roko-runtime`
+
+The projection test run emitted unrelated existing warnings in heartbeat test files; no failures.

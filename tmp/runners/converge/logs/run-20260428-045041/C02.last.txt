@@ -1,0 +1,8 @@
+Implemented `print_identity` in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:74), using `intro()`, `bar()`, padded dim labels, cyan model output, and magenta/cyan routing split on `" → "`. Added the requested smoke test at [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:139).
+
+Verification:
+- `grep` done-criteria checks: passed
+- `cargo check -p roko-cli`: passed
+- `cargo test -p roko-cli --lib output_format`: failed due existing out-of-scope test compile errors in `tui/app.rs` and `orchestrate.rs`, not `output_format.rs`:
+  - missing `roko_core::shared_state_hub`
+  - `StateHubSender` type mismatch between `roko_serve` and local `state_hub` types

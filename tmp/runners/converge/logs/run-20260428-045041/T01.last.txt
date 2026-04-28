@@ -1,0 +1,12 @@
+Implemented the two express WorkflowEngine integration tests in [workflow_engine.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/workflow_engine.rs:650).
+
+What changed:
+- Added minimal mock services for `ModelCaller`, `PromptAssembler`, `FeedbackSink`, and `GateRunner`.
+- Added success-path express workflow test.
+- Added lifecycle event emission test using a recording `EventConsumer`.
+- Used an isolated temporary git repo so the engine’s current commit step does not touch the project checkout.
+
+Verification:
+- `cargo test -p roko-runtime workflow_engine_express` passes.
+- `cargo clippy -p roko-runtime` completes successfully. It still reports existing warnings in unrelated runtime files; none are from the new test block.
+- `rustfmt --edition 2024 --check crates/roko-runtime/src/workflow_engine.rs` passes.

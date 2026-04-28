@@ -1,0 +1,6 @@
+{"ts":"2026-04-28T22:42:03+02:00","batch":"A01","attempt":1,"event":"dispatch_start","details":""}
+{"ts":"2026-04-28T22:42:03+02:00","batch":"A01","attempt":1,"event":"spawn_started","details":""}
+{"ts":"2026-04-28T22:42:53+02:00","batch":"A01","attempt":1,"event":"spawn_ok","details":"duration=50s"}
+{"ts":"2026-04-28T22:42:53+02:00","batch":"A01","attempt":1,"event":"merge_failed","details":""}
+{"ts":"2026-04-28T22:42:53+02:00","batch":"A01","attempt":2,"event":"dispatch_start","details":""}
+{"ts":"2026-04-28T22:42:53+02:00","batch":"A01","attempt":2,"event":"spawn_started","details":""}

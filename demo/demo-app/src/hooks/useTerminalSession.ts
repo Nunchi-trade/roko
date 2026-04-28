@@ -109,6 +109,26 @@ export interface GateResult {
   status: 'pass' | 'fail';
 }
 
+let showCmdSeq = 0;
+
+async function typeVisibleCommandAndWait(
+  handle: TerminalHandle,
+  cmd: string,
+  timeout: number,
+): Promise<boolean> {
+  if (!handle.ws || handle.ws.readyState !== WebSocket.OPEN) return false;
+
+  const marker = `__RK_SHOW_${(++showCmdSeq).toString(36)}_${Date.now().toString(36)}__`;
+  for (const ch of cmd) {
+    handle.ws.send(ch);
+    await rawSleep(10 + Math.random() * 5);
+  }
+  await rawSleep(40);
+  handle.ws.send('\r');
+  handle.sendRaw(`printf '\\n${marker}\\n'\r`);
+  return handle.waitForMarker(marker, timeout);
+}
+
 /**
  * Type a command with animation, wait for prompt, and detect output.
  *
@@ -139,13 +159,9 @@ export async function showCmd(
   // Log to command panel
   opts?.onLog?.(cmd, desc);
 
-  // Type and execute
-  const ok = await handle.typeCmd(cmd, 12);
-
-  // Wait for prompt with timeout
-  if (ok) {
-    await handle.waitForPrompt(timeout);
-  }
+  // Type and execute. Waiting on an explicit marker is more reliable than
+  // trying to parse arbitrary themed shell prompts.
+  const ok = await typeVisibleCommandAndWait(handle, cmd, timeout);
 
   const elapsed = (Date.now() - startTime) / 1000;
 

@@ -1,0 +1,13 @@
+Implemented the MCP passthrough in [model_call_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/model_call_service.rs:61):
+
+- Added `mcp_config: Option<PathBuf>` to `ModelCallService`.
+- Added `with_mcp_config(...)`.
+- Extracted `build_agent_options(...)` and threads explicit MCP config into `AgentOptions`.
+- Added a passing test for explicit MCP config passthrough.
+
+Blocked part: this checkout’s `roko_core::config::AgentConfig` does not expose `mcp_config`, and the batch write scope forbids editing `roko-core`. I left a `TODO(converge)` and an ignored fallback test documenting that blocker.
+
+Verification:
+- `cargo check -p roko-agent` passed.
+- Required grep checks passed.
+- `cargo test -p roko-agent model_call_service` passed: `7 passed; 1 ignored`.

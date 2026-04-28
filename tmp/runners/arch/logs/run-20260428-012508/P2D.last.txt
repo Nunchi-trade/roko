@@ -1,0 +1,12 @@
+Implemented `WorkflowEngine` in [workflow_engine.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/workflow_engine.rs) and exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-runtime/src/lib.rs).
+
+Key notes:
+- Added `WorkflowRunConfig`, `WorkflowResult`, lifecycle `WorkflowEvent`, and `WorkflowEventConsumer`.
+- Wired `PipelineStateV2` to `EffectDriver` in an async run loop.
+- Kept compatibility TODOs where the current crate graph prevents importing `roko_core` event/foundation types.
+- Added small helper tests.
+
+Verification passed:
+- Required grep checks
+- `cargo check -p roko-runtime`
+- `cargo test -p roko-runtime` with 142 tests passing; existing unrelated warnings remain in heartbeat test code.

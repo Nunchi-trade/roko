@@ -1,0 +1,4 @@
+{"ts":"2026-04-28T23:01:56+02:00","batch":"A01","attempt":1,"event":"dispatch_start","details":""}
+{"ts":"2026-04-28T23:01:56+02:00","batch":"A01","attempt":1,"event":"spawn_started","details":""}
+{"ts":"2026-04-28T23:03:49+02:00","batch":"A01","attempt":1,"event":"spawn_ok","details":"duration=113s"}
+{"ts":"2026-04-28T23:03:49+02:00","batch":"A01","attempt":1,"event":"success","details":""}

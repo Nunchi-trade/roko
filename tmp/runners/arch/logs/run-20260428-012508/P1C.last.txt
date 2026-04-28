@@ -1,0 +1,10 @@
+Implemented `FeedbackService` in [feedback_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-learn/src/feedback_service.rs) and exported it from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-learn/src/lib.rs).
+
+It buffers `FeedbackEvent`s, flushes them to `efficiency.jsonl`, implements `FeedbackSink`, supports `.roko/learn` construction, and includes unit tests for model-call and gate-result recording.
+
+Verification passed:
+- Done-criteria `grep` checks
+- `cargo check -p roko-learn`
+- `cargo test -p roko-learn feedback_service`
+
+The targeted test run emitted existing unrelated warnings in `verdict_scorer.rs` and `tests/cost_comparison.rs`, but all feedback service tests passed.

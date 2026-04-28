@@ -1,0 +1,10 @@
+Implemented `print_cost_prediction` in [output_format.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/output_format.rs:115), plus the private `fmt_tokens` helper and unit tests in the existing test module.
+
+Verification:
+- `grep` checks for `print_cost_prediction`, `fmt_tokens`, and `~`: passed
+- `cargo check -p roko-cli`: passed
+- `cargo test -p roko-cli --lib output_format`: failed during test compilation on existing errors outside the allowed write scope:
+  - `crates/roko-cli/src/tui/app.rs:3262`: `roko_core::shared_state_hub()` not found
+  - `crates/roko-cli/src/orchestrate.rs:20065`: mismatched `StateHubSender` types
+
+Only `crates/roko-cli/src/output_format.rs` was modified.

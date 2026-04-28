@@ -1,0 +1,3521 @@
+=== Batch: E02 (PipelineStateV2: add checkpoint serialization + resume) ===
+=== Started: 2026-04-28T06:50:38+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E02/codex-attempt-1 ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/E02.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd26c-cbcf-75a3-bc20-0971ddf195d0
+--------
+user
+# Convergence Batch E02 — PipelineStateV2: add checkpoint serialization + resume
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+## Batch E02: PipelineStateV2 — checkpoint serialization + resume
+
+### Write Scope
+- **MODIFY**: `crates/roko-runtime/src/pipeline_state.rs`
+
+### Dependencies
+- E01 (serde derives added to WorkflowConfig)
+
+### DO NOT
+- Modify any other files
+- Add new Cargo.toml dependencies (`serde` and `serde_json` are already in the workspace)
+- Change the `step()` state machine logic
+- Change the `Phase` or `PipelineInput` or `PipelineOutput` enum variants
+
+### Existing Code Context
+
+`crates/roko-runtime/src/pipeline_state.rs` — `Phase` and `PipelineStateV2` (lines 77–268):
+```rust
+/// Current phase of the pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase {
+    Pending,
+    Strategizing,
+    Implementing,
+    Gating,
+    AutoFixing,
+    Reviewing,
+    Committing,
+    Complete,
+    Halted { reason: String },
+    Cancelled,
+}
+
+/// Pure state machine for workflow pipelines.
+#[derive(Debug, Clone)]
+pub struct PipelineStateV2 {
+    pub phase: Phase,
+    pub config: WorkflowConfig,
+    pub iteration: u32,
+    pub autofix_attempts: u32,
+    pub original_prompt: String,
+    pub strategist_brief: Option<String>,
+    pub review_findings: Vec<String>,
+    pub last_gate_failure: Option<String>,
+    pub files_changed: u32,
+    pub commit_hash: Option<String>,
+}
+```
+
+After E01, `WorkflowConfig` has `#[derive(Serialize, Deserialize)]`. `Phase` and
+`PipelineStateV2` do not yet have serde derives.
+
+The `Phase::Halted { reason }` variant carries a `reason: String` field. The serde
+representation should be a tagged enum: `{"Halted": {"reason": "..."}}`. The other
+unit variants serialize as plain strings.
+
+`WorkflowOutcome` (lines 16–30) must also be serializable so checkpoints can record
+completed runs, though it is not part of `PipelineStateV2` itself:
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+```
+
+### Task
+
+#### 1. Add serde derives to `Phase` and `WorkflowOutcome`
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Phase { ... }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WorkflowOutcome { ... }
+```
+
+No `#[serde(...)]` attributes needed — the default tagged representation is correct.
+
+#### 2. Add serde derives to `PipelineStateV2`
+
+```rust
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PipelineStateV2 { ... }
+```
+
+All fields are either primitives, `String`, `Vec<String>`, or `Option<String>`, except
+`config: WorkflowConfig` which gets its serde support from E01. No custom serialization
+is needed.
+
+#### 3. Add `PipelineStateV2::checkpoint`
+
+```rust
+/// Serialize the current pipeline state to a JSON string.
+///
+/// The resulting JSON can be passed to `from_checkpoint` to restore the exact
+/// state — including phase, iteration count, and accumulated findings — so a
+/// workflow can resume after a process restart.
+///
+/// Returns an error only if serde_json serialization fails (in practice, never
+/// for this struct).
+pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::to_string(self)?)
+}
+```
+
+#### 4. Add `PipelineStateV2::from_checkpoint`
+
+```rust
+/// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
+/// [`checkpoint`].
+///
+/// After restoring, call [`step`] with the next input as if the workflow is
+/// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
+/// `Cancelled`) are valid checkpoint states — callers should check
+/// `phase.is_terminal()` before resuming.
+///
+/// Returns an error if the JSON is malformed or missing required fields.
+pub fn from_checkpoint(json: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::from_str(json)?)
+}
+```
+
+#### 5. Add unit tests
+
+```rust
+#[test]
+fn checkpoint_round_trip_implementing() {
+    let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
+    sm.step(PipelineInput::Start);
+    // Now in Implementing phase.
+
+    let json = sm.checkpoint().unwrap();
+    let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+    assert_eq!(restored.phase, Phase::Implementing);
+    assert_eq!(restored.iteration, 1);
+    assert_eq!(restored.original_prompt, "add feature");
+}
+
+#[test]
+fn checkpoint_preserves_review_findings() {
+    let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
+    sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
+    sm.iteration = 2;
+    sm.phase = Phase::Implementing;
+
+    let json = sm.checkpoint().unwrap();
+    let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+    assert_eq!(restored.review_findings, vec!["needs error handling", "add docs"]);
+    assert_eq!(restored.iteration, 2);
+}
+
+#[test]
+fn checkpoint_halted_phase() {
+    let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
+    sm.phase = Phase::Halted { reason: "compile failed".into() };
+
+    let json = sm.checkpoint().unwrap();
+    let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+    assert!(restored.phase.is_terminal());
+    assert!(matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed"));
+}
+
+#[test]
+fn checkpoint_full_config() {
+    let config = WorkflowConfig::full();
+    let sm = PipelineStateV2::new(config, "complex".into());
+
+    let json = sm.checkpoint().unwrap();
+    let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
+
+    assert!(restored.config.has_strategy);
+    assert!(restored.config.has_review);
+    assert_eq!(restored.config.max_iterations, 3);
+}
+
+#[test]
+fn from_checkpoint_rejects_invalid_json() {
+    assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
+    assert!(PipelineStateV2::from_checkpoint("{}").is_err()); // missing required fields
+}
+```
+
+### Done Criteria
+```bash
+# serde derives on Phase, PipelineStateV2, WorkflowOutcome
+grep -q 'Serialize, Deserialize' crates/roko-runtime/src/pipeline_state.rs
+
+# checkpoint and from_checkpoint methods exist
+grep -q 'fn checkpoint' crates/roko-runtime/src/pipeline_state.rs
+grep -q 'fn from_checkpoint' crates/roko-runtime/src/pipeline_state.rs
+
+# compiles clean
+cargo check -p roko-runtime
+
+# all tests pass (existing + new checkpoint tests)
+cargo test -p roko-runtime --lib pipeline_state
+```
+
+codex
+I’ll make the scoped runtime change only in `pipeline_state.rs`, then run the requested grep, check, and focused tests. First I’m reading the file to preserve the existing state machine behavior and test style.
+exec
+/bin/zsh -lc "sed -n '1,360p' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! PipelineStateV2: config-driven workflow state machine.
+//!
+//! This is a PURE state machine with no side effects. It takes events and
+//! returns actions. The effect driver executes the actions.
+//!
+//! Config determines which phases are active:
+//! - Express: implement -> gate -> commit
+//! - Standard: implement -> gate -> review -> commit
+//! - Full: strategy -> implement -> gate -> review -> commit
+
+use serde::{Deserialize, Serialize};
+
+// TODO(arch): Use roko_core::runtime_event::WorkflowOutcome once the crate
+// dependency graph matches the architecture reference. In this checkout,
+// roko-core currently depends on roko-runtime, so importing roko-core here
+// would create a circular dependency and Cargo.toml edits are out of scope.
+/// Outcome of a completed workflow run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowOutcome {
+    /// Workflow completed successfully, optionally with a commit hash.
+    Success {
+        /// Commit hash created by the workflow, when commit creation was requested.
+        commit_hash: Option<String>,
+    },
+    /// Workflow halted due to an error or resource limit.
+    Halted {
+        /// Human-readable halt reason.
+        reason: String,
+    },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+/// Configuration for the pipeline. Determines which phases are active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    /// Include a strategist phase before implementation.
+    pub has_strategy: bool,
+    /// Include a review phase after gates pass.
+    pub has_review: bool,
+    /// Maximum implement -> gate -> review iterations.
+    pub max_iterations: u32,
+    /// Maximum autofix attempts per gate failure.
+    pub max_autofix_attempts: u32,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowConfigToml {
+    template: Option<String>,
+    has_strategy: Option<bool>,
+    has_review: Option<bool>,
+    max_iterations: Option<u32>,
+    max_autofix_attempts: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowTomlScope {
+    Root,
+    Workflow,
+    WorkflowStep,
+    Other,
+}
+
+impl WorkflowConfig {
+    /// Express: implement -> gate -> commit.
+    pub fn express() -> Self {
+        Self {
+            has_strategy: false,
+            has_review: false,
+            max_iterations: 1,
+            max_autofix_attempts: 1,
+        }
+    }
+
+    /// Standard: implement -> gate -> review -> commit.
+    pub fn standard() -> Self {
+        Self {
+            has_strategy: false,
+            has_review: true,
+            max_iterations: 2,
+            max_autofix_attempts: 2,
+        }
+    }
+
+    /// Full: strategy -> implement -> gate -> review -> commit.
+    pub fn full() -> Self {
+        Self {
+            has_strategy: true,
+            has_review: true,
+            max_iterations: 3,
+            max_autofix_attempts: 2,
+        }
+    }
+
+    /// Parse a `WorkflowConfig` from a TOML string.
+    ///
+    /// The string may contain a `[workflow]` table or just the bare keys. If a
+    /// `template` key is present (`"express"`, `"standard"`, or `"full"`), that
+    /// preset is used as the base; any additional keys override the preset values.
+    ///
+    /// Returns an error if the TOML is malformed or `template` is an unknown value.
+    pub fn from_toml_str(
+        s: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let raw = parse_workflow_config_toml(s)?;
+
+        let mut config = match raw.template.as_deref() {
+            Some("express") => Self::express(),
+            Some("standard") | None => Self::standard(),
+            Some("full") => Self::full(),
+            Some(template) => {
+                return Err(config_parse_error(format!(
+                    "unknown workflow template: {template}"
+                )));
+            }
+        };
+
+        if let Some(has_strategy) = raw.has_strategy {
+            config.has_strategy = has_strategy;
+        }
+        if let Some(has_review) = raw.has_review {
+            config.has_review = has_review;
+        }
+        if let Some(max_iterations) = raw.max_iterations {
+            config.max_iterations = max_iterations;
+        }
+        if let Some(max_autofix_attempts) = raw.max_autofix_attempts {
+            config.max_autofix_attempts = max_autofix_attempts;
+        }
+
+        Ok(config)
+    }
+
+    /// Load a `WorkflowConfig` from a TOML file on disk.
+    ///
+    /// The file is read synchronously (this is configuration loading, not hot path).
+    /// Returns an error if the file cannot be read or the TOML is invalid.
+    pub fn from_toml(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml_str(&contents)
+    }
+}
+
+fn parse_workflow_config_toml(
+    s: &str,
+) -> Result<WorkflowConfigToml, Box<dyn std::error::Error + Send + Sync>> {
+    let mut workflow = WorkflowConfigToml {
+        template: None,
+        has_strategy: None,
+        has_review: None,
+        max_iterations: None,
+        max_autofix_attempts: None,
+    };
+    let mut scope = WorkflowTomlScope::Root;
+    let mut saw_workflow_table = false;
+    let mut saw_workflow_steps = false;
+    let mut steps_have_strategy = false;
+    let mut steps_have_review = false;
+
+    for (idx, raw_line) in s.lines().enumerate() {
+        let line_number = idx + 1;
+        let line = strip_toml_comment(raw_line)
+            .map_err(|err| config_parse_error(format!("line {line_number}: {err}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with("[[") || line.starts_with('[') {
+            scope = parse_workflow_toml_scope(line)
+                .map_err(|err| config_parse_error(format!("line {line_number}: {err}")))?;
+            if scope == WorkflowTomlScope::Workflow {
+                saw_workflow_table = true;
+            } else if scope == WorkflowTomlScope::WorkflowStep {
+                saw_workflow_steps = true;
+            }
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(config_parse_error(format!(
+                "line {line_number}: expected key = value"
+            )));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            return Err(config_parse_error(format!(
+                "line {line_number}: expected key = value"
+            )));
+        }
+
+        let should_read = if saw_workflow_table {
+            scope == WorkflowTomlScope::Workflow
+        } else {
+            scope == WorkflowTomlScope::Root
+        };
+        if !should_read {
+            if scope == WorkflowTomlScope::WorkflowStep && key == "name" {
+                match parse_toml_string(value, line_number)?.as_str() {
+                    "strategy" => steps_have_strategy = true,
+                    "review" => steps_have_review = true,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        match key {
+            "template" => workflow.template = Some(parse_toml_string(value, line_number)?),
+            "has_strategy" => workflow.has_strategy = Some(parse_toml_bool(value, line_number)?),
+            "has_review" => workflow.has_review = Some(parse_toml_bool(value, line_number)?),
+            "max_iterations" => {
+                workflow.max_iterations = Some(parse_toml_u32(value, line_number)?);
+            }
+            "max_autofix_attempts" => {
+                workflow.max_autofix_attempts = Some(parse_toml_u32(value, line_number)?);
+            }
+            _ => {}
+        }
+    }
+
+    if saw_workflow_steps {
+        workflow.has_strategy = workflow.has_strategy.or(Some(steps_have_strategy));
+        workflow.has_review = workflow.has_review.or(Some(steps_have_review));
+    }
+
+    Ok(workflow)
+}
+
+fn parse_workflow_toml_scope(
+    line: &str,
+) -> Result<WorkflowTomlScope, Box<dyn std::error::Error + Send + Sync>> {
+    if line.starts_with("[[") {
+        if !line.ends_with("]]") {
+            return Err(config_parse_error("unterminated array table header"));
+        }
+        let name = line
+            .trim_start_matches("[[")
+            .trim_end_matches("]]")
+            .trim();
+        return Ok(match name {
+            "workflow.steps" => WorkflowTomlScope::WorkflowStep,
+            _ => WorkflowTomlScope::Other,
+        });
+    }
+
+    if !line.ends_with(']') {
+        return Err(config_parse_error("unterminated table header"));
+    }
+    let name = line.trim_start_matches('[').trim_end_matches(']').trim();
+    Ok(match name {
+        "workflow" => WorkflowTomlScope::Workflow,
+        _ => WorkflowTomlScope::Other,
+    })
+}
+
+fn strip_toml_comment(
+    line: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut out = String::new();
+
+    for ch in line.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '#' => break,
+            _ => out.push(ch),
+        }
+    }
+
+    if in_string {
+        return Err(config_parse_error("unterminated string"));
+    }
+
+    Ok(out)
+}
+
+fn parse_toml_string(
+    value: &str,
+    line_number: usize,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
+        return Err(config_parse_error(format!(
+            "line {line_number}: expected string value"
+        )));
+    }
+
+    let inner = &value[1..value.len() - 1];
+    let mut parsed = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(escaped) = chars.next() else {
+                return Err(config_parse_error(format!(
+                    "line {line_number}: dangling escape in string"
+                )));
+            };
+            let value = match escaped {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            };
+            parsed.push(value);
+        } else {
+            parsed.push(ch);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_toml_bool(
+    value: &str,
+    line_number: usize,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(config_parse_error(format!(
+            "line {line_number}: expected boolean value"
+        ))),
+    }
+}
+
+fn parse_toml_u32(
+    value: &str,
+    line_number: usize,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    value.parse::<u32>().map_err(|err| {
+        config_parse_error(format!("line {line_number}: expected unsigned integer: {err}"))
+    })
+}
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc "sed -n '360,760p' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+}
+
+fn config_parse_error(
+    message: impl Into<String>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
+}
+
+/// Current phase of the pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase {
+    /// Pipeline has been created but not started.
+    Pending,
+    /// Strategy phase is running.
+    Strategizing,
+    /// Implementation phase is running.
+    Implementing,
+    /// Verification gates are running.
+    Gating,
+    /// Autofix phase is running after a gate failure.
+    AutoFixing,
+    /// Review phase is running after gates pass.
+    Reviewing,
+    /// Commit creation is running.
+    Committing,
+    /// Workflow completed successfully.
+    Complete,
+    /// Workflow halted before completion.
+    Halted {
+        /// Human-readable halt reason.
+        reason: String,
+    },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+impl Phase {
+    /// Returns true when no further state transitions should be accepted.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Phase::Complete | Phase::Halted { .. } | Phase::Cancelled
+        )
+    }
+
+    /// Stable lowercase label for logs, events, and UI adapters.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Phase::Pending => "pending",
+            Phase::Strategizing => "strategizing",
+            Phase::Implementing => "implementing",
+            Phase::Gating => "gating",
+            Phase::AutoFixing => "auto_fixing",
+            Phase::Reviewing => "reviewing",
+            Phase::Committing => "committing",
+            Phase::Complete => "complete",
+            Phase::Halted { .. } => "halted",
+            Phase::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Events fed into the state machine.
+#[derive(Debug, Clone)]
+pub enum PipelineInput {
+    /// Start the pipeline.
+    Start,
+    /// Strategist completed with a brief.
+    StrategyComplete {
+        /// Strategy brief to pass into implementation context.
+        brief: String,
+    },
+    /// Strategy phase was skipped.
+    StrategySkipped,
+    /// Agent completed with output.
+    AgentCompleted {
+        /// Final textual output from the agent.
+        output: String,
+        /// Number of files changed by the agent.
+        files_changed: u32,
+    },
+    /// Agent failed.
+    AgentFailed {
+        /// Human-readable agent error.
+        error: String,
+    },
+    /// All gates passed.
+    GatesPassed,
+    /// A gate failed.
+    GateFailed {
+        /// Gate name that failed.
+        gate: String,
+        /// Gate output or diagnostic text.
+        output: String,
+    },
+    /// Review approved.
+    ReviewApproved {
+        /// Review summary supplied by the reviewer.
+        summary: String,
+    },
+    /// Review requests revisions.
+    ReviewRevise {
+        /// Findings that should guide the next implementation pass.
+        findings: Vec<String>,
+    },
+    /// Commit done.
+    CommitDone {
+        /// Commit hash created by the effect driver.
+        hash: String,
+    },
+    /// User cancelled.
+    UserCancel,
+    /// Timeout or budget exceeded.
+    ResourceExhausted {
+        /// Human-readable resource exhaustion reason.
+        reason: String,
+    },
+}
+
+/// Actions the state machine asks the effect driver to execute.
+#[derive(Debug, Clone)]
+pub enum PipelineOutput {
+    /// Spawn a strategist agent.
+    SpawnStrategist {
+        /// Prompt to send to the strategist.
+        prompt: String,
+    },
+    /// Spawn an implementer agent.
+    SpawnImplementer {
+        /// Original user prompt for the implementer.
+        prompt: String,
+        /// Optional strategy, gate, or review context for this iteration.
+        context: Option<String>,
+    },
+    /// Spawn an autofix agent.
+    SpawnAutoFixer {
+        /// Gate output that the autofix agent should address.
+        error_output: String,
+    },
+    /// Run verification gates.
+    RunGates,
+    /// Spawn a reviewer agent.
+    SpawnReviewer {
+        /// Optional diff context for the reviewer.
+        diff_context: Option<String>,
+    },
+    /// Create a commit.
+    Commit,
+    /// Pipeline is done.
+    Done {
+        /// Final workflow outcome.
+        outcome: WorkflowOutcome,
+    },
+    /// Pipeline is halted.
+    Halt {
+        /// Human-readable halt reason.
+        reason: String,
+    },
+}
+
+/// Pure state machine for workflow pipelines.
+#[derive(Debug, Clone)]
+pub struct PipelineStateV2 {
+    /// Current pipeline phase.
+    pub phase: Phase,
+    /// Workflow phase and retry configuration.
+    pub config: WorkflowConfig,
+    /// Current implementation iteration, starting at 1 once implementation begins.
+    pub iteration: u32,
+    /// Autofix attempts used for the current gate failure.
+    pub autofix_attempts: u32,
+    /// Original user prompt for the workflow.
+    pub original_prompt: String,
+    /// Optional strategist brief from the strategy phase.
+    pub strategist_brief: Option<String>,
+    /// Accumulated review findings across iterations.
+    pub review_findings: Vec<String>,
+    /// Most recent gate failure output.
+    pub last_gate_failure: Option<String>,
+    /// Number of files changed by the most recent implementation pass.
+    pub files_changed: u32,
+    /// Commit hash produced when the workflow completes successfully.
+    pub commit_hash: Option<String>,
+}
+
+impl PipelineStateV2 {
+    /// Create a new pipeline state machine in the pending phase.
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self {
+        Self {
+            phase: Phase::Pending,
+            config,
+            iteration: 0,
+            autofix_attempts: 0,
+            original_prompt: prompt,
+            strategist_brief: None,
+            review_findings: Vec::new(),
+            last_gate_failure: None,
+            files_changed: 0,
+            commit_hash: None,
+        }
+    }
+
+    /// Feed an event into the state machine, get an action back.
+    /// This is the ONLY way to drive the state machine. No side effects here.
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+        match (&self.phase, input) {
+            (Phase::Pending, PipelineInput::Start) => {
+                if self.config.has_strategy {
+                    self.phase = Phase::Strategizing;
+                    PipelineOutput::SpawnStrategist {
+                        prompt: self.original_prompt.clone(),
+                    }
+                } else {
+                    self.phase = Phase::Implementing;
+                    self.iteration = 1;
+                    PipelineOutput::SpawnImplementer {
+                        prompt: self.original_prompt.clone(),
+                        context: None,
+                    }
+                }
+            }
+
+            (Phase::Strategizing, PipelineInput::StrategyComplete { brief }) => {
+                self.strategist_brief = Some(brief.clone());
+                self.phase = Phase::Implementing;
+                self.iteration = 1;
+                PipelineOutput::SpawnImplementer {
+                    prompt: self.original_prompt.clone(),
+                    context: Some(brief),
+                }
+            }
+            (Phase::Strategizing, PipelineInput::StrategySkipped) => {
+                self.phase = Phase::Implementing;
+                self.iteration = 1;
+                PipelineOutput::SpawnImplementer {
+                    prompt: self.original_prompt.clone(),
+                    context: None,
+                }
+            }
+
+            (
+                Phase::Implementing,
+                PipelineInput::AgentCompleted {
+                    output: _,
+                    files_changed,
+                },
+            ) => {
+                self.files_changed = files_changed;
+                self.phase = Phase::Gating;
+                self.autofix_attempts = 0;
+                PipelineOutput::RunGates
+            }
+            (Phase::Implementing, PipelineInput::AgentFailed { error }) => {
+                self.phase = Phase::Halted {
+                    reason: error.clone(),
+                };
+                PipelineOutput::Halt { reason: error }
+            }
+
+            (Phase::Gating, PipelineInput::GatesPassed) => {
+                if self.config.has_review {
+                    self.phase = Phase::Reviewing;
+                    PipelineOutput::SpawnReviewer { diff_context: None }
+                } else {
+                    self.phase = Phase::Committing;
+                    PipelineOutput::Commit
+                }
+            }
+            (Phase::Gating, PipelineInput::GateFailed { gate, output }) => {
+                self.last_gate_failure = Some(output.clone());
+                if self.autofix_attempts < self.config.max_autofix_attempts {
+                    self.autofix_attempts += 1;
+                    self.phase = Phase::AutoFixing;
+                    PipelineOutput::SpawnAutoFixer {
+                        error_output: output,
+                    }
+                } else if self.iteration < self.config.max_iterations {
+                    self.iteration += 1;
+                    self.autofix_attempts = 0;
+                    self.phase = Phase::Implementing;
+                    PipelineOutput::SpawnImplementer {
+                        prompt: self.original_prompt.clone(),
+                        context: Some(format!(
+                            "Previous attempt failed gate '{}'. Error:\n{}",
+                            gate, output
+                        )),
+                    }
+                } else {
+                    let reason =
+                        format!("Gate '{}' failed after {} iterations", gate, self.iteration);
+                    self.phase = Phase::Halted {
+                        reason: reason.clone(),
+                    };
+                    PipelineOutput::Halt { reason }
+                }
+            }
+
+            (Phase::AutoFixing, PipelineInput::AgentCompleted { .. }) => {
+                self.phase = Phase::Gating;
+                PipelineOutput::RunGates
+            }
+            (Phase::AutoFixing, PipelineInput::AgentFailed { error }) => {
+                if self.iteration < self.config.max_iterations {
+                    self.iteration += 1;
+                    self.autofix_attempts = 0;
+                    self.phase = Phase::Implementing;
+                    PipelineOutput::SpawnImplementer {
+                        prompt: self.original_prompt.clone(),
+                        context: self.last_gate_failure.clone(),
+                    }
+                } else {
+                    let reason = format!("Autofix failed: {error}");
+                    self.phase = Phase::Halted {
+                        reason: reason.clone(),
+                    };
+                    PipelineOutput::Halt { reason }
+                }
+            }
+
+            (Phase::Reviewing, PipelineInput::ReviewApproved { .. }) => {
+                self.phase = Phase::Committing;
+                PipelineOutput::Commit
+            }
+            (Phase::Reviewing, PipelineInput::ReviewRevise { findings }) => {
+                self.review_findings.extend(findings);
+                if self.iteration < self.config.max_iterations {
+                    self.iteration += 1;
+                    self.autofix_attempts = 0;
+                    self.phase = Phase::Implementing;
+                    let feedback = self.review_findings.join("\n- ");
+                    PipelineOutput::SpawnImplementer {
+                        prompt: self.original_prompt.clone(),
+                        context: Some(format!("Review findings:\n- {feedback}")),
+                    }
+                } else {
+                    self.phase = Phase::Committing;
+                    PipelineOutput::Commit
+                }
+            }
+
+            (Phase::Committing, PipelineInput::CommitDone { hash }) => {
+                self.commit_hash = Some(hash.clone());
+                self.phase = Phase::Complete;
+                PipelineOutput::Done {
+                    outcome: WorkflowOutcome::Success {
+                        commit_hash: Some(hash),
+                    },
+                }
+            }
+
+            (_, PipelineInput::UserCancel) => {
+                self.phase = Phase::Cancelled;
+                PipelineOutput::Done {
+                    outcome: WorkflowOutcome::Cancelled,
+                }
+            }
+            (_, PipelineInput::ResourceExhausted { reason }) => {
+                self.phase = Phase::Halted {
+                    reason: reason.clone(),
+                };
+                PipelineOutput::Halt { reason }
+            }
+
+            (phase, input) => {
+                let reason = format!(
+                    "Invalid transition: {:?} in phase {:?}",
+                    std::mem::discriminant(&input),
+                    phase
+                );
+                self.phase = Phase::Halted {
+                    reason: reason.clone(),
+                };
+                PipelineOutput::Halt { reason }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn express_happy_path() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "fix bug".into());
+
+        let out = sm.step(PipelineInput::Start);
+        assert!(matches!(out, PipelineOutput::SpawnImplementer { .. }));
+        assert_eq!(sm.phase, Phase::Implementing);
+
+        let out = sm.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 2,
+        });
+        assert!(matches!(out, PipelineOutput::RunGates));
+
+        let out = sm.step(PipelineInput::GatesPassed);
+        assert!(matches!(out, PipelineOutput::Commit));
+
+exec
+/bin/zsh -lc "sed -n '760,1160p' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+        assert!(matches!(out, PipelineOutput::Commit));
+
+        let out = sm.step(PipelineInput::CommitDone { hash: "abc".into() });
+        assert!(matches!(out, PipelineOutput::Done { .. }));
+        assert_eq!(sm.phase, Phase::Complete);
+    }
+
+    #[test]
+    fn standard_with_review() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
+
+        sm.step(PipelineInput::Start);
+        sm.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 3,
+        });
+        sm.step(PipelineInput::GatesPassed);
+
+        assert_eq!(sm.phase, Phase::Reviewing);
+
+        let out = sm.step(PipelineInput::ReviewApproved {
+            summary: "lgtm".into(),
+        });
+        assert!(matches!(out, PipelineOutput::Commit));
+    }
+
+    #[test]
+    fn full_with_strategy() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::full(), "complex task".into());
+
+        let out = sm.step(PipelineInput::Start);
+        assert!(matches!(out, PipelineOutput::SpawnStrategist { .. }));
+        assert_eq!(sm.phase, Phase::Strategizing);
+
+        let out = sm.step(PipelineInput::StrategyComplete {
+            brief: "plan".into(),
+        });
+        assert!(matches!(
+            out,
+            PipelineOutput::SpawnImplementer {
+                context: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn gate_failure_triggers_autofix() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "fix".into());
+
+        sm.step(PipelineInput::Start);
+        sm.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 1,
+        });
+
+        let out = sm.step(PipelineInput::GateFailed {
+            gate: "compile".into(),
+            output: "error[E0308]".into(),
+        });
+        assert!(matches!(out, PipelineOutput::SpawnAutoFixer { .. }));
+        assert_eq!(sm.phase, Phase::AutoFixing);
+    }
+
+    #[test]
+    fn cancel_from_any_phase() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
+        sm.step(PipelineInput::Start);
+
+        let out = sm.step(PipelineInput::UserCancel);
+        assert!(matches!(
+            out,
+            PipelineOutput::Done {
+                outcome: WorkflowOutcome::Cancelled
+            }
+        ));
+        assert_eq!(sm.phase, Phase::Cancelled);
+    }
+
+    #[test]
+    fn review_revise_triggers_reimplementation() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feature".into());
+
+        sm.step(PipelineInput::Start);
+        sm.step(PipelineInput::AgentCompleted {
+            output: "v1".into(),
+            files_changed: 2,
+        });
+        sm.step(PipelineInput::GatesPassed);
+
+        let out = sm.step(PipelineInput::ReviewRevise {
+            findings: vec!["needs error handling".into()],
+        });
+        assert!(matches!(out, PipelineOutput::SpawnImplementer { .. }));
+        assert_eq!(sm.iteration, 2);
+    }
+
+    #[test]
+    fn toml_express_template() {
+        let cfg = WorkflowConfig::from_toml_str("template = \"express\"").unwrap();
+        assert!(!cfg.has_strategy);
+        assert!(!cfg.has_review);
+        assert_eq!(cfg.max_iterations, 1);
+    }
+
+    #[test]
+    fn toml_full_template_with_override() {
+        let cfg =
+            WorkflowConfig::from_toml_str("template = \"full\"\nmax_iterations = 5").unwrap();
+        assert!(cfg.has_strategy);
+        assert_eq!(cfg.max_iterations, 5);
+    }
+
+    #[test]
+    fn toml_table_form() {
+        let src = "[workflow]\ntemplate = \"standard\"\nmax_autofix_attempts = 3";
+        let cfg = WorkflowConfig::from_toml_str(src).unwrap();
+        assert_eq!(cfg.max_autofix_attempts, 3);
+        assert!(cfg.has_review);
+    }
+
+    #[test]
+    fn toml_bare_keys_no_template() {
+        let cfg = WorkflowConfig::from_toml_str(
+            "has_strategy = true\nhas_review = false\nmax_iterations = 2\nmax_autofix_attempts = 1",
+        )
+        .unwrap();
+        assert!(cfg.has_strategy);
+        assert!(!cfg.has_review);
+    }
+
+    #[test]
+    fn toml_unknown_template_is_error() {
+        assert!(WorkflowConfig::from_toml_str("template = \"bogus\"").is_err());
+    }
+
+    #[test]
+    fn toml_steps_infer_strategy_and_review_flags() {
+        let src = r#"
+[workflow]
+max_iterations = 4
+
+[[workflow.steps]]
+name = "strategy"
+role = "strategist"
+
+[[workflow.steps]]
+name = "implement"
+role = "implementer"
+"#;
+        let cfg = WorkflowConfig::from_toml_str(src).unwrap();
+        assert!(cfg.has_strategy);
+        assert!(!cfg.has_review);
+        assert_eq!(cfg.max_iterations, 4);
+    }
+}
+
+codex
+The file already imports `serde::{Deserialize, Serialize}` and `WorkflowConfig` is serializable. I’m going to add derives to the three requested types, add the JSON checkpoint helpers on `PipelineStateV2`, and append the checkpoint tests inside the existing test module.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/pipeline_state.rs
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+codex
+The implementation is in place, with no changes to the transition match arms. I’m running the required text checks and the runtime crate build/test commands now.
+exec
+/bin/zsh -lc "grep -q 'fn from_checkpoint' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc "grep -q 'Serialize, Deserialize' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc "grep -q 'fn checkpoint' crates/roko-runtime/src/pipeline_state.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+ succeeded in 30556ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+    Checking memchr v2.8.0
+   Compiling semver v1.0.28
+   Compiling shlex v1.3.0
+   Compiling zmij v1.0.21
+   Compiling getrandom v0.4.2
+   Compiling autocfg v1.5.0
+   Compiling rustc_version v0.4.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.2.60
+   Compiling serde_json v1.0.149
+    Checking smallvec v1.15.1
+    Checking equivalent v1.0.2
+    Checking hashbrown v0.17.0
+    Checking scopeguard v1.2.0
+    Checking lock_api v0.4.14
+   Compiling generic-array v0.14.9
+   Compiling curve25519-dalek v4.1.3
+    Checking aho-corasick v1.1.4
+    Checking indexmap v2.14.0
+    Checking core-foundation-sys v0.8.7
+   Compiling thiserror v2.0.18
+   Compiling num-traits v0.2.19
+    Checking regex-syntax v0.8.10
+    Checking toml_write v0.1.2
+    Checking pin-project-lite v0.2.17
+    Checking subtle v2.6.1
+   Compiling cfg_aliases v0.2.1
+    Checking zeroize v1.8.2
+    Checking signature v2.2.0
+    Checking winnow v0.7.15
+    Checking once_cell v1.21.4
+    Checking itoa v1.0.18
+    Checking ed25519 v2.2.3
+    Checking tracing-core v0.1.36
+   Compiling nix v0.29.0
+    Checking iana-time-zone v0.1.65
+    Checking bytes v1.11.1
+    Checking regex-automata v0.4.14
+    Checking constant_time_eq v0.4.2
+    Checking arrayref v0.3.9
+   Compiling syn v2.0.117
+    Checking arrayvec v0.7.6
+    Checking cpufeatures v0.2.17
+    Checking errno v0.3.14
+    Checking uuid v1.23.0
+    Checking mio v1.2.0
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking socket2 v0.6.3
+    Checking bitflags v2.11.0
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking sha2 v0.10.9
+    Checking ed25519-dalek v2.2.0
+    Checking regex v1.12.3
+   Compiling blake3 v1.8.4
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking chrono v0.4.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 30.46s
+
+codex
+`cargo check -p roko-runtime` passed. I’m running the focused library test filter next to cover the existing `pipeline_state` tests plus the new checkpoint cases.
+exec
+/bin/zsh -lc 'cargo test -p roko-runtime --lib pipeline_state' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+codex
+The test build is still compiling dependencies for the runtime test target; no failures yet. I’m keeping it running and will fix anything that appears before wrapping up.
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+ succeeded in 41932ms:
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.19.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling scopeguard v1.2.0
+   Compiling smallvec v1.15.1
+   Compiling once_cell v1.21.4
+   Compiling zmij v1.0.21
+   Compiling rustix v1.1.4
+   Compiling winnow v0.7.15
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.11.0
+   Compiling regex-syntax v0.8.10
+   Compiling lock_api v0.4.14
+   Compiling subtle v2.6.1
+   Compiling pin-project-lite v0.2.17
+   Compiling aho-corasick v1.1.4
+   Compiling core-foundation-sys v0.8.7
+   Compiling signature v2.2.0
+   Compiling zeroize v1.8.2
+   Compiling toml_write v0.1.2
+   Compiling generic-array v0.14.9
+   Compiling iana-time-zone v0.1.65
+   Compiling ed25519 v2.2.3
+   Compiling tracing-core v0.1.36
+   Compiling num-traits v0.2.19
+   Compiling arrayvec v0.7.6
+   Compiling bytes v1.11.1
+   Compiling indexmap v2.14.0
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling thiserror v2.0.18
+   Compiling errno v0.3.14
+   Compiling getrandom v0.4.2
+   Compiling parking_lot_core v0.9.12
+   Compiling cpufeatures v0.2.17
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.6
+   Compiling parking_lot v0.12.5
+   Compiling digest v0.10.7
+   Compiling tracing v0.1.44
+   Compiling blake3 v1.8.4
+   Compiling fastrand v2.4.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling sha2 v0.10.9
+   Compiling tokio v1.51.1
+   Compiling nix v0.29.0
+   Compiling regex-automata v0.4.14
+   Compiling tempfile v3.27.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling uuid v1.23.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling chrono v0.4.44
+   Compiling toml_edit v0.22.27
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling regex v1.12.3
+   Compiling toml v0.8.23
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 41.58s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E02/codex-attempt-1/debug/deps/roko_runtime-0c58882bc064c5a6)
+
+running 17 tests
+test pipeline_state::tests::toml_express_template ... ok
+test pipeline_state::tests::cancel_from_any_phase ... ok
+test pipeline_state::tests::full_with_strategy ... ok
+test pipeline_state::tests::toml_bare_keys_no_template ... ok
+test pipeline_state::tests::express_happy_path ... ok
+test pipeline_state::tests::gate_failure_triggers_autofix ... ok
+test pipeline_state::tests::standard_with_review ... ok
+test pipeline_state::tests::toml_full_template_with_override ... ok
+test pipeline_state::tests::review_revise_triggers_reimplementation ... ok
+test pipeline_state::tests::from_checkpoint_rejects_invalid_json ... ok
+test pipeline_state::tests::toml_steps_infer_strategy_and_review_flags ... ok
+test pipeline_state::tests::checkpoint_round_trip_implementing ... ok
+test pipeline_state::tests::checkpoint_halted_phase ... ok
+test pipeline_state::tests::checkpoint_full_config ... ok
+test pipeline_state::tests::checkpoint_preserves_review_findings ... ok
+test pipeline_state::tests::toml_table_form ... ok
+test pipeline_state::tests::toml_unknown_template_is_error ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.00s
+
+
+exec
+/bin/zsh -lc 'rg -n "WorkflowOutcome|pub enum Phase|pub struct PipelineStateV2|fn checkpoint|fn from_checkpoint|checkpoint_round_trip_implementing" crates/roko-runtime/src/pipeline_state.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+13:// TODO(arch): Use roko_core::runtime_event::WorkflowOutcome once the crate
+19:pub enum WorkflowOutcome {
+373:pub enum Phase {
+514:        outcome: WorkflowOutcome,
+525:pub struct PipelineStateV2 {
+573:    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+586:    pub fn from_checkpoint(
+734:                    outcome: WorkflowOutcome::Success {
+743:                    outcome: WorkflowOutcome::Cancelled,
+860:                outcome: WorkflowOutcome::Cancelled
+944:    fn checkpoint_round_trip_implementing() {
+957:    fn checkpoint_preserves_review_findings() {
+974:    fn checkpoint_halted_phase() {
+990:    fn checkpoint_full_config() {
+1003:    fn from_checkpoint_rejects_invalid_json() {
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-runtime/src/pipeline_state.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e8..d9c01b4f 100644
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@ fn config_parse_error(
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@ pub enum PipelineOutput {
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@ impl PipelineStateV2 {
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@ role = "implementer"
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+codex
+Implemented checkpoint serialization/resume in [pipeline_state.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/pipeline_state.rs:19).
+
+Changes:
+- Added `Serialize, Deserialize` derives to `WorkflowOutcome`, `Phase`, and `PipelineStateV2`.
+- Added `PipelineStateV2::checkpoint()` and `PipelineStateV2::from_checkpoint()`.
+- Added the five requested checkpoint unit tests.
+
+Verification passed:
+- `grep -q 'Serialize, Deserialize' crates/roko-runtime/src/pipeline_state.rs`
+- `grep -q 'fn checkpoint' crates/roko-runtime/src/pipeline_state.rs`
+- `grep -q 'fn from_checkpoint' crates/roko-runtime/src/pipeline_state.rs`
+- `cargo check -p roko-runtime`
+- `cargo test -p roko-runtime --lib pipeline_state`
+
+The focused test run passed: `17 passed; 0 failed`. It emitted three pre-existing warnings in unrelated runtime test modules.
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index 3fdba7e82f5450f67480437cd15cad37513d553e..d9c01b4f85f5ba4f24124e8f89c9762025087c82
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -15,7 +15,7 @@
+ // roko-core currently depends on roko-runtime, so importing roko-core here
+ // would create a circular dependency and Cargo.toml edits are out of scope.
+ /// Outcome of a completed workflow run.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum WorkflowOutcome {
+     /// Workflow completed successfully, optionally with a commit hash.
+     Success {
+@@ -369,7 +369,7 @@
+ }
+ 
+ /// Current phase of the pipeline.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum Phase {
+     /// Pipeline has been created but not started.
+     Pending,
+@@ -521,7 +521,7 @@
+ }
+ 
+ /// Pure state machine for workflow pipelines.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PipelineStateV2 {
+     /// Current pipeline phase.
+     pub phase: Phase,
+@@ -562,6 +562,33 @@
+         }
+     }
+ 
++    /// Serialize the current pipeline state to a JSON string.
++    ///
++    /// The resulting JSON can be passed to `from_checkpoint` to restore the exact
++    /// state -- including phase, iteration count, and accumulated findings -- so a
++    /// workflow can resume after a process restart.
++    ///
++    /// Returns an error only if serde_json serialization fails (in practice, never
++    /// for this struct).
++    pub fn checkpoint(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::to_string(self)?)
++    }
++
++    /// Restore a `PipelineStateV2` from a JSON checkpoint string produced by
++    /// [`checkpoint`].
++    ///
++    /// After restoring, call [`step`] with the next input as if the workflow is
++    /// continuing from the saved phase. Terminal phases (`Complete`, `Halted`,
++    /// `Cancelled`) are valid checkpoint states -- callers should check
++    /// `phase.is_terminal()` before resuming.
++    ///
++    /// Returns an error if the JSON is malformed or missing required fields.
++    pub fn from_checkpoint(
++        json: &str,
++    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
++        Ok(serde_json::from_str(json)?)
++    }
++
+     /// Feed an event into the state machine, get an action back.
+     /// This is the ONLY way to drive the state machine. No side effects here.
+     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
+@@ -912,4 +939,69 @@
+         assert!(!cfg.has_review);
+         assert_eq!(cfg.max_iterations, 4);
+     }
++
++    #[test]
++    fn checkpoint_round_trip_implementing() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "add feature".into());
++        sm.step(PipelineInput::Start);
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(restored.phase, Phase::Implementing);
++        assert_eq!(restored.iteration, 1);
++        assert_eq!(restored.original_prompt, "add feature");
++    }
++
++    #[test]
++    fn checkpoint_preserves_review_findings() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::standard(), "feat".into());
++        sm.review_findings = vec!["needs error handling".into(), "add docs".into()];
++        sm.iteration = 2;
++        sm.phase = Phase::Implementing;
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert_eq!(
++            restored.review_findings,
++            vec!["needs error handling", "add docs"]
++        );
++        assert_eq!(restored.iteration, 2);
++    }
++
++    #[test]
++    fn checkpoint_halted_phase() {
++        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "task".into());
++        sm.phase = Phase::Halted {
++            reason: "compile failed".into(),
++        };
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.phase.is_terminal());
++        assert!(
++            matches!(restored.phase, Phase::Halted { ref reason } if reason == "compile failed")
++        );
++    }
++
++    #[test]
++    fn checkpoint_full_config() {
++        let config = WorkflowConfig::full();
++        let sm = PipelineStateV2::new(config, "complex".into());
++
++        let json = sm.checkpoint().unwrap();
++        let restored = PipelineStateV2::from_checkpoint(&json).unwrap();
++
++        assert!(restored.config.has_strategy);
++        assert!(restored.config.has_review);
++        assert_eq!(restored.config.max_iterations, 3);
++    }
++
++    #[test]
++    fn from_checkpoint_rejects_invalid_json() {
++        assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
++        assert!(PipelineStateV2::from_checkpoint("{}").is_err());
++    }
+ }
+
+2026-04-28T04:52:35.189599Z ERROR codex_core::session: failed to record rollout items: thread 019dd26c-cbcf-75a3-bc20-0971ddf195d0 not found
+tokens used
+26,007
+Implemented checkpoint serialization/resume in [pipeline_state.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/pipeline_state.rs:19).
+
+Changes:
+- Added `Serialize, Deserialize` derives to `WorkflowOutcome`, `Phase`, and `PipelineStateV2`.
+- Added `PipelineStateV2::checkpoint()` and `PipelineStateV2::from_checkpoint()`.
+- Added the five requested checkpoint unit tests.
+
+Verification passed:
+- `grep -q 'Serialize, Deserialize' crates/roko-runtime/src/pipeline_state.rs`
+- `grep -q 'fn checkpoint' crates/roko-runtime/src/pipeline_state.rs`
+- `grep -q 'fn from_checkpoint' crates/roko-runtime/src/pipeline_state.rs`
+- `cargo check -p roko-runtime`
+- `cargo test -p roko-runtime --lib pipeline_state`
+
+The focused test run passed: `17 passed; 0 failed`. It emitted three pre-existing warnings in unrelated runtime test modules.
+
+=== Finished: 2026-04-28T06:52:35+02:00 ===
+=== Duration: 1m 57s ===
+=== Exit code: 0 ===
+[structural] grep -q 'Serialize\|Deserialize\|checkpoint\|resume' crates/roko-runtime/src/pipeline_state.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E02/verify-attempt-1 cargo check -p roko-runtime
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+    Checking cfg-if v1.0.4
+   Compiling typenum v1.19.0
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+    Checking memchr v2.8.0
+   Compiling semver v1.0.28
+   Compiling autocfg v1.5.0
+   Compiling zmij v1.0.21
+   Compiling getrandom v0.4.2
+   Compiling shlex v1.3.0
+   Compiling parking_lot_core v0.9.12
+   Compiling find-msvc-tools v0.1.9
+   Compiling rustc_version v0.4.1
+   Compiling cc v1.2.60
+    Checking equivalent v1.0.2
+   Compiling serde_json v1.0.149
+    Checking smallvec v1.15.1
+    Checking hashbrown v0.17.0
+    Checking scopeguard v1.2.0
+    Checking aho-corasick v1.1.4
+    Checking lock_api v0.4.14
+    Checking zeroize v1.8.2
+   Compiling generic-array v0.14.9
+   Compiling curve25519-dalek v4.1.3
+   Compiling thiserror v2.0.18
+    Checking core-foundation-sys v0.8.7
+    Checking itoa v1.0.18
+    Checking once_cell v1.21.4
+    Checking indexmap v2.14.0
+    Checking winnow v0.7.15
+    Checking pin-project-lite v0.2.17
+   Compiling num-traits v0.2.19
+    Checking toml_write v0.1.2
+   Compiling cfg_aliases v0.2.1
+    Checking regex-syntax v0.8.10
+    Checking subtle v2.6.1
+    Checking signature v2.2.0
+   Compiling nix v0.29.0
+    Checking ed25519 v2.2.3
+    Checking tracing-core v0.1.36
+   Compiling syn v2.0.117
+    Checking iana-time-zone v0.1.65
+    Checking arrayref v0.3.9
+    Checking bytes v1.11.1
+    Checking arrayvec v0.7.6
+    Checking constant_time_eq v0.4.2
+    Checking bitflags v2.11.0
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.6
+    Checking digest v0.10.7
+    Checking errno v0.3.14
+    Checking cpufeatures v0.2.17
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking sha2 v0.10.9
+    Checking regex-automata v0.4.14
+    Checking signal-hook-registry v1.4.8
+    Checking uuid v1.23.0
+    Checking parking_lot v0.12.5
+    Checking ed25519-dalek v2.2.0
+   Compiling blake3 v1.8.4
+    Checking regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking tracing v0.1.44
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking chrono v0.4.44
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 26.23s
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E02/verify-attempt-1 cargo test -p roko-runtime --lib -- pipeline_state
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.0
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.19.0
+   Compiling scopeguard v1.2.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.0
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.1
+   Compiling zmij v1.0.21
+   Compiling bitflags v2.11.0
+   Compiling winnow v0.7.15
+   Compiling itoa v1.0.18
+   Compiling rustix v1.1.4
+   Compiling lock_api v0.4.14
+   Compiling core-foundation-sys v0.8.7
+   Compiling signature v2.2.0
+   Compiling zeroize v1.8.2
+   Compiling pin-project-lite v0.2.17
+   Compiling regex-syntax v0.8.10
+   Compiling subtle v2.6.1
+   Compiling aho-corasick v1.1.4
+   Compiling toml_write v0.1.2
+   Compiling ed25519 v2.2.3
+   Compiling generic-array v0.14.9
+   Compiling iana-time-zone v0.1.65
+   Compiling tracing-core v0.1.36
+   Compiling num-traits v0.2.19
+   Compiling constant_time_eq v0.4.2
+   Compiling arrayref v0.3.9
+   Compiling arrayvec v0.7.6
+   Compiling indexmap v2.14.0
+   Compiling errno v0.3.14
+   Compiling getrandom v0.4.2
+   Compiling cpufeatures v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling parking_lot v0.12.5
+   Compiling digest v0.10.7
+   Compiling bytes v1.11.1
+   Compiling sha2 v0.10.9
+   Compiling curve25519-dalek v4.1.3
+   Compiling blake3 v1.8.4
+   Compiling tracing v0.1.44
+   Compiling tokio v1.51.1
+   Compiling regex-automata v0.4.14
+   Compiling serde v1.0.228
+   Compiling uuid v1.23.0
+   Compiling serde_json v1.0.149
+   Compiling ed25519-dalek v2.2.0
+   Compiling thiserror v2.0.18
+   Compiling fastrand v2.4.1
+   Compiling nix v0.29.0
+   Compiling tempfile v3.27.0
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling chrono v0.4.44
+   Compiling toml_edit v0.22.27
+   Compiling roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+   Compiling regex v1.12.3
+   Compiling toml v0.8.23
+   Compiling roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+   Compiling roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 38.11s
+     Running unittests src/lib.rs (/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/E02/verify-attempt-1/debug/deps/roko_runtime-0c58882bc064c5a6)
+
+running 17 tests
+test pipeline_state::tests::toml_full_template_with_override ... ok
+test pipeline_state::tests::toml_express_template ... ok
+test pipeline_state::tests::standard_with_review ... ok
+test pipeline_state::tests::gate_failure_triggers_autofix ... ok
+test pipeline_state::tests::full_with_strategy ... ok
+test pipeline_state::tests::cancel_from_any_phase ... ok
+test pipeline_state::tests::express_happy_path ... ok
+test pipeline_state::tests::toml_bare_keys_no_template ... ok
+test pipeline_state::tests::review_revise_triggers_reimplementation ... ok
+test pipeline_state::tests::from_checkpoint_rejects_invalid_json ... ok
+test pipeline_state::tests::toml_steps_infer_strategy_and_review_flags ... ok
+test pipeline_state::tests::checkpoint_halted_phase ... ok
+test pipeline_state::tests::checkpoint_round_trip_implementing ... ok
+test pipeline_state::tests::checkpoint_full_config ... ok
+test pipeline_state::tests::checkpoint_preserves_review_findings ... ok
+test pipeline_state::tests::toml_table_form ... ok
+test pipeline_state::tests::toml_unknown_template_is_error ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.00s
+

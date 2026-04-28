@@ -1,0 +1,10 @@
+=== Batch: A01 (RuntimeEvent serde envelope with run id, sequence, timestamp, schema version) ===
+=== Started: 2026-04-28T22:27:22+02:00 ===
+=== Worktree: HEAD is now at d69d375d update demo / bench
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-222719-A01 ===
+=== Model: gpt-5.5 ===
+Error: No such file or directory (os error 2)
+
+=== Finished: 2026-04-28T22:27:22+02:00 ===
+=== Duration: 0s ===
+=== Exit: 1 ===

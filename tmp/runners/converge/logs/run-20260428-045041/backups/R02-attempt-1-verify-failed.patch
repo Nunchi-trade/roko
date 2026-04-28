@@ -1,0 +1,20 @@
+diff --git a/crates/roko-cli/src/lib.rs b/crates/roko-cli/src/lib.rs
+index 7823934d..ae2c65d8 100644
+--- a/crates/roko-cli/src/lib.rs
++++ b/crates/roko-cli/src/lib.rs
+@@ -73,6 +73,7 @@ pub mod inline;
+ pub(crate) mod knowledge_helpers;
+ pub(crate) mod learning_helpers;
+ pub mod oneshot;
++#[cfg(feature = "legacy-orchestrate")]
+ pub mod orchestrate;
+ pub mod output_format;
+ pub mod pipe;
+@@ -121,6 +122,7 @@ pub use deployment::SigstoreVerifier;
+ pub use episode::EpisodePolicy;
+ pub use inject::{InjectKind, InjectRequest};
+ pub use oneshot::{OneshotMode, OneshotResult};
++#[cfg(feature = "legacy-orchestrate")]
+ pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
+ pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
+ pub use plan::{Plan, PlanSummary, PlanTask};

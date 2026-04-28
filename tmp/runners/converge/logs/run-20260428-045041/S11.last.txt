@@ -1,0 +1,17 @@
+Implemented S11 in [feedback_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/feedback_service.rs).
+
+Changes:
+- Added optional `Arc<CascadeRouter>` field and `with_cascade_router`.
+- `FeedbackSink::record` now eagerly observes `ModelCall` events before buffering.
+- Added private `observe_model_call`, `model_call_context_vec`, and `simple_role_hash`.
+- Added tests for known-model observation and unknown-model skip.
+
+Verification passed:
+- `cargo check -p roko-learn`
+- `grep -q 'with_cascade_router' ...`
+- `grep -q 'observe_model_call' ...`
+- `cargo test -p roko-learn feedback_service`
+- `cargo test -p roko-learn observes_model_call`
+- `cargo test -p roko-learn skips_observation`
+
+The test commands emitted existing warnings outside this change, but all required checks passed.

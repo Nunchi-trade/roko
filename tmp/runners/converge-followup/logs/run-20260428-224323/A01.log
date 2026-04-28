@@ -1,0 +1,4 @@
+=== Batch: A01 (RuntimeEvent serde envelope with run id, sequence, timestamp, schema version) ===
+=== Started: 2026-04-28T22:43:24+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224323-A01 ===
+=== Model: gpt-5.5 ===

@@ -1,0 +1,1841 @@
+=== Batch: X01 (Fix contract fail-open to fail-closed) ===
+=== Started: 2026-04-28T15:19:18+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041 ===
+=== Model: gpt-5.5 ===
+=== Reasoning: high ===
+=== Timeout: 5400 ===
+=== Cargo target: /var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared ===
+=== Prompt snapshot: /Users/will/dev/nunchi/roko/roko/tmp/runners/converge/logs/run-20260428-045041/prompts/X01.prompt.md ===
+
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd43e-7d1f-7ee3-a6bb-ad4275bc2f59
+--------
+user
+# Convergence Batch X01 — Fix contract fail-open to fail-closed
+
+Run id: run-20260428-045041
+Attempt: 1
+Model: gpt-5.5
+Reasoning: high
+
+---
+
+## Rules (mandatory)
+
+## Mandatory Rules for All Batches
+
+You are an unattended Codex batch agent. There is no prior chat history. This prompt is
+entirely self-contained — everything you need is inlined below.
+
+### Execution discipline
+
+1. **Work ONLY within the listed write scope.** Do not modify files outside your scope.
+2. **Run verify commands** before declaring success. If `cargo check` fails, fix the errors.
+3. **If blocked**, implement the maximum possible and leave a `// TODO(converge): <reason>` comment.
+4. **Do NOT create new crates.** All work goes into existing crate directories.
+5. **Do NOT add Cargo.toml dependencies** unless the prompt explicitly lists them.
+6. **Do NOT modify Cargo.toml** unless the prompt explicitly instructs you to.
+7. **Do NOT spawn subagents or delegate.** Each batch is small enough for one agent.
+8. **Do NOT create test files** in separate directories. Put `#[cfg(test)] mod tests` at the
+   bottom of the implementation file.
+
+### Code quality
+
+9. **No `todo!()` or `unimplemented!()` in public API methods.** Use `Err(...)` or sensible
+    defaults instead. Internal helper stubs are acceptable with `// TODO(converge)` markers.
+10. **Use `async_trait`** for async trait methods. The crate is already available workspace-wide.
+11. **Follow existing naming conventions.** Study the crate's `lib.rs` for style guidance.
+12. **All public types need `pub` visibility** and should be re-exported from `lib.rs`.
+13. **Prefer `anyhow::Result`** for fallible functions unless the crate uses a custom error type.
+
+### Convergence-specific rules
+
+14. **Use roko-core foundation traits.** The canonical traits live in `roko_core::foundation`.
+    Do NOT create local copies of `ModelCaller`, `PromptAssembler`, `FeedbackSink`, `GateRunner`,
+    `EventConsumer`, or `EffectExecutor`. Import them from `roko_core`.
+15. **Use roko-core RuntimeEvent.** The canonical enum lives in `roko_core::runtime_event`.
+    Do NOT create local copies. Import from `roko_core`.
+16. **Feature-gate legacy code with `#[cfg(feature = "legacy-orchestrate")]`** when the prompt
+    instructs you to wrap code in a feature gate. Do NOT delete legacy code — gate it.
+17. **Wire, don't rebuild.** Existing services have real implementations. Your job is to connect
+    them to the WorkflowEngine path, not rewrite them.
+
+### Anti-patterns (condensed — see 03-ANTI-PATTERNS.md for details)
+
+18. **NEVER `Command::new("claude")`** — use `ModelCallService` / `ModelCaller` trait.
+19. **NEVER `format!("You are the...")`** — use `PromptAssemblyService` / `SystemPromptBuilder`.
+20. **NEVER put decision logic in the effect driver** — decisions live in the state machine.
+21. **NEVER hardcode roles** — roles come from config or `AgentRole` enum.
+22. **NEVER skip feedback recording** — `FeedbackService` must see every model call.
+23. **NEVER copy code between entry points** — extract shared services.
+24. **NEVER add execution logic to a specific entry point** — use shared services under
+    `roko-runtime`, `roko-agent`, `roko-compose`, etc.
+
+---
+
+## Architecture Reference
+
+## Architecture Reference
+
+This is the current architecture after the arch runner (Phases 0-3). Your implementation
+must conform to and extend these types and traits.
+
+### RuntimeEvent enum (in roko-core/src/runtime_event.rs)
+
+```rust
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    WorkflowStarted  { run_id: String, template: String, prompt: String },
+    PhaseTransition  { run_id: String, from: String, to: String },
+    WorkflowCompleted{ run_id: String, outcome: WorkflowOutcome },
+    AgentSpawned     { run_id: String, agent_id: String, role: String, model: String },
+    AgentOutput      { run_id: String, agent_id: String, chunk: String },
+    AgentCompleted   { run_id: String, agent_id: String, output: String, tokens_used: u64, cost_usd: f64 },
+    AgentFailed      { run_id: String, agent_id: String, error: String },
+    GateStarted      { run_id: String, gate_name: String, rung: u8 },
+    GatePassed       { run_id: String, gate_name: String, duration_ms: u64 },
+    GateFailed       { run_id: String, gate_name: String, output: String, duration_ms: u64 },
+    FeedbackRecorded { run_id: String, kind: String, summary: String },
+    StateCheckpointed{ run_id: String, path: String },
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkflowOutcome {
+    Success { commit_hash: Option<String> },
+    Halted { reason: String },
+    Cancelled,
+}
+
+impl RuntimeEvent {
+    pub fn run_id(&self) -> &str { ... }
+    pub fn kind(&self) -> &'static str { ... }
+}
+```
+
+### Foundation Traits (in roko-core/src/foundation.rs)
+
+```rust
+// --- Request/Response types ---
+pub struct ModelCallRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub role: Option<String>,
+}
+
+pub struct ChatMessage { pub role: MessageRole, pub content: String }
+pub enum MessageRole { System, User, Assistant }
+
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+}
+
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+pub struct PromptSpec {
+    pub role: Option<String>,
+    pub task: Option<String>,
+    pub workdir: Option<PathBuf>,
+    pub gate_feedback: Vec<String>,
+    pub anti_patterns: Vec<String>,
+}
+
+pub enum FeedbackEvent {
+    ModelCall { run_id: String, model: String, role: Option<String>,
+               input_tokens: u64, output_tokens: u64, cost_usd: f64,
+               latency_ms: u64, success: bool },
+    GateResult { run_id: String, gate_name: String, passed: bool, duration_ms: u64 },
+    WorkflowComplete { run_id: String, outcome: String, total_cost_usd: f64,
+                       total_tokens: u64, duration_ms: u64 },
+}
+
+pub struct GateConfig {
+    pub workdir: PathBuf,
+    pub enabled_gates: Vec<String>,
+    pub max_rung: Option<u8>,
+}
+
+pub struct GateVerdict { pub gate_name: String, pub passed: bool, pub output: String, pub duration_ms: u64 }
+pub struct GateReport { pub verdicts: Vec<GateVerdict> }
+
+pub enum Effect {
+    SpawnAgent { run_id: String, role: String, model: String, system_prompt: String, user_prompt: String, workdir: PathBuf },
+    RunGates   { run_id: String, config: GateConfig },
+    Commit     { run_id: String, workdir: PathBuf, message: String },
+    Checkpoint { run_id: String, state_json: String, path: PathBuf },
+}
+
+pub enum EffectOutcome {
+    AgentDone     { agent_id: String, output: String, tokens_used: u64, cost_usd: f64, files_changed: Vec<String> },
+    GatesDone     { report: GateReport },
+    CommitDone    { hash: String, message: String },
+    CheckpointDone{ path: String },
+    Failed        { error: String },
+}
+
+// --- Traits ---
+#[async_trait] pub trait ModelCaller: Send + Sync {
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+#[async_trait] pub trait PromptAssembler: Send + Sync {
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+#[async_trait] pub trait FeedbackSink: Send + Sync {
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+#[async_trait] pub trait GateRunner: Send + Sync {
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+pub trait EventConsumer: Send + Sync {
+    fn consume(&self, event: &RuntimeEvent);
+}
+#[async_trait] pub trait EffectExecutor: Send + Sync {
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+impl GateReport {
+    pub fn all_passed(&self) -> bool { ... }
+    pub fn first_failure(&self) -> Option<&GateVerdict> { ... }
+    pub fn failure_summary(&self) -> String { ... }
+}
+```
+
+### Existing Concrete Services
+
+| Service | Crate | Traits Implemented | Status |
+|---------|-------|--------------------|--------|
+| `ModelCallService` | `roko-agent` | `ModelCaller` (roko-core) | Stub — needs real provider dispatch |
+| `PromptAssemblyService` | `roko-compose` | `PromptAssembler` (roko-core) | Basic — needs full 9-layer builder |
+| `FeedbackService` | `roko-learn` | `FeedbackSink` (roko-core) | Works — writes efficiency.jsonl |
+| `GateService` | `roko-gate` | `GateRunner` (roko-core) | Partial — rungs 0-2 only |
+| `JsonlLogger` | `roko-runtime` | `EventConsumer` (LOCAL copy) | Works — needs roko-core trait |
+| `RuntimeProjection` | `roko-runtime` | (stateless reader) | Partial — 5 of 12 variants |
+
+### Execution Engine (in roko-runtime)
+
+```rust
+// PipelineStateV2 — pure state machine, no I/O
+pub struct PipelineStateV2 { pub phase: Phase, ... }
+impl PipelineStateV2 {
+    pub fn new(config: WorkflowConfig, prompt: String) -> Self;
+    pub fn step(&mut self, input: PipelineInput) -> PipelineOutput;
+}
+
+// EffectDriver — executes side effects
+pub struct EffectDriver { services: EffectServices, ... }
+impl EffectDriver {
+    pub fn new(services: EffectServices, run_id: String, workdir: PathBuf) -> Self;
+    pub async fn spawn_agent(&self, role: &str, user_prompt: &str, context: Option<&str>) -> PipelineInput;
+    pub async fn run_gates(&self, enabled_gates: &[String]) -> PipelineInput;
+    pub async fn commit(&self, message: &str) -> PipelineInput;
+}
+
+// EffectServices — dependency injection bundle
+pub struct EffectServices {
+    pub model_caller: Arc<dyn ModelCaller>,       // Currently: LOCAL trait
+    pub prompt_assembler: Arc<dyn PromptAssembler>, // Currently: LOCAL trait
+    pub feedback_sink: Arc<dyn FeedbackSink>,     // Currently: LOCAL trait
+    pub gate_runner: Arc<dyn GateRunner>,         // Currently: LOCAL trait
+}
+// ^^^ Track F fixes these to use roko-core traits
+
+// WorkflowEngine — top-level facade
+pub struct WorkflowEngine { services: EffectServices, consumers: Vec<Arc<dyn WorkflowEventConsumer>> }
+impl WorkflowEngine {
+    pub fn new(services: EffectServices) -> Self;
+    pub fn add_consumer(&mut self, consumer: Arc<dyn WorkflowEventConsumer>);
+    pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult>;
+}
+```
+
+### Crate Dependency Map (CURRENT — Track F01 fixes the cycle)
+
+```
+roko-core          (CURRENTLY depends on roko-runtime — WRONG, F01 removes this)
+    ↑
+roko-runtime       (depends on: roko-core after F01)
+    ↑
+roko-agent         (depends on: roko-core)
+roko-compose       (depends on: roko-core)
+roko-learn         (depends on: roko-core)
+roko-gate          (depends on: roko-core)
+    ↑
+roko-acp           (depends on: roko-core, roko-runtime, roko-agent, roko-gate, roko-compose)
+roko-serve         (depends on: roko-core, roko-runtime)
+roko-cli           (depends on: everything)
+```
+
+### Key Existing Infrastructure (do NOT recreate)
+
+- `EventBus<E>` in `roko-runtime::event_bus` — typed broadcast with replay ring
+- `SystemPromptBuilder` in `roko-compose` — 9-layer prompt assembly
+- `InferenceProvider` trait in `roko-agent` — LLM backend abstraction
+- `adapter_for_kind()` in `roko-agent` — creates backend for a ProviderKind
+- `create_agent_for_model()` in `roko-agent` — model string → provider
+- `Verify` trait in `roko-gate` — gate execution trait
+- `CompileGate`, `TestGate`, `ClippyGate` in `roko-gate` — existing gate impls
+- `AdaptiveThresholds` in `roko-gate` — per-rung adaptive gate skipping
+- `EpisodeLogger` in `roko-learn` — append-only JSONL episode recording
+- `CascadeRouter` in `roko-learn` — model routing with LinUCB bandit learning
+- `PlaybookStore` in `roko-learn` — proven action sequences with success scores
+- `ExperimentStore` in `roko-learn` — prompt A/B testing
+- `ConductorBandit` in `roko-learn` — retry strategy learning
+- `KnowledgeStore` in `roko-neuro` — durable knowledge with tier progression
+- `StateHub` in `roko-runtime` — push-based dashboard event hub
+- `ProcessSupervisor` in `roko-runtime` — agent lifecycle management
+- `CancelToken` in `roko-runtime` — cooperative cancellation
+
+### Key CLI Entry Points
+
+```rust
+// roko-cli/src/run.rs
+pub async fn run_once(workdir, config, prompt, hub) -> Result<RunReport>;  // CURRENT active path
+pub async fn run_with_workflow_engine(prompt, workdir, template, gates) -> Result<()>; // NEW path (not yet wired)
+
+// roko-cli/src/orchestrate.rs (21,577 lines — will be feature-gated)
+pub struct PlanRunner { ... } // ~70 fields
+impl PlanRunner {
+    pub async fn run_all(&mut self, cancel) -> Result<OrchestrationReport>; // main tick loop
+    pub async fn from_plans_dir(dir, workdir, config, ...) -> Result<Self>;
+}
+
+// roko-cli/src/dispatch_direct.rs (fast path for unified chat)
+pub async fn dispatch_prompt(auth, prompt) -> Result<DispatchResult>;
+```
+
+---
+
+## Anti-Patterns (DO NOT violate)
+
+## Anti-Patterns — DO NOT Do These
+
+These are concrete examples of code that has been written in this codebase before and caused
+problems. Each one has a "BAD" example and a "GOOD" replacement.
+
+### AP-1: Never shell out to claude CLI
+
+**BAD** (actual code found in codebase):
+```rust
+let output = Command::new("claude")
+    .arg("--print")
+    .arg("--dangerously-skip-permissions")
+    .arg(&prompt)
+    .current_dir(&workdir)
+    .output()
+    .await?;
+```
+
+**GOOD** — use the provider abstraction:
+```rust
+let response = model_caller.call(ModelCallRequest {
+    model: model_spec,
+    messages: vec![...],
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Shelling out bypasses cost tracking, feedback recording, provider health monitoring,
+rate limiting, and model routing. It also makes the code untestable without a real claude binary.
+
+---
+
+### AP-2: Never inline prompt strings
+
+**BAD**:
+```rust
+let prompt = format!(
+    "You are the {} agent. Your task is to {}. \
+     Follow these conventions: {}",
+    role, task, conventions
+);
+```
+
+**GOOD** — use PromptAssemblyService:
+```rust
+let prompt = prompt_assembler.assemble(PromptSpec {
+    role: Some(role.to_string()),
+    task: Some(task.clone()),
+    ..Default::default()
+}).await?;
+```
+
+**Why**: Inline prompts skip the 9-layer system prompt builder, miss anti-patterns, miss
+conventions, miss gate feedback from prior iterations, and can't be A/B tested.
+
+---
+
+### AP-3: Never add execution logic to a specific entry point
+
+**BAD** — putting gate execution in the CLI:
+```rust
+// in roko-cli/src/run.rs
+async fn run_gates(workdir: &Path) -> Result<()> {
+    let compile = CompileGate;
+    let test = TestGate;
+    compile.verify(&signal, &ctx).await?;
+    test.verify(&signal, &ctx).await?;
+}
+```
+
+**GOOD** — use the shared GateService:
+```rust
+let report = gate_runner.run_gates(GateConfig {
+    workdir: workdir.to_path_buf(),
+    enabled_gates: vec!["compile".into(), "test".into()],
+    ..Default::default()
+}).await?;
+```
+
+---
+
+### AP-4: Never put decisions in the effect driver
+
+**BAD**:
+```rust
+impl EffectDriver {
+    async fn handle_gate_result(&self, result: &GateReport) {
+        if result.all_passed() {
+            self.run_reviewer().await;  // Decision!
+        } else if self.iteration < self.max_iterations {
+            self.run_autofix().await;   // Decision!
+        }
+    }
+}
+```
+
+**GOOD** — decisions in the state machine, effects in the driver:
+```rust
+let action = pipeline_state.step(PipelineInput::GatesPassed);
+match action {
+    PipelineOutput::SpawnReviewer { .. } => driver.spawn_agent(...).await,
+    PipelineOutput::Halt { reason } => driver.halt(reason).await,
+}
+```
+
+---
+
+### AP-5: Never hardcode roles
+
+**BAD**:
+```rust
+if role == "implementer" {
+    model = "claude-sonnet-4-20250514";
+} else if role == "reviewer" {
+    model = "claude-opus-4-20250514";
+}
+```
+
+**GOOD** — roles come from config / CascadeRouter:
+```rust
+let model = cascade_router.select(&TaskRequirements {
+    role: spec.role.clone(),
+    ..Default::default()
+});
+```
+
+---
+
+### AP-6: Never skip feedback recording
+
+**BAD**:
+```rust
+let response = provider.call(request).await?;
+process_response(response);  // No feedback recorded!
+```
+
+**GOOD**:
+```rust
+let response = model_caller.call(request).await?;
+// ModelCallService internally records to FeedbackSink
+```
+
+---
+
+### AP-7: Never copy code between entry points
+
+**BAD** — duplicating gate logic across CLI and ACP:
+```rust
+// roko-cli/src/run.rs
+async fn cli_run_gates() { /* 50 lines */ }
+// roko-acp/src/runner.rs
+async fn acp_run_gates() { /* same 50 lines, slightly different */ }
+```
+
+**GOOD** — shared service:
+```rust
+let report = gate_service.run_gates(config).await?;
+```
+
+---
+
+### AP-8: Never create local copies of foundation traits
+
+**BAD** — the arch runner created local copies in effect_driver.rs:
+```rust
+// In roko-runtime/src/effect_driver.rs
+pub trait ModelCaller: Send + Sync {           // LOCAL COPY — wrong!
+    fn call(&self, ...) -> BoxFuture<...>;
+}
+```
+
+**GOOD** — import from roko-core:
+```rust
+use roko_core::foundation::ModelCaller;        // Canonical trait
+```
+
+This is the #1 problem the convergence runner fixes. The arch runner created local trait
+copies because of a crate cycle (roko-core depended on roko-runtime). Track F fixes the
+crate cycle so all crates use the canonical roko-core traits.
+
+---
+
+### AP-9: Never create new crates
+
+All 18 crates already exist. Your code goes into existing crate directories.
+
+---
+
+### AP-10: Never use `todo!()` in public APIs
+
+```rust
+// BAD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    todo!()
+}
+
+// GOOD
+pub async fn stream(&self, req: ModelCallRequest) -> Result<ModelCallStream> {
+    let response = self.call(req).await?;
+    Ok(ModelCallStream::from_complete(response))
+}
+```
+
+---
+
+# Batch X01 — Fix contract fail-open to fail-closed
+
+## Write Scope
+- **MODIFY**: `crates/roko-agent/src/safety/mod.rs`
+
+## Task
+
+Change the `contract_for_role()` method in the safety module to use the restricted (deny-all) fallback instead of the permissive (allow-all) fallback when no contract YAML exists for a role. This is a security hardening change -- agents without explicit contracts should have zero capabilities, not unlimited ones.
+
+### 1. Replace the fallback in `contract_for_role()`
+
+Current code at line ~864:
+```rust
+fn contract_for_role(&self, role: &str) -> AgentContract {
+    let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+        tracing::warn!(
+            %role,
+            %err,
+            "no contract for role; using permissive default"
+        );
+        AgentContract::permissive(role.to_string())
+    });
+    // ... role override budget injection follows ...
+    contract
+}
+```
+
+Replace with:
+```rust
+fn contract_for_role(&self, role: &str) -> AgentContract {
+    let mut contract = AgentContract::load_for_role_with_mode(
+        role,
+        ContractLoadMode::RestrictedFallback,
+    )
+    .unwrap_or_else(|err| {
+        // load_for_role_with_mode with RestrictedFallback should never
+        // error (it returns Ok(restricted) on missing asset), but handle
+        // the impossible case defensively.
+        tracing::error!(
+            %role,
+            %err,
+            "contract load failed even with restricted fallback; using deny-all"
+        );
+        AgentContract::restricted(role.to_string())
+    });
+    // ... rest of the method (role override budget injection) unchanged ...
+    contract
+}
+```
+
+### 2. Add necessary imports
+
+Ensure `ContractLoadMode` is imported at the top of the file. It is defined in `crate::safety::contract::ContractLoadMode`. Check what is already imported and add it if missing.
+
+### 3. Verify no other permissive fallback paths exist
+
+Search the rest of `safety/mod.rs` for any other calls to `AgentContract::permissive()`. If found in the runtime path (not tests), change those to use `restricted()` or `load_for_role_with_mode` as well.
+
+Do NOT change calls in `#[cfg(test)]` blocks -- tests may legitimately use permissive contracts.
+
+### Existing Code Context
+
+`ContractLoadMode` at `crates/roko-agent/src/safety/contract.rs` line 29:
+```rust
+pub enum ContractLoadMode {
+    Strict,
+    RestrictedFallback,
+}
+
+impl Default for ContractLoadMode {
+    fn default() -> Self {
+        Self::RestrictedFallback
+    }
+}
+```
+
+`AgentContract::restricted()` at line 97:
+```rust
+pub fn restricted(role: impl Into<String>) -> Self {
+    Self {
+        role: role.into(),
+        invariants: vec![Invariant::NoNetworkAccess],
+        governance: Vec::new(),
+        recovery: Vec::new(),
+        allowed_tools: Some(Vec::new()),  // empty allowlist = deny all
+    }
+}
+```
+
+`AgentContract::load_for_role_with_mode()` at line 153:
+```rust
+pub fn load_for_role_with_mode(
+    role: impl AsRef<str>,
+    mode: ContractLoadMode,
+) -> Result<Self, ContractLoadError> {
+    match Self::load_for_role(role_ref) {
+        Ok(contract) => Ok(contract),
+        Err(err) => match mode {
+            ContractLoadMode::Strict => Err(err),
+            ContractLoadMode::RestrictedFallback => {
+                tracing::warn!(role = %role_ref, %err, "no contract for role; using restricted (deny-all) fallback");
+                Ok(Self::restricted(role_ref))
+            }
+        },
+    }
+}
+```
+
+The role override budget injection that follows the contract load (lines 874-889) must remain unchanged -- it adds `MaxTokensPerTurn` and `MaxCostPerTurn` governance rules from config overrides.
+
+## DO NOT
+- Modify any file other than `crates/roko-agent/src/safety/mod.rs`
+- Change `contract.rs` or the `AgentContract` struct itself
+- Remove `AgentContract::permissive()` (it is still used in tests)
+- Change the role override budget injection logic that follows the contract load
+- Modify `#[cfg(test)]` code
+
+## Done Criteria
+- `cargo check -p roko-agent` passes
+- `grep -n 'permissive' crates/roko-agent/src/safety/mod.rs | grep -v '#\[cfg(test)\]' | grep -v '// test' | grep -v 'mod tests'` returns zero matches in non-test code (the word "permissive" should not appear in the runtime fallback path)
+- `grep -n 'RestrictedFallback\|load_for_role_with_mode' crates/roko-agent/src/safety/mod.rs` returns at least 1 match
+- `grep -n 'ContractLoadMode' crates/roko-agent/src/safety/mod.rs` returns at least 1 match
+
+codex
+I’ll make this as a tightly scoped edit in `crates/roko-agent/src/safety/mod.rs`, then run the requested checks. I’ll inspect the existing imports and fallback usage first so the patch only touches the intended path.
+exec
+/bin/zsh -lc "sed -n '1,80p' crates/roko-agent/src/safety/mod.rs && sed -n '840,900p' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+//! Tool-dispatch safety enforcement (§36.e).
+//!
+//! Each submodule owns **one policy family** that gates a specific
+//! capability before the dispatcher hands a tool call to its handler.
+//! Policies are **pure validators**: they take a call + context and
+//! return a verdict — no side effects, no mutation of the caller's state.
+//!
+//! # Families (wave 1)
+//!
+//! - [`path`] (§36.46) — worktree-relative canonicalization & escape prevention
+//! - [`bash`] (§36.47) — command allowlist / denylist for the `bash` tool
+//! - [`network`] (§36.48) — outbound-destination allowlist for network tools
+//!
+//! # Families (later waves)
+//!
+//! - `git` (§36.49) — branch-protection policy
+//! - `scrub` (§36.50) — secret-scrubbing from outputs
+//! - `rate_limit` (§36.51) — per-tool / per-role rate limits
+//! - `audit` (§36.52) — append-only JSONL audit log (lives in `roko-fs`)
+//!
+//! # Composition
+//!
+//! Each policy exposes a `check(...)` that returns `Result<(), ToolError>`.
+//! The dispatcher chains them in order; the first failure short-circuits
+//! and is returned verbatim to the caller.
+
+#![allow(clippy::module_name_repetitions)]
+
+pub mod allowlist;
+pub mod authz;
+pub mod bash;
+pub mod capabilities;
+pub mod contract;
+pub mod data_llm;
+pub mod git;
+pub mod hallucination;
+pub mod hooks;
+pub mod network;
+pub mod path;
+pub mod provenance;
+pub mod rate_limit;
+pub mod result_filter;
+pub mod risk;
+pub mod scrub;
+pub mod spending;
+pub mod temporal;
+pub mod witness;
+
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use regex::Regex;
+use roko_core::config::schema::{RokoConfig, RoleOverride};
+use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+
+use self::bash::BashPolicy;
+use self::contract::{AgentContract, GovernanceRule, Invariant};
+use self::git::GitPolicy;
+use self::network::NetworkPolicy;
+use self::path::PathPolicy;
+use self::rate_limit::{RateLimitKey, RateLimiter};
+use self::risk::{BudgetCheckResult, ProposedAction};
+use self::scrub::ScrubPolicy;
+
+use self::capabilities::{exec_capability_from_command, network_capability_from_url};
+pub use allowlist::AllowlistGuard;
+pub use authz::{
+    ApproveAllChannel, AuthorizationEvidence, AuthorizationSource, AuthzDecision,
+    ConfirmationChannel, ConfirmationOutcome, ConfirmationSource, DenyAllChannel, EscalationTarget,
+    LogAndDenyChannel,
+};
+pub use capabilities::{
+    AgentWarrant, Capability, CapabilityError, PluginTier, check_capability, check_plugin_tier,
+    delegate,
+};
+pub use data_llm::{
+    DataLlmAuditEntry, DataLlmDecision, DataLlmRouter, SanitizeResult, sanitize_input,
+        }
+
+        // Contract invariants → anti-patterns.
+        for inv in &self.contract.invariants {
+            match inv {
+                Invariant::NoNetworkAccess => {
+                    patterns
+                        .push("This role has no network access; never call network tools.".into());
+                }
+                Invariant::RequireGateBeforeCommit => {
+                    patterns.push("Never commit without a passing gate verification first.".into());
+                }
+                _ => {}
+            }
+        }
+
+        // Path policy → anti-patterns.
+        if self.path_policy.prevent_escapes {
+            patterns.push("Never read or write files outside the designated worktree root.".into());
+        }
+
+        patterns
+    }
+
+    fn contract_for_role(&self, role: &str) -> AgentContract {
+        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+            tracing::warn!(
+                %role,
+                %err,
+                "no contract for role; using permissive default"
+            );
+            AgentContract::permissive(role.to_string())
+        });
+
+        if let Some(role_override) = self.role_overrides.get(role)
+            && let Some(budget) = role_override.effective_budget()
+        {
+            if let Some(max_tokens) = budget.max_tokens_per_turn {
+                contract
+                    .invariants
+                    .push(Invariant::MaxTokensPerTurn(max_tokens));
+            }
+            if let Some(max_cost_usd) = budget.max_cost_usd_per_turn() {
+                contract
+                    .governance
+                    .push(GovernanceRule::MaxCostPerTurn(max_cost_usd));
+            }
+        }
+
+        contract
+    }
+}
+
+fn build_role_tools(roles: &HashMap<String, RoleOverride>) -> HashMap<String, ToolWhitelist> {
+    let mut role_tools = HashMap::new();
+    for (role, override_cfg) in roles {
+        let Some(tools) = override_cfg.tools.as_ref() else {
+            continue;
+        };
+        let whitelist = ToolWhitelist::from_patterns(tools);
+        for key in role_override_keys(role, override_cfg) {
+
+exec
+/bin/zsh -lc 'rg -n "AgentContract|ContractLoadMode|permissive|contract_for_role|load_for_role" crates/roko-agent/src/safety/mod.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+60:use self::contract::{AgentContract, GovernanceRule, Invariant};
+203:    pub contract: AgentContract,
+254:            contract: AgentContract::permissive("default"),
+275:        self.contract = self.contract_for_role(&role);
+282:    pub fn with_contract(mut self, contract: AgentContract) -> Self {
+864:    fn contract_for_role(&self, role: &str) -> AgentContract {
+865:        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+869:                "no contract for role; using permissive default"
+871:            AgentContract::permissive(role.to_string())
+
+codex
+The main fallback is exactly where the prompt described. There is also an earlier non-test `AgentContract::permissive("default")` initializer in the builder path, so I’m checking whether that is an actual runtime default before changing it under the same fail-closed rule.
+exec
+/bin/zsh -lc "sed -n '220,310p' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+struct ToolWhitelist(Vec<Regex>);
+
+impl ToolWhitelist {
+    fn from_patterns(patterns: &[String]) -> Self {
+        let patterns = patterns
+            .iter()
+            .map(|pattern| glob_to_regex(pattern))
+            .collect();
+        Self(patterns)
+    }
+
+    fn matches(&self, tool: &str) -> bool {
+        self.0.iter().any(|pattern| pattern.is_match(tool))
+    }
+}
+
+impl SafetyLayer {
+    /// Construct with all default policies enabled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the default `BashPolicy` regex compilation fails
+    /// (a compile-time bug, not a runtime condition).
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self {
+            bash_policy: BashPolicy::with_defaults(),
+            git_policy: GitPolicy::default(),
+            network_policy: NetworkPolicy::default(),
+            path_policy: PathPolicy::default(),
+            scrub_policy: ScrubPolicy::default(),
+            rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+            safety_budget: None,
+            role: "default".into(),
+            contract: AgentContract::permissive("default"),
+            warrant: None,
+            role_tools: HashMap::new(),
+            role_overrides: HashMap::new(),
+            temporal_monitor: None,
+        }
+    }
+
+    /// Construct with default policies and role-local tool whitelists from config.
+    #[must_use]
+    pub fn from_config(config: &RokoConfig) -> Self {
+        let mut layer = Self::with_defaults();
+        layer.role_tools = build_role_tools(&config.agent.roles);
+        layer.role_overrides = build_role_overrides_map(&config.agent.roles);
+        layer
+    }
+
+    /// Override the role label used in rate-limit keys.
+    #[must_use]
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        let role = role.into();
+        self.contract = self.contract_for_role(&role);
+        self.role = role;
+        self
+    }
+
+    /// Override the contract attached to the safety layer.
+    #[must_use]
+    pub fn with_contract(mut self, contract: AgentContract) -> Self {
+        self.role = contract.role.clone();
+        self.contract = contract;
+        self
+    }
+
+    /// Attach a warrant to the safety layer.
+    #[must_use]
+    pub fn with_warrant(mut self, warrant: AgentWarrant) -> Self {
+        self.warrant = Some(warrant);
+        self
+    }
+
+    /// Attach an adaptive-risk budget tracker to the safety layer.
+    #[must_use]
+    pub fn with_safety_budget(mut self, budget: SafetyBudgetTracker) -> Self {
+        self.safety_budget = Some(Arc::new(Mutex::new(budget)));
+        self
+    }
+
+    /// Attach a shared adaptive-risk budget tracker to the safety layer.
+    #[must_use]
+    pub fn with_shared_safety_budget(mut self, budget: Arc<Mutex<SafetyBudgetTracker>>) -> Self {
+        self.safety_budget = Some(budget);
+        self
+    }
+
+    /// Attach a temporal logic monitor for safety/liveness property checking.
+    ///
+
+exec
+/bin/zsh -lc "sed -n '900,1040p' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+        for key in role_override_keys(role, override_cfg) {
+            role_tools.insert(key, whitelist.clone());
+        }
+    }
+    role_tools
+}
+
+fn build_role_overrides_map(
+    roles: &HashMap<String, RoleOverride>,
+) -> HashMap<String, RoleOverride> {
+    let mut role_overrides = HashMap::new();
+    for (role, override_cfg) in roles {
+        for key in role_override_keys(role, override_cfg) {
+            role_overrides.insert(key, override_cfg.clone());
+        }
+    }
+    role_overrides
+}
+
+fn role_override_keys(section_name: &str, override_cfg: &RoleOverride) -> Vec<String> {
+    let mut keys = vec![section_name.to_string()];
+    let resolved = override_cfg.resolved_role_name(section_name);
+    if resolved != section_name {
+        keys.push(resolved.to_string());
+    }
+    keys
+}
+
+fn glob_to_regex(pattern: &str) -> Regex {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    Regex::new(&regex).expect("generated whitelist regex should compile")
+}
+
+fn required_capabilities(
+    call: &ToolCall,
+    ctx: &ToolContext,
+    path_policy: &PathPolicy,
+) -> Vec<Capability> {
+    let mut required = vec![Capability::Tool(call.name.clone())];
+    let name = call.name.as_str();
+
+    if BASH_TOOLS.contains(&name)
+        && let Some(command) = call.arguments.get("command").and_then(|v| v.as_str())
+        && let Some(exec) = exec_capability_from_command(command)
+    {
+        required.push(exec);
+    }
+
+    if NETWORK_TOOLS.contains(&name)
+        && let Some(url) = call.arguments.get("url").and_then(|v| v.as_str())
+        && let Some(network) = network_capability_from_url(url)
+    {
+        required.push(network);
+    }
+
+    if FILE_TOOLS.contains(&name) {
+        let path_arg = call
+            .arguments
+            .get("file_path")
+            .or_else(|| call.arguments.get("path"))
+            .or_else(|| call.arguments.get("pattern"))
+            .and_then(|v| v.as_str());
+        if let Some(path_arg) = path_arg
+            && let Ok(canonical) =
+                path::canonicalize_with_policy(&ctx.worktree_path, path_arg, path_policy)
+        {
+            required.push(match name {
+                "write_file" | "edit_file" | "multi_edit" | "apply_patch" | "notebook_edit" => {
+                    Capability::WritePath(canonical.absolute)
+                }
+                _ => Capability::ReadPath(canonical.absolute),
+            });
+        }
+    }
+
+    required
+}
+
+fn shell_command_arg<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    if !is_shell_program(program) {
+        return None;
+    }
+
+    args.windows(2).find_map(|pair| {
+        let [flag, command] = pair else {
+            return None;
+        };
+        if is_shell_command_flag(flag) {
+            Some(command.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn render_exec_command(program: &str, args: &[String]) -> String {
+    let display_program = display_program_name(program);
+    if args.is_empty() {
+        display_program.to_string()
+    } else {
+        format!("{display_program} {}", args.join(" "))
+    }
+}
+
+fn exec_rate_limit_subject(program: &str, command: &str) -> String {
+    let executable = exec_capability_from_command(command)
+        .and_then(|capability| match capability {
+            Capability::Exec(name) => Some(name),
+            _ => None,
+        })
+        .unwrap_or_else(|| display_program_name(program).to_string());
+    format!("exec:{executable}")
+}
+
+fn display_program_name(program: &str) -> &str {
+    Path::new(program)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .and_then(OsStr::to_str)
+        .unwrap_or(program)
+}
+
+fn is_shell_program(program: &str) -> bool {
+    let Some(name) = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+
+codex
+I’m updating the default contract construction and missing-role load path to deny all by default, while leaving the role override budget injection untouched.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/safety/mod.rs
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..f43fd03404288b8b4046832d781221bf783beb84
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,13 +862,15 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++            tracing::error!(
+                 %role,
+                 %err,
+-                "no contract for role; using permissive default"
++                "contract load failed even with restricted fallback; using deny-all"
+             );
+-            AgentContract::permissive(role.to_string())
++            AgentContract::restricted(role.to_string())
+         });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..f43fd03404288b8b4046832d781221bf783beb84
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,13 +862,15 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++            tracing::error!(
+                 %role,
+                 %err,
+-                "no contract for role; using permissive default"
++                "contract load failed even with restricted fallback; using deny-all"
+             );
+-            AgentContract::permissive(role.to_string())
++            AgentContract::restricted(role.to_string())
+         });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+
+exec
+/bin/zsh -lc "grep -n 'permissive' crates/roko-agent/src/safety/mod.rs | grep -v '#\\[cfg(test)\\]' | grep -v '// test' | grep -v 'mod tests'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ exited 1 in 0ms:
+exec
+/bin/zsh -lc "sed -n '52,66p' crates/roko-agent/src/safety/mod.rs && sed -n '246,258p' crates/roko-agent/src/safety/mod.rs && sed -n '862,878p' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use regex::Regex;
+use roko_core::config::schema::{RokoConfig, RoleOverride};
+use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+
+use self::bash::BashPolicy;
+use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+use self::git::GitPolicy;
+use self::network::NetworkPolicy;
+use self::path::PathPolicy;
+use self::rate_limit::{RateLimitKey, RateLimiter};
+use self::risk::{BudgetCheckResult, ProposedAction};
+use self::scrub::ScrubPolicy;
+            bash_policy: BashPolicy::with_defaults(),
+            git_policy: GitPolicy::default(),
+            network_policy: NetworkPolicy::default(),
+            path_policy: PathPolicy::default(),
+            scrub_policy: ScrubPolicy::default(),
+            rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+            safety_budget: None,
+            role: "default".into(),
+            contract: AgentContract::restricted("default"),
+            warrant: None,
+            role_tools: HashMap::new(),
+            role_overrides: HashMap::new(),
+            temporal_monitor: None,
+    }
+
+    fn contract_for_role(&self, role: &str) -> AgentContract {
+        let mut contract =
+            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
+                .unwrap_or_else(|err| {
+            tracing::error!(
+                %role,
+                %err,
+                "contract load failed even with restricted fallback; using deny-all"
+            );
+            AgentContract::restricted(role.to_string())
+        });
+
+        if let Some(role_override) = self.role_overrides.get(role)
+            && let Some(budget) = role_override.effective_budget()
+        {
+
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..f43fd03404288b8b4046832d781221bf783beb84
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,13 +862,15 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++            tracing::error!(
+                 %role,
+                 %err,
+-                "no contract for role; using permissive default"
++                "contract load failed even with restricted fallback; using deny-all"
+             );
+-            AgentContract::permissive(role.to_string())
++            AgentContract::restricted(role.to_string())
+         });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+
+codex
+The grep for `permissive` in non-test code is already clean. I’m fixing local formatting in the edited expression before running the compile check.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/safety/mod.rs
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+codex
+The code change is in place: default safety layer now starts restricted, and role-specific contracts use `RestrictedFallback`. I’m running the requested verification commands now.
+exec
+/bin/zsh -lc "grep -n 'RestrictedFallback\\|load_for_role_with_mode' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+866:            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
+
+exec
+/bin/zsh -lc "grep -n 'permissive' crates/roko-agent/src/safety/mod.rs | grep -v '#\\[cfg(test)\\]' | grep -v '// test' | grep -v 'mod tests'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ exited 1 in 0ms:
+exec
+/bin/zsh -lc "grep -n 'ContractLoadMode' crates/roko-agent/src/safety/mod.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+60:use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+866:            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
+
+exec
+/bin/zsh -lc 'cargo check -p roko-agent' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+ succeeded in 31327ms:
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.185
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.15.1
+    Checking pin-project-lite v0.2.17
+    Checking scopeguard v1.2.0
+   Compiling parking_lot_core v0.9.12
+    Checking once_cell v1.21.4
+    Checking bytes v1.11.1
+    Checking memchr v2.8.0
+    Checking core-foundation-sys v0.8.7
+    Checking itoa v1.0.18
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+    Checking futures-core v0.3.32
+   Compiling serde_core v1.0.228
+    Checking futures-sink v0.3.32
+    Checking lock_api v0.4.14
+    Checking equivalent v1.0.2
+    Checking stable_deref_trait v1.2.1
+   Compiling serde v1.0.228
+   Compiling cc v1.2.60
+   Compiling version_check v0.9.5
+   Compiling typenum v1.19.0
+    Checking zeroize v1.8.2
+    Checking slab v0.4.12
+   Compiling getrandom v0.4.2
+    Checking hashbrown v0.17.0
+    Checking futures-channel v0.3.32
+    Checking bitflags v2.11.0
+    Checking tracing-core v0.1.36
+    Checking futures-task v0.3.32
+    Checking futures-io v0.3.32
+    Checking http v1.4.0
+    Checking subtle v2.6.1
+    Checking indexmap v2.14.0
+    Checking writeable v0.6.3
+   Compiling zmij v1.0.21
+   Compiling semver v1.0.28
+    Checking litemap v0.8.2
+   Compiling rustc_version v0.4.1
+   Compiling autocfg v1.5.0
+   Compiling system-configuration-sys v0.6.0
+    Checking http-body v1.0.1
+   Compiling rustix v1.1.4
+   Compiling generic-array v0.14.9
+   Compiling icu_normalizer_data v2.2.0
+    Checking percent-encoding v2.3.2
+   Compiling zerocopy v0.8.48
+   Compiling serde_json v1.0.149
+   Compiling httparse v1.10.1
+    Checking utf8_iter v1.0.4
+   Compiling icu_properties_data v2.2.0
+   Compiling syn v2.0.117
+   Compiling num-traits v0.2.19
+   Compiling curve25519-dalek v4.1.3
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking parking_lot v0.12.5
+    Checking mio v1.2.0
+    Checking socket2 v0.6.3
+    Checking getrandom v0.2.17
+    Checking rustls-pki-types v1.14.0
+    Checking untrusted v0.9.0
+    Checking try-lock v0.2.5
+    Checking fnv v1.0.7
+    Checking tower-service v0.3.3
+    Checking atomic-waker v1.1.2
+    Checking want v0.3.1
+    Checking core-foundation v0.9.4
+    Checking security-framework-sys v2.17.0
+    Checking cpufeatures v0.2.17
+    Checking core-foundation v0.10.1
+    Checking aho-corasick v1.1.4
+    Checking toml_write v0.1.2
+   Compiling getrandom v0.3.4
+    Checking crypto-common v0.1.6
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking fastrand v2.4.1
+    Checking regex-syntax v0.8.10
+   Compiling rustls v0.23.38
+    Checking signature v2.2.0
+   Compiling thiserror v2.0.18
+   Compiling native-tls v0.2.18
+   Compiling synstructure v0.13.2
+    Checking winnow v0.7.15
+    Checking tempfile v3.27.0
+    Checking ed25519 v2.2.3
+    Checking regex-automata v0.4.14
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.4
+    Checking sha2 v0.10.9
+    Checking security-framework v3.7.0
+    Checking uuid v1.23.0
+    Checking iana-time-zone v0.1.65
+    Checking arrayref v0.3.9
+   Compiling crossbeam-utils v0.8.21
+    Checking system-configuration v0.7.0
+    Checking constant_time_eq v0.4.2
+    Checking base64 v0.22.1
+    Checking arrayvec v0.7.6
+    Checking ipnet v2.12.0
+    Checking form_urlencoded v1.2.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking webpki-roots v1.0.6
+    Checking http-body-util v0.1.3
+    Checking regex v1.12.3
+   Compiling portable-atomic v1.13.1
+    Checking ryu v1.0.23
+    Checking ed25519-dalek v2.2.0
+    Checking iri-string v0.7.12
+    Checking rand_core v0.6.4
+    Checking ppv-lite86 v0.2.21
+    Checking encoding_rs v0.8.35
+    Checking log v0.4.29
+    Checking foldhash v0.2.0
+    Checking allocator-api2 v0.2.21
+    Checking hashbrown v0.14.5
+    Checking mime v0.3.17
+    Checking rand_chacha v0.3.1
+    Checking spinning_top v0.3.0
+    Checking futures-timer v3.0.3
+    Checking web-time v1.1.0
+    Checking hashbrown v0.16.1
+    Checking nonzero_ext v0.3.0
+    Checking rand v0.8.5
+    Checking rand_core v0.9.5
+    Checking rand_chacha v0.9.0
+    Checking rand v0.9.3
+    Checking dashmap v6.1.0
+    Checking quanta v0.12.6
+   Compiling zerofrom-derive v0.1.7
+   Compiling tokio-macros v2.7.0
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-macro v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+    Checking tokio v1.51.1
+    Checking rustls-webpki v0.103.11
+    Checking futures-util v0.3.32
+    Checking tracing v0.1.44
+    Checking zerofrom v0.1.7
+    Checking tokio-util v0.7.18
+    Checking tokio-native-tls v0.3.1
+    Checking yoke v0.8.2
+    Checking h2 v0.4.13
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking futures-executor v0.3.32
+    Checking governor v0.10.4
+    Checking zerovec v0.11.6
+    Checking zerotrie v0.2.4
+    Checking futures v0.3.32
+    Checking tower-http v0.6.8
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking roko-primitives v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-primitives)
+    Checking chrono v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking toml_edit v0.22.27
+    Checking hyper v1.9.0
+    Checking tinystr v0.8.3
+    Checking potential_utf v0.1.5
+    Checking icu_collections v2.2.0
+    Checking icu_locale_core v2.2.0
+    Checking hyper-util v0.1.20
+    Checking toml v0.8.23
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-core)
+    Checking icu_provider v2.2.0
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking hyper-tls v0.6.0
+    Checking hyper-rustls v0.27.8
+    Checking idna_adapter v1.2.1
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking reqwest v0.12.28
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-fs)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 31.30s
+
+codex
+`cargo check` is still compiling dependencies for `roko-agent`; the grep checks have the expected results: no non-test `permissive` matches, and the new restricted fallback symbols are present.
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-agent/src/safety/mod.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+exec
+/bin/zsh -lc 'git status --short crates/roko-agent/src/safety/mod.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041
+ succeeded in 0ms:
+ M crates/roko-agent/src/safety/mod.rs
+
+ succeeded in 0ms:
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a..16be103d 100644
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@ use roko_core::config::schema::{RokoConfig, RoleOverride};
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@ impl SafetyLayer {
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@ impl SafetyLayer {
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+codex
+Implemented the fail-closed contract fallback in [mod.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/safety/mod.rs:60).
+
+Changes:
+- Imported `ContractLoadMode`.
+- Switched `contract_for_role()` to `load_for_role_with_mode(..., RestrictedFallback)`.
+- Defensive error fallback now uses `AgentContract::restricted(...)`.
+- Changed the runtime default contract from `permissive("default")` to `restricted("default")` so no non-test permissive path remains.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- non-test `permissive` grep returned zero matches
+- `RestrictedFallback`, `load_for_role_with_mode`, and `ContractLoadMode` are present.
+diff --git a/crates/roko-agent/src/safety/mod.rs b/crates/roko-agent/src/safety/mod.rs
+index 82d28d0a062434795ca45511999fde307dd8df38..16be103d73cdaf37efa95ab621756b5ceafb4dac
+--- a/crates/roko-agent/src/safety/mod.rs
++++ b/crates/roko-agent/src/safety/mod.rs
+@@ -57,7 +57,7 @@
+ use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
+ 
+ use self::bash::BashPolicy;
+-use self::contract::{AgentContract, GovernanceRule, Invariant};
++use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
+ use self::git::GitPolicy;
+ use self::network::NetworkPolicy;
+ use self::path::PathPolicy;
+@@ -251,7 +251,7 @@
+             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
+             safety_budget: None,
+             role: "default".into(),
+-            contract: AgentContract::permissive("default"),
++            contract: AgentContract::restricted("default"),
+             warrant: None,
+             role_tools: HashMap::new(),
+             role_overrides: HashMap::new(),
+@@ -862,14 +862,16 @@
+     }
+ 
+     fn contract_for_role(&self, role: &str) -> AgentContract {
+-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
+-            tracing::warn!(
+-                %role,
+-                %err,
+-                "no contract for role; using permissive default"
+-            );
+-            AgentContract::permissive(role.to_string())
+-        });
++        let mut contract =
++            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
++                .unwrap_or_else(|err| {
++                    tracing::error!(
++                        %role,
++                        %err,
++                        "contract load failed even with restricted fallback; using deny-all"
++                    );
++                    AgentContract::restricted(role.to_string())
++                });
+ 
+         if let Some(role_override) = self.role_overrides.get(role)
+             && let Some(budget) = role_override.effective_budget()
+
+2026-04-28T13:20:46.874007Z ERROR codex_core::session: failed to record rollout items: thread 019dd43e-7d1f-7ee3-a6bb-ad4275bc2f59 not found
+tokens used
+19,554
+Implemented the fail-closed contract fallback in [mod.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-agent/src/safety/mod.rs:60).
+
+Changes:
+- Imported `ContractLoadMode`.
+- Switched `contract_for_role()` to `load_for_role_with_mode(..., RestrictedFallback)`.
+- Defensive error fallback now uses `AgentContract::restricted(...)`.
+- Changed the runtime default contract from `permissive("default")` to `restricted("default")` so no non-test permissive path remains.
+
+Verification passed:
+- `cargo check -p roko-agent`
+- non-test `permissive` grep returned zero matches
+- `RestrictedFallback`, `load_for_role_with_mode`, and `ContractLoadMode` are present.
+
+=== Finished: 2026-04-28T15:20:46+02:00 ===
+=== Duration: 1m 28s ===
+=== Exit code: 0 ===
+[structural] ! grep -q 'AgentContract::permissive' crates/roko-agent/src/safety/mod.rs
+[structural] grep -q 'RestrictedFallback\|restricted' crates/roko-agent/src/safety/mod.rs
+[verify] CARGO_TARGET_DIR=/var/folders/bn/ks_s66191vb0zzvs08qcw_gh0000gn/T//roko-converge-targets/run-20260428-045041/shared cargo check -p roko-agent
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.35s
+[antipattern] ! grep -n 'permissive' crates/roko-agent/src/safety/mod.rs

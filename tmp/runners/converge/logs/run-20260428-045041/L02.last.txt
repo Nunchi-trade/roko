@@ -1,0 +1,12 @@
+Implemented `roko layer-check`.
+
+Changes:
+- Added [layer_check.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/layer_check.rs) with metadata extraction, layer summary, and violation reporting.
+- Exported `layer_check` and `LayerViolation` from [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/lib.rs:74).
+- Added `LayerCheck` clap subcommand and dispatch in [main.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/main.rs:366).
+- Added direct `cargo_metadata = "0.23"` dependency, matching the latest available line already present in the lockfile.
+
+Verification:
+- `cargo check -p roko-cli` passed.
+- `cargo fmt --check --package roko-cli` passed.
+- Required grep checks passed. Note: `roko-serve` still emits an existing build-script missing-docs warning during check.

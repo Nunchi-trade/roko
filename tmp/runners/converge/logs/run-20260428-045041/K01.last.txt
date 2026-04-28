@@ -1,0 +1,9 @@
+Implemented `route_with_knowledge()` and `route_with_knowledge_among()` in [cascade_router.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-learn/src/cascade_router.rs:828).
+
+The new helper preserves the existing C-Factor route as baseline, applies knowledge score adjustments over the relevant candidate set, only swaps primary when the adjusted margin exceeds `0.1`, and logs the applied influence with `tracing::debug!`.
+
+Verification passed:
+- `cargo fmt --check -p roko-learn`
+- `cargo check -p roko-learn`
+- `grep -n 'fn route_with_knowledge' ...` returned 2 matches
+- `grep -n 'KnowledgeRoutingAdvice' ...` returned 5 matches

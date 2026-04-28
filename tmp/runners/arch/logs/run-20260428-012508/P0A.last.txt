@@ -1,0 +1,10 @@
+Implemented P0A RuntimeEvent types within scope.
+
+Changed:
+- Added [runtime_event.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-core/src/runtime_event.rs:1) with `RuntimeEvent`, `WorkflowOutcome`, accessors, display impls, and inline tests.
+- Updated [lib.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/arch-run-20260428-012508/crates/roko-core/src/lib.rs:103) with `pub mod runtime_event;` and root re-exports.
+
+Verification passed:
+- Required `grep` checks
+- `cargo check -p roko-core`
+- `cargo test -p roko-core --lib -- runtime_event` with 2 tests passing.

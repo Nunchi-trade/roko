@@ -1,0 +1,16 @@
+Implemented K03 in [prompt_assembly_service.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-compose/src/prompt_assembly_service.rs:1).
+
+What changed:
+- Added optional knowledge-store prompt enrichment with `with_knowledge_store`.
+- Added `query_techniques` and `query_anti_patterns`.
+- Injects relevant knowledge into context and anti-knowledge warnings into anti-patterns.
+- Tracks used knowledge IDs via `last_knowledge_ids()`, clearing per `assemble()` call.
+- Preserved existing domain-layer knowledge injection.
+
+One note: `roko_neuro::NeuroStore` currently has a `Sized` supertrait, so it cannot be used directly as `dyn NeuroStore`. I added a local object-safe adapter with a `// TODO(converge)` marker, while keeping the public builder method generic over `NeuroStore`.
+
+Verification passed:
+- `cargo check -p roko-compose`
+- `grep -n 'knowledge_store' ...`
+- `grep -n 'query_techniques\|query_anti_patterns' ...`
+- `grep -n 'last_knowledge_ids' ...`

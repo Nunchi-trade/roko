@@ -1,0 +1,1573 @@
+=== Batch: A01 (RuntimeEvent serde envelope with run id, sequence, timestamp, schema version) ===
+=== Started: 2026-04-28T22:42:53+02:00 ===
+=== Worktree: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01 ===
+=== Model: gpt-5.5 ===
+OpenAI Codex v0.125.0 (research preview)
+--------
+workdir: /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/will/.codex/memories] (network access enabled)
+reasoning effort: high
+reasoning summaries: none
+session id: 019dd5d4-9ccc-79d0-a176-8d65fc8c0a43
+--------
+user
+# Batch A01 — RuntimeEvent serde envelope with run id, sequence, timestamp, schema version
+
+Run: run-20260428-224202 | Attempt: 2 | Model: gpt-5.5
+
+---
+
+# Rules
+
+You are modifying a Rust workspace (`roko`) with 18 crates. Follow these rules strictly.
+
+## Mandatory
+
+1. **One implementation, one code path.** Never duplicate traits, types, or logic that exists elsewhere.
+   Before defining anything, check `crates/roko-core/src/foundation.rs` — if it's there, import it.
+
+2. **Wire, don't build.** If the type/trait/function exists but isn't called, wire it in. Don't create
+   a new version. The codebase already has what you need — connect it.
+
+3. **No stubs that silently pass.** Never return `Ok(())`, `true`, `Verdict::pass`, or empty success
+   without doing real work. If functionality isn't ready, return an explicit error.
+
+4. **No empty string placeholders.** Never emit events or create requests with `String::new()` for
+   fields like `agent_id`, `model`, or `checkpoint_path`. Use `Option<String>` if the value may be
+   absent, or fill it with the real value.
+
+5. **No debug strings as data contracts.** Never use `format!("{:?}", event)` as a serialization
+   format. Use `serde_json::to_string(&event)` with proper `Serialize`/`Deserialize` derives.
+
+6. **Typed outcomes, not success-carrying-errors.** Don't encode errors inside success variants
+   (e.g., `CommitDone { hash: "error: ..." }`). Use `Result<T, E>` or typed enums.
+
+7. **Foundation types are canonical.** `crates/roko-core/src/foundation.rs` owns:
+   `ModelCallRequest`, `ModelCallResult`, `ModelCaller`, `PromptSpec`, `PromptAssembler`,
+   `FeedbackEvent`, `FeedbackSink`, `GateConfig`, `GateService`, `EventConsumer`, `Effect`,
+   `EffectExecutor`, `AffectPolicy`, `DispatchModulation`.
+   Do NOT define local copies of these in any other crate.
+
+8. **Preserve public API.** Don't change function signatures that are called from other crates
+   unless you also update all callers. `cargo check --workspace` must pass.
+
+## Style
+
+- Follow existing code style. Use `anyhow::Result` for errors in CLI/runtime, typed errors in core.
+- Derive `Serialize, Deserialize` for anything that crosses a persistence boundary.
+- Use `tokio::sync::Mutex` (never `std::sync::Mutex`) when the guard is held across `.await`.
+- Don't add unnecessary dependencies. Prefer what's already in `Cargo.toml`.
+- Don't add doc comments, tests, or clippy annotations unless the batch specifically asks for them.
+- Keep changes minimal. Only modify what the batch prompt asks for.
+
+---
+
+# Architecture
+
+## Crate Layers
+
+```
+Layer 0 (kernel):  roko-core          — Signal, 6 verb traits, foundation types, RuntimeEvent
+Layer 1 (support): roko-fs, roko-primitives, roko-neuro, roko-dreams, roko-daimon, roko-index
+Layer 2 (domain):  roko-agent, roko-gate, roko-compose, roko-learn, roko-orchestrator, roko-conductor
+Layer 3 (runtime): roko-runtime       — WorkflowEngine, PipelineState, EffectDriver, JsonlLogger
+Layer 4 (surface): roko-cli, roko-serve, roko-agent-server, roko-mcp-*
+```
+
+Dependencies flow downward only. Layer 3 uses Layer 0 types for events and contracts.
+Layer 4 constructs services from Layer 2 and runs them through Layer 3.
+
+## Key Types
+
+| Type | Crate | Role |
+|------|-------|------|
+| `RuntimeEvent` | roko-core | Durable event envelope for workflow lifecycle |
+| `ModelCallRequest` | roko-core | Full inference request contract |
+| `ModelCallResult` | roko-core | Inference response with metadata |
+| `AffectPolicy` | roko-core | Dispatch modulation from affect engine |
+| `DispatchModulation` | roko-core | Concrete modulation values |
+| `FeedbackEvent` | roko-core | Learning event for episodes/metrics |
+| `FeedbackSink` | roko-core | Trait for recording feedback |
+| `WorkflowEngine` | roko-runtime | Runs workflow pipelines |
+| `EffectDriver` | roko-runtime | Executes typed effects (spawn, gate, commit) |
+| `PipelineState` | roko-runtime | Workflow phase state machine |
+| `ModelCallService` | roko-agent | Inference gateway (routing, cache, budget) |
+| `PromptAssemblyService` | roko-compose | Dynamic prompt builder |
+| `FeedbackService` | roko-learn | Episode recording, efficiency metrics |
+| `GateService` | roko-gate | Gate pipeline execution |
+
+## Intended Flow (v2)
+
+```
+Entry point (CLI/server/ACP)
+  → ServiceFactory constructs services
+  → WorkflowEngine drives PipelineState
+  → EffectDriver executes effects:
+      → PromptAssemblyService assembles prompt
+      → ModelCallService dispatches to provider
+      → GateService runs gates
+      → FeedbackService records outcomes
+  → WorkflowRunReport returned to entry point
+  → Entry point uses report for CLI output, sharing, StateHub
+```
+
+## Current Reality
+
+- Entry points construct services independently (CLI in `run.rs:480-547`, server in `state.rs:479-482`)
+- `EffectDriver` has local policy traits instead of using core foundation
+- `WorkflowEngine` emits empty/duplicate lifecycle events
+- `JsonlLogger` writes debug strings, `RuntimeProjection` parses them back
+- Legacy `run_once`, `dispatch_agent`, and `orchestrate.rs` remain reachable
+- `--share` doesn't work on the default v2 path
+- Plan execution uses an env-gated adapter inside legacy orchestration
+
+---
+
+# Anti-Patterns To Avoid
+
+These are the specific anti-patterns the converge runner introduced or preserved.
+Your changes must not introduce any of these. The runner checks for them automatically.
+
+## AP-1: Stubs That Silently Pass
+
+**BAD:**
+```rust
+fn run_gate(&self, config: &GateConfig) -> Result<GateResult> {
+    Ok(GateResult { passed: true, ..Default::default() }) // stub
+}
+```
+
+**GOOD:**
+```rust
+fn run_gate(&self, config: &GateConfig) -> Result<GateResult> {
+    anyhow::bail!("custom gate not yet configured: {:?}", config.name)
+}
+```
+
+## AP-2: `block_on` Inside Async
+
+**BAD:** `futures::executor::block_on(async_fn())` inside a tokio runtime — panics.
+**GOOD:** Use `.await` directly or `tokio::task::spawn_blocking`.
+
+## AP-3: Duplicate Trait Definitions
+
+**BAD:** Defining `pub trait AffectPolicy` in `effect_driver.rs` when it exists in `foundation.rs`.
+**GOOD:** `use roko_core::foundation::AffectPolicy;`
+
+## AP-4: Computed But Unused Values
+
+**BAD:**
+```rust
+let modulation = policy.modulate(&context);
+// modulation never used
+```
+
+**GOOD:** Apply the result or don't compute it.
+
+## AP-5: Shell Out To Claude/Codex CLI
+
+**BAD:** `Command::new("claude")` for model inference at runtime.
+**GOOD:** Use `ModelCallService` with the appropriate provider.
+
+## AP-6: Inline Prompt Strings
+
+**BAD:** `format!("You are a helpful assistant...")` in dispatch code.
+**GOOD:** Use `PromptAssemblyService` with templates.
+
+## AP-7: `std::sync::Mutex` Held Across `.await`
+
+**BAD:**
+```rust
+let guard = std_mutex.lock().unwrap();
+some_async_fn().await; // guard still held — deadlock risk
+```
+
+**GOOD:** Use `tokio::sync::Mutex` or drop the guard before `.await`.
+
+## AP-8: Debug Strings As Event Contracts
+
+**BAD:** `writeln!(file, "{event:?}")` then parsing `Debug` output back into state.
+**GOOD:** `serde_json::to_string(&event)` then `serde_json::from_str`.
+
+## AP-9: Empty String Placeholders In Events
+
+**BAD:** `RuntimeEvent::AgentSpawned { agent_id: String::new(), model: String::new() }`
+**GOOD:** Use `Option<String>` or fill with the actual value from the effect/request.
+
+## AP-10: Success Variants Carrying Error State
+
+**BAD:** `CommitDone { hash: "error: git commit failed".into() }`
+**GOOD:** Return `Err(...)` or use a typed enum with `CommitFailed` variant.
+
+---
+
+# Execution Strategy
+
+## Use Maximum Parallelism
+
+You have access to subagents. **Use them aggressively** to complete this batch as fast as possible.
+
+### How to parallelize
+
+1. **Read all scope files and also_read files simultaneously** at the start — don't read them one at a time.
+2. **If the batch modifies multiple files**, plan all changes first, then apply them in parallel using subagents — one per file or logical change group.
+3. **Run verification commands in parallel** (e.g., `cargo check -p crate1` and `cargo check -p crate2` at the same time).
+4. **Don't wait for one edit to complete before starting the next** if they're in different files.
+
+### Speed guidelines
+
+- Do NOT run `cargo test`, `cargo clippy`, or full `cargo check --workspace` — only run per-crate `cargo check -p <crate>` if you need to verify your changes compile.
+- Do NOT write tests unless the batch prompt explicitly asks for tests.
+- Do NOT add doc comments, type annotations, or refactor surrounding code.
+- Make the minimal changes described in the batch prompt. Nothing more.
+- Prefer `cargo check -p <specific-crate>` over `cargo check --workspace` — it's 10x faster.
+
+---
+
+---
+
+## Current file contents (live from worktree)
+
+### `crates/roko-core/src/runtime_event.rs`
+
+```rust
+//! Runtime events emitted by the workflow engine.
+//!
+//! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
+//! consume these via `EventBus<RuntimeEvent>`.
+
+use std::fmt;
+
+/// Outcome of a completed workflow run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowOutcome {
+    /// Workflow completed successfully, optionally with a commit hash.
+    Success { commit_hash: Option<String> },
+    /// Workflow halted due to an error or resource limit.
+    Halted { reason: String },
+    /// Workflow was cancelled by the user.
+    Cancelled,
+}
+
+/// Every event the workflow engine can emit.
+///
+/// These events are fire-and-forget: the engine emits them and does not wait
+/// for observers to process them. Observers subscribe via
+/// `EventBus<RuntimeEvent>`.
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    // Lifecycle
+    WorkflowStarted {
+        run_id: String,
+        template: String,
+        prompt: String,
+    },
+    PhaseTransition {
+        run_id: String,
+        from: String,
+        to: String,
+    },
+    WorkflowCompleted {
+        run_id: String,
+        outcome: WorkflowOutcome,
+    },
+
+    // Agent
+    AgentSpawned {
+        run_id: String,
+        agent_id: String,
+        role: String,
+        model: String,
+    },
+    AgentOutput {
+        run_id: String,
+        agent_id: String,
+        chunk: String,
+    },
+    AgentCompleted {
+        run_id: String,
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+    },
+    AgentFailed {
+        run_id: String,
+        agent_id: String,
+        error: String,
+    },
+
+    // Gates
+    GateStarted {
+        run_id: String,
+        gate_name: String,
+        rung: u8,
+    },
+    GatePassed {
+        run_id: String,
+        gate_name: String,
+        duration_ms: u64,
+    },
+    GateFailed {
+        run_id: String,
+        gate_name: String,
+        output: String,
+        duration_ms: u64,
+    },
+
+    // Feedback
+    FeedbackRecorded {
+        run_id: String,
+        kind: String,
+        summary: String,
+    },
+
+    // Persistence
+    StateCheckpointed {
+        run_id: String,
+        path: String,
+    },
+}
+
+impl RuntimeEvent {
+    /// Returns the run_id common to all event variants.
+    pub fn run_id(&self) -> &str {
+        match self {
+            Self::WorkflowStarted { run_id, .. }
+            | Self::PhaseTransition { run_id, .. }
+            | Self::WorkflowCompleted { run_id, .. }
+            | Self::AgentSpawned { run_id, .. }
+            | Self::AgentOutput { run_id, .. }
+            | Self::AgentCompleted { run_id, .. }
+            | Self::AgentFailed { run_id, .. }
+            | Self::GateStarted { run_id, .. }
+            | Self::GatePassed { run_id, .. }
+            | Self::GateFailed { run_id, .. }
+            | Self::FeedbackRecorded { run_id, .. }
+            | Self::StateCheckpointed { run_id, .. } => run_id,
+        }
+    }
+
+    /// Human-readable event kind label.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::WorkflowStarted { .. } => "workflow_started",
+            Self::PhaseTransition { .. } => "phase_transition",
+            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::AgentSpawned { .. } => "agent_spawned",
+            Self::AgentOutput { .. } => "agent_output",
+            Self::AgentCompleted { .. } => "agent_completed",
+            Self::AgentFailed { .. } => "agent_failed",
+            Self::GateStarted { .. } => "gate_started",
+            Self::GatePassed { .. } => "gate_passed",
+            Self::GateFailed { .. } => "gate_failed",
+            Self::FeedbackRecorded { .. } => "feedback_recorded",
+            Self::StateCheckpointed { .. } => "state_checkpointed",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.run_id(), self.kind())
+    }
+}
+
+impl fmt::Display for WorkflowOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success {
+                commit_hash: Some(hash),
+            } => write!(f, "success ({hash})"),
+            Self::Success { commit_hash: None } => write!(f, "success"),
+            Self::Halted { reason } => write!(f, "halted: {reason}"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_accessor() {
+        let event = RuntimeEvent::WorkflowStarted {
+            run_id: "r1".into(),
+            template: "express".into(),
+            prompt: "fix bug".into(),
+        };
+
+        assert_eq!(event.run_id(), "r1");
+        assert_eq!(event.kind(), "workflow_started");
+    }
+
+    #[test]
+    fn display_formats() {
+        let outcome = WorkflowOutcome::Success {
+            commit_hash: Some("abc123".into()),
+        };
+
+        assert!(outcome.to_string().contains("abc123"));
+    }
+}
+```
+
+### `crates/roko-core/src/foundation.rs`
+
+```rust
+//! Foundation traits for the workflow engine.
+//!
+//! These define the contracts between the engine and its services:
+//! - `ModelCaller` - call LLMs (implemented by roko-agent)
+//! - `PromptAssembler` - build system prompts (implemented by roko-compose)
+//! - `FeedbackSink` - record feedback (implemented by roko-learn)
+//! - `GateRunner` - run verification gates (implemented by roko-gate)
+//! - `EventConsumer` - observe runtime events (implemented by adapters)
+//! - `EffectExecutor` - execute side-effects (implemented by roko-runtime)
+
+use crate::runtime_event::RuntimeEvent;
+use crate::{Result, RokoError};
+use async_trait::async_trait;
+use std::path::PathBuf;
+
+// -- ModelCaller --
+
+/// Request to call an LLM model.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCallRequest {
+    /// Model identifier (e.g., "claude-sonnet-4-20250514").
+    pub model: String,
+    /// System prompt.
+    pub system: Option<String>,
+    /// User messages.
+    pub messages: Vec<ChatMessage>,
+    /// Maximum tokens to generate.
+    pub max_tokens: Option<u32>,
+    /// Temperature (0.0-1.0).
+    pub temperature: Option<f32>,
+    /// Role for model routing.
+    pub role: Option<String>,
+    /// Caller surface that originated this request.
+    pub caller: Option<CallerIdentity>,
+    /// Per-call token and cost budget.
+    pub budget: Option<TokenBudget>,
+    /// Cache behavior for this request.
+    pub cache_policy: CachePolicy,
+}
+
+/// Who originated this model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum CallerIdentity {
+    Cli,
+    Acp,
+    Serve,
+    Research,
+    Dreams,
+    Test,
+}
+
+/// Cache behaviour for this request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CachePolicy {
+    /// Use the default L1 cache behaviour.
+    #[default]
+    Default,
+    /// Skip cache lookup but still store the result.
+    Bypass,
+    /// Skip cache lookup AND discard any prior cached result for this key.
+    ForceRefresh,
+}
+
+/// Token and cost budget for a single model call.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct TokenBudget {
+    /// Maximum input tokens the gateway should accept.
+    pub max_input: Option<u64>,
+    /// Maximum output tokens requested from the provider.
+    pub max_output: Option<u64>,
+    /// Maximum cost in USD for this single call.
+    pub max_cost_usd: Option<f64>,
+}
+
+/// Errors specific to the gateway pipeline (not provider errors).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GatewayError {
+    #[error("provider error: {0}")]
+    ProviderError(String),
+    #[error("budget exceeded: {detail}")]
+    BudgetExceeded { detail: String },
+    #[error("rate limited: retry after {retry_after_ms:?} ms")]
+    RateLimited { retry_after_ms: Option<u64> },
+    #[error("cache error: {0}")]
+    CacheError(String),
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("convergence detected after {consecutive} identical outputs")]
+    ConvergenceDetected { consecutive: u32 },
+}
+
+impl From<GatewayError> for RokoError {
+    fn from(error: GatewayError) -> Self {
+        // TODO(converge): Map to RokoError::Other once that variant exists in roko-core.
+        RokoError::invalid(error.to_string())
+    }
+}
+
+/// A single chat message.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+
+/// Message role in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+/// Response from a model call.
+#[derive(Debug, Clone)]
+pub struct ModelCallResponse {
+    pub content: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub stop_reason: Option<String>,
+    /// Gateway request id, set by ModelCallService when the call flows through the gateway.
+    pub request_id: Option<String>,
+}
+
+/// Token usage and cost from a model call.
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// Call an LLM model. Wraps provider selection, streaming, cost tracking.
+#[async_trait]
+pub trait ModelCaller: Send + Sync {
+    /// Single-shot model call, returns complete response.
+    async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse>;
+}
+
+// -- PromptAssembler --
+
+/// Specification for assembling a system prompt.
+#[derive(Debug, Clone, Default)]
+pub struct PromptSpec {
+    /// Agent role (determines identity layer).
+    pub role: Option<String>,
+    /// Task description.
+    pub task: Option<String>,
+    /// Working directory for convention detection.
+    pub workdir: Option<PathBuf>,
+    /// Gate feedback from prior iterations.
+    pub gate_feedback: Vec<String>,
+    /// Anti-patterns to include.
+    pub anti_patterns: Vec<String>,
+}
+
+/// Assemble a system prompt for a given role and context.
+#[async_trait]
+pub trait PromptAssembler: Send + Sync {
+    /// Build a complete system prompt from the spec.
+    async fn assemble(&self, spec: PromptSpec) -> Result<String>;
+}
+
+// -- FeedbackSink --
+
+/// A feedback event to record.
+#[derive(Debug, Clone)]
+pub enum FeedbackEvent {
+    /// Feedback from a model call.
+    ModelCall {
+        run_id: String,
+        model: String,
+        role: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: f64,
+        latency_ms: u64,
+        success: bool,
+    },
+    /// Feedback from a gate execution.
+    GateResult {
+        run_id: String,
+        gate_name: String,
+        passed: bool,
+        duration_ms: u64,
+    },
+    /// Feedback from a workflow completion.
+    WorkflowComplete {
+        run_id: String,
+        outcome: String,
+        total_cost_usd: f64,
+        total_tokens: u64,
+        duration_ms: u64,
+    },
+}
+
+/// Record feedback from model calls, gate results, and workflow outcomes.
+#[async_trait]
+pub trait FeedbackSink: Send + Sync {
+    /// Record a feedback event.
+    async fn record(&self, event: FeedbackEvent) -> Result<()>;
+}
+
+// -- GateRunner --
+
+/// Configuration for a gate run.
+#[derive(Debug, Clone)]
+pub struct GateConfig {
+    /// Working directory to verify.
+    pub workdir: PathBuf,
+    /// Which gates to run (e.g., ["compile", "test", "clippy"]).
+    pub enabled_gates: Vec<String>,
+    /// Maximum rung to run (0-6).
+    pub max_rung: Option<u8>,
+}
+
+/// Result from a single gate.
+#[derive(Debug, Clone)]
+pub struct GateVerdict {
+    pub gate_name: String,
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+/// Report from running a set of gates.
+#[derive(Debug, Clone)]
+pub struct GateReport {
+    pub verdicts: Vec<GateVerdict>,
+}
+
+impl GateReport {
+    /// Returns true if all gates passed.
+    #[must_use]
+    pub fn all_passed(&self) -> bool {
+        self.verdicts.iter().all(|v| v.passed)
+    }
+
+    /// Returns the first failing gate, if any.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<&GateVerdict> {
+        self.verdicts.iter().find(|v| !v.passed)
+    }
+
+    /// Collects all failure outputs for agent feedback.
+    #[must_use]
+    pub fn failure_summary(&self) -> String {
+        self.verdicts
+            .iter()
+            .filter(|v| !v.passed)
+            .map(|v| format!("{}: {}", v.gate_name, v.output))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+/// Run a set of verification gates against a working directory.
+#[async_trait]
+pub trait GateRunner: Send + Sync {
+    /// Execute gates per the config, returning a report.
+    async fn run_gates(&self, config: GateConfig) -> Result<GateReport>;
+}
+
+// -- EventConsumer --
+
+/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+///
+/// Consumers must be non-blocking. If they need async work, they should
+/// buffer internally and process asynchronously.
+pub trait EventConsumer: Send + Sync {
+    /// Called for each event emitted by the workflow engine.
+    fn consume(&self, event: &RuntimeEvent);
+}
+
+// -- EffectExecutor --
+
+/// A side-effect the workflow engine needs to execute.
+#[derive(Debug, Clone)]
+pub enum Effect {
+    /// Spawn an agent with the given role and prompt.
+    SpawnAgent {
+        run_id: String,
+        role: String,
+        model: String,
+        system_prompt: String,
+        user_prompt: String,
+        workdir: PathBuf,
+    },
+    /// Run verification gates.
+    RunGates { run_id: String, config: GateConfig },
+    /// Create a git commit.
+    Commit {
+        run_id: String,
+        workdir: PathBuf,
+        message: String,
+    },
+    /// Persist a state checkpoint.
+    Checkpoint {
+        run_id: String,
+        state_json: String,
+        path: PathBuf,
+    },
+}
+
+/// Outcome from executing an effect.
+#[derive(Debug, Clone)]
+pub enum EffectOutcome {
+    /// Agent completed with output.
+    AgentDone {
+        agent_id: String,
+        output: String,
+        tokens_used: u64,
+        cost_usd: f64,
+        files_changed: Vec<String>,
+    },
+    /// Gates completed.
+    GatesDone { report: GateReport },
+    /// Commit created.
+    CommitDone { hash: String, message: String },
+    /// Checkpoint saved.
+    CheckpointDone { path: String },
+    /// Effect failed.
+    Failed { error: String },
+}
+
+/// Execute a side-effect (spawn agent, run gates, commit, checkpoint).
+///
+/// The state machine decides WHAT to do; the EffectExecutor decides HOW.
+#[async_trait]
+pub trait EffectExecutor: Send + Sync {
+    /// Execute the given effect, returning the outcome.
+    async fn execute(&self, effect: Effect) -> Result<EffectOutcome>;
+}
+
+// -- AffectPolicy --
+
+/// Behavioral state of the affect engine.
+///
+/// Mirrors `roko_core::BehavioralState` from `affect.rs` but is re-exported
+/// here for self-contained trait signatures. Use the canonical enum from
+/// `roko_core::BehavioralState` — do NOT duplicate the definition.
+/// (The type is already `pub` in roko-core via `affect.rs`.)
+/// Affect context snapshot provided before dispatching a task.
+#[derive(Debug, Clone)]
+pub struct AffectContext {
+    /// Current behavioral state classification.
+    pub behavioral_state: crate::BehavioralState,
+    /// Current PAD vector: [Pleasure, Arousal, Dominance], each in [-1.0, 1.0].
+    pub pad: [f32; 3],
+    /// Human-readable emotional label, if available.
+    pub emotional_tag: Option<String>,
+}
+
+/// Modulation parameters applied to dispatch configuration.
+///
+/// The affect policy fills these in; the effect driver applies them.
+#[derive(Debug, Clone)]
+pub struct DispatchModulation {
+    /// Tier bias: -1.0 (prefer cheapest model) to +1.0 (prefer most capable model).
+    pub tier_bias: f32,
+    /// Multiplier on the default turn limit. 1.0 = no change.
+    pub turn_limit_factor: f32,
+    /// Exploration rate in [0.0, 1.0]. Higher = more exploratory routing.
+    pub exploration_rate: f32,
+}
+
+impl Default for DispatchModulation {
+    fn default() -> Self {
+        Self {
+            tier_bias: 0.0,
+            turn_limit_factor: 1.0,
+            exploration_rate: 0.0,
+        }
+    }
+}
+
+/// Policy trait for behavioral affect modulation in workflow execution.
+///
+/// The canonical implementation is `DaimonPolicy` in `roko-daimon`.
+/// When affect is disabled, use `NoOpAffectPolicy` which returns neutral defaults.
+#[async_trait]
+pub trait AffectPolicy: Send + Sync {
+    /// Called before dispatching a task. Returns an affect context snapshot.
+    fn pre_dispatch(&self, task_id: &str, role: &str) -> AffectContext;
+
+    /// Called after a task completes (success or failure).
+    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64);
+
+    /// Called after a gate verdict.
+    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64);
+
+    /// Modulate dispatch parameters based on current affect state.
+    fn modulate_dispatch(&self, role: &str, params: &mut DispatchModulation);
+
+    /// Get the current behavioral state for logging/display.
+    fn behavioral_state(&self) -> crate::BehavioralState;
+
+    /// Persist affect state to disk.
+    async fn persist(&self) -> Result<()>;
+}
+
+/// No-op implementation of `AffectPolicy` for when affect modulation is disabled.
+///
+/// All methods return neutral defaults. No state is tracked or persisted.
+pub struct NoOpAffectPolicy;
+
+#[async_trait]
+impl AffectPolicy for NoOpAffectPolicy {
+    fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
+        AffectContext {
+            behavioral_state: crate::BehavioralState::Engaged,
+            pad: [0.0, 0.0, 0.0],
+            emotional_tag: None,
+        }
+    }
+
+    fn on_task_outcome(
+        &mut self,
+        _task_id: &str,
+        _succeeded: bool,
+        _tokens_used: u64,
+        _cost_usd: f64,
+    ) {
+    }
+
+    fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {}
+
+    fn modulate_dispatch(&self, _role: &str, _params: &mut DispatchModulation) {}
+
+    fn behavioral_state(&self) -> crate::BehavioralState {
+        crate::BehavioralState::Engaged
+    }
+
+    async fn persist(&self) -> Result<()> {
+        Ok(())
+    }
+}
+```
+
+---
+
+## Previous attempt failed
+
+## Merge conflict (attempt 1)
+
+Your changes conflicted with another batch that was merged first.
+Rebase your changes on the current main branch state.
+
+Fix the issues above. Do not repeat the same mistakes.
+
+---
+
+# A01: RuntimeEvent Serde Envelope
+
+## Task
+
+Add proper serde serialization to `RuntimeEvent` in `crates/roko-core/src/runtime_event.rs`.
+
+Currently `RuntimeEvent` is a plain enum used only for in-memory dispatch and debug-string logging.
+Make it a durable, versioned event envelope suitable for JSONL persistence and typed projection.
+
+## Changes Required
+
+1. Add these fields to a new `RuntimeEventEnvelope` wrapper (or extend the existing enum):
+   - `run_id: String` — identifies the workflow run
+   - `seq: u64` — monotonic sequence number within the run
+   - `ts: chrono::DateTime<chrono::Utc>` — event timestamp (use `chrono` if available, or `std::time::SystemTime` serialized as ISO 8601)
+   - `schema_version: u8` — starts at `1`, for forward compatibility
+   - `source: String` — which component emitted the event (e.g., "workflow_engine", "effect_driver")
+   - `payload: RuntimeEvent` — the existing enum variants
+
+2. Derive `Serialize, Deserialize, Debug, Clone` on both the envelope and all `RuntimeEvent` variants.
+
+3. Ensure every variant's fields are serializable. Replace any non-serializable types (like `Box<dyn Error>`) with `String` error messages.
+
+4. Add a `RuntimeEventEnvelope::new(run_id, seq, source, payload)` constructor that sets `ts` to now and `schema_version` to 1.
+
+## Acceptance Criteria
+
+- `serde_json::to_string(&envelope)` produces valid JSON for every variant.
+- `serde_json::from_str::<RuntimeEventEnvelope>(&json)` round-trips correctly.
+- No `format!("{:?}", ...)` is used for event persistence anywhere in this file.
+- Existing code that pattern-matches on `RuntimeEvent` variants still compiles.
+
+## Do NOT
+
+- Change the semantic meaning of existing variants.
+- Add new event variants (that's for later batches).
+- Modify any file outside the scope.
+
+codex
+I’ll update the core event type only, then run a focused check for `roko-core`. First I’m reading the crate manifest and event exports so the serde/chrono choice matches what’s already available.
+exec
+/bin/zsh -lc "sed -n '1,180p' crates/roko-core/src/lib.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+exec
+/bin/zsh -lc "sed -n '1,220p' crates/roko-core/Cargo.toml" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+ succeeded in 0ms:
+//! Roko kernel — the universal Engram type and six traits that compose to express
+//! every capability in the Roko orchestration system.
+//!
+//! # Architecture
+//!
+//! The entire Roko system is built from **one noun** ([`Engram`]) and **six verbs**:
+//!
+//! | Trait | Purpose |
+//! |---|---|
+//! | [`Store`] | Store and query engrams |
+//! | [`Score`](traits::Score) | Rate engrams along multi-dimensional axes |
+//! | [`Verify`] | Verify engrams against ground truth |
+//! | [`Route`] | Select one engram from many candidates |
+//! | [`Compose`] | Combine engrams into a new engram under a budget |
+//! | [`React`] | Watch engram streams and emit new engrams (interventions) |
+//!
+//! Every capability — coding-agent spawning, verification gates, context assembly,
+//! model routing, memory retrieval, chain participation, bounty markets, HDC search
+//! — is one of these six verbs operating on Engrams.
+//!
+//! # The Universal Loop
+//!
+//! Every operation in Roko follows the same shape:
+//!
+//! ```text
+//! query substrate → score → route/compose → gate verdict → write back → policy fires
+//! ```
+//!
+//! See [`loop_tick`] for the concrete implementation.
+//!
+//! # Extensibility
+//!
+//! All enums marked `#[non_exhaustive]` can grow without breaking downstream impls.
+//! New capabilities are added by implementing one of the six traits; no core
+//! changes are needed.
+
+#![allow(
+    missing_docs,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::collapsible_str_replace,
+    clippy::derivable_impls,
+    clippy::expect_used,
+    clippy::module_name_repetitions,
+    clippy::nursery,
+    clippy::obfuscated_if_else,
+    clippy::pedantic
+)]
+
+/// Generate a short share token: `<unix_millis_hex>-<rand_hex>`.
+pub fn generate_share_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand_part: u16 = (millis as u16) ^ (std::process::id() as u16);
+    format!("{millis:x}-{rand_part:04x}")
+}
+
+pub mod affect;
+pub mod agent;
+/// Cross-cut arbitration protocol for resolving Daimon/Neuro/Dreams conflicts (INT-21).
+pub mod arbitration;
+pub mod attestation;
+pub mod body;
+pub mod build;
+/// Additional Bus backend implementations: BroadcastBus, MemoryBus, MultiBus.
+pub mod bus_backends;
+pub mod catalyst;
+/// The Cell trait — universal computation unit for all protocol implementations.
+pub mod cell;
+pub mod cfactor;
+/// Canonical provider-agnostic chat message types.
+pub mod chat_types;
+pub mod cognitive_workspace;
+pub mod conductor;
+pub mod config;
+/// Connector trait for external system I/O (MCP, API, Database, Blockchain, Feed, Custom).
+pub mod connector;
+pub mod context;
+pub mod dashboard_snapshot;
+pub mod datum;
+pub mod decay;
+pub mod demurrage;
+/// Domain profiles for agent specialization: gate defaults, tool sets, context templates.
+pub mod domain_profile;
+pub mod engram;
+pub mod error;
+pub mod extension;
+/// Feed trait for agent-produced data streams (Raw, Derived, Composite, Meta).
+pub mod feed;
+/// Forensic replay engine for causal decision reconstruction (SAFE-12).
+pub mod forensic;
+pub mod foundation;
+pub mod hash;
+/// Heartbeat protocol types for health monitoring.
+pub mod heartbeat;
+/// Cognitive immune system -- quarantine, anomaly detection, incident linking.
+pub mod immune;
+/// Marketplace job types shared between serve, TUI, and CLI.
+pub mod job;
+pub mod kind;
+pub mod language;
+pub mod loop_tick;
+pub mod metric;
+pub mod namespace;
+pub mod obs {
+    #[path = "../obs/health.rs"]
+    pub mod health;
+    #[path = "../obs/histograms.rs"]
+    pub mod histograms;
+    #[path = "../obs/metrics.rs"]
+    pub mod metrics;
+    #[path = "../obs/schema.rs"]
+    pub mod schema;
+    #[path = "../obs/scrub.rs"]
+    pub mod scrub;
+
+    pub use health::{
+        AlwaysUpProbe, DegradedReason, HealthStatus, NamedProbe, Probe, ProbeRegistry,
+        ReadinessStatus,
+    };
+    pub use histograms::{Histogram, HistogramSnapshot, LLM_LATENCY_BUCKETS};
+    pub use metrics::{
+        Counter, Gauge, LabelSet, MetricKind, MetricRegistry, MetricSnapshot, MetricValue,
+        STANDARD_METRICS, register_standard_metrics,
+    };
+    pub use schema::{CanonicalMetricSchema, MetricDescriptor, MetricSchema, SCHEMA_VERSION};
+    pub use scrub::{LogScrubber, REDACTED};
+}
+pub mod operating_frequency;
+pub mod phase;
+pub mod policy_manifest;
+pub mod polyglot;
+pub mod prediction;
+pub mod project;
+pub mod provenance;
+pub mod pulse;
+pub mod query;
+pub mod runtime_event;
+pub mod score;
+pub mod secrets;
+pub mod shutdown;
+/// Signal — forward-compatible alias for `Engram` (Phase 1 prep).
+pub mod signal;
+pub mod signal_kinds;
+pub mod task;
+pub mod temperament;
+pub mod tool;
+pub mod traits;
+pub mod verdict;
+
+pub use affect::{BehavioralState, DaimonPolicy, EmotionalTag, PadVector};
+pub use agent::{
+    AgentBackend, AgentRole, ModelSpec, ModelTier, ProviderKind, ReasoningEffort, TaskRequirements,
+    ToolPermissions, TurnBudget, score_model_for_task, select_model_for_task,
+    select_model_for_task_with_bonus,
+};
+pub use arbitration::{
+    ArbitrationConfig, ArbitrationOutcome, Arbitrator, Subsystem, SubsystemGuidance,
+};
+pub use attestation::{Attestation, ChainAttestation, Ed25519Signature, PublicKey};
+pub use body::Body;
+pub use build::{BuildCommand, BuildSystem};
+pub use bus_backends::{
+    BroadcastBus, BroadcastBusReceiver, BusErased, MemoryBus, MemoryBusReceiver, MultiBus,
+};
+pub use catalyst::{CatalystImpactSummary, CatalystScorer, CatalystSignalSource};
+pub use cell::*;
+pub use cfactor::{CFactorPolicy, CFactorSource, CFactorSummary};
+pub use chat_types::{
+    ChatMessage, ChatRequest, ChatResponse, ContentBlock, FinishReason, ImageUrl, MessageContent,
+    RequestOptions, ResponseFormat, ResponseMetadata, SessionState, ToolCallFunction,
+    ToolCallMessage, ToolChoice, Usage,
+};
+pub use cognitive_workspace::{
+    COGNITIVE_WORKSPACE_SCHEMA_VERSION, CapabilityGrant, CognitiveWorkspace, ContextPolicyAuditRef,
+    ContextRejectionAudit, ContextRejectionAuditReason, ContextScopeAudit, ContextSectionAudit,
+    InvocationGateOutcome, InvocationReviewVerdictOutcome, ModelChoice, OutputParseResult,
+
+ succeeded in 0ms:
+[package]
+name = "roko-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Roko kernel: Signal type and the six universal traits (Substrate, Scorer, Gate, Router, Composer, Policy)."
+
+[lints]
+workspace = true
+
+[dependencies]
+roko-primitives = { path = "../roko-primitives" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+blake3 = "1"
+ed25519-dalek = "2"
+async-trait = "0.1"
+parking_lot = "0.12"
+regex = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+rkyv = { version = "0.8", optional = true }
+
+[features]
+default = []
+rkyv = ["dep:rkyv"]
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name = "engram_bench"
+harness = false
+
+[package.metadata.roko]
+layer = 1
+
+exec
+/bin/zsh -lc "rg -n \"chrono|serde_json|runtime_event|RuntimeEvent\" crates/roko-core/Cargo.toml crates/roko-core/src -g '*.rs'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+ succeeded in 0ms:
+crates/roko-core/Cargo.toml:16:serde_json = { workspace = true }
+crates/roko-core/Cargo.toml:18:chrono = { workspace = true }
+crates/roko-core/src/conductor.rs:254:        let json = serde_json::to_string(&d).unwrap();
+crates/roko-core/src/conductor.rs:255:        let decoded: ConductorDecision = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/conductor.rs:262:        let json = serde_json::to_string(&d).unwrap();
+crates/roko-core/src/conductor.rs:263:        let decoded: ConductorDecision = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/conductor.rs:270:        let json = serde_json::to_string(&d).unwrap();
+crates/roko-core/src/conductor.rs:271:        let decoded: ConductorDecision = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/conductor.rs:303:            let json = serde_json::to_string(s).unwrap();
+crates/roko-core/src/conductor.rs:304:            let decoded: CognitiveSignal = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/conductor.rs:333:        let json = serde_json::to_string(&eval).unwrap();
+crates/roko-core/src/conductor.rs:334:        let decoded: ConductorEvaluation = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/context.rs:36:            now_ms: chrono::Utc::now().timestamp_millis(),
+crates/roko-core/src/context.rs:105:        let diff = (chrono::Utc::now().timestamp_millis() - c.now_ms).abs();
+crates/roko-core/src/kind.rs:342:            let json = serde_json::to_string(&k).unwrap();
+crates/roko-core/src/kind.rs:343:            let parsed: Kind = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/foundation.rs:11:use crate::runtime_event::RuntimeEvent;
+crates/roko-core/src/foundation.rs:267:/// Consume RuntimeEvents for side-effects (logging, UI updates, etc).
+crates/roko-core/src/foundation.rs:270:/// buffer internally and process asynchronously.
+crates/roko-core/src/foundation.rs:273:    fn consume(&self, event: &RuntimeEvent);
+crates/roko-core/src/metric.rs:48:    pub fn of<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+crates/roko-core/src/metric.rs:49:        // Round-trip through serde_json::Value to get deterministic key
+crates/roko-core/src/metric.rs:50:        // ordering. serde_json::to_string alone preserves struct-field
+crates/roko-core/src/metric.rs:53:        let v = serde_json::to_value(value)?;
+crates/roko-core/src/metric.rs:90:/// Serialize a `serde_json::Value` with sorted object keys.
+crates/roko-core/src/metric.rs:92:/// `serde_json` preserves insertion order for `Map<String, Value>`
+crates/roko-core/src/metric.rs:97:fn canonical_json(v: &serde_json::Value) -> String {
+crates/roko-core/src/metric.rs:98:    use serde_json::Value;
+crates/roko-core/src/metric.rs:105:                // serde_json handles escaping — cheapest to call it.
+crates/roko-core/src/metric.rs:106:                out.push_str(&serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()));
+crates/roko-core/src/metric.rs:126:                    out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()));
+crates/roko-core/src/metric.rs:238:    pub fn to_jsonl(&self) -> Result<String, serde_json::Error> {
+crates/roko-core/src/metric.rs:239:        serde_json::to_string(self)
+crates/roko-core/src/metric.rs:247:    pub fn from_jsonl(line: &str) -> Result<Self, serde_json::Error> {
+crates/roko-core/src/metric.rs:248:        serde_json::from_str(line)
+crates/roko-core/src/metric.rs:511:        let v = serde_json::json!({
+crates/roko-core/src/metric.rs:522:        let v = serde_json::json!({"s": "a\"b"});
+crates/roko-core/src/agent.rs:1072:            let json = serde_json::to_string(&kind).unwrap();
+crates/roko-core/src/agent.rs:1074:            let decoded: ProviderKind = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/agent.rs:1402:        let json = serde_json::to_string(&r).unwrap();
+crates/roko-core/src/agent.rs:1404:        let decoded: AgentRole = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/prediction.rs:60:        let created_at_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/prediction.rs:137:    Custom(serde_json::Value),
+crates/roko-core/src/prediction.rs:384:        let created_at_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/prediction.rs:886:        let resolved_at_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/prediction.rs:983:        let now_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/runtime_event.rs:4://! consume these via `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:23:/// `EventBus<RuntimeEvent>`.
+crates/roko-core/src/runtime_event.rs:25:pub enum RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:99:impl RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:137:impl fmt::Display for RuntimeEvent {
+crates/roko-core/src/runtime_event.rs:162:        let event = RuntimeEvent::WorkflowStarted {
+crates/roko-core/src/chat_types.rs:171:    pub content_filter: Option<serde_json::Value>,
+crates/roko-core/src/chat_types.rs:172:    pub web_search: Option<serde_json::Value>,
+crates/roko-core/src/chat_types.rs:173:    pub extra: Option<serde_json::Value>,
+crates/roko-core/src/chat_types.rs:330:    pub extra: HashMap<String, serde_json::Value>,
+crates/roko-core/src/tool/bandit.rs:233:            arm.last_pulled_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/tool/bandit.rs:342:            arm.last_pulled_ms = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/tool/bandit.rs:535:        let json = serde_json::to_string(&k).unwrap();
+crates/roko-core/src/tool/bandit.rs:536:        let decoded: BanditKey = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/bandit.rs:549:        let json = serde_json::to_string(&arm).unwrap();
+crates/roko-core/src/tool/bandit.rs:550:        let decoded: ArmEntry = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/def.rs:209:#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value isn't Eq (has f64)
+crates/roko-core/src/tool/def.rs:212:pub struct ToolSchema(pub serde_json::Value);
+crates/roko-core/src/tool/def.rs:215:    /// Wrap a raw `serde_json::Value` as a schema.
+crates/roko-core/src/tool/def.rs:217:    pub const fn from_value(v: serde_json::Value) -> Self {
+crates/roko-core/src/tool/def.rs:231:        Self(serde_json::json!({
+crates/roko-core/src/tool/def.rs:240:    pub const fn as_value(&self) -> &serde_json::Value {
+crates/roko-core/src/tool/def.rs:258:#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value isn't Eq (has f64)
+crates/roko-core/src/tool/def.rs:275:        config: serde_json::Value,
+crates/roko-core/src/tool/def.rs:326:    pub metadata: Option<serde_json::Value>,
+crates/roko-core/src/tool/def.rs:398:        let json = serde_json::to_string(&ToolCategory::Exec).unwrap();
+crates/roko-core/src/tool/def.rs:400:        let decoded: ToolCategory = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/def.rs:406:        let json = serde_json::to_string(&ToolConcurrency::Serial).unwrap();
+crates/roko-core/src/tool/def.rs:408:        let decoded: ToolConcurrency = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/def.rs:474:        let schema = ToolSchema::from_value(serde_json::json!({"type": "object"}));
+crates/roko-core/src/tool/def.rs:499:        let json = serde_json::to_string(&t).unwrap();
+crates/roko-core/src/tool/def.rs:500:        let decoded: ToolDef = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/def.rs:506:        let legacy = serde_json::json!({
+crates/roko-core/src/tool/def.rs:523:        let decoded: ToolDef = serde_json::from_value(legacy).unwrap();
+crates/roko-core/src/tool/def.rs:538:            config: serde_json::json!({
+crates/roko-core/src/tool/def.rs:543:        let encoded = serde_json::to_value(&tool).unwrap();
+crates/roko-core/src/tool/def.rs:546:            serde_json::json!({
+crates/roko-core/src/hash.rs:151:        let json = serde_json::to_string(&h).unwrap();
+crates/roko-core/src/hash.rs:152:        let parsed: ContentHash = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/error/rpc.rs:20:    pub data: Option<serde_json::Value>,
+crates/roko-core/src/error/rpc.rs:60:    pub fn with_data(code: i64, message: impl Into<String>, data: serde_json::Value) -> Self {
+crates/roko-core/src/error/rpc.rs:132:        let err = RokoError::Json(serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err());
+crates/roko-core/src/error/rpc.rs:219:            serde_json::json!({"backend": "claude"}),
+crates/roko-core/src/error/rpc.rs:232:            serde_json::json!({"retry": true}),
+crates/roko-core/src/error/rpc.rs:234:        let json = serde_json::to_string(&original).unwrap();
+crates/roko-core/src/error/rpc.rs:235:        let back: RpcError = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/error/rpc.rs:242:        let json = serde_json::to_string(&rpc).unwrap();
+crates/roko-core/src/tool/metrics.rs:446:        let json = serde_json::to_string(&k).unwrap();
+crates/roko-core/src/tool/metrics.rs:447:        let decoded: MetricsKey = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/metrics.rs:455:        let json = serde_json::to_string(&m).unwrap();
+crates/roko-core/src/tool/metrics.rs:456:        let decoded: ToolMetrics = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/dashboard_snapshot.rs:11:use chrono::{DateTime, TimeZone, Utc};
+crates/roko-core/src/dashboard_snapshot.rs:1176:            read_json_value(&state_dir.join("executor.json"))?.unwrap_or(serde_json::Value::Null);
+crates/roko-core/src/dashboard_snapshot.rs:1215:fn read_json_value(path: &Path) -> Result<Option<serde_json::Value>, io::Error> {
+crates/roko-core/src/dashboard_snapshot.rs:1218:            let value = serde_json::from_str::<serde_json::Value>(&text).map_err(|err| {
+crates/roko-core/src/dashboard_snapshot.rs:1238:    state: &serde_json::Value,
+crates/roko-core/src/dashboard_snapshot.rs:1241:    event_entries: &[serde_json::Value],
+crates/roko-core/src/dashboard_snapshot.rs:1252:        .and_then(serde_json::Value::as_object)
+crates/roko-core/src/dashboard_snapshot.rs:1351:    let store = serde_json::from_value::<PersistedExperimentStore>(value).map_err(|err| {
+crates/roko-core/src/dashboard_snapshot.rs:1390:        let Ok(snapshot) = serde_json::from_str::<PersistedCFactorSnapshot>(trimmed) else {
+crates/roko-core/src/dashboard_snapshot.rs:1600:    plan_state: &serde_json::Value,
+crates/roko-core/src/dashboard_snapshot.rs:1609:        .and_then(serde_json::Value::as_bool)
+crates/roko-core/src/dashboard_snapshot.rs:1614:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1615:        .or_else(|| plan_state.get("id").and_then(serde_json::Value::as_str))
+crates/roko-core/src/dashboard_snapshot.rs:1731:        .and_then(serde_json::Value::as_array)
+crates/roko-core/src/dashboard_snapshot.rs:1768:        .and_then(serde_json::Value::as_array)
+crates/roko-core/src/dashboard_snapshot.rs:1778:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1784:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1785:                        .or_else(|| result.get("gate").and_then(serde_json::Value::as_str))
+crates/roko-core/src/dashboard_snapshot.rs:1790:                        .and_then(serde_json::Value::as_bool)
+crates/roko-core/src/dashboard_snapshot.rs:1794:                        .and_then(serde_json::Value::as_u64)
+crates/roko-core/src/dashboard_snapshot.rs:1803:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1807:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1809:        .or_else(|| plan_state.get("error").and_then(serde_json::Value::as_str))
+crates/roko-core/src/dashboard_snapshot.rs:1818:                    .and_then(serde_json::Value::as_u64)
+crates/roko-core/src/dashboard_snapshot.rs:1825:fn current_phase_label(plan_state: &serde_json::Value) -> Option<String> {
+crates/roko-core/src/dashboard_snapshot.rs:1828:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1833:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1839:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1845:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1878:        let Some(plan_id) = entry.get("plan_id").and_then(serde_json::Value::as_str) else {
+crates/roko-core/src/dashboard_snapshot.rs:1886:            .and_then(serde_json::Value::as_array)
+crates/roko-core/src/dashboard_snapshot.rs:1891:            .and_then(serde_json::Value::as_array)
+crates/roko-core/src/dashboard_snapshot.rs:1910:        let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) else {
+crates/roko-core/src/dashboard_snapshot.rs:1925:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1929:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1934:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1940:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1944:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1949:                        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:1962:fn read_jsonl_values(path: &Path) -> Result<Option<Vec<serde_json::Value>>, io::Error> {
+crates/roko-core/src/dashboard_snapshot.rs:1968:                    serde_json::from_str::<serde_json::Value>(line).map_err(|err| {
+crates/roko-core/src/dashboard_snapshot.rs:1982:fn read_event_entries(path: &Path) -> Result<Vec<serde_json::Value>, io::Error> {
+crates/roko-core/src/dashboard_snapshot.rs:1989:fn extract_event_entries(value: &serde_json::Value) -> Vec<serde_json::Value> {
+crates/roko-core/src/dashboard_snapshot.rs:1990:    if let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) {
+crates/roko-core/src/dashboard_snapshot.rs:1999:fn collect_agent_roles(event_entries: &[serde_json::Value]) -> HashMap<String, String> {
+crates/roko-core/src/dashboard_snapshot.rs:2014:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2019:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2023:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2035:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2046:fn append_event_errors(snapshot: &mut DashboardSnapshot, event_entries: &[serde_json::Value]) {
+crates/roko-core/src/dashboard_snapshot.rs:2062:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2076:fn append_event_diagnoses(snapshot: &mut DashboardSnapshot, event_entries: &[serde_json::Value]) {
+crates/roko-core/src/dashboard_snapshot.rs:2092:fn event_kind_label(entry: &serde_json::Value) -> Option<String> {
+crates/roko-core/src/dashboard_snapshot.rs:2098:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2102:fn event_timestamp_ms(entry: &serde_json::Value) -> u64 {
+crates/roko-core/src/dashboard_snapshot.rs:2105:        .and_then(serde_json::Value::as_u64)
+crates/roko-core/src/dashboard_snapshot.rs:2106:        .or_else(|| entry.get("timestamp").and_then(serde_json::Value::as_u64))
+crates/roko-core/src/dashboard_snapshot.rs:2203:fn diagnosis_from_event_entry(entry: &serde_json::Value) -> Option<DiagnosisSummary> {
+crates/roko-core/src/dashboard_snapshot.rs:2207:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2211:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2215:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2222:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2226:            .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2231:                    .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2249:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2258:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2273:    diagnosis: &serde_json::Value,
+crates/roko-core/src/dashboard_snapshot.rs:2278:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2341:fn string_array(values: &[serde_json::Value]) -> Vec<String> {
+crates/roko-core/src/dashboard_snapshot.rs:2344:        .filter_map(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2353:fn extract_gate_name(entry: &serde_json::Value) -> Option<String> {
+crates/roko-core/src/dashboard_snapshot.rs:2356:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2361:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2367:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2373:                .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2379:fn extract_gate_passed(entry: &serde_json::Value) -> Option<bool> {
+crates/roko-core/src/dashboard_snapshot.rs:2382:        .and_then(serde_json::Value::as_str)
+crates/roko-core/src/dashboard_snapshot.rs:2391:                .and_then(serde_json::Value::as_bool)
+crates/roko-core/src/dashboard_snapshot.rs:2396:                .and_then(serde_json::Value::as_bool)
+crates/roko-core/src/dashboard_snapshot.rs:2400:fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<u64> {
+crates/roko-core/src/dashboard_snapshot.rs:2403:        .and_then(serde_json::Value::as_u64)
+crates/roko-core/src/dashboard_snapshot.rs:2407:                .and_then(serde_json::Value::as_i64)
+crates/roko-core/src/dashboard_snapshot.rs:2448:        let Ok(row) = serde_json::from_str::<EpisodeRow>(trimmed) else {
+crates/roko-core/src/dashboard_snapshot.rs:2459:                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+crates/roko-core/src/dashboard_snapshot.rs:2493:        if let Ok(row) = serde_json::from_str::<EffRow>(trimmed) {
+crates/roko-core/src/dashboard_snapshot.rs:2679:            serde_json::to_vec_pretty(&serde_json::json!({
+crates/roko-core/src/dashboard_snapshot.rs:2696:            serde_json::to_vec_pretty(&serde_json::json!([
+crates/roko-core/src/dashboard_snapshot.rs:2708:            serde_json::to_vec_pretty(&serde_json::json!({
+crates/roko-core/src/dashboard_snapshot.rs:2767:            serde_json::to_vec_pretty(&serde_json::json!({
+crates/roko-core/src/dashboard_snapshot.rs:2782:                serde_json::json!({
+crates/roko-core/src/dashboard_snapshot.rs:2810:            serde_json::to_vec_pretty(&serde_json::json!({
+crates/roko-core/src/job.rs:130:    pub submission: Option<serde_json::Value>,
+crates/roko-core/src/job.rs:133:    pub evaluation: Option<serde_json::Value>,
+crates/roko-core/src/job.rs:318:    Serde(serde_json::Error),
+crates/roko-core/src/job.rs:350:impl From<serde_json::Error> for JobError {
+crates/roko-core/src/job.rs:351:    fn from(err: serde_json::Error) -> Self {
+crates/roko-core/src/job.rs:439:        let json = serde_json::to_string_pretty(job)?;
+crates/roko-core/src/job.rs:455:        let job: MarketplaceJob = serde_json::from_str(&data)?;
+crates/roko-core/src/job.rs:475:            let mut job: MarketplaceJob = match serde_json::from_str(&data) {
+crates/roko-core/src/job.rs:496:        let now = chrono::Utc::now();
+crates/roko-core/src/job.rs:592:        let json = serde_json::to_string(&job).unwrap();
+crates/roko-core/src/job.rs:593:        let parsed: MarketplaceJob = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/format.rs:410:            let json = serde_json::to_string(&f).unwrap();
+crates/roko-core/src/tool/format.rs:411:            let decoded: ToolFormat = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/format.rs:516:        let json = serde_json::to_string(&p).unwrap();
+crates/roko-core/src/tool/format.rs:517:        let decoded: ToolFormatProfile = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/registry.rs:37:    fn validate_args(&self, name: &str, _args: &serde_json::Value) -> Result<()> {
+crates/roko-core/src/tool/registry.rs:167:        let result = r.validate_args("does_not_exist", &serde_json::json!({}));
+crates/roko-core/src/tool/registry.rs:174:        assert!(r.validate_args("read_file", &serde_json::json!({})).is_ok());
+crates/roko-core/src/tool/handler.rs:20:use chrono::{DateTime, Utc};
+crates/roko-core/src/tool/handler.rs:23:use serde_json::Value;
+crates/roko-core/src/tool/handler.rs:408:            metadata: serde_json::json!({"state": "approved"}),
+crates/roko-core/src/namespace.rs:51:    pub schema: Option<serde_json::Value>,
+crates/roko-core/src/namespace.rs:377:                schema: Some(serde_json::json!({"type": "object"})),
+crates/roko-core/src/namespace.rs:385:        let json = serde_json::to_string(&ns).unwrap();
+crates/roko-core/src/namespace.rs:386:        let decoded: CognitiveNamespace = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/trace.rs:496:        data: serde_json::Value,
+crates/roko-core/src/tool/trace.rs:606:                let scrubbed_data = serde_json::to_string(data)
+crates/roko-core/src/tool/trace.rs:609:                    .and_then(|s| serde_json::from_str(&s).ok())
+crates/roko-core/src/tool/trace.rs:866:            let now = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/tool/trace.rs:902:        let json = serde_json::to_string(&id).unwrap();
+crates/roko-core/src/tool/trace.rs:903:        let decoded: TraceId = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/trace.rs:969:        let json = serde_json::to_string(&e).unwrap();
+crates/roko-core/src/tool/trace.rs:970:        let decoded: ToolTraceEvent = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/trace.rs:1042:        let json = serde_json::to_string(&ft).unwrap();
+crates/roko-core/src/tool/trace.rs:1043:        let decoded: FailureTrace = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/trace.rs:1239:                data: serde_json::json!({
+crates/roko-core/src/tool/trace.rs:1249:        let json = serde_json::to_string(&scrubbed.events[0]).unwrap();
+crates/roko-core/src/tool/call.rs:33:#[allow(clippy::derive_partial_eq_without_eq)] // arguments: serde_json::Value isn't Eq
+crates/roko-core/src/tool/call.rs:41:    pub arguments: serde_json::Value,
+crates/roko-core/src/tool/call.rs:52:        arguments: serde_json::Value,
+crates/roko-core/src/tool/call.rs:58:            request_ts_ms: chrono::Utc::now().timestamp_millis(),
+crates/roko-core/src/tool/call.rs:68:        arguments: serde_json::Value,
+crates/roko-core/src/tool/call.rs:244:        let before = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/tool/call.rs:245:        let call = ToolCall::new("call-1", "read_file", serde_json::json!({ "path": "x.rs" }));
+crates/roko-core/src/tool/call.rs:246:        let after = chrono::Utc::now().timestamp_millis();
+crates/roko-core/src/tool/call.rs:255:        let call = ToolCall::at("x", "bash", serde_json::json!({}), 1_700_000_000_000);
+crates/roko-core/src/tool/call.rs:264:            serde_json::json!({"pattern": "foo"}),
+crates/roko-core/src/tool/call.rs:267:        let json = serde_json::to_string(&call).unwrap();
+crates/roko-core/src/tool/call.rs:268:        let decoded: ToolCall = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/call.rs:312:        let json = serde_json::to_string(&a).unwrap();
+crates/roko-core/src/tool/call.rs:313:        let decoded: Artifact = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/call.rs:325:        let json = serde_json::to_string(&r).unwrap();
+crates/roko-core/src/tool/call.rs:326:        let decoded: ToolResult = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/tool/call.rs:352:            let json = serde_json::to_string(&e).unwrap();
+crates/roko-core/src/tool/call.rs:353:            let decoded: ToolError = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/error/mod.rs:77:    Json(#[from] serde_json::Error),
+crates/roko-core/src/error/mod.rs:549:                    RokoError::Json(serde_json::from_str::<serde_json::Value>("{ bad").unwrap_err())
+crates/roko-core/src/error/mod.rs:726:            let s = serde_json::to_string(&kind).expect("serialize");
+crates/roko-core/src/error/mod.rs:727:            let back: ErrorKind = serde_json::from_str(&s).expect("deserialize");
+crates/roko-core/src/phase.rs:380:        let json = serde_json::to_string(&p).unwrap();
+crates/roko-core/src/phase.rs:383:        let decoded: PlanPhase = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/feed.rs:14:use chrono::{DateTime, Utc};
+crates/roko-core/src/feed.rs:16:use serde_json::Value;
+crates/roko-core/src/feed.rs:265:        let json = serde_json::to_string(&reg).expect("serialize");
+crates/roko-core/src/feed.rs:266:        let restored: FeedRegistry = serde_json::from_str(&json).expect("deserialize");
+crates/roko-core/src/tool/pointer.rs:154:        let json = serde_json::to_string(&p).unwrap();
+crates/roko-core/src/tool/pointer.rs:155:        let decoded: MemoryPointer = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/forensic.rs:296:        let canonical = serde_json::to_vec(self).unwrap_or_default();
+crates/roko-core/src/forensic.rs:372:        let line = serde_json::to_string(replay)
+crates/roko-core/src/forensic.rs:392:            .filter_map(|line| serde_json::from_str(line).ok())
+crates/roko-core/src/forensic.rs:519:        let json = serde_json::to_string(&replay).unwrap();
+crates/roko-core/src/forensic.rs:520:        let decoded: ForensicReplay = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/forensic.rs:600:            let json = serde_json::to_string(&outcome).unwrap();
+crates/roko-core/src/forensic.rs:601:            let decoded: PolicyOutcome = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/cognitive_workspace.rs:8:use serde_json::Value;
+crates/roko-core/src/cognitive_workspace.rs:92:            created_at_ms: chrono::Utc::now().timestamp_millis(),
+crates/roko-core/src/cognitive_workspace.rs:538:    use serde_json::json;
+crates/roko-core/src/cognitive_workspace.rs:573:        let encoded = serde_json::to_value(&workspace).expect("serialize workspace");
+crates/roko-core/src/config/agent.rs:244:    pub output_schema: Option<serde_json::Value>,
+crates/roko-core/src/pulse.rs:291:    chrono::Utc::now().timestamp_millis()
+crates/roko-core/src/pulse.rs:337:        let json = serde_json::to_string(&t).unwrap();
+crates/roko-core/src/pulse.rs:338:        let parsed: Topic = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/pulse.rs:388:        let json = serde_json::to_string(&p).unwrap();
+crates/roko-core/src/pulse.rs:389:        let parsed: Pulse = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/pulse.rs:427:            let json = serde_json::to_string(&f).unwrap();
+crates/roko-core/src/pulse.rs:428:            let parsed: TopicFilter = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/pulse.rs:502:        let json = serde_json::to_string(&o).unwrap();
+crates/roko-core/src/pulse.rs:503:        let parsed: PolicyOutputs = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/body.rs:22:    Json(serde_json::Value),
+crates/roko-core/src/body.rs:45:        let json = serde_json::to_value(value).map_err(RokoError::body_encode)?;
+crates/roko-core/src/body.rs:63:            Self::Json(v) => serde_json::from_value(v.clone()).map_err(RokoError::body_decode),
+crates/roko-core/src/body.rs:130:        serde_json::to_vec(self).unwrap_or_default()
+crates/roko-core/src/body.rs:242:        assert!(b.as_json::<serde_json::Value>().is_err());
+crates/roko-core/src/body.rs:265:        let json = serde_json::to_string(&body).unwrap();
+crates/roko-core/src/body.rs:266:        let parsed: Body = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/config/schema.rs:1832:        let json = serde_json::to_string(&trigger).unwrap();
+crates/roko-core/src/config/schema.rs:1833:        let parsed: SubscriptionTrigger = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/connector.rs:14:use chrono::{DateTime, Utc};
+crates/roko-core/src/connector.rs:16:use serde_json::Value;
+crates/roko-core/src/connector.rs:237:        let json = serde_json::to_string(&reg).expect("serialize");
+crates/roko-core/src/connector.rs:238:        let restored: ConnectorRegistry = serde_json::from_str(&json).expect("deserialize");
+crates/roko-core/src/lib.rs:141:pub mod runtime_event;
+crates/roko-core/src/lib.rs:251:pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+crates/roko-core/src/engram.rs:234:                let values: Vec<serde_json::Value> = pulses
+crates/roko-core/src/engram.rs:236:                    .map(|p| serde_json::to_value(&p.body).unwrap_or_default())
+crates/roko-core/src/engram.rs:238:                Body::Json(serde_json::Value::Array(values))
+crates/roko-core/src/engram.rs:433:    chrono::Utc::now().timestamp_millis()
+crates/roko-core/src/engram.rs:646:        let json = serde_json::to_string(&s).unwrap();
+crates/roko-core/src/engram.rs:647:        let parsed: Engram = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/state_hub.rs:53:        if let Ok(json) = serde_json::to_string(event) {
+crates/roko-core/src/state_hub.rs:210:                if let Ok(event) = serde_json::from_str::<DashboardEvent>(line) {
+crates/roko-core/src/state_hub.rs:237:                if let Ok(event) = serde_json::from_str::<DashboardEvent>(line) {
+crates/roko-core/src/state_hub.rs:384:        // Snapshot is updated synchronously.
+crates/roko-core/src/state_hub.rs:459:        let executor_state = serde_json::json!({
+crates/roko-core/src/state_hub.rs:478:            serde_json::to_vec(&executor_state).expect("executor json"),
+crates/roko-core/src/config/serve.rs:281:    pub metadata: serde_json::Value,
+crates/roko-core/src/config/serve.rs:290:            metadata: serde_json::Value::Null,
+crates/roko-core/src/score.rs:305:        let score: Score = serde_json::from_str(json).unwrap();
+crates/roko-core/src/secrets/resolve.rs:289:/// Current time in epoch milliseconds (uses `chrono`).
+crates/roko-core/src/secrets/resolve.rs:292:    let ms = chrono::Utc::now().timestamp_millis() as u64;
+crates/roko-core/src/extension.rs:41:    pub extra: serde_json::Value,
+crates/roko-core/src/extension.rs:63:    pub extra: serde_json::Value,
+crates/roko-core/src/extension.rs:80:    pub details: serde_json::Value,
+crates/roko-core/src/extension.rs:91:    pub extra: serde_json::Value,
+crates/roko-core/src/extension.rs:100:    pub data: serde_json::Value,
+crates/roko-core/src/extension.rs:109:    pub arguments: serde_json::Value,
+crates/roko-core/src/extension.rs:111:    pub result: Option<serde_json::Value>,
+crates/roko-core/src/extension.rs:135:    pub payload: serde_json::Value,
+crates/roko-core/src/extension.rs:144:    pub entries: Vec<serde_json::Value>,
+crates/roko-core/src/extension.rs:153:    pub data: serde_json::Value,
+crates/roko-core/src/extension.rs:160:    pub state: serde_json::Value,
+crates/roko-core/src/extension.rs:228:    pub value: serde_json::Value,
+crates/roko-core/src/extension.rs:261:/// of raw `serde_json::Value`.
+crates/roko-core/src/extension.rs:682:            arguments: serde_json::json!({}),
+crates/roko-core/src/extension.rs:694:            arguments: serde_json::json!({}),
+crates/roko-core/src/extension.rs:707:            extra: serde_json::Value::Null,
+crates/roko-core/src/extension.rs:722:            extra: serde_json::Value::Null,
+crates/roko-core/src/extension.rs:740:            extra: serde_json::Value::Null,
+crates/roko-core/src/extension.rs:755:            details: serde_json::Value::Null,
+crates/roko-core/src/traits.rs:211:/// trait is async. For pure/synchronous verification, implementors can return
+crates/roko-core/src/immune.rs:23:use chrono::{DateTime, Utc};
+crates/roko-core/src/immune.rs:554:        let json = serde_json::to_string(&entry).unwrap();
+crates/roko-core/src/immune.rs:555:        let back: QuarantineEntry = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/immune.rs:569:        let json = serde_json::to_string(&resp).unwrap();
+crates/roko-core/src/immune.rs:570:        let back: ImmuneResponse = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/task.rs:693:        let parsed: TaskMeta = serde_json::from_str(json).unwrap();
+crates/roko-core/src/task.rs:720:        let a: Wrap = serde_json::from_str(r#"{"v": true}"#).unwrap();
+crates/roko-core/src/task.rs:722:        let b: Wrap = serde_json::from_str(r#"{"v": "false"}"#).unwrap();
+crates/roko-core/src/task.rs:724:        let c: Wrap = serde_json::from_str(r#"{"v": "True"}"#).unwrap();
+crates/roko-core/src/task.rs:726:        let d: Wrap = serde_json::from_str(r#"{"v": ""}"#).unwrap();
+crates/roko-core/src/task.rs:728:        let e: Wrap = serde_json::from_str(r#"{}"#).unwrap();
+crates/roko-core/src/task.rs:739:        assert!(serde_json::from_str::<Wrap>(r#"{"v": "maybe"}"#).is_err());
+crates/roko-core/src/task.rs:740:        let parsed: Wrap = serde_json::from_str(r#"{"v": "false"}"#).unwrap();
+crates/roko-core/src/task.rs:754:        let json = serde_json::to_string(&t).unwrap();
+crates/roko-core/src/task.rs:755:        let decoded: Task = serde_json::from_str(&json).unwrap();
+crates/roko-core/src/task.rs:762:            serde_json::to_string(&TaskCategory::Implementation).unwrap(),
+crates/roko-core/src/task.rs:766:            serde_json::to_string(&TaskComplexityBand::Complex).unwrap(),
+crates/roko-core/src/task.rs:770:            serde_json::to_string(&TaskContextWeight::Slim).unwrap(),
+crates/roko-core/src/task.rs:778:            serde_json::to_string(&PlanStatus::Implementing).unwrap(),
+crates/roko-core/src/obs/metrics.rs:826:        let json = serde_json::to_string(&snap).expect("serialise snapshot");
+crates/roko-core/src/obs/metrics.rs:829:            serde_json::from_str(&json).expect("deserialise snapshot");
+crates/roko-core/src/obs/health.rs:168:    pub fn json_snapshot(&self) -> serde_json::Value {
+crates/roko-core/src/obs/health.rs:171:        serde_json::json!({
+
+codex
+`roko-core` already has `serde`, `serde_json`, and `chrono`, so this can stay confined to `runtime_event.rs`. I’m going to add derives plus the envelope constructor and keep the existing enum shape intact so current pattern matches continue to work.
+exec
+/bin/zsh -lc "sed -n '220,280p' crates/roko-core/src/lib.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+ succeeded in 0ms:
+    OperatingFrequencyScheduler,
+};
+pub use phase::{FailureKind, PhaseKind, PlanPhase, is_monotonic_progression, valid_transitions};
+pub use policy_manifest::{
+    BUILTIN_ROLE_POLICY_MANIFEST_PATH, BUILTIN_ROLE_POLICY_MANIFEST_TOML,
+    CURRENT_POLICY_MANIFEST_SCHEMA_VERSION, ContextPolicyRef, FallbackBehavior, GateExpectation,
+    InclusionMode, InclusionRule, MANIFEST_BACKED_BUILTIN_ROLE_IDS, ManifestError,
+    ManifestLookupError, ManifestValidationError, OutputFormat, OutputSchemaExpectation,
+    PolicyProvenance, PromptBudgetPolicy, PromptPolicy, PromptPolicySection, PromptSectionSource,
+    RolePolicyManifest, RoleProfile, RoleSafetyPolicy, SectionBudget, ToolCapabilityPolicy,
+};
+pub use polyglot::{PolyglotProject, detect_polyglot};
+pub use prediction::{
+    AccuracyStats, CalibrationStats, CalibrationTracker, ChainCondition, ChainMetric,
+    ChainQueryPayload, ChainTarget, ChangeContext, CodingMetric, CodingQueryPayload, CodingScope,
+    ExponentialMovingAverage, OperationsMetric, OperationsQueryPayload, Oracle, OracleDomain,
+    OracleQuery, PredictedValue, Prediction, PredictionAccuracy, PredictionCalibrationSource,
+    PredictionCalibrationSummary, PredictionInterval, PredictionOutcome, PredictionPolicy,
+    PredictionProvenance, PredictionStore, PredictiveScorer, QueryPayload, ResearchMetric,
+    ResearchQueryPayload, ResidualCorrector, SourceReference,
+};
+pub use project::{
+    DetectedBuildSystem, Language, ProjectInfo, detect_from_files,
+    detect_from_files_with_cargo_toml,
+};
+pub use provenance::{
+    Provenance, ProvenanceCoherenceCheck, ProvenanceCoherenceIssue, Taint, TaintInfo,
+};
+pub use pulse::{PolicyOutputs, Pulse, PulseBuilder, Topic, TopicFilter};
+pub use query::{Budget, Query};
+pub use roko_primitives::HdcVector;
+pub use runtime_event::{RuntimeEvent, WorkflowOutcome};
+pub use score::Score;
+pub use signal::{Signal, SignalBuilder};
+pub use signal_kinds::*;
+pub use task::{
+    GlobalTaskId, PlanStatus, Task, TaskCategory, TaskComplexityBand, TaskContextWeight,
+    TaskDomain, TaskMeta, TaskQualityProfile, TaskReasoningLevel, TaskSpeedPriority, TaskStatus,
+};
+// Note: tool::FailureKind (for tool-call failures) is NOT re-exported here to avoid
+// collision with phase::FailureKind (for PlanPhase failures); reach it via
+// `roko_core::tool::FailureKind`.
+pub use dashboard_snapshot::{
+    AgentState as DashboardAgentState, AgentTopology, AgentTopologyEdge, AgentTopologyNode,
+    CFactorBucket, DashboardEvent, DashboardEventLogEntry, DashboardSnapshot, DiagnosisSeverity,
+    DiagnosisSummary, EfficiencyBucket, ExperimentWinnerSummary, FailureEntry,
+    KnowledgeBrowseEntry as DashboardKnowledgeBrowseEntry, SnapshotStats, TrendBucket,
+    TrendBuckets,
+};
+pub use job::{
+    CreateJobRequest, FileJobStore, JobError, JobEvaluation, JobFilter, JobGateResult,
+    JobProgressEntry, JobStats, JobStatus, JobSubmission, JobType, MarketplaceJob, PrdSummary,
+    TaskSummary as JobTaskSummary,
+};
+pub use namespace::{
+    Channel, ChannelDirection, CognitiveNamespace, NamespaceAcl, NamespaceRegistry, RateLimitConfig,
+};
+pub use temperament::Temperament;
+pub use tool::{
+    ArmEntry, Artifact, AuditSink, BanditKey, CancelSource, CancelToken, EpsilonGreedyBandit,
+    FailureTrace, FormatBandit, KeywordOverlapScorer, MemoryPointer, MetricsKey, MetricsSink,
+
+exec
+/bin/zsh -lc 'rg -n "chrono =" Cargo.toml Cargo.lock' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-224202-A01
+ succeeded in 0ms:
+Cargo.toml:136:chrono = { version = "0.4", features = ["serde"] }
+

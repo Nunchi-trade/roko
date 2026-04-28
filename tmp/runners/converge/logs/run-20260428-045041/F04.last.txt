@@ -1,0 +1,10 @@
+Implemented Batch F04 in [jsonl_logger.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/jsonl_logger.rs).
+
+Changed `JsonlLogger` to use `roko_core::foundation::EventConsumer` and `roko_core::RuntimeEvent`, removed the local trait copy, and kept the canonical `event.kind()` / `event.run_id()` delegation.
+
+Verification passed:
+- Done-criteria grep checks
+- `cargo test -p roko-runtime --lib -- jsonl_logger`
+- `cargo check -p roko-runtime`
+
+The targeted test emitted unrelated existing warnings in heartbeat test code; no changes made outside scope.

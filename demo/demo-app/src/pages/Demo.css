@@ -270,6 +270,19 @@
   background: var(--bg-deeper, var(--bg-void));
 }
 
+.demo-main-pipeline .demo-terminals {
+  flex: 34;
+}
+
+.demo-main-pipeline .demo-sidebar {
+  flex: 66;
+}
+
+.demo-main-pipeline .demo-terminal-grid.demo-cols-2 {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
 /* Remove default pane margins inside sidebar */
 .demo-sidebar .pane {
   margin-top: 0;

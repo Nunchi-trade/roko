@@ -1,0 +1,6 @@
+Implemented `.github/workflows/ci.yml` with a new independent `layer-check` job after `fmt`.
+
+Verified:
+- `grep -n 'layer-check\|layer.check' .github/workflows/ci.yml` returns 3 matches.
+- `grep -n 'Layer Check' .github/workflows/ci.yml` returns 1 match.
+- Diff only shows additions after the existing `fmt` job; `test` and `fmt` were unchanged.

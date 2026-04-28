@@ -1,0 +1,10 @@
+Implemented the JSONL workflow consumer wiring in [run.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-cli/src/run.rs:365).
+
+The current `WorkflowEngine` API already accepts the canonical `RuntimeEvent` consumer trait, so the local `JsonlWorkflowConsumer` forwards `RuntimeEvent`s into `JsonlLogger` and is registered before `engine.run(config)`.
+
+Verification passed:
+
+```text
+cargo check -p roko-cli
+Finished `dev` profile [optimized + debuginfo]
+```

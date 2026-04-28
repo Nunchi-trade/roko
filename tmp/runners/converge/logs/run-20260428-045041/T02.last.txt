@@ -1,0 +1,7 @@
+Implemented the two standard workflow tests in [workflow_engine.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-runtime/src/workflow_engine.rs:710), reusing the existing mocks and recording consumer.
+
+Verification:
+- `cargo test -p roko-runtime workflow_engine_standard` passed: 2 tests passed.
+- `cargo clippy -p roko-runtime` completed successfully. It still reports existing warnings in unrelated/pre-existing runtime code, but nothing from the new test additions.
+
+Only modified `crates/roko-runtime/src/workflow_engine.rs`.

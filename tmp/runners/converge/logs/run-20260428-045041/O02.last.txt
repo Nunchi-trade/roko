@@ -1,0 +1,10 @@
+Implemented `GET /api/dashboard/runs`.
+
+Changed:
+- [runs.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/runs.rs): new RuntimeProjection-backed route reading `.roko/runtime-events.jsonl`, returning sorted `{"runs":[...]}`, and falling back to an empty array on read/projection errors.
+- [mod.rs](/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-run-20260428-045041/crates/roko-serve/src/routes/mod.rs): registered `mod runs` and merged it next to `run::routes()`.
+
+Verification:
+- `cargo check -p roko-serve` passed.
+- `git status --short` shows only the two scoped files changed.
+- `cargo fmt --check` reports pre-existing formatting drift in unrelated files outside this batch scope, so I left those untouched.
