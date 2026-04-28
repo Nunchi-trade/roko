@@ -24554,3 +24554,2878 @@ index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec4
  
      struct MockGateRunner;
 
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..f25856d78345ad3e47f9847fd6e518032907ac21
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,9 +192,28 @@
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
+             Ok(())
+         })
+     }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
++            Ok(())
++        })
++    }
+ }
+ 
+ struct AcpWorkflowEventConsumer {
+@@ -512,14 +531,20 @@
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..1213ac5ec30b9a3c18f3a2bbe2c6e2b556750b89
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..1969089157e96bc23bc41a15d72e546efeeec4e4
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..6ffaa338afcf3d983572e0693d0282c73762a923
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..5245a90e199f821672ed5387f90c6db1bd6747ec
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec42759aa86
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
+ exited 101 in 27217ms:
+    Blocking waiting for file lock on build directory
+    Checking roko-core v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-core)
+   Compiling roko-cli v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-cli)
+    Checking roko-chain v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-chain)
+    Checking roko-fs v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-fs)
+    Checking roko-daimon v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-daimon)
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-runtime)
+    Checking roko-lang-typescript v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-lang-typescript)
+    Checking roko-lang-go v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-lang-go)
+    Checking roko-plugin v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-plugin)
+    Checking roko-lang-rust v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-lang-rust)
+    Checking roko-index v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-index)
+    Checking roko-std v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-std)
+    Checking roko-agent v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-agent)
+    Checking roko-learn v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-learn)
+    Checking roko-gate v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-gate)
+    Checking roko-acp v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-acp)
+    Checking roko-neuro v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-neuro)
+    Checking roko-conductor v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-conductor)
+    Checking roko-orchestrator v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-orchestrator)
+    Checking roko-agent-server v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-agent-server)
+    Checking roko-compose v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-compose)
+    Checking roko-dreams v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-dreams)
+    Checking roko-serve v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-serve)
+error: #[derive(RustEmbed)] folder '/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05/crates/roko-serve/../../demo/demo-app/dist/' does not exist. cwd: '/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05'
+  --> crates/roko-serve/src/embedded.rs:11:1
+   |
+11 | / #[folder = "../../demo/demo-app/dist/"]
+12 | | struct DemoAssets;
+   | |__________________^
+
+error[E0599]: no function or associated item named `get` found for struct `DemoAssets` in the current scope
+  --> crates/roko-serve/src/embedded.rs:23:21
+   |
+12 | struct DemoAssets;
+   | ----------------- function or associated item `get` not found for this struct
+...
+23 |         DemoAssets::get("index.html")
+   |                     ^^^ function or associated item not found in `DemoAssets`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `get`, perhaps you need to implement one of them:
+           candidate #1: `Embed`
+           candidate #2: `SecretProvider`
+           candidate #3: `SecretStore`
+           candidate #4: `SliceIndex`
+           candidate #5: `icu_collections::codepointtrie::cptrie::TypedCodePointTrie`
+           candidate #6: `icu_properties::names::PropertyEnumToValueNameLookup`
+           candidate #7: `icu_provider::baked::DataStore`
+           candidate #8: `itertools::Itertools`
+           candidate #9: `nonzero_ext::NonZero`
+           candidate #10: `roko_core_crate::Store`
+           candidate #11: `roko_core_crate::ToolRegistry`
+           candidate #12: `rustls::server::server_conn::StoresServerSessions`
+           candidate #13: `toml_edit::table::TableLike`
+
+error[E0599]: no function or associated item named `get` found for struct `DemoAssets` in the current scope
+  --> crates/roko-serve/src/embedded.rs:25:21
+   |
+12 | struct DemoAssets;
+   | ----------------- function or associated item `get` not found for this struct
+...
+25 |         DemoAssets::get(path).or_else(|| DemoAssets::get("index.html"))
+   |                     ^^^ function or associated item not found in `DemoAssets`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `get`, perhaps you need to implement one of them:
+           candidate #1: `Embed`
+           candidate #2: `SecretProvider`
+           candidate #3: `SecretStore`
+           candidate #4: `SliceIndex`
+           candidate #5: `icu_collections::codepointtrie::cptrie::TypedCodePointTrie`
+           candidate #6: `icu_properties::names::PropertyEnumToValueNameLookup`
+           candidate #7: `icu_provider::baked::DataStore`
+           candidate #8: `itertools::Itertools`
+           candidate #9: `nonzero_ext::NonZero`
+           candidate #10: `roko_core_crate::Store`
+           candidate #11: `roko_core_crate::ToolRegistry`
+           candidate #12: `rustls::server::server_conn::StoresServerSessions`
+           candidate #13: `toml_edit::table::TableLike`
+
+error[E0599]: no function or associated item named `get` found for struct `DemoAssets` in the current scope
+  --> crates/roko-serve/src/embedded.rs:25:54
+   |
+12 | struct DemoAssets;
+   | ----------------- function or associated item `get` not found for this struct
+...
+25 |         DemoAssets::get(path).or_else(|| DemoAssets::get("index.html"))
+   |                                                      ^^^ function or associated item not found in `DemoAssets`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `get`, perhaps you need to implement one of them:
+           candidate #1: `Embed`
+           candidate #2: `SecretProvider`
+           candidate #3: `SecretStore`
+           candidate #4: `SliceIndex`
+           candidate #5: `icu_collections::codepointtrie::cptrie::TypedCodePointTrie`
+           candidate #6: `icu_properties::names::PropertyEnumToValueNameLookup`
+           candidate #7: `icu_provider::baked::DataStore`
+           candidate #8: `itertools::Itertools`
+           candidate #9: `nonzero_ext::NonZero`
+           candidate #10: `roko_core_crate::Store`
+           candidate #11: `roko_core_crate::ToolRegistry`
+           candidate #12: `rustls::server::server_conn::StoresServerSessions`
+           candidate #13: `toml_edit::table::TableLike`
+
+error[E0599]: no function or associated item named `get` found for struct `DemoAssets` in the current scope
+  --> crates/roko-serve/src/embedded.rs:31:46
+   |
+12 | struct DemoAssets;
+   | ----------------- function or associated item `get` not found for this struct
+...
+31 |             let served_path = if DemoAssets::get(path).is_some() && !path.is_empty() {
+   |                                              ^^^ function or associated item not found in `DemoAssets`
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `get`, perhaps you need to implement one of them:
+           candidate #1: `Embed`
+           candidate #2: `SecretProvider`
+           candidate #3: `SecretStore`
+           candidate #4: `SliceIndex`
+           candidate #5: `icu_collections::codepointtrie::cptrie::TypedCodePointTrie`
+           candidate #6: `icu_properties::names::PropertyEnumToValueNameLookup`
+           candidate #7: `icu_provider::baked::DataStore`
+           candidate #8: `itertools::Itertools`
+           candidate #9: `nonzero_ext::NonZero`
+           candidate #10: `roko_core_crate::Store`
+           candidate #11: `roko_core_crate::ToolRegistry`
+           candidate #12: `rustls::server::server_conn::StoresServerSessions`
+           candidate #13: `toml_edit::table::TableLike`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `roko-serve` (lib) due to 5 previous errors
+
+exec
+/bin/zsh -lc 'git diff -- crates/roko-core/src/foundation.rs crates/roko-runtime/src/effect_driver.rs crates/roko-runtime/src/workflow_engine.rs crates/roko-learn/src/feedback_service.rs crates/roko-acp/src/runner.rs crates/roko-cli/src/run.rs' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05
+ succeeded in 0ms:
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf717882..f25856d7 100644
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,6 +192,25 @@ impl FeedbackSink for AcpFeedbackSink {
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
++            Ok(())
++        })
++    }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
+             Ok(())
+         })
+     }
+@@ -512,14 +531,20 @@ fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04..1213ac5e 100644
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@ impl RuntimeFeedbackSink for RuntimeFeedbackSinkAdapter {
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3..19690891 100644
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@ pub trait PromptAssembler: Send + Sync {
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@ pub enum FeedbackEvent {
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@ pub enum FeedbackEvent {
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e7..6ffaa338 100644
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@ impl FeedbackService {
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@ impl FeedbackService {
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@ impl FeedbackSink for FeedbackService {
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@ impl Drop for FeedbackService {
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@ fn build_episode_from_workflow(
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@ mod tests {
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184..5245a90e 100644
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@ pub struct EffectServices {
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@ impl EffectDriver {
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@ impl EffectDriver {
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@ impl EffectDriver {
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813..ce0dfd10 100644
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@ impl WorkflowEngine {
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@ impl WorkflowEngine {
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@ impl WorkflowEngine {
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@ impl WorkflowEngine {
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@ impl WorkflowEngine {
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@ impl WorkflowEngine {
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@ impl WorkflowEngine {
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@ impl WorkflowEngine {
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@ fn template_name(config: &WorkflowConfig) -> &'static str {
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@ mod tests {
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
+exec
+/bin/zsh -lc "rg -n \"WorkflowComplete \\{|async fn flush|fn flush|record_workflow_feedback|workflow_feedback_totals|WorkflowFeedbackTotals\" crates/roko-core/src/foundation.rs crates/roko-runtime/src/workflow_engine.rs crates/roko-runtime/src/effect_driver.rs crates/roko-learn/src/feedback_service.rs crates/roko-acp/src/runner.rs crates/roko-cli/src/run.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05
+ succeeded in 0ms:
+crates/roko-learn/src/feedback_service.rs:92:    pub fn flush(&self) -> Result<()> {
+crates/roko-learn/src/feedback_service.rs:150:                FeedbackEvent::WorkflowComplete {
+crates/roko-learn/src/feedback_service.rs:292:    pub async fn flush_async(&self) -> Result<()> {
+crates/roko-learn/src/feedback_service.rs:321:                if let FeedbackEvent::WorkflowComplete {
+crates/roko-learn/src/feedback_service.rs:392:    async fn flush(&self) -> Result<()> {
+crates/roko-learn/src/feedback_service.rs:508:        svc.record(FeedbackEvent::WorkflowComplete {
+crates/roko-runtime/src/workflow_engine.rs:136:                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+crates/roko-runtime/src/workflow_engine.rs:212:                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
+crates/roko-runtime/src/workflow_engine.rs:230:                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+crates/roko-runtime/src/workflow_engine.rs:392:                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
+crates/roko-runtime/src/workflow_engine.rs:410:                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+crates/roko-runtime/src/workflow_engine.rs:457:    async fn record_workflow_feedback(
+crates/roko-runtime/src/workflow_engine.rs:464:        let totals = driver.workflow_feedback_totals().await;
+crates/roko-runtime/src/workflow_engine.rs:474:            .record(FeedbackEvent::WorkflowComplete {
+crates/roko-runtime/src/workflow_engine.rs:710:        fn flush<'life0, 'async_trait>(
+crates/roko-core/src/foundation.rs:189:    WorkflowComplete {
+crates/roko-core/src/foundation.rs:208:    async fn flush(&self) -> Result<()>;
+crates/roko-runtime/src/effect_driver.rs:43:pub(crate) struct WorkflowFeedbackTotals {
+crates/roko-runtime/src/effect_driver.rs:54:    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+crates/roko-runtime/src/effect_driver.rs:64:            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+crates/roko-runtime/src/effect_driver.rs:68:    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
+crates/roko-acp/src/runner.rs:200:    fn flush<'life0, 'async_trait>(
+crates/roko-acp/src/runner.rs:533:        FeedbackEvent::WorkflowComplete {
+crates/roko-cli/src/run.rs:279:    async fn flush(&self) -> roko_core::Result<()> {
+crates/roko-cli/src/run.rs:378:        RuntimeFeedbackEvent::WorkflowComplete {
+crates/roko-cli/src/run.rs:386:            CoreFeedbackEvent::WorkflowComplete {
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05
+ succeeded in 0ms:
+ M crates/roko-acp/src/runner.rs
+ M crates/roko-cli/src/run.rs
+ M crates/roko-core/src/foundation.rs
+ M crates/roko-learn/src/feedback_service.rs
+ M crates/roko-runtime/src/effect_driver.rs
+ M crates/roko-runtime/src/workflow_engine.rs
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..f25856d78345ad3e47f9847fd6e518032907ac21
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,9 +192,28 @@
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
+             Ok(())
+         })
+     }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
++            Ok(())
++        })
++    }
+ }
+ 
+ struct AcpWorkflowEventConsumer {
+@@ -512,14 +531,20 @@
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..1213ac5ec30b9a3c18f3a2bbe2c6e2b556750b89
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..1969089157e96bc23bc41a15d72e546efeeec4e4
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..6ffaa338afcf3d983572e0693d0282c73762a923
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..5245a90e199f821672ed5387f90c6db1bd6747ec
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec42759aa86
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime --tests' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B05
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..f25856d78345ad3e47f9847fd6e518032907ac21
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,9 +192,28 @@
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
+             Ok(())
+         })
+     }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
++            Ok(())
++        })
++    }
+ }
+ 
+ struct AcpWorkflowEventConsumer {
+@@ -512,14 +531,20 @@
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..1213ac5ec30b9a3c18f3a2bbe2c6e2b556750b89
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..1969089157e96bc23bc41a15d72e546efeeec4e4
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..6ffaa338afcf3d983572e0693d0282c73762a923
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..5245a90e199f821672ed5387f90c6db1bd6747ec
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec42759aa86
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..f25856d78345ad3e47f9847fd6e518032907ac21
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,9 +192,28 @@
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
+             Ok(())
+         })
+     }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
++            Ok(())
++        })
++    }
+ }
+ 
+ struct AcpWorkflowEventConsumer {
+@@ -512,14 +531,20 @@
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..1213ac5ec30b9a3c18f3a2bbe2c6e2b556750b89
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..1969089157e96bc23bc41a15d72e546efeeec4e4
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..6ffaa338afcf3d983572e0693d0282c73762a923
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..5245a90e199f821672ed5387f90c6db1bd6747ec
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec42759aa86
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
+ succeeded in 11513ms:
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 11.51s
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..f25856d78345ad3e47f9847fd6e518032907ac21
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -192,9 +192,28 @@
+             let line = feedback_json(event).to_string();
+             file.write_all(line.as_bytes()).await?;
+             file.write_all(b"\n").await?;
++            file.flush().await?;
+             Ok(())
+         })
+     }
++
++    fn flush<'life0, 'async_trait>(
++        &'life0 self,
++    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++    where
++        'life0: 'async_trait,
++        Self: 'async_trait,
++    {
++        let path = self.data_dir.join("efficiency.jsonl");
++        Box::pin(async move {
++            match tokio::fs::OpenOptions::new().read(true).open(path).await {
++                Ok(file) => file.sync_all().await?,
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++                Err(err) => return Err(err.into()),
++            }
++            Ok(())
++        })
++    }
+ }
+ 
+ struct AcpWorkflowEventConsumer {
+@@ -512,14 +531,20 @@
+             "ts": ts,
+         }),
+         FeedbackEvent::WorkflowComplete {
++            event_type,
+             run_id,
++            model,
++            success,
+             outcome,
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+         } => serde_json::json!({
+-            "kind": "workflow_complete",
++            "kind": event_type,
++            "event_type": event_type,
+             "run_id": run_id,
++            "model": model,
++            "success": success,
+             "outcome": outcome,
+             "total_cost_usd": total_cost_usd,
+             "total_tokens": total_tokens,
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..1213ac5ec30b9a3c18f3a2bbe2c6e2b556750b89
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -275,6 +275,10 @@
+         self.inner.record(core_feedback_event(event)).await?;
+         Ok(())
+     }
++
++    async fn flush(&self) -> roko_core::Result<()> {
++        self.inner.flush().await
++    }
+ }
+ 
+ struct RuntimeGateRunnerAdapter {
+@@ -377,13 +381,23 @@
+             total_cost_usd,
+             total_tokens,
+             duration_ms,
+-        } => CoreFeedbackEvent::WorkflowComplete {
+-            run_id,
+-            outcome,
+-            total_cost_usd,
+-            total_tokens,
+-            duration_ms,
+-        },
++        } => {
++            let success = outcome == "success";
++            CoreFeedbackEvent::WorkflowComplete {
++                event_type: if success {
++                    "workflow_completed".to_string()
++                } else {
++                    "workflow_failed".to_string()
++                },
++                run_id,
++                model: None,
++                success,
++                outcome,
++                total_cost_usd,
++                total_tokens,
++                duration_ms,
++            }
++        }
+     }
+ }
+ 
+diff --git a/crates/roko-core/src/foundation.rs b/crates/roko-core/src/foundation.rs
+index 6017fcc3fdc4d0ebe14db5c19d0d2161a1143901..1969089157e96bc23bc41a15d72e546efeeec4e4
+--- a/crates/roko-core/src/foundation.rs
++++ b/crates/roko-core/src/foundation.rs
+@@ -165,7 +165,7 @@
+ // -- FeedbackSink --
+ 
+ /// A feedback event to record.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+ pub enum FeedbackEvent {
+     /// Feedback from a model call.
+     ModelCall {
+@@ -187,7 +187,10 @@
+     },
+     /// Feedback from a workflow completion.
+     WorkflowComplete {
++        event_type: String,
+         run_id: String,
++        model: Option<String>,
++        success: bool,
+         outcome: String,
+         total_cost_usd: f64,
+         total_tokens: u64,
+@@ -200,6 +203,9 @@
+ pub trait FeedbackSink: Send + Sync {
+     /// Record a feedback event.
+     async fn record(&self, event: FeedbackEvent) -> Result<()>;
++
++    /// Flush any buffered feedback events.
++    async fn flush(&self) -> Result<()>;
+ }
+ 
+ // -- GateRunner --
+diff --git a/crates/roko-learn/src/feedback_service.rs b/crates/roko-learn/src/feedback_service.rs
+index 49a5f7e76867733804844ccba7d2ef91ebb0a849..6ffaa338afcf3d983572e0693d0282c73762a923
+--- a/crates/roko-learn/src/feedback_service.rs
++++ b/crates/roko-learn/src/feedback_service.rs
+@@ -148,14 +148,20 @@
+                     "ts": ts,
+                 }),
+                 FeedbackEvent::WorkflowComplete {
++                    event_type,
+                     run_id,
++                    model,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
+                 } => serde_json::json!({
+-                    "kind": "workflow_complete",
++                    "kind": event_type,
++                    "event_type": event_type,
+                     "run_id": run_id,
++                    "model": model,
++                    "success": success,
+                     "outcome": outcome,
+                     "total_cost_usd": total_cost_usd,
+                     "total_tokens": total_tokens,
+@@ -314,14 +320,17 @@
+             .filter_map(|event| {
+                 if let FeedbackEvent::WorkflowComplete {
+                     run_id,
++                    success,
+                     outcome,
+                     total_cost_usd,
+                     total_tokens,
+                     duration_ms,
++                    ..
+                 } = event
+                 {
+                     Some(build_episode_from_workflow(
+                         run_id,
++                        *success,
+                         outcome,
+                         *total_cost_usd,
+                         *total_tokens,
+@@ -379,6 +388,10 @@
+ 
+         Ok(())
+     }
++
++    async fn flush(&self) -> Result<()> {
++        self.flush_async().await
++    }
+ }
+ 
+ fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
+@@ -410,6 +423,7 @@
+ 
+ fn build_episode_from_workflow(
+     run_id: &str,
++    success: bool,
+     outcome: &str,
+     total_cost_usd: f64,
+     total_tokens: u64,
+@@ -420,7 +434,7 @@
+     episode.id = format!("ep-{run_id}");
+     episode.episode_id = episode.id.clone();
+     episode.trigger_kind = "workflow_complete".to_string();
+-    episode.success = outcome == "success";
++    episode.success = success;
+     episode.duration_secs = duration_ms as f64 / 1000.0;
+     episode.tokens_used = total_tokens;
+     episode.usage = Usage {
+@@ -492,7 +506,10 @@
+         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
+ 
+         svc.record(FeedbackEvent::WorkflowComplete {
++            event_type: "workflow_completed".into(),
+             run_id: "r1".into(),
++            model: Some("sonnet".into()),
++            success: true,
+             outcome: "success".into(),
+             total_cost_usd: 0.02,
+             total_tokens: 1200,
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..5245a90e199f821672ed5387f90c6db1bd6747ec
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -39,11 +39,19 @@
+     pub affect_policy: Option<Arc<tokio::sync::Mutex<dyn AffectPolicy>>>,
+ }
+ 
++#[derive(Debug, Clone, Default)]
++pub(crate) struct WorkflowFeedbackTotals {
++    pub primary_model: Option<String>,
++    pub total_tokens: u64,
++    pub total_cost_usd: f64,
++}
++
+ /// Drives workflow execution by translating state-machine actions into effects.
+ pub struct EffectDriver {
+     services: EffectServices,
+     run_id: String,
+     workdir: PathBuf,
++    feedback_totals: tokio::sync::Mutex<WorkflowFeedbackTotals>,
+ }
+ 
+ impl EffectDriver {
+@@ -53,9 +61,14 @@
+             services,
+             run_id,
+             workdir,
++            feedback_totals: tokio::sync::Mutex::new(WorkflowFeedbackTotals::default()),
+         }
+     }
+ 
++    pub(crate) async fn workflow_feedback_totals(&self) -> WorkflowFeedbackTotals {
++        self.feedback_totals.lock().await.clone()
++    }
++
+     /// Spawn an agent with the given role and prompt.
+     ///
+     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
+@@ -131,6 +144,8 @@
+ 
+         match result {
+             Ok(response) => {
++                self.record_model_totals(&response).await;
++
+                 if let Some(ref affect) = self.services.affect_policy {
+                     let mut policy = affect.lock().await;
+                     policy.on_task_outcome(
+@@ -390,6 +405,17 @@
+             })
+             .await;
+     }
++
++    async fn record_model_totals(&self, response: &ModelCallResponse) {
++        let mut totals = self.feedback_totals.lock().await;
++        if totals.primary_model.is_none() && !response.model.is_empty() {
++            totals.primary_model = Some(response.model.clone());
++        }
++        totals.total_tokens = totals
++            .total_tokens
++            .saturating_add(response.usage.total_tokens);
++        totals.total_cost_usd += response.usage.cost_usd;
++    }
+ }
+ 
+ fn duration_millis(start: Instant) -> u64 {
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..ce0dfd105237e59d5deeed9f81d59ec42759aa86
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -5,10 +5,10 @@
+ //!
+ use std::path::PathBuf;
+ use std::sync::Arc;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
+ 
+ use roko_core::RuntimeEvent;
+-use roko_core::foundation::{EventConsumer, ShellGateCommand};
++use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+ 
+ use crate::cancel::CancelToken;
+ use crate::effect_driver::{EffectDriver, EffectServices, Result};
+@@ -101,6 +101,7 @@
+         token: CancelToken,
+     ) -> Result<WorkflowResult> {
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
+ 
+@@ -132,6 +133,8 @@
+                         run_id: run_id.clone(),
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -206,9 +209,9 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome: outcome.clone(),
+@@ -224,9 +227,9 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+-                    // TODO(arch): Record final workflow feedback once the local
+-                    // `FeedbackEvent` includes `WorkflowComplete`.
+                     return Ok(WorkflowResult {
+                         run_id,
+                         outcome,
+@@ -294,6 +297,7 @@
+         }
+ 
+         let run_id = generate_run_id();
++        let started_at = Instant::now();
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
+@@ -385,6 +389,8 @@
+                         outcome: runtime_workflow_outcome(outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -401,6 +407,8 @@
+                         outcome: runtime_workflow_outcome(&outcome),
+                     });
+ 
++                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
++                        .await?;
+                     self.persist_affect_policy().await;
+                     return Ok(WorkflowResult {
+                         run_id,
+@@ -445,6 +453,38 @@
+             drop(policy);
+         }
+     }
++
++    async fn record_workflow_feedback(
++        &self,
++        run_id: &str,
++        outcome: &WorkflowOutcome,
++        driver: &EffectDriver,
++        started_at: Instant,
++    ) -> Result<()> {
++        let totals = driver.workflow_feedback_totals().await;
++        let success = matches!(outcome, WorkflowOutcome::Success { .. });
++        let event_type = if success {
++            "workflow_completed"
++        } else {
++            "workflow_failed"
++        };
++
++        self.services
++            .feedback_sink
++            .record(FeedbackEvent::WorkflowComplete {
++                event_type: event_type.to_string(),
++                run_id: run_id.to_string(),
++                model: totals.primary_model,
++                success,
++                outcome: workflow_feedback_outcome(outcome).to_string(),
++                total_cost_usd: totals.total_cost_usd,
++                total_tokens: totals.total_tokens,
++                duration_ms: duration_millis(started_at),
++            })
++            .await?;
++        self.services.feedback_sink.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ fn runtime_workflow_outcome(
+@@ -540,6 +580,19 @@
+     }
+ }
+ 
++fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
++    match outcome {
++        WorkflowOutcome::Success { .. } => "success",
++        WorkflowOutcome::Halted { .. } => "failed",
++        WorkflowOutcome::Cancelled => "cancelled",
++    }
++}
++
++fn duration_millis(start: Instant) -> u64 {
++    let millis = start.elapsed().as_millis();
++    u64::try_from(millis).unwrap_or(u64::MAX)
++}
++
+ fn generate_run_id() -> String {
+     let ts = SystemTime::now()
+         .duration_since(UNIX_EPOCH)
+@@ -653,6 +706,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+
