@@ -19,7 +19,7 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
 use roko_agent::translate::{ClaudeTranslator, OllamaTranslator, RenderedTools, Translator};
-use roko_agent::{AgentResult, OllamaLlmBackend};
+use roko_agent::{AgentResult, ModelCallService, OllamaLlmBackend};
 use roko_compose::{Placement, PromptComposer, PromptSection, SectionPriority, TaskContext};
 use roko_core::agent::resolve_model;
 use roko_core::dashboard_snapshot::DashboardEvent;
@@ -42,8 +42,8 @@ use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
 use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_runtime::effect_driver::{
     AffectContext as RuntimeAffectContext, AffectPolicy as RuntimeAffectPolicy,
-    BoxFuture as RuntimeBoxFuture, DispatchModulation as RuntimeDispatchModulation,
-    EffectServices, Result as RuntimeResult,
+    BoxFuture as RuntimeBoxFuture, DispatchModulation as RuntimeDispatchModulation, EffectServices,
+    Result as RuntimeResult,
 };
 use roko_runtime::pipeline_state::WorkflowConfig;
 use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
@@ -204,18 +204,18 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-struct RuntimeModelCallerAdapter {
-    inner: Arc<dyn CoreModelCaller>,
+struct CliModelCaller {
+    inner: Arc<ModelCallService>,
 }
 
-impl RuntimeModelCallerAdapter {
-    fn new(inner: Arc<dyn CoreModelCaller>) -> Self {
+impl CliModelCaller {
+    fn new(inner: Arc<ModelCallService>) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait::async_trait]
-impl RuntimeModelCaller for RuntimeModelCallerAdapter {
+impl RuntimeModelCaller for CliModelCaller {
     async fn call(
         &self,
         req: RuntimeModelCallRequest,
@@ -413,7 +413,7 @@ fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         role: req.role,
-        caller: req.caller,
+        caller: Some(roko_core::foundation::CallerIdentity::Cli),
         budget: req.budget,
         cache_policy: req.cache_policy,
     }
@@ -469,7 +469,6 @@ fn core_feedback_event(event: RuntimeFeedbackEvent) -> CoreFeedbackEvent {
 
 fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<EffectServices> {
     // Import the concrete service implementations.
-    use roko_agent::model_call_service::ModelCallService;
     use roko_compose::prompt_assembly_service::PromptAssemblyService;
     use roko_daimon::policy::DaimonPolicy;
     use roko_gate::gate_service::GateService;
@@ -505,13 +504,15 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
         Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
     // and provider settings are carried through the existing RokoConfig path.
+    let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
     let mut model_caller_inner = ModelCallService::new(model)
         .with_feedback_sink(Arc::clone(&feedback_sink))
-        .with_config(model_config);
+        .with_config(model_config)
+        .with_run_id(run_id);
     if let Some(ref mcp_path) = config.agent.mcp_config {
         model_caller_inner = model_caller_inner.with_mcp_config(mcp_path.clone());
     }
-    let model_caller: Arc<dyn CoreModelCaller> = Arc::new(model_caller_inner);
+    let model_caller = Arc::new(model_caller_inner);
     // TODO(S06): PromptAssemblyService has no with_workdir method and the CLI
     // PromptConfig has no conventions field yet; EffectDriver passes workdir
     // through PromptSpec for per-call assembly.
@@ -527,7 +528,7 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
     };
 
     Ok(EffectServices {
-        model_caller: Arc::new(RuntimeModelCallerAdapter::new(model_caller)),
+        model_caller: Arc::new(CliModelCaller::new(model_caller)),
         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
         gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
@@ -1257,6 +1258,7 @@ async fn dispatch_agent(
     prompt_text: &str,
     ctx: &Context,
 ) -> Result<(AgentResult, Vec<ExternalAction>)> {
+    // TODO(gateway): migrate to ModelCallService.
     let mut routing_config = roko_core::config::load_config(workdir)
         .with_context(|| format!("load routing config from {}", workdir.display()))?;
     routing_config.apply_process_env();
@@ -2247,7 +2249,11 @@ mod tests {
             output_text: Some("done".into()),
         };
         let token = write_shared_run(&tmp, &report).unwrap();
-        assert!(tmp.join(".roko/shared").join(format!("{token}.json")).exists());
+        assert!(
+            tmp.join(".roko/shared")
+                .join(format!("{token}.json"))
+                .exists()
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

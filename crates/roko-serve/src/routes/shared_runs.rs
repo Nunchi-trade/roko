@@ -348,10 +348,7 @@ mod tests {
             role: "implementer".to_string(),
             prompt: "fix the bug".to_string(),
             success: true,
-            gates: vec![
-                ("compile".to_string(), true),
-                ("test".to_string(), true),
-            ],
+            gates: vec![("compile".to_string(), true), ("test".to_string(), true)],
             output: Some("Fixed the null pointer dereference.".to_string()),
             cost_usd: Some(0.0042),
             input_tokens: Some(1500),
