@@ -3,10 +3,40 @@
 //! All observers (ACP adapter, SSE adapter, JSONL logger, TUI bridge)
 //! consume these via `EventBus<RuntimeEvent>`.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeEventEnvelope {
+    pub run_id: String,
+    pub seq: u64,
+    pub ts: DateTime<Utc>,
+    pub schema_version: u8,
+    pub source: String,
+    pub payload: RuntimeEvent,
+}
+
+impl RuntimeEventEnvelope {
+    pub fn new(
+        run_id: impl Into<String>,
+        seq: u64,
+        source: impl Into<String>,
+        payload: RuntimeEvent,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            seq,
+            ts: Utc::now(),
+            schema_version: 1,
+            source: source.into(),
+            payload,
+        }
+    }
+}
+
 /// Outcome of a completed workflow run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkflowOutcome {
     /// Workflow completed successfully, optionally with a commit hash.
     Success { commit_hash: Option<String> },
@@ -21,7 +51,8 @@ pub enum WorkflowOutcome {
 /// These events are fire-and-forget: the engine emits them and does not wait
 /// for observers to process them. Observers subscribe via
 /// `EventBus<RuntimeEvent>`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     // Lifecycle
     WorkflowStarted {
