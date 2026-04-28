@@ -75,6 +75,7 @@ pub(crate) mod knowledge_helpers;
 pub mod layer_check;
 pub(crate) mod learning_helpers;
 pub mod oneshot;
+#[cfg(feature = "legacy-orchestrate")]
 pub mod orchestrate;
 pub mod output_format;
 pub mod pipe;
@@ -124,6 +125,7 @@ pub use episode::EpisodePolicy;
 pub use inject::{InjectKind, InjectRequest};
 pub use layer_check::LayerViolation;
 pub use oneshot::{OneshotMode, OneshotResult};
+#[cfg(feature = "legacy-orchestrate")]
 pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
 pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};
