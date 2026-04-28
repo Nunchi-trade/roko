@@ -14,7 +14,9 @@ use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
 use crate::event_bus::emit_runtime_event;
 pub use crate::pipeline_state::WorkflowOutcome;
-use crate::pipeline_state::{PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig};
+use crate::pipeline_state::{
+    Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig,
+};
 
 /// Configuration for a workflow run.
 #[derive(Debug, Clone)]
@@ -237,6 +239,182 @@ impl WorkflowEngine {
         }
     }
 
+    /// Resume a workflow run from a checkpoint.
+    ///
+    /// Deserializes the pipeline state from `checkpoint` JSON (produced by
+    /// `PipelineStateV2::checkpoint()`) and continues the run loop from the
+    /// saved phase. If the checkpoint is in a terminal phase (`Complete`,
+    /// `Halted`, `Cancelled`), returns immediately with the terminal outcome.
+    ///
+    /// The `config` provides the working directory and enabled gates for the
+    /// resumed run. The workflow config (template, max iterations) comes from
+    /// the checkpoint itself, not from `config` -- this ensures the resumed
+    /// run uses the same settings as the original.
+    ///
+    /// Returns an error if the checkpoint JSON is malformed.
+    pub async fn resume(
+        &self,
+        config: WorkflowRunConfig,
+        checkpoint: &str,
+    ) -> Result<WorkflowResult> {
+        let pipeline = PipelineStateV2::from_checkpoint(checkpoint).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid checkpoint: {err}"),
+            )
+        })?;
+
+        if pipeline.phase.is_terminal() {
+            let outcome = match &pipeline.phase {
+                Phase::Complete => WorkflowOutcome::Success {
+                    commit_hash: pipeline.commit_hash.clone(),
+                },
+                Phase::Halted { reason } => WorkflowOutcome::Halted {
+                    reason: reason.clone(),
+                },
+                Phase::Cancelled => WorkflowOutcome::Cancelled,
+                _ => unreachable!(),
+            };
+
+            return Ok(WorkflowResult {
+                run_id: generate_run_id(),
+                outcome,
+                iterations: pipeline.iteration,
+            });
+        }
+
+        let run_id = generate_run_id();
+
+        let driver = EffectDriver::new(
+            EffectServices {
+                model_caller: Arc::clone(&self.services.model_caller),
+                prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                feedback_sink: Arc::clone(&self.services.feedback_sink),
+                gate_runner: Arc::clone(&self.services.gate_runner),
+            },
+            run_id.clone(),
+            config.workdir.clone(),
+        );
+
+        self.emit(RuntimeEvent::WorkflowStarted {
+            run_id: run_id.clone(),
+            template: "resumed".to_string(),
+            prompt: pipeline.original_prompt.clone(),
+        });
+
+        let mut pipeline = pipeline;
+        let mut output = resumed_output(&mut pipeline);
+
+        loop {
+            let old_phase = pipeline.phase.label();
+
+            let input = match &output {
+                PipelineOutput::SpawnStrategist { prompt } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "strategist".to_string(),
+                        model: String::new(),
+                    });
+                    strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                }
+                PipelineOutput::SpawnImplementer { prompt, context } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "implementer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("implementer", prompt, context.as_deref())
+                        .await
+                }
+                PipelineOutput::SpawnAutoFixer { error_output } => {
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "autofix".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                        .await
+                }
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+                    self.emit(RuntimeEvent::AgentSpawned {
+                        run_id: run_id.clone(),
+                        agent_id: String::new(),
+                        role: "reviewer".to_string(),
+                        model: String::new(),
+                    });
+                    driver
+                        .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                        .await
+                }),
+                PipelineOutput::RunGates => {
+                    self.emit(RuntimeEvent::GateStarted {
+                        run_id: run_id.clone(),
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver.run_gates(&config.enabled_gates).await
+                }
+                PipelineOutput::Commit => {
+                    let message = commit_message_for(
+                        &pipeline.original_prompt,
+                        config.commit_prefix.as_deref(),
+                    );
+                    driver.commit(&message).await
+                }
+                PipelineOutput::Done { outcome } => {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
+                    });
+
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome: outcome.clone(),
+                        iterations: pipeline.iteration,
+                    });
+                }
+                PipelineOutput::Halt { reason } => {
+                    let outcome = WorkflowOutcome::Halted {
+                        reason: reason.clone(),
+                    };
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+                }
+            };
+
+            output = pipeline.step(input);
+            let new_phase = pipeline.phase.label();
+
+            if old_phase != new_phase {
+                self.emit(RuntimeEvent::PhaseTransition {
+                    run_id: run_id.clone(),
+                    from: old_phase.to_string(),
+                    to: new_phase.to_string(),
+                });
+
+                if pipeline.checkpoint().is_ok() {
+                    self.emit(RuntimeEvent::StateCheckpointed {
+                        run_id: run_id.clone(),
+                        path: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
     fn emit(&self, event: RuntimeEvent) {
         for consumer in &self.consumers {
             consumer.consume(&event);
@@ -284,9 +462,46 @@ fn reviewer_input(input: PipelineInput) -> PipelineInput {
     }
 }
 
+fn resumed_output(pipeline: &mut PipelineStateV2) -> PipelineOutput {
+    match &pipeline.phase {
+        Phase::Pending => pipeline.step(PipelineInput::Start),
+        Phase::Strategizing => PipelineOutput::SpawnStrategist {
+            prompt: pipeline.original_prompt.clone(),
+        },
+        Phase::Implementing => PipelineOutput::SpawnImplementer {
+            prompt: pipeline.original_prompt.clone(),
+            context: resumed_implementer_context(pipeline),
+        },
+        Phase::Gating => PipelineOutput::RunGates,
+        Phase::AutoFixing => PipelineOutput::SpawnAutoFixer {
+            error_output: pipeline.last_gate_failure.clone().unwrap_or_default(),
+        },
+        Phase::Reviewing => PipelineOutput::SpawnReviewer { diff_context: None },
+        Phase::Committing => PipelineOutput::Commit,
+        Phase::Complete | Phase::Halted { .. } | Phase::Cancelled => PipelineOutput::Halt {
+            reason: format!("cannot resume from phase {:?}", pipeline.phase),
+        },
+    }
+}
+
+fn resumed_implementer_context(pipeline: &PipelineStateV2) -> Option<String> {
+    if !pipeline.review_findings.is_empty() {
+        let feedback = pipeline.review_findings.join("\n- ");
+        Some(format!("Review findings:\n- {feedback}"))
+    } else if let Some(gate_failure) = &pipeline.last_gate_failure {
+        Some(gate_failure.clone())
+    } else {
+        pipeline.strategist_brief.clone()
+    }
+}
+
 fn commit_message(config: &WorkflowRunConfig) -> String {
-    let prompt = truncate(&config.prompt, 60);
-    config.commit_prefix.as_deref().map_or_else(
+    commit_message_for(&config.prompt, config.commit_prefix.as_deref())
+}
+
+fn commit_message_for(prompt: &str, prefix: Option<&str>) -> String {
+    let prompt = truncate(prompt, 60);
+    prefix.map_or_else(
         || format!("feat: {prompt}"),
         |prefix| format!("{prefix}: {prompt}"),
     )
