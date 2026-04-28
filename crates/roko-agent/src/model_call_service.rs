@@ -15,6 +15,7 @@ use roko_core::foundation::{
 use roko_core::{
     Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, Usage,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,6 +58,8 @@ pub struct ModelCallService {
     env: Vec<(String, String)>,
     /// Optional base URL for OpenAI-compatible providers.
     openai_base_url: Option<String>,
+    /// Explicit MCP config path threaded into provider options.
+    mcp_config: Option<PathBuf>,
     /// Run id used for emitted events and feedback when the request has none.
     run_id: String,
 }
@@ -74,6 +77,7 @@ impl ModelCallService {
             model_router: None,
             env: Vec::new(),
             openai_base_url: None,
+            mcp_config: None,
             run_id: "model-call-service".to_string(),
         }
     }
@@ -127,6 +131,13 @@ impl ModelCallService {
     #[must_use]
     pub fn with_openai_base_url(mut self, url: String) -> Self {
         self.openai_base_url = Some(url);
+        self
+    }
+
+    /// Use an explicit MCP config path for service-created agents.
+    #[must_use]
+    pub fn with_mcp_config(mut self, path: impl Into<PathBuf>) -> Self {
+        self.mcp_config = Some(path.into());
         self
     }
 
@@ -271,6 +282,33 @@ impl ModelCallService {
         config
     }
 
+    fn build_agent_options(
+        &self,
+        req: &ModelCallRequest,
+        system_prompt: Option<String>,
+    ) -> AgentOptions {
+        let mut options = AgentOptions {
+            system_prompt,
+            mcp_config: self.mcp_config.clone(),
+            name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
+            env: self.env.clone(),
+            ..AgentOptions::default()
+        };
+        options.mcp_config = self
+            .mcp_config
+            .clone()
+            .or_else(|| self.config_agent_mcp_config());
+        options
+    }
+
+    fn config_agent_mcp_config(&self) -> Option<PathBuf> {
+        // TODO(converge): Replace this with `self.config.agent.mcp_config.clone()`
+        // once the roko-core `AgentConfig` in this worktree exposes that field.
+        // This batch's write scope forbids adding the missing schema field here.
+        let _ = &self.config;
+        None
+    }
+
     fn emit(&self, event: RuntimeEvent) {
         for consumer in &self.event_consumers {
             consumer.consume(&event);
@@ -355,12 +393,7 @@ impl ModelCaller for ModelCallService {
         let system_prompt = req.system.clone().or(message_system);
         let config = self.config_for_model(&model);
 
-        let options = AgentOptions {
-            system_prompt,
-            name: req.role.clone().unwrap_or_else(|| "model_call".to_string()),
-            env: self.env.clone(),
-            ..AgentOptions::default()
-        };
+        let options = self.build_agent_options(&req, system_prompt);
         // TODO(converge): Thread per-request generation settings through
         // AgentOptions/provider adapters. The Anthropic and OpenAI-compatible
         // adapters derive max tokens from ModelProfile::max_output and do not
@@ -502,6 +535,32 @@ mod tests {
         let profile = config.models.get("claude-haiku-4").expect("model profile");
         assert_eq!(profile.provider, "anthropic");
         assert_eq!(profile.slug, "claude-haiku-4");
+    }
+
+    #[test]
+    fn mcp_config_is_threaded_to_agent_options() {
+        let svc = ModelCallService::new("claude".into()).with_mcp_config("/tmp/mcp.json");
+        let req = ModelCallRequest {
+            model: String::new(),
+            system: None,
+            messages: vec![],
+            max_tokens: None,
+            temperature: None,
+            role: None,
+        };
+
+        assert_eq!(svc.resolve_model(&req), "claude");
+
+        let options = svc.build_agent_options(&req, None);
+        assert_eq!(options.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
+    }
+
+    #[test]
+    #[ignore = "blocked until roko_core::config::AgentConfig exposes mcp_config"]
+    fn mcp_config_falls_back_to_roko_config() {
+        // TODO(converge): Enable this once the roko-core AgentConfig schema has
+        // `mcp_config: Option<PathBuf>`. The S05 write scope only allows edits
+        // to this file, so the config-backed fallback cannot be compiled here.
     }
 
     #[test]
