@@ -12,6 +12,7 @@ import Terminal from './pages/Terminal';
 import CascadeRouter from './pages/dashboard/CascadeRouter';
 import DashboardLayout from './pages/dashboard/Layout';
 import KnowledgeEntries from './pages/dashboard/KnowledgeEntries';
+import ShareView from './pages/dashboard/ShareView';
 import './styles/global.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -30,6 +31,7 @@ createRoot(document.getElementById('root')!).render(
             <Route index element={<KnowledgeEntries />} />
             <Route path="entries" element={<KnowledgeEntries />} />
             <Route path="routing" element={<CascadeRouter />} />
+            <Route path="share/:token" element={<ShareView />} />
           </Route>
         </Route>
       </Routes>
