@@ -165,7 +165,7 @@ pub trait PromptAssembler: Send + Sync {
 // -- FeedbackSink --
 
 /// A feedback event to record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum FeedbackEvent {
     /// Feedback from a model call.
     ModelCall {
@@ -187,7 +187,10 @@ pub enum FeedbackEvent {
     },
     /// Feedback from a workflow completion.
     WorkflowComplete {
+        event_type: String,
         run_id: String,
+        model: Option<String>,
+        success: bool,
         outcome: String,
         total_cost_usd: f64,
         total_tokens: u64,
@@ -200,6 +203,9 @@ pub enum FeedbackEvent {
 pub trait FeedbackSink: Send + Sync {
     /// Record a feedback event.
     async fn record(&self, event: FeedbackEvent) -> Result<()>;
+
+    /// Flush any buffered feedback events.
+    async fn flush(&self) -> Result<()>;
 }
 
 // -- GateRunner --

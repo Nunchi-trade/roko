@@ -148,14 +148,20 @@ impl FeedbackService {
                     "ts": ts,
                 }),
                 FeedbackEvent::WorkflowComplete {
+                    event_type,
                     run_id,
+                    model,
+                    success,
                     outcome,
                     total_cost_usd,
                     total_tokens,
                     duration_ms,
                 } => serde_json::json!({
-                    "kind": "workflow_complete",
+                    "kind": event_type,
+                    "event_type": event_type,
                     "run_id": run_id,
+                    "model": model,
+                    "success": success,
                     "outcome": outcome,
                     "total_cost_usd": total_cost_usd,
                     "total_tokens": total_tokens,
@@ -314,14 +320,17 @@ impl FeedbackService {
             .filter_map(|event| {
                 if let FeedbackEvent::WorkflowComplete {
                     run_id,
+                    success,
                     outcome,
                     total_cost_usd,
                     total_tokens,
                     duration_ms,
+                    ..
                 } = event
                 {
                     Some(build_episode_from_workflow(
                         run_id,
+                        *success,
                         outcome,
                         *total_cost_usd,
                         *total_tokens,
@@ -379,6 +388,10 @@ impl FeedbackSink for FeedbackService {
 
         Ok(())
     }
+
+    async fn flush(&self) -> Result<()> {
+        self.flush_async().await
+    }
 }
 
 fn model_call_context_vec(role: &str, latency_ms: u64) -> Vec<f64> {
@@ -410,6 +423,7 @@ impl Drop for FeedbackService {
 
 fn build_episode_from_workflow(
     run_id: &str,
+    success: bool,
     outcome: &str,
     total_cost_usd: f64,
     total_tokens: u64,
@@ -420,7 +434,7 @@ fn build_episode_from_workflow(
     episode.id = format!("ep-{run_id}");
     episode.episode_id = episode.id.clone();
     episode.trigger_kind = "workflow_complete".to_string();
-    episode.success = outcome == "success";
+    episode.success = success;
     episode.duration_secs = duration_ms as f64 / 1000.0;
     episode.tokens_used = total_tokens;
     episode.usage = Usage {
@@ -492,7 +506,10 @@ mod tests {
         let svc = FeedbackService::new(dir.path().join("learn")).with_episode_logger(logger);
 
         svc.record(FeedbackEvent::WorkflowComplete {
+            event_type: "workflow_completed".into(),
             run_id: "r1".into(),
+            model: Some("sonnet".into()),
+            success: true,
             outcome: "success".into(),
             total_cost_usd: 0.02,
             total_tokens: 1200,

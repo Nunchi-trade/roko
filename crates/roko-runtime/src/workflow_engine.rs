@@ -5,10 +5,10 @@
 //!
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use roko_core::RuntimeEvent;
-use roko_core::foundation::{EventConsumer, ShellGateCommand};
+use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
 
 use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
@@ -101,6 +101,7 @@ impl WorkflowEngine {
         token: CancelToken,
     ) -> Result<WorkflowResult> {
         let run_id = generate_run_id();
+        let started_at = Instant::now();
 
         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
 
@@ -132,6 +133,8 @@ impl WorkflowEngine {
                         run_id: run_id.clone(),
                         outcome: runtime_workflow_outcome(&outcome),
                     });
+                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await?;
                     self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
@@ -206,9 +209,9 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
+                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
+                        .await?;
                     self.persist_affect_policy().await;
-                    // TODO(arch): Record final workflow feedback once the local
-                    // `FeedbackEvent` includes `WorkflowComplete`.
                     return Ok(WorkflowResult {
                         run_id,
                         outcome: outcome.clone(),
@@ -224,9 +227,9 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
+                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await?;
                     self.persist_affect_policy().await;
-                    // TODO(arch): Record final workflow feedback once the local
-                    // `FeedbackEvent` includes `WorkflowComplete`.
                     return Ok(WorkflowResult {
                         run_id,
                         outcome,
@@ -294,6 +297,7 @@ impl WorkflowEngine {
         }
 
         let run_id = generate_run_id();
+        let started_at = Instant::now();
 
         let driver = EffectDriver::new(
             EffectServices {
@@ -385,6 +389,8 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
+                    self.record_workflow_feedback(&run_id, outcome, &driver, started_at)
+                        .await?;
                     self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
@@ -401,6 +407,8 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
+                    self.record_workflow_feedback(&run_id, &outcome, &driver, started_at)
+                        .await?;
                     self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
@@ -444,6 +452,38 @@ impl WorkflowEngine {
             let _ = policy.persist().await;
             drop(policy);
         }
+    }
+
+    async fn record_workflow_feedback(
+        &self,
+        run_id: &str,
+        outcome: &WorkflowOutcome,
+        driver: &EffectDriver,
+        started_at: Instant,
+    ) -> Result<()> {
+        let totals = driver.workflow_feedback_totals().await;
+        let success = matches!(outcome, WorkflowOutcome::Success { .. });
+        let event_type = if success {
+            "workflow_completed"
+        } else {
+            "workflow_failed"
+        };
+
+        self.services
+            .feedback_sink
+            .record(FeedbackEvent::WorkflowComplete {
+                event_type: event_type.to_string(),
+                run_id: run_id.to_string(),
+                model: totals.primary_model,
+                success,
+                outcome: workflow_feedback_outcome(outcome).to_string(),
+                total_cost_usd: totals.total_cost_usd,
+                total_tokens: totals.total_tokens,
+                duration_ms: duration_millis(started_at),
+            })
+            .await?;
+        self.services.feedback_sink.flush().await?;
+        Ok(())
     }
 }
 
@@ -538,6 +578,19 @@ fn template_name(config: &WorkflowConfig) -> &'static str {
     } else {
         "express"
     }
+}
+
+fn workflow_feedback_outcome(outcome: &WorkflowOutcome) -> &'static str {
+    match outcome {
+        WorkflowOutcome::Success { .. } => "success",
+        WorkflowOutcome::Halted { .. } => "failed",
+        WorkflowOutcome::Cancelled => "cancelled",
+    }
+}
+
+fn duration_millis(start: Instant) -> u64 {
+    let millis = start.elapsed().as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 fn generate_run_id() -> String {
@@ -646,6 +699,16 @@ mod tests {
         fn record<'life0, 'async_trait>(
             &'life0 self,
             _event: FeedbackEvent,
+        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush<'life0, 'async_trait>(
+            &'life0 self,
         ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
         where
             'life0: 'async_trait,
