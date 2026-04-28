@@ -2,6 +2,9 @@
 //!
 //! Bridges Roko's provider system (via `roko-agent`) to ACP
 //! `session/update` notifications.
+//! All cognitive workflow dispatch now goes through
+//! [`crate::runner::run_with_workflow_engine`], which uses `ModelCallService`
+//! for provider-agnostic model calls.
 
 use std::path::{Path, PathBuf};
 
@@ -17,7 +20,6 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-#[allow(unused_imports)]
 use crate::runner::run_with_workflow_engine;
 use crate::{
     session::{AcpSession, CancelToken},
@@ -446,26 +448,35 @@ where
         } else {
             crate::pipeline::WorkflowTemplate::from_config(&workflow_config)
         };
-        // TODO(arch): Wire run_with_workflow_engine as alternative to run_workflow_pipeline.
-        // When workflow config selects v2 engine, call:
-        //   run_with_workflow_engine(session_id, prompt, workdir, template, event_sender).await
         if let Some(template) = pipeline_template {
-            return Ok(crate::runner::run_workflow_pipeline(
+            if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
+                return Ok(crate::runner::run_workflow_pipeline(
+                    &session_id,
+                    &prompt_text,
+                    &workdir,
+                    crate::runner::PipelineConfig {
+                        template,
+                        max_iterations,
+                        clippy_enabled,
+                        tests_enabled,
+                        review_strictness,
+                    },
+                    cancel_token,
+                    event_sender,
+                    shared_run,
+                )
+                .await?);
+            }
+
+            run_with_workflow_engine(
                 &session_id,
                 &prompt_text,
                 &workdir,
-                crate::runner::PipelineConfig {
-                    template,
-                    max_iterations,
-                    clippy_enabled,
-                    tests_enabled,
-                    review_strictness,
-                },
-                cancel_token,
+                workflow_template_name(&template),
                 event_sender,
-                shared_run,
             )
-            .await?);
+            .await?;
+            return Ok(());
         }
 
         // Default: single-agent dispatch (workflow = "none").
@@ -1088,41 +1099,51 @@ Use the Workflow dropdown in the status bar to select, or:
         }
         "express" => {
             require_args!("express", "<prompt>");
-            return Ok(crate::runner::run_workflow_pipeline(
-                session_id,
-                args,
-                workdir,
-                crate::runner::PipelineConfig {
-                    template: crate::pipeline::WorkflowTemplate::Express,
-                    max_iterations: 2,
-                    clippy_enabled: true,
-                    tests_enabled: true,
-                    review_strictness: "standard".to_string(),
-                },
-                cancel_token,
-                event_sender,
-                shared_run,
-            )
-            .await?);
+            if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
+                return Ok(crate::runner::run_workflow_pipeline(
+                    session_id,
+                    args,
+                    workdir,
+                    crate::runner::PipelineConfig {
+                        template: crate::pipeline::WorkflowTemplate::Express,
+                        max_iterations: 2,
+                        clippy_enabled: true,
+                        tests_enabled: true,
+                        review_strictness: "standard".to_string(),
+                    },
+                    cancel_token,
+                    event_sender,
+                    shared_run,
+                )
+                .await?);
+            }
+
+            run_with_workflow_engine(session_id, args, workdir, "express", event_sender).await?;
+            return Ok(());
         }
         "full" => {
             require_args!("full", "<prompt>");
-            return Ok(crate::runner::run_workflow_pipeline(
-                session_id,
-                args,
-                workdir,
-                crate::runner::PipelineConfig {
-                    template: crate::pipeline::WorkflowTemplate::Full,
-                    max_iterations: 2,
-                    clippy_enabled: true,
-                    tests_enabled: true,
-                    review_strictness: "standard".to_string(),
-                },
-                cancel_token,
-                event_sender,
-                shared_run,
-            )
-            .await?);
+            if std::env::var_os("ROKO_ACP_LEGACY").is_some() {
+                return Ok(crate::runner::run_workflow_pipeline(
+                    session_id,
+                    args,
+                    workdir,
+                    crate::runner::PipelineConfig {
+                        template: crate::pipeline::WorkflowTemplate::Full,
+                        max_iterations: 2,
+                        clippy_enabled: true,
+                        tests_enabled: true,
+                        review_strictness: "standard".to_string(),
+                    },
+                    cancel_token,
+                    event_sender,
+                    shared_run,
+                )
+                .await?);
+            }
+
+            run_with_workflow_engine(session_id, args, workdir, "full", event_sender).await?;
+            return Ok(());
         }
         "review-this" => {
             return run_shell_command(session_id, "git diff", workdir, cancel_token, event_sender)
@@ -1588,6 +1609,14 @@ fn read_file_context(uris: &[String], workdir: &Path) -> String {
     }
 
     context
+}
+
+fn workflow_template_name(template: &crate::pipeline::WorkflowTemplate) -> &'static str {
+    match template {
+        crate::pipeline::WorkflowTemplate::Express => "express",
+        crate::pipeline::WorkflowTemplate::Standard => "standard",
+        crate::pipeline::WorkflowTemplate::Full => "full",
+    }
 }
 
 fn text_block(text: String) -> ContentBlock {

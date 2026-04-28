@@ -6,13 +6,14 @@
 //! 3. Feeding results back as events
 //! 4. Emitting ACP session updates (plan entries, tool calls) through the event channel
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use roko_core::foundation::{
-    ChatMessage as CoreChatMessage, EventConsumer as CoreEventConsumer,
-    GateConfig as CoreGateConfig, GateRunner as CoreGateRunner, MessageRole as CoreMessageRole,
-    ModelCallRequest as CoreModelCallRequest, ModelCaller as CoreModelCaller,
+    EventConsumer as CoreEventConsumer, FeedbackEvent, FeedbackSink, GateRunner as CoreGateRunner,
+    ModelCaller as CoreModelCaller, PromptAssembler, PromptSpec,
 };
 use roko_core::{
     Body, Context, Engram, Kind, RuntimeEvent as CoreRuntimeEvent, Verify,
@@ -22,27 +23,15 @@ use roko_gate::{
     AdaptiveThresholds, ClippyGate, CompileGate, GatePayload, TestGate,
     parse_structured_review_verdict, review_verdict::ReviewVerdictContext,
 };
-use roko_runtime::effect_driver::{
-    BoxFuture as RuntimeBoxFuture, EffectServices, FeedbackEvent as RuntimeFeedbackEvent,
-    FeedbackSink as RuntimeFeedbackSink, GateConfig as RuntimeGateConfig,
-    GateReport as RuntimeGateReport, GateRunner as RuntimeGateRunner,
-    GateVerdict as RuntimeGateVerdict, MessageRole as RuntimeMessageRole,
-    ModelCallRequest as RuntimeModelCallRequest, ModelCallResponse as RuntimeModelCallResponse,
-    ModelCaller as RuntimeModelCaller, PromptAssembler as RuntimePromptAssembler,
-    PromptSpec as RuntimePromptSpec, Result as RuntimeResult, RuntimeEvent as RuntimeDriverEvent,
-    TokenUsage as RuntimeTokenUsage,
-};
+use roko_runtime::effect_driver::{EffectServices, RuntimeEvent as RuntimeDriverEvent};
 use roko_runtime::event_bus::runtime_event_bus;
-use roko_runtime::pipeline_state::{WorkflowConfig, WorkflowOutcome as RuntimeWorkflowOutcome};
-use roko_runtime::workflow_engine::{
-    WorkflowEngine, WorkflowEvent, WorkflowEventConsumer, WorkflowResult, WorkflowRunConfig,
-};
+use roko_runtime::pipeline_state::WorkflowConfig;
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowResult, WorkflowRunConfig};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::acp_adapter::AcpAdapter;
 use crate::bridge_events::CognitiveEvent;
 use crate::pipeline::{PipelineAction, PipelineEvent, PipelinePhase, WorkflowTemplate};
 use crate::session::{CancelToken, SharedWorkflowRun};
@@ -68,7 +57,7 @@ const CLAUDE_CLI_BIN: &str = "claude";
 ///
 /// This is an alternative to [`run_workflow_pipeline`] that uses the shared
 /// WorkflowEngine architecture. Runtime events are bridged to the ACP session
-/// via [`AcpAdapter`] (`EventConsumer` -> `CognitiveEvent` -> session updates).
+/// via an `EventConsumer` bridge (`RuntimeEvent` -> `CognitiveEvent` -> session updates).
 pub async fn run_with_workflow_engine(
     session_id: &str,
     prompt: &str,
@@ -80,17 +69,20 @@ pub async fn run_with_workflow_engine(
     use roko_gate::gate_service::GateService;
 
     let runtime_run_id = Arc::new(Mutex::new(None));
+    let roko_config = roko_core::config::load_config(workdir).unwrap_or_default();
+    let model_key =
+        std::env::var("ROKO_MODEL").unwrap_or_else(|_| roko_config.agent.default_model.clone());
+    let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
 
-    let model_caller: Arc<dyn CoreModelCaller> = Arc::new(ModelCallService::new(
-        "claude-sonnet-4-20250514".to_string(),
-    ));
+    let model_caller: Arc<dyn CoreModelCaller> =
+        Arc::new(ModelCallService::new(model).with_config(roko_config));
     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
 
     let services = EffectServices {
-        model_caller: Arc::new(RuntimeModelCallerAdapter::new(model_caller)),
+        model_caller,
         prompt_assembler: Arc::new(AcpPromptAssembler),
         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
-        gate_runner: Arc::new(RuntimeGateRunnerAdapter::new(gate_runner)),
+        gate_runner,
     };
 
     let workflow = match template {
@@ -128,43 +120,17 @@ pub async fn run_with_workflow_engine(
     result
 }
 
-struct RuntimeModelCallerAdapter {
-    inner: Arc<dyn CoreModelCaller>,
-}
-
-impl RuntimeModelCallerAdapter {
-    fn new(inner: Arc<dyn CoreModelCaller>) -> Self {
-        Self { inner }
-    }
-}
-
-impl RuntimeModelCaller for RuntimeModelCallerAdapter {
-    fn call(
-        &self,
-        req: RuntimeModelCallRequest,
-    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeModelCallResponse>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let response = inner.call(core_model_call_request(req)).await?;
-            Ok(RuntimeModelCallResponse {
-                content: response.content,
-                model: response.model,
-                usage: RuntimeTokenUsage {
-                    input_tokens: response.usage.input_tokens,
-                    output_tokens: response.usage.output_tokens,
-                    total_tokens: response.usage.total_tokens,
-                    cost_usd: response.usage.cost_usd,
-                },
-                stop_reason: response.stop_reason,
-            })
-        })
-    }
-}
-
 struct AcpPromptAssembler;
 
-impl RuntimePromptAssembler for AcpPromptAssembler {
-    fn assemble(&self, spec: RuntimePromptSpec) -> RuntimeBoxFuture<'_, RuntimeResult<String>> {
+impl PromptAssembler for AcpPromptAssembler {
+    fn assemble<'life0, 'async_trait>(
+        &'life0 self,
+        spec: PromptSpec,
+    ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
         Box::pin(async move {
             // TODO(arch): Replace this bridge with PromptAssemblyService once
             // roko-acp declares roko-compose in its manifest scope.
@@ -203,8 +169,15 @@ impl AcpFeedbackSink {
     }
 }
 
-impl RuntimeFeedbackSink for AcpFeedbackSink {
-    fn record(&self, event: RuntimeFeedbackEvent) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
+impl FeedbackSink for AcpFeedbackSink {
+    fn record<'life0, 'async_trait>(
+        &'life0 self,
+        event: FeedbackEvent,
+    ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
         let data_dir = self.data_dir.clone();
         Box::pin(async move {
             tokio::fs::create_dir_all(&data_dir).await?;
@@ -222,115 +195,138 @@ impl RuntimeFeedbackSink for AcpFeedbackSink {
     }
 }
 
-struct RuntimeGateRunnerAdapter {
-    inner: Arc<dyn CoreGateRunner>,
-}
-
-impl RuntimeGateRunnerAdapter {
-    fn new(inner: Arc<dyn CoreGateRunner>) -> Self {
-        Self { inner }
-    }
-}
-
-impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
-    fn run_gates(
-        &self,
-        config: RuntimeGateConfig,
-    ) -> RuntimeBoxFuture<'_, RuntimeResult<RuntimeGateReport>> {
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let report = inner
-                .run_gates(CoreGateConfig {
-                    workdir: config.workdir,
-                    enabled_gates: config.enabled_gates,
-                    max_rung: config.max_rung,
-                })
-                .await?;
-            Ok(RuntimeGateReport {
-                verdicts: report
-                    .verdicts
-                    .into_iter()
-                    .map(|verdict| RuntimeGateVerdict {
-                        gate_name: verdict.gate_name,
-                        passed: verdict.passed,
-                        output: verdict.output,
-                        duration_ms: verdict.duration_ms,
-                    })
-                    .collect(),
-            })
-        })
-    }
-}
-
 struct AcpWorkflowEventConsumer {
-    session_id: String,
     run_id: Arc<Mutex<Option<String>>>,
+    template: Arc<Mutex<Option<String>>>,
     sender: mpsc::Sender<CognitiveEvent>,
 }
 
 impl AcpWorkflowEventConsumer {
     fn new(
-        session_id: String,
+        _session_id: String,
         run_id: Arc<Mutex<Option<String>>>,
         sender: mpsc::Sender<CognitiveEvent>,
     ) -> Self {
         Self {
-            session_id,
             run_id,
+            template: Arc::new(Mutex::new(None)),
             sender,
         }
     }
 
-    fn publish(&self, run_id: &str, event: CoreRuntimeEvent) {
-        let adapter = AcpAdapter::new(
-            self.session_id.clone(),
-            run_id.to_string(),
-            self.sender.clone(),
-        );
-        CoreEventConsumer::consume(&adapter, &event);
+    fn publish(&self, event: CognitiveEvent) {
+        let _ = self.sender.try_send(event);
     }
 }
 
-impl WorkflowEventConsumer for AcpWorkflowEventConsumer {
-    fn consume(&self, event: &WorkflowEvent) {
+impl CoreEventConsumer for AcpWorkflowEventConsumer {
+    fn consume(&self, event: &CoreRuntimeEvent) {
         match event {
-            WorkflowEvent::WorkflowStarted {
+            CoreRuntimeEvent::WorkflowStarted {
                 run_id,
                 template,
-                prompt,
+                ..
             } => {
                 if let Ok(mut current) = self.run_id.lock() {
                     *current = Some(run_id.clone());
                 }
-                self.publish(
-                    run_id,
-                    CoreRuntimeEvent::WorkflowStarted {
-                        run_id: run_id.clone(),
-                        template: template.clone(),
-                        prompt: prompt.clone(),
-                    },
-                );
+                if let Ok(mut current) = self.template.lock() {
+                    *current = Some(template.clone());
+                }
+                self.publish(CognitiveEvent::PlanUpdate {
+                    entries: workflow_plan_entries(template, "implementing"),
+                });
             }
-            WorkflowEvent::PhaseTransition { run_id, from, to } => {
-                self.publish(
-                    run_id,
-                    CoreRuntimeEvent::PhaseTransition {
-                        run_id: run_id.clone(),
-                        from: from.clone(),
-                        to: to.clone(),
-                    },
-                );
+            CoreRuntimeEvent::PhaseTransition { run_id, to, .. } => {
+                if self.accepts_run(run_id) {
+                    let template = self
+                        .template
+                        .lock()
+                        .ok()
+                        .and_then(|current| current.clone())
+                        .unwrap_or_else(|| "standard".to_string());
+                    self.publish(CognitiveEvent::PlanUpdate {
+                        entries: workflow_plan_entries(&template, to),
+                    });
+                }
             }
-            WorkflowEvent::WorkflowCompleted { run_id, outcome } => {
-                self.publish(
-                    run_id,
-                    CoreRuntimeEvent::WorkflowCompleted {
-                        run_id: run_id.clone(),
-                        outcome: core_workflow_outcome(outcome),
-                    },
-                );
+            CoreRuntimeEvent::AgentOutput { run_id, chunk, .. } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::TokenChunk(chunk.clone()));
+                }
             }
+            CoreRuntimeEvent::AgentCompleted { .. } => {}
+            CoreRuntimeEvent::AgentFailed {
+                run_id,
+                agent_id,
+                error,
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallComplete {
+                        tool_call_id: agent_id.clone(),
+                        status: ToolCallStatus::Failed,
+                        content: vec![text_block(error.clone())],
+                    });
+                }
+            }
+            CoreRuntimeEvent::GateStarted {
+                run_id, gate_name, ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallStart {
+                        tool_call_id: gate_call_id(gate_name),
+                        title: format!("Gate: {gate_name}"),
+                        kind: ToolCallKind::Other,
+                    });
+                }
+            }
+            CoreRuntimeEvent::GatePassed {
+                run_id, gate_name, ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallComplete {
+                        tool_call_id: gate_call_id(gate_name),
+                        status: ToolCallStatus::Completed,
+                        content: vec![text_block(format!("{gate_name} passed"))],
+                    });
+                }
+            }
+            CoreRuntimeEvent::GateFailed {
+                run_id,
+                gate_name,
+                output,
+                ..
+            } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::ToolCallComplete {
+                        tool_call_id: gate_call_id(gate_name),
+                        status: ToolCallStatus::Failed,
+                        content: vec![text_block(output.clone())],
+                    });
+                }
+            }
+            CoreRuntimeEvent::WorkflowCompleted { run_id, outcome } => {
+                if self.accepts_run(run_id) {
+                    self.publish(CognitiveEvent::Complete {
+                        stop_reason: stop_reason_for_core_outcome(outcome),
+                        usage: None,
+                    });
+                }
+            }
+            CoreRuntimeEvent::AgentSpawned { .. }
+            | CoreRuntimeEvent::FeedbackRecorded { .. }
+            | CoreRuntimeEvent::StateCheckpointed { .. } => {}
         }
+    }
+}
+
+impl AcpWorkflowEventConsumer {
+    fn accepts_run(&self, run_id: &str) -> bool {
+        self.run_id
+            .lock()
+            .ok()
+            .and_then(|current| current.clone())
+            .is_some_and(|current| current == run_id)
     }
 }
 
@@ -346,6 +342,17 @@ fn spawn_runtime_event_bridge(
             match receiver.recv().await {
                 Ok(envelope) => {
                     let event = envelope.payload;
+                    if matches!(
+                        event,
+                        RuntimeDriverEvent::WorkflowStarted { .. }
+                            | RuntimeDriverEvent::PhaseTransition { .. }
+                            | RuntimeDriverEvent::WorkflowCompleted { .. }
+                            | RuntimeDriverEvent::GateStarted { .. }
+                            | RuntimeDriverEvent::FeedbackRecorded { .. }
+                            | RuntimeDriverEvent::StateCheckpointed { .. }
+                    ) {
+                        continue;
+                    }
                     let Some(active_run_id) = run_id.lock().ok().and_then(|guard| guard.clone())
                     else {
                         continue;
@@ -355,9 +362,12 @@ fn spawn_runtime_event_bridge(
                     }
 
                     let core_event = core_runtime_event_from_driver(event);
-                    let adapter =
-                        AcpAdapter::new(session_id.clone(), active_run_id, sender.clone());
-                    CoreEventConsumer::consume(&adapter, &core_event);
+                    let consumer = AcpWorkflowEventConsumer::new(
+                        session_id.clone(),
+                        Arc::new(Mutex::new(Some(active_run_id))),
+                        sender.clone(),
+                    );
+                    CoreEventConsumer::consume(&consumer, &core_event);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -366,32 +376,102 @@ fn spawn_runtime_event_bridge(
     })
 }
 
-fn core_model_call_request(req: RuntimeModelCallRequest) -> CoreModelCallRequest {
-    CoreModelCallRequest {
-        model: req.model,
-        system: req.system,
-        messages: req
-            .messages
-            .into_iter()
-            .map(|message| CoreChatMessage {
-                role: match message.role {
-                    RuntimeMessageRole::System => CoreMessageRole::System,
-                    RuntimeMessageRole::User => CoreMessageRole::User,
-                    RuntimeMessageRole::Assistant => CoreMessageRole::Assistant,
-                },
-                content: message.content,
-            })
-            .collect(),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
-        role: req.role,
+fn workflow_plan_entries(template: &str, phase: &str) -> Vec<PlanEntry> {
+    let has_strategy = template == "full";
+    let has_review = template != "express";
+    let mut entries = Vec::new();
+
+    if has_strategy {
+        entries.push(PlanEntry {
+            content: "Strategy brief".to_string(),
+            priority: Priority::High,
+            status: plan_status(phase, &["strategizing"], &[]),
+        });
+    }
+
+    entries.push(PlanEntry {
+        content: "Implementation".to_string(),
+        priority: Priority::High,
+        status: plan_status(
+            phase,
+            &["implementing", "auto_fixing"],
+            if has_strategy { &["strategizing"] } else { &[] },
+        ),
+    });
+
+    entries.push(PlanEntry {
+        content: "Run gates".to_string(),
+        priority: Priority::Medium,
+        status: plan_status(
+            phase,
+            &["gating"],
+            &["pending", "strategizing", "implementing", "auto_fixing"],
+        ),
+    });
+
+    if has_review {
+        entries.push(PlanEntry {
+            content: "Code review".to_string(),
+            priority: Priority::Medium,
+            status: plan_status(
+                phase,
+                &["reviewing"],
+                &["pending", "strategizing", "implementing", "auto_fixing", "gating"],
+            ),
+        });
+    }
+
+    entries.push(PlanEntry {
+        content: "Commit changes".to_string(),
+        priority: Priority::Low,
+        status: plan_status(
+            phase,
+            &["committing"],
+            &[
+                "pending",
+                "strategizing",
+                "implementing",
+                "auto_fixing",
+                "gating",
+                "reviewing",
+            ],
+        ),
+    });
+
+    entries
+}
+
+fn plan_status(phase: &str, active: &[&str], pending: &[&str]) -> PlanStatus {
+    if active.contains(&phase) {
+        PlanStatus::InProgress
+    } else if pending.contains(&phase) {
+        PlanStatus::Pending
+    } else {
+        PlanStatus::Completed
     }
 }
 
-fn feedback_json(event: RuntimeFeedbackEvent) -> serde_json::Value {
+fn gate_call_id(gate_name: &str) -> String {
+    format!("gate-{gate_name}")
+}
+
+fn text_block(text: String) -> ContentBlock {
+    ContentBlock::Text { text }
+}
+
+fn stop_reason_for_core_outcome(outcome: &CoreWorkflowOutcome) -> StopReason {
+    match outcome {
+        CoreWorkflowOutcome::Cancelled => StopReason::Cancelled,
+        CoreWorkflowOutcome::Success { .. } | CoreWorkflowOutcome::Halted { .. } => {
+            StopReason::EndTurn
+        }
+    }
+}
+
+fn feedback_json(event: FeedbackEvent) -> serde_json::Value {
     let ts = chrono::Utc::now().to_rfc3339();
     match event {
-        RuntimeFeedbackEvent::ModelCall {
+        FeedbackEvent::ModelCall {
             run_id,
             model,
             role,
@@ -412,7 +492,7 @@ fn feedback_json(event: RuntimeFeedbackEvent) -> serde_json::Value {
             "success": success,
             "ts": ts,
         }),
-        RuntimeFeedbackEvent::GateResult {
+        FeedbackEvent::GateResult {
             run_id,
             gate_name,
             passed,
@@ -425,87 +505,30 @@ fn feedback_json(event: RuntimeFeedbackEvent) -> serde_json::Value {
             "duration_ms": duration_ms,
             "ts": ts,
         }),
+        FeedbackEvent::WorkflowComplete {
+            run_id,
+            outcome,
+            total_cost_usd,
+            total_tokens,
+            duration_ms,
+        } => serde_json::json!({
+            "kind": "workflow_complete",
+            "run_id": run_id,
+            "outcome": outcome,
+            "total_cost_usd": total_cost_usd,
+            "total_tokens": total_tokens,
+            "duration_ms": duration_ms,
+            "ts": ts,
+        }),
     }
 }
 
 fn driver_event_run_id(event: &RuntimeDriverEvent) -> &str {
-    match event {
-        RuntimeDriverEvent::AgentSpawned { run_id, .. }
-        | RuntimeDriverEvent::AgentCompleted { run_id, .. }
-        | RuntimeDriverEvent::AgentFailed { run_id, .. }
-        | RuntimeDriverEvent::GatePassed { run_id, .. }
-        | RuntimeDriverEvent::GateFailed { run_id, .. } => run_id,
-    }
+    event.run_id()
 }
 
 fn core_runtime_event_from_driver(event: RuntimeDriverEvent) -> CoreRuntimeEvent {
-    match event {
-        RuntimeDriverEvent::AgentSpawned {
-            run_id,
-            agent_id,
-            role,
-            model,
-        } => CoreRuntimeEvent::AgentSpawned {
-            run_id,
-            agent_id,
-            role,
-            model,
-        },
-        RuntimeDriverEvent::AgentCompleted {
-            run_id,
-            agent_id,
-            output,
-            tokens_used,
-            cost_usd,
-        } => CoreRuntimeEvent::AgentCompleted {
-            run_id,
-            agent_id,
-            output,
-            tokens_used,
-            cost_usd,
-        },
-        RuntimeDriverEvent::AgentFailed {
-            run_id,
-            agent_id,
-            error,
-        } => CoreRuntimeEvent::AgentFailed {
-            run_id,
-            agent_id,
-            error,
-        },
-        RuntimeDriverEvent::GatePassed {
-            run_id,
-            gate_name,
-            duration_ms,
-        } => CoreRuntimeEvent::GatePassed {
-            run_id,
-            gate_name,
-            duration_ms,
-        },
-        RuntimeDriverEvent::GateFailed {
-            run_id,
-            gate_name,
-            output,
-            duration_ms,
-        } => CoreRuntimeEvent::GateFailed {
-            run_id,
-            gate_name,
-            output,
-            duration_ms,
-        },
-    }
-}
-
-fn core_workflow_outcome(outcome: &RuntimeWorkflowOutcome) -> CoreWorkflowOutcome {
-    match outcome {
-        RuntimeWorkflowOutcome::Success { commit_hash } => CoreWorkflowOutcome::Success {
-            commit_hash: commit_hash.clone(),
-        },
-        RuntimeWorkflowOutcome::Halted { reason } => CoreWorkflowOutcome::Halted {
-            reason: reason.clone(),
-        },
-        RuntimeWorkflowOutcome::Cancelled => CoreWorkflowOutcome::Cancelled,
-    }
+    event
 }
 
 /// Run a workflow pipeline, emitting ACP events as it progresses.
