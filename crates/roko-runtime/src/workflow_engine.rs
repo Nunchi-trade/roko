@@ -381,13 +381,6 @@ impl WorkflowEngine {
                     from: old_phase.to_string(),
                     to: new_phase.to_string(),
                 });
-
-                if pipeline.checkpoint().is_ok() {
-                    self.emit(RuntimeEvent::StateCheckpointed {
-                        run_id: run_id.clone(),
-                        path: String::new(),
-                    });
-                }
             }
         }
     }

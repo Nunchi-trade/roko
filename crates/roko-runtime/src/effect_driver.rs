@@ -146,6 +146,7 @@ impl EffectDriver {
         let request = model_call_request(
             &self.services.model,
             role,
+            &self.run_id,
             system_prompt,
             user_content,
             &modulation,
@@ -174,29 +175,7 @@ impl EffectDriver {
         });
 
         let start = Instant::now();
-        let result = self
-            .services
-            .model_caller
-            .call(ModelCallRequest {
-                model: String::new(),
-                system: Some(system_prompt),
-                messages: vec![ChatMessage {
-                    role: MessageRole::User,
-                    content: user_content,
-                }],
-                max_tokens: None,
-                temperature: None,
-                role: Some(role.to_string()),
-                caller: None,
-                run_id: None,
-                prompt_section_ids: Vec::new(),
-                knowledge_ids: Vec::new(),
-                budget: None,
-                budget_remaining: None,
-                routing_hints: Vec::new(),
-                cache_policy: CachePolicy::Default,
-            })
-            .await;
+        let result = self.services.model_caller.call(request).await;
         let latency_ms = duration_millis(start);
 
         match result {
@@ -495,6 +474,7 @@ fn duration_millis(start: Instant) -> u64 {
 fn model_call_request(
     model: &str,
     role: &str,
+    run_id: &str,
     system_prompt: String,
     user_content: String,
     modulation: &DispatchModulation,
@@ -510,12 +490,17 @@ fn model_call_request(
         max_tokens: Some(max_tokens),
         temperature: Some(modulated_temperature(modulation)),
         role: Some(role.to_string()),
-        caller: None,
+        caller: Some("effect_driver".to_string()),
+        run_id: Some(run_id.to_string()),
+        prompt_section_ids: Vec::new(),
+        knowledge_ids: Vec::new(),
         budget: Some(TokenBudget {
             max_input: None,
             max_output: Some(u64::from(max_tokens)),
             max_cost_usd: None,
         }),
+        budget_remaining: None,
+        routing_hints: Vec::new(),
         cache_policy: modulated_cache_policy(modulation),
     }
 }
