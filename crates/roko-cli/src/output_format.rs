@@ -281,6 +281,47 @@ pub fn print_gate_result(name: &str, passed: bool, duration_ms: u64, error_outpu
     }
 }
 
+/// Print a formatted agent table.
+///
+/// Each tuple is `(name, status, model, last_active)`.
+/// Status colors: `"active"` green, `"idle"` yellow, else dim.
+pub fn print_agent_table(agents: &[(&str, &str, &str, &str)]) {
+    intro("Agents");
+    divider();
+    bar(&format!(
+        "  {:<14}{:<10}{:<25}{}",
+        bold("NAME"),
+        bold("STATUS"),
+        bold("MODEL"),
+        bold("LAST ACTIVE")
+    ));
+    bar(&format!("  {}", dim(&"\u{2500}".repeat(60))));
+    for (name, status, model, last_active) in agents {
+        let status_display = match *status {
+            "active" => green(status),
+            "idle" => yellow(status),
+            _ => dim(status),
+        };
+        bar(&format!(
+            "  {:<14}{:<10}{:<25}{}",
+            cyan(name),
+            status_display,
+            dim(model),
+            dim(last_active)
+        ));
+    }
+    divider();
+    let active = agents
+        .iter()
+        .filter(|(_, status, _, _)| *status == "active")
+        .count();
+    end(&dim(&format!(
+        "{} agents ({} active)",
+        agents.len(),
+        active
+    )));
+}
+
 /// Print an end line: `└  <text>`.
 pub fn end(text: &str) {
     println!("{}  {}", symbols::END, text);
@@ -382,5 +423,19 @@ mod tests {
     #[test]
     fn gate_result_fail_empty_error_no_panic() {
         print_gate_result("lint", false, 10, "");
+    }
+
+    #[test]
+    fn agent_table_no_panic() {
+        print_agent_table(&[
+            ("researcher", "active", "claude-sonnet-4-6", "2m ago"),
+            ("reviewer", "idle", "gpt-4o", "1h ago"),
+            ("planner", "stopped", "claude-haiku-3", "3d ago"),
+        ]);
+    }
+
+    #[test]
+    fn agent_table_empty_no_panic() {
+        print_agent_table(&[]);
     }
 }
