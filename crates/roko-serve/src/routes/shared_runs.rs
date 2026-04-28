@@ -56,6 +56,74 @@ pub async fn get_run_json(State(state): State<Arc<AppState>>, Path(id): Path<Str
     }
 }
 
+/// `GET /api/shared/{token}` — JSON transcript for a shared token.
+pub async fn get_shared_run(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Response {
+    match load_transcript(&state, &token) {
+        Some(t) => Json(json!(t)).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `POST /api/runs/{id}/share` — create a shared run token.
+pub async fn create_share(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let token = format!("{}-{:04x}", id, std::process::id() as u16);
+    let shared_dir = state.workdir.join(".roko").join("shared");
+    if let Some(existing) = load_transcript(&state, &token) {
+        return Json(json!({
+            "token": token,
+            "url": format!("/runs/{}", token),
+            "transcript": existing
+        }))
+        .into_response();
+    }
+    if let Err(e) = std::fs::create_dir_all(&shared_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("mkdir failed: {e}")})),
+        )
+            .into_response();
+    }
+    let transcript = RunTranscript {
+        id: token.clone(),
+        agent: String::new(),
+        role: String::new(),
+        prompt: String::new(),
+        success: false,
+        gates: vec![],
+        output: None,
+        cost_usd: None,
+        input_tokens: None,
+        output_tokens: None,
+        model: None,
+        duration_s: None,
+        episode_id: Some(id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let path = shared_dir.join(format!("{token}.json"));
+    match serde_json::to_string_pretty(&transcript) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("write failed: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize failed: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    Json(json!({"token": token, "url": format!("/runs/{}", token)})).into_response()
+}
+
 /// `GET /runs/{id}` — Self-contained HTML page.
 pub async fn get_run_html(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     match load_transcript(&state, &id) {
@@ -259,5 +327,7 @@ fn render_html(t: &RunTranscript) -> String {
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/runs/{id}", axum::routing::get(get_run_json))
+        .route("/api/runs/{id}/share", axum::routing::post(create_share))
+        .route("/api/shared/{token}", axum::routing::get(get_shared_run))
         .route("/runs/{id}", axum::routing::get(get_run_html))
 }
