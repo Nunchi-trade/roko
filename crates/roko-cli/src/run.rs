@@ -13,6 +13,7 @@ use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
+use crate::state_hub::StateHub;
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Utc;
 use roko_agent::provider::is_known_protocol_command;
@@ -34,7 +35,6 @@ use roko_core::tool::ToolRegistry;
 use roko_core::{
     AgentRole, Body, Budget, Compose, Context, Engram, Kind, Provenance, Store, Verdict, Verify,
 };
-use crate::state_hub::StateHub;
 use roko_fs::FileSubstrate;
 use roko_gate::{BuildSystem, ClippyGate, CompileGate, GatePayload, ShellGate, TestGate};
 use roko_learn::episode_logger::{Episode, GateVerdict, Usage as EpisodeUsage};
@@ -42,6 +42,8 @@ use roko_learn::runtime_feedback::{CompletedRunInput, LearningRuntime};
 use roko_runtime::effect_driver::{
     BoxFuture as RuntimeBoxFuture, EffectServices, Result as RuntimeResult,
 };
+use roko_runtime::pipeline_state::WorkflowConfig;
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig};
 use roko_runtime::{
     FeedbackEvent as RuntimeFeedbackEvent, FeedbackSink as RuntimeFeedbackSink,
     GateConfig as RuntimeGateConfig, GateReport as RuntimeGateReport,
@@ -51,8 +53,6 @@ use roko_runtime::{
     PromptAssembler as RuntimePromptAssembler, PromptSpec as RuntimePromptSpec,
     TokenUsage as RuntimeTokenUsage,
 };
-use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig};
 use roko_std::NoOpScorer;
 use roko_std::StaticToolRegistry;
 use std::path::{Path, PathBuf};
@@ -173,10 +173,7 @@ impl RuntimeGateRunnerAdapter {
 
 #[async_trait::async_trait]
 impl RuntimeGateRunner for RuntimeGateRunnerAdapter {
-    async fn run_gates(
-        &self,
-        config: RuntimeGateConfig,
-    ) -> roko_core::Result<RuntimeGateReport> {
+    async fn run_gates(&self, config: RuntimeGateConfig) -> roko_core::Result<RuntimeGateReport> {
         let report = self
             .inner
             .run_gates(CoreGateConfig {
@@ -293,13 +290,47 @@ pub async fn run_with_workflow_engine(
     use roko_gate::gate_service::GateService;
     use roko_learn::feedback_service::FeedbackService;
 
+    let config = crate::config::load_layered(workdir)
+        .map(|resolved| resolved.config)
+        .unwrap_or_default();
+    let mut model_config = roko_core::config::load_config(workdir).unwrap_or_default();
+    model_config.apply_process_env();
+    crate::config::merge_global_providers(&mut model_config);
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.command = Some(config.agent.command.clone());
+    model_config.agent.args = Some(config.agent.args.clone());
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.env = Some(config.agent.env.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    let model_key = config
+        .agent
+        .model
+        .clone()
+        .unwrap_or_else(|| model_config.agent.default_model.clone());
+    let model = resolve_model(&model_config, &model_key).slug;
+
     // Build services.
     let feedback_sink: Arc<dyn CoreFeedbackSink> =
         Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
-    let model_caller: Arc<dyn CoreModelCaller> = Arc::new(
-        ModelCallService::new("claude-sonnet-4-20250514".to_string())
-            .with_feedback_sink(Arc::clone(&feedback_sink)),
-    );
+    // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+    // and provider settings are carried through the existing RokoConfig path.
+    let mut model_caller_inner = ModelCallService::new(model)
+        .with_feedback_sink(Arc::clone(&feedback_sink))
+        .with_config(model_config);
+    if let Some(ref mcp_path) = config.agent.mcp_config {
+        model_caller_inner = model_caller_inner.with_mcp_config(mcp_path.clone());
+    }
+    let model_caller: Arc<dyn CoreModelCaller> = Arc::new(model_caller_inner);
+    // TODO(S06): PromptAssemblyService has no with_workdir method and the CLI
+    // PromptConfig has no conventions field yet; EffectDriver passes workdir
+    // through PromptSpec for per-call assembly.
     let prompt_assembler: Arc<dyn CorePromptAssembler> = Arc::new(PromptAssemblyService::new());
     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
 
