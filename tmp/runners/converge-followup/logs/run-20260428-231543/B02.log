@@ -26677,3 +26677,3925 @@ index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..c698b95911d9b50a480ffe633a31ffd9
              prompt_assembler: Arc::new(MockPromptAssembler),
              feedback_sink: Arc::new(MockFeedbackSink),
 
+codex
+One remaining anti-pattern surfaced in the runtime grep: `WorkflowEngine` still emits duplicate `AgentSpawned` events with empty `agent_id` and `model` before the driver emits the real event. Since the driver now emits the populated event, I’m removing those duplicate placeholder emissions.
+apply patch
+patch: completed
+/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02/crates/roko-runtime/src/workflow_engine.rs
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+exec
+/bin/zsh -lc "rg -n \"RuntimeEvent::AgentSpawned \\{|agent_id: String::new\\(\\)|model: String::new\\(\\)|ModelCallRequest \\{\" crates/roko-runtime/src/effect_driver.rs crates/roko-runtime/src/workflow_engine.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+ succeeded in 0ms:
+crates/roko-runtime/src/effect_driver.rs:151:        emit_runtime_event(RuntimeEvent::AgentSpawned {
+crates/roko-runtime/src/effect_driver.rs:437:) -> ModelCallRequest {
+crates/roko-runtime/src/effect_driver.rs:439:    ModelCallRequest {
+
+exec
+/bin/zsh -lc "sed -n '140,188p' crates/roko-runtime/src/workflow_engine.rs && sed -n '322,363p' crates/roko-runtime/src/workflow_engine.rs" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+ succeeded in 0ms:
+                        iterations: pipeline.iteration,
+                    });
+                }
+            }
+
+            let old_phase = pipeline.phase.label();
+
+            let input = match &output {
+                PipelineOutput::SpawnStrategist { prompt } => {
+                    strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                }
+                PipelineOutput::SpawnImplementer { prompt, context } => {
+                    driver
+                        .spawn_agent("implementer", prompt, context.as_deref())
+                        .await
+                }
+                PipelineOutput::SpawnAutoFixer { error_output } => {
+                    driver
+                        .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                        .await
+                }
+                PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+                    driver
+                        .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                        .await
+                }),
+                PipelineOutput::RunGates => {
+                    self.emit(RuntimeEvent::GateStarted {
+                        run_id: run_id.clone(),
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver
+                        .run_gates(&config.enabled_gates, &config.shell_gates)
+                        .await
+                }
+                PipelineOutput::Commit => {
+                    let message = commit_message(&config);
+                    driver.commit(&message).await
+                }
+                PipelineOutput::Done { outcome } => {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
+                    });
+
+                    self.persist_affect_policy().await;
+                    // TODO(arch): Record final workflow feedback once the local
+                    // `FeedbackEvent` includes `WorkflowComplete`.
+                        gate_name: "pipeline".to_string(),
+                        rung: 0,
+                    });
+                    driver
+                        .run_gates(&config.enabled_gates, &config.shell_gates)
+                        .await
+                }
+                PipelineOutput::Commit => {
+                    let message = commit_message_for(
+                        &pipeline.original_prompt,
+                        config.commit_prefix.as_deref(),
+                    );
+                    driver.commit(&message).await
+                }
+                PipelineOutput::Done { outcome } => {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(outcome),
+                    });
+
+                    self.persist_affect_policy().await;
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome: outcome.clone(),
+                        iterations: pipeline.iteration,
+                    });
+                }
+                PipelineOutput::Halt { reason } => {
+                    let outcome = WorkflowOutcome::Halted {
+                        reason: reason.clone(),
+                    };
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+
+                    self.persist_affect_policy().await;
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+
+exec
+/bin/zsh -lc 'git diff --stat' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+ succeeded in 0ms:
+ crates/roko-acp/src/runner.rs              |   3 +-
+ crates/roko-cli/src/run.rs                 |   3 +-
+ crates/roko-runtime/src/effect_driver.rs   | 314 +++++++++++++++++++++++++++--
+ crates/roko-runtime/src/workflow_engine.rs |  61 ++----
+ 4 files changed, 310 insertions(+), 71 deletions(-)
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+exec
+/bin/zsh -lc 'cargo check -p roko-runtime --tests' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+ succeeded in 4434ms:
+    Checking roko-runtime v0.1.0 (/Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02/crates/roko-runtime)
+warning: variable does not need to be mutable
+    --> crates/roko-runtime/src/heartbeat_attention.rs:1730:13
+     |
+1730 |         let mut budget = AttentionBudget::new(&subsystems);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stddev`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1463:20
+     |
+1463 |         let (mean, stddev) = stats.push(0.1);
+     |                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stddev`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mean_after`
+    --> crates/roko-runtime/src/heartbeat_probes.rs:1468:14
+     |
+1468 |         let (mean_after, stddev_after) = stats.push(0.9);
+     |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mean_after`
+
+warning: `roko-runtime` (lib test) generated 3 warnings (run `cargo fix --lib -p roko-runtime --tests` to apply 3 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 4.42s
+
+exec
+/bin/zsh -lc "git diff -- crates/roko-runtime/src/effect_driver.rs | sed -n '1,260p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+exec
+/bin/zsh -lc "git diff -- crates/roko-runtime/src/workflow_engine.rs | sed -n '1,220p'" in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184..68668cb7 100644
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@ pub use roko_core::foundation::{
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@ use crate::pipeline_state::PipelineInput;
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@ impl EffectDriver {
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@ impl EffectDriver {
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@ impl EffectDriver {
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@ fn duration_millis(start: Instant) -> u64 {
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@ fn uuid_short() -> String {
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
+
+ succeeded in 0ms:
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813..b4b8fefa 100644
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@ impl WorkflowEngine {
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@ impl WorkflowEngine {
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@ impl WorkflowEngine {
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@ impl WorkflowEngine {
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@ mod tests {
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@ mod tests {
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+
+exec
+/bin/zsh -lc 'git status --short' in /Users/will/dev/nunchi/roko/roko/.roko/worktrees/converge-followup-run-20260428-231543-B02
+ succeeded in 0ms:
+ M crates/roko-acp/src/runner.rs
+ M crates/roko-cli/src/run.rs
+ M crates/roko-runtime/src/effect_driver.rs
+ M crates/roko-runtime/src/workflow_engine.rs
+
+diff --git a/crates/roko-acp/src/runner.rs b/crates/roko-acp/src/runner.rs
+index bf71788236fa44ceef4996dd7864c3a92c17985f..ad39f2d7b3fd402e8f290185f8e1b1ffce1fa5da
+--- a/crates/roko-acp/src/runner.rs
++++ b/crates/roko-acp/src/runner.rs
+@@ -75,10 +75,11 @@
+     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
+ 
+     let model_caller: Arc<dyn CoreModelCaller> =
+-        Arc::new(ModelCallService::new(model).with_config(roko_config));
++        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
+     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
+ 
+     let services = EffectServices {
++        model,
+         model_caller,
+         prompt_assembler: Arc::new(AcpPromptAssembler),
+         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),
+diff --git a/crates/roko-cli/src/run.rs b/crates/roko-cli/src/run.rs
+index 1b1a8e04e921e6ce37542cbec091348efc8397fd..17b2e491d00c5722d90a11275b6fcba87bcbe63c
+--- a/crates/roko-cli/src/run.rs
++++ b/crates/roko-cli/src/run.rs
+@@ -425,7 +425,7 @@
+     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
+     // and provider settings are carried through the existing RokoConfig path.
+     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
+-    let mut model_caller_inner = ModelCallService::new(model)
++    let mut model_caller_inner = ModelCallService::new(model.clone())
+         .with_feedback_sink(Arc::clone(&feedback_sink))
+         .with_config(model_config)
+         .with_run_id(run_id);
+@@ -446,6 +446,7 @@
+     };
+ 
+     Ok(EffectServices {
++        model,
+         model_caller: Arc::new(CliModelCaller::new(model_caller)),
+         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
+         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
+diff --git a/crates/roko-runtime/src/effect_driver.rs b/crates/roko-runtime/src/effect_driver.rs
+index 4c795184bce3af40183cc7dcff424cd968f47ef5..68668cb7d95249283dabebd4599b3db2a86393ff
+--- a/crates/roko-runtime/src/effect_driver.rs
++++ b/crates/roko-runtime/src/effect_driver.rs
+@@ -16,7 +16,7 @@
+ };
+ use roko_core::foundation::{
+     CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCaller,
+-    PromptAssembler, PromptSpec, ShellGateCommand,
++    PromptAssembler, PromptSpec, ShellGateCommand, TokenBudget,
+ };
+ 
+ use crate::event_bus::emit_runtime_event;
+@@ -25,8 +25,18 @@
+ /// Fallible result type used by the effect driver.
+ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+ 
++const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 2048;
++const MIN_TURN_LIMIT_FACTOR: f32 = 0.25;
++const MAX_TURN_LIMIT_FACTOR: f32 = 2.0;
++const BASE_TEMPERATURE: f32 = 0.2;
++const EXPLORATION_TEMPERATURE_RANGE: f32 = 0.6;
++const TIER_TEMPERATURE_RANGE: f32 = 0.1;
++const CACHE_BYPASS_EXPLORATION_THRESHOLD: f32 = 0.5;
++
+ /// Services required by the `EffectDriver`.
+ pub struct EffectServices {
++    /// Default model used for runtime-dispatched model calls.
++    pub model: String,
+     /// Model call service.
+     pub model_caller: Arc<dyn ModelCaller>,
+     /// Prompt assembly service.
+@@ -75,6 +85,20 @@
+             let _ctx = policy.pre_dispatch(&agent_id, role);
+             policy.modulate_dispatch(role, &mut modulation);
+         }
++        if modulation.turn_limit_factor <= 0.0 {
++            tracing::debug!(
++                run_id = %self.run_id,
++                agent_id,
++                role,
++                tier_bias = modulation.tier_bias,
++                turn_limit_factor = modulation.turn_limit_factor,
++                exploration_rate = modulation.exploration_rate,
++                "affect policy deferred agent dispatch"
++            );
++            return PipelineInput::ResourceExhausted {
++                reason: format!("affect policy deferred {role} dispatch"),
++            };
++        }
+ 
+         let system_prompt = match self
+             .services
+@@ -101,32 +125,39 @@
+             |ctx| format!("{user_prompt}\n\n## Additional Context\n\n{ctx}"),
+         );
+ 
++        let request = model_call_request(
++            &self.services.model,
++            role,
++            system_prompt,
++            user_content,
++            &modulation,
++        );
++
++        tracing::debug!(
++            run_id = %self.run_id,
++            agent_id,
++            role,
++            model = %request.model,
++            max_tokens = request.max_tokens,
++            temperature = request.temperature,
++            budget = ?request.budget,
++            cache_policy = ?request.cache_policy,
++            tier_bias = modulation.tier_bias,
++            turn_limit_factor = modulation.turn_limit_factor,
++            exploration_rate = modulation.exploration_rate,
++            "applied affect dispatch modulation"
++        );
++
+         emit_runtime_event(RuntimeEvent::AgentSpawned {
+             run_id: self.run_id.clone(),
+             agent_id: agent_id.clone(),
+             role: role.to_string(),
+-            model: String::new(),
++            model: request.model.clone(),
+         });
+ 
+         let start = Instant::now();
+-        let result = self
+-            .services
+-            .model_caller
+-            .call(ModelCallRequest {
+-                model: String::new(),
+-                system: Some(system_prompt),
+-                messages: vec![ChatMessage {
+-                    role: MessageRole::User,
+-                    content: user_content,
+-                }],
+-                max_tokens: None,
+-                temperature: None,
+-                role: Some(role.to_string()),
+-                caller: None,
+-                budget: None,
+-                cache_policy: CachePolicy::Default,
+-            })
+-            .await;
++        let request_model = request.model.clone();
++        let result = self.services.model_caller.call(request).await;
+         let latency_ms = duration_millis(start);
+ 
+         match result {
+@@ -182,7 +213,7 @@
+                     .feedback_sink
+                     .record(FeedbackEvent::ModelCall {
+                         run_id: self.run_id.clone(),
+-                        model: String::new(),
++                        model: request_model,
+                         role: role.to_string(),
+                         input_tokens: 0,
+                         output_tokens: 0,
+@@ -397,6 +428,62 @@
+     u64::try_from(millis).unwrap_or(u64::MAX)
+ }
+ 
++fn model_call_request(
++    model: &str,
++    role: &str,
++    system_prompt: String,
++    user_content: String,
++    modulation: &DispatchModulation,
++) -> ModelCallRequest {
++    let max_tokens = modulated_max_tokens(modulation);
++    ModelCallRequest {
++        model: model.to_string(),
++        system: Some(system_prompt),
++        messages: vec![ChatMessage {
++            role: MessageRole::User,
++            content: user_content,
++        }],
++        max_tokens: Some(max_tokens),
++        temperature: Some(modulated_temperature(modulation)),
++        role: Some(role.to_string()),
++        caller: None,
++        budget: Some(TokenBudget {
++            max_input: None,
++            max_output: Some(u64::from(max_tokens)),
++            max_cost_usd: None,
++        }),
++        cache_policy: modulated_cache_policy(modulation),
++    }
++}
++
++fn modulated_max_tokens(modulation: &DispatchModulation) -> u32 {
++    let factor = finite_or_default(modulation.turn_limit_factor, 1.0)
++        .clamp(MIN_TURN_LIMIT_FACTOR, MAX_TURN_LIMIT_FACTOR);
++    ((DEFAULT_MAX_OUTPUT_TOKENS as f32) * factor).round() as u32
++}
++
++fn modulated_temperature(modulation: &DispatchModulation) -> f32 {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    let tier_bias = finite_or_default(modulation.tier_bias, 0.0).clamp(-1.0, 1.0);
++    (BASE_TEMPERATURE
++        + (exploration * EXPLORATION_TEMPERATURE_RANGE)
++        + (tier_bias.max(0.0) * TIER_TEMPERATURE_RANGE))
++        .clamp(0.0, 1.0)
++}
++
++fn modulated_cache_policy(modulation: &DispatchModulation) -> CachePolicy {
++    let exploration = finite_or_default(modulation.exploration_rate, 0.0).clamp(0.0, 1.0);
++    if exploration >= CACHE_BYPASS_EXPLORATION_THRESHOLD {
++        CachePolicy::Bypass
++    } else {
++        CachePolicy::Default
++    }
++}
++
++fn finite_or_default(value: f32, default: f32) -> f32 {
++    if value.is_finite() { value } else { default }
++}
++
+ fn truncate_message(s: &str, max: usize) -> &str {
+     if s.len() <= max {
+         s
+@@ -445,3 +532,188 @@
+         .map_or(0, |duration| duration.as_millis());
+     format!("{:x}", millis & 0xFFFF_FFFF)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future;
++    use std::pin::Pin;
++
++    use parking_lot::Mutex;
++    use roko_core::BehavioralState;
++    use roko_core::foundation::AffectContext;
++
++    struct RecordingModelCaller {
++        captured: Arc<Mutex<Option<ModelCallRequest>>>,
++    }
++
++    impl ModelCaller for RecordingModelCaller {
++        fn call<'life0, 'async_trait>(
++            &'life0 self,
++            req: ModelCallRequest,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            let captured = Arc::clone(&self.captured);
++            Box::pin(async move {
++                captured.lock().replace(req);
++                Ok(ModelCallResponse {
++                    content: "done".to_string(),
++                    model: "mock-model".to_string(),
++                    usage: TokenUsage {
++                        input_tokens: 10,
++                        output_tokens: 20,
++                        total_tokens: 30,
++                        cost_usd: 0.01,
++                    },
++                    stop_reason: None,
++                    request_id: None,
++                })
++            })
++        }
++    }
++
++    struct StaticPromptAssembler;
++
++    impl PromptAssembler for StaticPromptAssembler {
++        fn assemble<'life0, 'async_trait>(
++            &'life0 self,
++            _spec: PromptSpec,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<String>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok("system prompt".to_string()) })
++        }
++    }
++
++    struct RecordingFeedbackSink;
++
++    impl FeedbackSink for RecordingFeedbackSink {
++        fn record<'life0, 'async_trait>(
++            &'life0 self,
++            _event: FeedbackEvent,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    struct UnusedGateRunner;
++
++    impl GateRunner for UnusedGateRunner {
++        fn run_gates<'life0, 'async_trait>(
++            &'life0 self,
++            _config: GateConfig,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<GateReport>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async {
++                Ok(GateReport {
++                    verdicts: Vec::new(),
++                })
++            })
++        }
++    }
++
++    struct ModulatingAffectPolicy;
++
++    impl AffectPolicy for ModulatingAffectPolicy {
++        fn pre_dispatch(&self, _task_id: &str, _role: &str) -> AffectContext {
++            AffectContext {
++                behavioral_state: BehavioralState::Exploring,
++                pad: [0.0, 0.3, 0.1],
++                emotional_tag: Some("exploring".to_string()),
++            }
++        }
++
++        fn on_task_outcome(
++            &mut self,
++            _task_id: &str,
++            _succeeded: bool,
++            _tokens_used: u64,
++            _cost_usd: f64,
++        ) {
++        }
++
++        fn on_gate_result(&mut self, _gate_name: &str, _passed: bool, _rung: u8, _confidence: f64) {
++        }
++
++        fn modulate_dispatch(&self, _role: &str, params: &mut DispatchModulation) {
++            params.tier_bias = 0.4;
++            params.turn_limit_factor = 1.5;
++            params.exploration_rate = 0.75;
++        }
++
++        fn behavioral_state(&self) -> BehavioralState {
++            BehavioralState::Exploring
++        }
++
++        fn persist<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
++    }
++
++    #[tokio::test]
++    async fn spawn_agent_applies_affect_modulation_to_model_request() {
++        let captured = Arc::new(Mutex::new(None));
++        let services = EffectServices {
++            model: "mock-model".to_string(),
++            model_caller: Arc::new(RecordingModelCaller {
++                captured: Arc::clone(&captured),
++            }),
++            prompt_assembler: Arc::new(StaticPromptAssembler),
++            feedback_sink: Arc::new(RecordingFeedbackSink),
++            gate_runner: Arc::new(UnusedGateRunner),
++            affect_policy: Some(Arc::new(tokio::sync::Mutex::new(ModulatingAffectPolicy))),
++        };
++        let tempdir = tempfile::tempdir().expect("create tempdir");
++        let driver = EffectDriver::new(services, "run-test".to_string(), tempdir.path().into());
++
++        let input = driver.spawn_agent("implementer", "do work", None).await;
++
++        assert!(matches!(input, PipelineInput::AgentCompleted { .. }));
++        let request = captured
++            .lock()
++            .clone()
++            .expect("model caller should capture request");
++        assert_eq!(request.model, "mock-model");
++        assert_eq!(request.max_tokens, Some(3072));
++        assert_eq!(
++            request.budget.and_then(|budget| budget.max_output),
++            Some(3072)
++        );
++        assert_eq!(request.cache_policy, CachePolicy::Bypass);
++        assert!(
++            request
++                .temperature
++                .is_some_and(|temperature| { (temperature - 0.69).abs() < f32::EPSILON }),
++            "expected modulated temperature, got {:?}",
++            request.temperature
++        );
++    }
++}
+diff --git a/crates/roko-runtime/src/pipeline_state.rs b/crates/roko-runtime/src/pipeline_state.rs
+index be763a523f82b4f15bfab496a101eeafb740b634..d0b03bb7820b84c965713d4fabc52df59768e1b7
+--- a/crates/roko-runtime/src/pipeline_state.rs
++++ b/crates/roko-runtime/src/pipeline_state.rs
+@@ -392,7 +392,10 @@
+ impl Phase {
+     /// Returns true when no further state transitions should be accepted.
+     pub fn is_terminal(&self) -> bool {
+-        matches!(self, Self::Complete | Self::Halted { .. } | Self::Cancelled)
++        matches!(
++            self,
++            Self::Complete | Self::Halted { .. } | Self::Cancelled
++        )
+     }
+ 
+     /// Stable lowercase label for logs, events, and UI adapters.
+diff --git a/crates/roko-runtime/src/workflow_engine.rs b/crates/roko-runtime/src/workflow_engine.rs
+index c1b12813e4342042e0a3e2fb03b5aee8e0c93f3f..b4b8fefa24a7ae6853beaf31566161bc8cdf180b
+--- a/crates/roko-runtime/src/workflow_engine.rs
++++ b/crates/roko-runtime/src/workflow_engine.rs
+@@ -106,6 +106,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -145,43 +146,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -297,6 +274,7 @@
+ 
+         let driver = EffectDriver::new(
+             EffectServices {
++                model: self.services.model.clone(),
+                 model_caller: Arc::clone(&self.services.model_caller),
+                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
+                 feedback_sink: Arc::clone(&self.services.feedback_sink),
+@@ -321,43 +299,19 @@
+ 
+             let input = match &output {
+                 PipelineOutput::SpawnStrategist { prompt } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "strategist".to_string(),
+-                        model: String::new(),
+-                    });
+                     strategy_input(driver.spawn_agent("strategist", prompt, None).await)
+                 }
+                 PipelineOutput::SpawnImplementer { prompt, context } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "implementer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("implementer", prompt, context.as_deref())
+                         .await
+                 }
+                 PipelineOutput::SpawnAutoFixer { error_output } => {
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "autofix".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("autofix", "Fix the following errors", Some(error_output))
+                         .await
+                 }
+                 PipelineOutput::SpawnReviewer { diff_context } => reviewer_input({
+-                    self.emit(RuntimeEvent::AgentSpawned {
+-                        run_id: run_id.clone(),
+-                        agent_id: String::new(),
+-                        role: "reviewer".to_string(),
+-                        model: String::new(),
+-                    });
+                     driver
+                         .spawn_agent("reviewer", "Review the changes", diff_context.as_deref())
+                         .await
+@@ -653,6 +607,16 @@
+         {
+             Box::pin(async { Ok(()) })
+         }
++
++        fn flush<'life0, 'async_trait>(
++            &'life0 self,
++        ) -> Pin<Box<dyn Future<Output = roko_core::Result<()>> + Send + 'async_trait>>
++        where
++            'life0: 'async_trait,
++            Self: 'async_trait,
++        {
++            Box::pin(async { Ok(()) })
++        }
+     }
+ 
+     struct MockGateRunner;
+@@ -787,6 +751,7 @@
+ 
+     fn mock_services() -> EffectServices {
+         EffectServices {
++            model: "mock".to_string(),
+             model_caller: Arc::new(MockModelCaller),
+             prompt_assembler: Arc::new(MockPromptAssembler),
+             feedback_sink: Arc::new(MockFeedbackSink),
+

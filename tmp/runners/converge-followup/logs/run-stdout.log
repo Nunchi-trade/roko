@@ -67,3 +67,8 @@
 [INFO]  B05          tail -f /Users/will/dev/nunchi/roko/roko/tmp/runners/converge-followup/logs/run-20260428-231543/B05.log
 [ OK ]  A04          Codex done (2m 41s)
 [ OK ]  A04          Merged 269ab17a
+[ OK ]  B05          Codex done (7m 52s)
+[ OK ]  B05          Merged f90e022e
+[ OK ]  A03          Codex done (7m 54s)
+[INFO]  A03          Attempt 2/2 — Extend ModelCallRequest and FeedbackEvent with caller, role, run id, prompt/knowledge ids
+[INFO]  A03          tail -f /Users/will/dev/nunchi/roko/roko/tmp/runners/converge-followup/logs/run-20260428-231543/A03.log

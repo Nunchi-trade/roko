@@ -46,6 +46,8 @@ pub enum ProviderKind {
     PerplexityApi,
     /// Google Gemini API.
     GeminiApi,
+    /// Cerebras Inference API (OpenAI-compatible, ultra-fast inference).
+    CerebrasApi,
 }
 
 impl ProviderKind {
@@ -59,6 +61,7 @@ impl ProviderKind {
             Self::CursorAcp => "cursor_acp",
             Self::PerplexityApi => "perplexity_api",
             Self::GeminiApi => "gemini_api",
+            Self::CerebrasApi => "cerebras_api",
         }
     }
 }
@@ -91,6 +94,8 @@ pub enum AgentBackend {
     OpenAi,
     /// Perplexity Sonar HTTP API.
     Perplexity,
+    /// Cerebras Inference API (ultra-fast LLM inference).
+    Cerebras,
 }
 
 impl AgentBackend {
@@ -104,6 +109,7 @@ impl AgentBackend {
             Self::Ollama => "ol",
             Self::OpenAi => "oa",
             Self::Perplexity => "px",
+            Self::Cerebras => "cb",
         }
     }
 
@@ -125,6 +131,8 @@ impl AgentBackend {
             Self::Ollama
         } else if slug.starts_with("sonar") || slug.starts_with("perplexity/") {
             Self::Perplexity
+        } else if slug.starts_with("cerebras/") {
+            Self::Cerebras
         } else if is_cursor_slug(slug) {
             Self::Cursor
         } else {
