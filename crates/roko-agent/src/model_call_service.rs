@@ -497,16 +497,20 @@ impl ModelCallService {
             .clone()
             .or_else(|| req.role.clone())
             .unwrap_or_else(|| "model_call".to_string());
+        let provider = self.provider_for_model(model);
+        let success = error.is_none();
         writer
             .write(&GatewayEvent {
                 request_id: request_id.to_string(),
                 caller,
                 model: model.to_string(),
+                provider,
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
                 cost_usd: usage.cost_usd,
                 latency_ms,
                 cache_hit,
+                success,
                 error,
                 timestamp: Utc::now().to_rfc3339(),
             })
