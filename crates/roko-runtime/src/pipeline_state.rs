@@ -8,6 +8,8 @@
 //! - Standard: implement -> gate -> review -> commit
 //! - Full: strategy -> implement -> gate -> review -> commit
 
+use serde::{Deserialize, Serialize};
+
 // TODO(arch): Use roko_core::runtime_event::WorkflowOutcome once the crate
 // dependency graph matches the architecture reference. In this checkout,
 // roko-core currently depends on roko-runtime, so importing roko-core here
@@ -30,7 +32,8 @@ pub enum WorkflowOutcome {
 }
 
 /// Configuration for the pipeline. Determines which phases are active.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WorkflowConfig {
     /// Include a strategist phase before implementation.
     pub has_strategy: bool,
@@ -40,6 +43,29 @@ pub struct WorkflowConfig {
     pub max_iterations: u32,
     /// Maximum autofix attempts per gate failure.
     pub max_autofix_attempts: u32,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowConfigToml {
+    template: Option<String>,
+    has_strategy: Option<bool>,
+    has_review: Option<bool>,
+    max_iterations: Option<u32>,
+    max_autofix_attempts: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowTomlScope {
+    Root,
+    Workflow,
+    WorkflowStep,
+    Other,
 }
 
 impl WorkflowConfig {
@@ -72,6 +98,274 @@ impl WorkflowConfig {
             max_autofix_attempts: 2,
         }
     }
+
+    /// Parse a `WorkflowConfig` from a TOML string.
+    ///
+    /// The string may contain a `[workflow]` table or just the bare keys. If a
+    /// `template` key is present (`"express"`, `"standard"`, or `"full"`), that
+    /// preset is used as the base; any additional keys override the preset values.
+    ///
+    /// Returns an error if the TOML is malformed or `template` is an unknown value.
+    pub fn from_toml_str(
+        s: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let raw = parse_workflow_config_toml(s)?;
+
+        let mut config = match raw.template.as_deref() {
+            Some("express") => Self::express(),
+            Some("standard") | None => Self::standard(),
+            Some("full") => Self::full(),
+            Some(template) => {
+                return Err(config_parse_error(format!(
+                    "unknown workflow template: {template}"
+                )));
+            }
+        };
+
+        if let Some(has_strategy) = raw.has_strategy {
+            config.has_strategy = has_strategy;
+        }
+        if let Some(has_review) = raw.has_review {
+            config.has_review = has_review;
+        }
+        if let Some(max_iterations) = raw.max_iterations {
+            config.max_iterations = max_iterations;
+        }
+        if let Some(max_autofix_attempts) = raw.max_autofix_attempts {
+            config.max_autofix_attempts = max_autofix_attempts;
+        }
+
+        Ok(config)
+    }
+
+    /// Load a `WorkflowConfig` from a TOML file on disk.
+    ///
+    /// The file is read synchronously (this is configuration loading, not hot path).
+    /// Returns an error if the file cannot be read or the TOML is invalid.
+    pub fn from_toml(
+        path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml_str(&contents)
+    }
+}
+
+fn parse_workflow_config_toml(
+    s: &str,
+) -> Result<WorkflowConfigToml, Box<dyn std::error::Error + Send + Sync>> {
+    let mut workflow = WorkflowConfigToml {
+        template: None,
+        has_strategy: None,
+        has_review: None,
+        max_iterations: None,
+        max_autofix_attempts: None,
+    };
+    let mut scope = WorkflowTomlScope::Root;
+    let mut saw_workflow_table = false;
+    let mut saw_workflow_steps = false;
+    let mut steps_have_strategy = false;
+    let mut steps_have_review = false;
+
+    for (idx, raw_line) in s.lines().enumerate() {
+        let line_number = idx + 1;
+        let line = strip_toml_comment(raw_line)
+            .map_err(|err| config_parse_error(format!("line {line_number}: {err}")))?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with("[[") || line.starts_with('[') {
+            scope = parse_workflow_toml_scope(line)
+                .map_err(|err| config_parse_error(format!("line {line_number}: {err}")))?;
+            if scope == WorkflowTomlScope::Workflow {
+                saw_workflow_table = true;
+            } else if scope == WorkflowTomlScope::WorkflowStep {
+                saw_workflow_steps = true;
+            }
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(config_parse_error(format!(
+                "line {line_number}: expected key = value"
+            )));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || value.is_empty() {
+            return Err(config_parse_error(format!(
+                "line {line_number}: expected key = value"
+            )));
+        }
+
+        let should_read = if saw_workflow_table {
+            scope == WorkflowTomlScope::Workflow
+        } else {
+            scope == WorkflowTomlScope::Root
+        };
+        if !should_read {
+            if scope == WorkflowTomlScope::WorkflowStep && key == "name" {
+                match parse_toml_string(value, line_number)?.as_str() {
+                    "strategy" => steps_have_strategy = true,
+                    "review" => steps_have_review = true,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        match key {
+            "template" => workflow.template = Some(parse_toml_string(value, line_number)?),
+            "has_strategy" => workflow.has_strategy = Some(parse_toml_bool(value, line_number)?),
+            "has_review" => workflow.has_review = Some(parse_toml_bool(value, line_number)?),
+            "max_iterations" => {
+                workflow.max_iterations = Some(parse_toml_u32(value, line_number)?);
+            }
+            "max_autofix_attempts" => {
+                workflow.max_autofix_attempts = Some(parse_toml_u32(value, line_number)?);
+            }
+            _ => {}
+        }
+    }
+
+    if saw_workflow_steps {
+        workflow.has_strategy = workflow.has_strategy.or(Some(steps_have_strategy));
+        workflow.has_review = workflow.has_review.or(Some(steps_have_review));
+    }
+
+    Ok(workflow)
+}
+
+fn parse_workflow_toml_scope(
+    line: &str,
+) -> Result<WorkflowTomlScope, Box<dyn std::error::Error + Send + Sync>> {
+    if line.starts_with("[[") {
+        if !line.ends_with("]]") {
+            return Err(config_parse_error("unterminated array table header"));
+        }
+        let name = line
+            .trim_start_matches("[[")
+            .trim_end_matches("]]")
+            .trim();
+        return Ok(match name {
+            "workflow.steps" => WorkflowTomlScope::WorkflowStep,
+            _ => WorkflowTomlScope::Other,
+        });
+    }
+
+    if !line.ends_with(']') {
+        return Err(config_parse_error("unterminated table header"));
+    }
+    let name = line.trim_start_matches('[').trim_end_matches(']').trim();
+    Ok(match name {
+        "workflow" => WorkflowTomlScope::Workflow,
+        _ => WorkflowTomlScope::Other,
+    })
+}
+
+fn strip_toml_comment(
+    line: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut out = String::new();
+
+    for ch in line.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '#' => break,
+            _ => out.push(ch),
+        }
+    }
+
+    if in_string {
+        return Err(config_parse_error("unterminated string"));
+    }
+
+    Ok(out)
+}
+
+fn parse_toml_string(
+    value: &str,
+    line_number: usize,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
+        return Err(config_parse_error(format!(
+            "line {line_number}: expected string value"
+        )));
+    }
+
+    let inner = &value[1..value.len() - 1];
+    let mut parsed = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(escaped) = chars.next() else {
+                return Err(config_parse_error(format!(
+                    "line {line_number}: dangling escape in string"
+                )));
+            };
+            let value = match escaped {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            };
+            parsed.push(value);
+        } else {
+            parsed.push(ch);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_toml_bool(
+    value: &str,
+    line_number: usize,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(config_parse_error(format!(
+            "line {line_number}: expected boolean value"
+        ))),
+    }
+}
+
+fn parse_toml_u32(
+    value: &str,
+    line_number: usize,
+) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    value.parse::<u32>().map_err(|err| {
+        config_parse_error(format!("line {line_number}: expected unsigned integer: {err}"))
+    })
+}
+
+fn config_parse_error(
+    message: impl Into<String>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
 }
 
 /// Current phase of the pipeline.
@@ -558,5 +852,64 @@ mod tests {
         });
         assert!(matches!(out, PipelineOutput::SpawnImplementer { .. }));
         assert_eq!(sm.iteration, 2);
+    }
+
+    #[test]
+    fn toml_express_template() {
+        let cfg = WorkflowConfig::from_toml_str("template = \"express\"").unwrap();
+        assert!(!cfg.has_strategy);
+        assert!(!cfg.has_review);
+        assert_eq!(cfg.max_iterations, 1);
+    }
+
+    #[test]
+    fn toml_full_template_with_override() {
+        let cfg =
+            WorkflowConfig::from_toml_str("template = \"full\"\nmax_iterations = 5").unwrap();
+        assert!(cfg.has_strategy);
+        assert_eq!(cfg.max_iterations, 5);
+    }
+
+    #[test]
+    fn toml_table_form() {
+        let src = "[workflow]\ntemplate = \"standard\"\nmax_autofix_attempts = 3";
+        let cfg = WorkflowConfig::from_toml_str(src).unwrap();
+        assert_eq!(cfg.max_autofix_attempts, 3);
+        assert!(cfg.has_review);
+    }
+
+    #[test]
+    fn toml_bare_keys_no_template() {
+        let cfg = WorkflowConfig::from_toml_str(
+            "has_strategy = true\nhas_review = false\nmax_iterations = 2\nmax_autofix_attempts = 1",
+        )
+        .unwrap();
+        assert!(cfg.has_strategy);
+        assert!(!cfg.has_review);
+    }
+
+    #[test]
+    fn toml_unknown_template_is_error() {
+        assert!(WorkflowConfig::from_toml_str("template = \"bogus\"").is_err());
+    }
+
+    #[test]
+    fn toml_steps_infer_strategy_and_review_flags() {
+        let src = r#"
+[workflow]
+max_iterations = 4
+
+[[workflow.steps]]
+name = "strategy"
+role = "strategist"
+
+[[workflow.steps]]
+name = "implement"
+role = "implementer"
+"#;
+        let cfg = WorkflowConfig::from_toml_str(src).unwrap();
+        assert!(cfg.has_strategy);
+        assert!(!cfg.has_review);
+        assert_eq!(cfg.max_iterations, 4);
     }
 }
