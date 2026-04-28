@@ -463,13 +463,149 @@ fn strategy_input(input: PipelineInput) -> PipelineInput {
 
 fn reviewer_input(input: PipelineInput) -> PipelineInput {
     match input {
-        PipelineInput::AgentCompleted { output, .. } => {
-            // TODO(arch): Replace this default approval with a structured reviewer
-            // effect outcome that can also express `ReviewRevise`.
-            PipelineInput::ReviewApproved { summary: output }
-        }
+        PipelineInput::AgentCompleted { output, .. } => review_output_input(output),
         input => input,
     }
+}
+
+fn review_output_input(output: String) -> PipelineInput {
+    if review_requests_revision(&output) {
+        PipelineInput::ReviewRejected { reason: output }
+    } else if review_approves(&output) {
+        PipelineInput::ReviewApproved { summary: output }
+    } else {
+        PipelineInput::ReviewUnclear { summary: output }
+    }
+}
+
+fn review_requests_revision(output: &str) -> bool {
+    if structured_review_decision(output).is_some_and(|approved| !approved) {
+        return true;
+    }
+
+    let normalized = output.to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "changes requested",
+            "request changes",
+            "requested changes",
+            "needs changes",
+            "needs revision",
+            "needs revisions",
+            "requires revision",
+            "requires revisions",
+            "please revise",
+            "must fix",
+            "required changes",
+            "blocking issue",
+            "blocking issues",
+            "not approved",
+            "do not approve",
+            "cannot approve",
+            "rejected",
+        ],
+    )
+}
+
+fn review_approves(output: &str) -> bool {
+    if structured_review_decision(output).is_some_and(|approved| approved) {
+        return true;
+    }
+
+    let normalized = output.to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "approved",
+            "approve",
+            "lgtm",
+            "looks good to me",
+            "no issues found",
+            "ready to merge",
+            "ship it",
+        ],
+    )
+}
+
+fn structured_review_decision(output: &str) -> Option<bool> {
+    let value = parse_structured_review(output)?;
+
+    if let Some(approved) = value.get("approved").and_then(serde_json::Value::as_bool) {
+        return Some(approved);
+    }
+
+    for key in ["decision", "verdict", "status", "review", "outcome"] {
+        let Some(decision) = value.get(key).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if decision_requests_revision(decision) {
+            return Some(false);
+        }
+        if decision_approves(decision) {
+            return Some(true);
+        }
+    }
+
+    None
+}
+
+fn parse_structured_review(output: &str) -> Option<serde_json::Value> {
+    let trimmed = output.trim();
+    serde_json::from_str(trimmed)
+        .ok()
+        .or_else(|| parse_fenced_json_review(trimmed))
+}
+
+fn parse_fenced_json_review(output: &str) -> Option<serde_json::Value> {
+    let mut lines = output.lines();
+    let first = lines.next()?.trim();
+    if !first.starts_with("```") {
+        return None;
+    }
+
+    let mut body = Vec::new();
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            break;
+        }
+        body.push(line);
+    }
+
+    serde_json::from_str(&body.join("\n")).ok()
+}
+
+fn decision_requests_revision(decision: &str) -> bool {
+    let normalized = decision.to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "changes_requested",
+            "request_changes",
+            "changes requested",
+            "revise",
+            "revision",
+            "reject",
+            "rejected",
+            "not approved",
+            "fail",
+            "failed",
+        ],
+    )
+}
+
+fn decision_approves(decision: &str) -> bool {
+    let normalized = decision.to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "approved", "approve", "accepted", "pass", "passed", "lgtm", "ready",
+        ],
+    )
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn resumed_output(pipeline: &mut PipelineStateV2) -> PipelineOutput {
@@ -607,15 +743,20 @@ mod tests {
     impl ModelCaller for MockModelCaller {
         fn call<'life0, 'async_trait>(
             &'life0 self,
-            _req: ModelCallRequest,
+            req: ModelCallRequest,
         ) -> Pin<Box<dyn Future<Output = roko_core::Result<ModelCallResponse>> + Send + 'async_trait>>
         where
             'life0: 'async_trait,
             Self: 'async_trait,
         {
+            let content = if req.role.as_deref() == Some("reviewer") {
+                "approved"
+            } else {
+                "done"
+            };
             Box::pin(async {
                 Ok(ModelCallResponse {
-                    content: "done".into(),
+                    content: content.into(),
                     model: "mock".into(),
                     usage: TokenUsage::default(),
                     stop_reason: None,

@@ -314,26 +314,35 @@ impl EffectDriver {
 
     /// Create a git commit.
     ///
-    /// Returns `PipelineInput::CommitDone` when a commit is created, or a noop
-    /// hash when there is nothing to commit.
+    /// Returns `PipelineInput::CommitDone` when a commit is created, a noop hash
+    /// when there is nothing to commit, or `PipelineInput::CommitFailed` when
+    /// git fails.
     pub async fn commit(&self, message: &str) -> PipelineInput {
-        let add_result = tokio::process::Command::new("git")
+        match tokio::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&self.workdir)
             .output()
-            .await;
-
-        if let Err(err) = add_result {
-            self.emit(RuntimeEvent::FeedbackRecorded {
-                run_id: self.run_id.clone(),
-                kind: "commit_error".to_string(),
-                summary: format!("git add failed: {err}"),
-            });
-            // Return CommitDone (not AgentFailed) because the state machine is in
-            // Phase::Committing which only handles CommitDone transitions.
-            return PipelineInput::CommitDone {
-                hash: format!("error: git add failed: {err}"),
-            };
+            .await
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let error = format!("git add failed: {}", command_failure_details(&output));
+                self.emit(RuntimeEvent::FeedbackRecorded {
+                    run_id: self.run_id.clone(),
+                    kind: "commit_error".to_string(),
+                    summary: error.clone(),
+                });
+                return PipelineInput::CommitFailed { error };
+            }
+            Err(err) => {
+                let error = format!("git add failed: {err}");
+                self.emit(RuntimeEvent::FeedbackRecorded {
+                    run_id: self.run_id.clone(),
+                    kind: "commit_error".to_string(),
+                    summary: error.clone(),
+                });
+                return PipelineInput::CommitFailed { error };
+            }
         }
 
         let commit_result = tokio::process::Command::new("git")
@@ -350,10 +359,40 @@ impl EffectDriver {
                     .output()
                     .await;
 
-                let hash = hash_output
-                    .ok()
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .map_or_else(|| "unknown".to_string(), |hash| hash.trim().to_string());
+                let hash = match hash_output {
+                    Ok(output) if output.status.success() => {
+                        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if hash.is_empty() {
+                            let error = "git rev-parse returned an empty commit hash".to_string();
+                            self.emit(RuntimeEvent::FeedbackRecorded {
+                                run_id: self.run_id.clone(),
+                                kind: "commit_error".to_string(),
+                                summary: error.clone(),
+                            });
+                            return PipelineInput::CommitFailed { error };
+                        }
+                        hash
+                    }
+                    Ok(output) => {
+                        let error =
+                            format!("git rev-parse failed: {}", command_failure_details(&output));
+                        self.emit(RuntimeEvent::FeedbackRecorded {
+                            run_id: self.run_id.clone(),
+                            kind: "commit_error".to_string(),
+                            summary: error.clone(),
+                        });
+                        return PipelineInput::CommitFailed { error };
+                    }
+                    Err(err) => {
+                        let error = format!("git rev-parse failed: {err}");
+                        self.emit(RuntimeEvent::FeedbackRecorded {
+                            run_id: self.run_id.clone(),
+                            kind: "commit_error".to_string(),
+                            summary: error.clone(),
+                        });
+                        return PipelineInput::CommitFailed { error };
+                    }
+                };
 
                 self.emit(RuntimeEvent::FeedbackRecorded {
                     run_id: self.run_id.clone(),
@@ -364,8 +403,8 @@ impl EffectDriver {
                 PipelineInput::CommitDone { hash }
             }
             Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if stderr.contains("nothing to commit") {
+                let output_text = command_failure_details(&output);
+                if output_text.contains("nothing to commit") {
                     self.emit(RuntimeEvent::FeedbackRecorded {
                         run_id: self.run_id.clone(),
                         kind: "commit_noop".to_string(),
@@ -375,13 +414,13 @@ impl EffectDriver {
                         hash: "noop".to_string(),
                     }
                 } else {
-                    PipelineInput::CommitDone {
-                        hash: format!("error: git commit failed: {stderr}"),
+                    PipelineInput::CommitFailed {
+                        error: format!("git commit failed: {output_text}"),
                     }
                 }
             }
-            Err(err) => PipelineInput::CommitDone {
-                hash: format!("error: git commit failed: {err}"),
+            Err(err) => PipelineInput::CommitFailed {
+                error: format!("git commit failed: {err}"),
             },
         }
     }
@@ -539,6 +578,20 @@ fn truncate_message(s: &str, max: usize) -> &str {
     } else {
         &s[..floor_char_boundary(s, max)]
     }
+}
+
+fn command_failure_details(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    output.status.to_string()
 }
 
 /// Manual implementation of `str::floor_char_boundary` for MSRV < 1.91.
