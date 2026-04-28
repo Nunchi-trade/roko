@@ -57,7 +57,7 @@ use roko_core::config::schema::{RokoConfig, RoleOverride};
 use roko_core::tool::{ToolCall, ToolContext, ToolError, ToolResult};
 
 use self::bash::BashPolicy;
-use self::contract::{AgentContract, GovernanceRule, Invariant};
+use self::contract::{AgentContract, ContractLoadMode, GovernanceRule, Invariant};
 use self::git::GitPolicy;
 use self::network::NetworkPolicy;
 use self::path::PathPolicy;
@@ -251,7 +251,7 @@ impl SafetyLayer {
             rate_limiter: Some(Arc::new(RateLimiter::with_defaults())),
             safety_budget: None,
             role: "default".into(),
-            contract: AgentContract::permissive("default"),
+            contract: AgentContract::restricted("default"),
             warrant: None,
             role_tools: HashMap::new(),
             role_overrides: HashMap::new(),
@@ -862,14 +862,16 @@ impl SafetyLayer {
     }
 
     fn contract_for_role(&self, role: &str) -> AgentContract {
-        let mut contract = AgentContract::load_for_role(role).unwrap_or_else(|err| {
-            tracing::warn!(
-                %role,
-                %err,
-                "no contract for role; using permissive default"
-            );
-            AgentContract::permissive(role.to_string())
-        });
+        let mut contract =
+            AgentContract::load_for_role_with_mode(role, ContractLoadMode::RestrictedFallback)
+                .unwrap_or_else(|err| {
+                    tracing::error!(
+                        %role,
+                        %err,
+                        "contract load failed even with restricted fallback; using deny-all"
+                    );
+                    AgentContract::restricted(role.to_string())
+                });
 
         if let Some(role_override) = self.role_overrides.get(role)
             && let Some(budget) = role_override.effective_budget()
