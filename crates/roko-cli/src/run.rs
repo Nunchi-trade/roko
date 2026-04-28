@@ -365,6 +365,19 @@ pub async fn run_with_workflow_engine(
     workflow_template: &str,
     enabled_gates: Vec<String>,
 ) -> anyhow::Result<()> {
+    use roko_runtime::effect_driver::RuntimeEvent;
+    use roko_runtime::jsonl_logger::{EventConsumer as RuntimeEventConsumer, JsonlLogger};
+
+    struct JsonlWorkflowConsumer {
+        logger: JsonlLogger,
+    }
+
+    impl RuntimeEventConsumer for JsonlWorkflowConsumer {
+        fn consume(&self, event: &RuntimeEvent) {
+            self.logger.consume(event);
+        }
+    }
+
     let services = build_workflow_effect_services(workdir)?;
 
     let config = WorkflowRunConfig {
@@ -376,7 +389,12 @@ pub async fn run_with_workflow_engine(
     };
 
     // Run the workflow.
-    let engine = WorkflowEngine::new(services);
+    let mut engine = WorkflowEngine::new(services);
+    let roko_dir = workdir.join(".roko");
+    let logger = JsonlLogger::from_roko_dir(&roko_dir);
+    let consumer = Arc::new(JsonlWorkflowConsumer { logger });
+    engine.add_consumer(consumer);
+
     let result = engine
         .run(config)
         .await
