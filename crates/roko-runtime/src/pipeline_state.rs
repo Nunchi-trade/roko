@@ -1004,4 +1004,88 @@ role = "implementer"
         assert!(PipelineStateV2::from_checkpoint("not json at all").is_err());
         assert!(PipelineStateV2::from_checkpoint("{}").is_err());
     }
+
+    #[test]
+    fn checkpoint_preserves_phase_and_iteration() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "fix bug".into());
+
+        sm.step(PipelineInput::Start);
+        sm.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 2,
+        });
+
+        let checkpoint = sm.clone();
+
+        assert_eq!(checkpoint.phase, Phase::Gating);
+        assert_eq!(checkpoint.iteration, 1);
+        assert_eq!(checkpoint.original_prompt, "fix bug");
+    }
+
+    #[test]
+    fn resume_from_gating_checkpoint_skips_implement() {
+        let mut sm = PipelineStateV2::new(WorkflowConfig::express(), "fix bug".into());
+
+        sm.step(PipelineInput::Start);
+        sm.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 2,
+        });
+
+        let mut resumed = sm.clone();
+
+        let out = resumed.step(PipelineInput::GatesPassed);
+        assert!(matches!(out, PipelineOutput::Commit));
+
+        let out = resumed.step(PipelineInput::CommitDone {
+            hash: "abc123".into(),
+        });
+        assert!(matches!(
+            out,
+            PipelineOutput::Done {
+                outcome: WorkflowOutcome::Success {
+                    commit_hash: Some(hash)
+                }
+            } if hash == "abc123"
+        ));
+        assert_eq!(resumed.phase, Phase::Complete);
+    }
+
+    #[test]
+    fn resume_does_not_affect_original() {
+        let mut original = PipelineStateV2::new(WorkflowConfig::express(), "fix bug".into());
+
+        original.step(PipelineInput::Start);
+        original.step(PipelineInput::AgentCompleted {
+            output: "done".into(),
+            files_changed: 2,
+        });
+
+        let mut checkpoint = original.clone();
+
+        original.step(PipelineInput::GatesPassed);
+        original.step(PipelineInput::CommitDone {
+            hash: "original".into(),
+        });
+
+        let out = checkpoint.step(PipelineInput::GateFailed {
+            gate: "compile".into(),
+            output: "error[E0308]".into(),
+        });
+        assert!(matches!(out, PipelineOutput::SpawnAutoFixer { .. }));
+
+        checkpoint.step(PipelineInput::AgentCompleted {
+            output: "fixed".into(),
+            files_changed: 1,
+        });
+        checkpoint.step(PipelineInput::GatesPassed);
+        checkpoint.step(PipelineInput::CommitDone {
+            hash: "checkpoint".into(),
+        });
+
+        assert_eq!(original.phase, Phase::Complete);
+        assert_eq!(checkpoint.phase, Phase::Complete);
+        assert_eq!(original.autofix_attempts, 0);
+        assert!(checkpoint.autofix_attempts > 0);
+    }
 }
