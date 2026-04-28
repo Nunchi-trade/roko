@@ -10,13 +10,14 @@ use roko_core::{Body, Context, Engram, Kind, Result, Verdict, Verify};
 use crate::clippy_gate::ClippyGate;
 use crate::compile::CompileGate;
 use crate::payload::{BuildSystem, GatePayload};
+use crate::shell::ShellGate;
 use crate::test_gate::TestGate;
 
 /// Service that runs verification gates via the existing gate infrastructure.
 ///
 /// This is the canonical way to run gates in the workflow engine. It:
 /// - Selects gates from `GateConfig`
-/// - Runs supported gates in rung order: compile, clippy, test
+/// - Runs supported gates in rung order: compile, clippy, test, diff, fmt, custom, judge
 /// - Stops at the first failing gate
 /// - Returns a unified `GateReport`
 pub struct GateService;
@@ -34,6 +35,10 @@ impl GateService {
             "compile" | "compile:cargo" => Some(0),
             "clippy" | "clippy:cargo" => Some(1),
             "test" | "test:cargo" => Some(2),
+            "diff" | "diff:git" => Some(3),
+            "fmt" | "fmt:cargo" | "format" => Some(4),
+            "custom" | "custom:shell" => Some(5),
+            "judge" | "llm-judge" => Some(6),
             _ => None,
         }
     }
@@ -44,6 +49,16 @@ impl GateService {
             "compile" | "compile:cargo" => Some(Box::new(CompileGate::new(build_system))),
             "clippy" | "clippy:cargo" => Some(Box::new(ClippyGate::new(build_system))),
             "test" | "test:cargo" => Some(Box::new(TestGate::new(build_system))),
+            "diff" | "diff:git" => Some(Box::new(
+                ShellGate::new("git", vec!["diff".into(), "--stat".into()])
+                    .with_timeout_ms(30_000),
+            )),
+            "fmt" | "fmt:cargo" | "format" => Some(Box::new(FormatCheckGate::cargo())),
+            "custom" | "custom:shell" => {
+                // TODO(converge): read custom command from GateConfig once it supports a custom_command field.
+                Some(Box::new(ShellGate::new("true", vec![])))
+            }
+            "judge" | "llm-judge" => Some(Box::new(StubJudgeGate)),
             _ => None,
         }
     }
@@ -68,6 +83,76 @@ impl GateService {
             .into_iter()
             .map(|(_, name)| name.clone())
             .collect()
+    }
+}
+
+/// Format-check gate adapter for the GateService rung pipeline.
+struct FormatCheckGate {
+    inner: ShellGate,
+}
+
+impl FormatCheckGate {
+    fn cargo() -> Self {
+        Self {
+            inner: ShellGate::new("cargo", vec!["fmt".into(), "--check".into()])
+                .with_name("format_check:cargo"),
+        }
+    }
+}
+
+impl roko_core::Cell for FormatCheckGate {
+    fn cell_id(&self) -> &str {
+        "format-check-gate"
+    }
+
+    fn cell_name(&self) -> &str {
+        "FormatCheckGate"
+    }
+
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
+#[async_trait]
+impl Verify for FormatCheckGate {
+    async fn verify(&self, signal: &Engram, ctx: &Context) -> Verdict {
+        self.inner.verify(signal, ctx).await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+
+/// Stub LLM judge gate that always passes.
+///
+/// Replace with `LlmJudgeGate` once model dispatch is available in the gate
+/// service context.
+struct StubJudgeGate;
+
+impl roko_core::Cell for StubJudgeGate {
+    fn cell_id(&self) -> &str {
+        "stub-llm-judge"
+    }
+
+    fn cell_name(&self) -> &str {
+        "StubJudgeGate"
+    }
+
+    fn protocols(&self) -> &[&str] {
+        &["Verify"]
+    }
+}
+
+#[async_trait]
+impl Verify for StubJudgeGate {
+    async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
+        Verdict::pass("stub-llm-judge").with_detail("LLM judge stub: always passes")
+    }
+
+    fn name(&self) -> &str {
+        "stub-llm-judge"
     }
 }
 
@@ -131,6 +216,74 @@ fn to_gate_verdict(gate_name: String, verdict: Verdict) -> GateVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rung_mapping_covers_all_seven_rungs() {
+        assert_eq!(GateService::rung_for_name("compile"), Some(0));
+        assert_eq!(GateService::rung_for_name("clippy"), Some(1));
+        assert_eq!(GateService::rung_for_name("test"), Some(2));
+        assert_eq!(GateService::rung_for_name("diff"), Some(3));
+        assert_eq!(GateService::rung_for_name("fmt"), Some(4));
+        assert_eq!(GateService::rung_for_name("custom"), Some(5));
+        assert_eq!(GateService::rung_for_name("judge"), Some(6));
+        assert_eq!(GateService::rung_for_name("nonexistent"), None);
+    }
+
+    #[test]
+    fn gate_for_name_returns_gates_for_all_rungs() {
+        let svc = GateService::new();
+        let bs = BuildSystem::Cargo;
+        assert!(svc.gate_for_name("compile", bs).is_some());
+        assert!(svc.gate_for_name("clippy", bs).is_some());
+        assert!(svc.gate_for_name("test", bs).is_some());
+        assert!(svc.gate_for_name("diff", bs).is_some());
+        assert!(svc.gate_for_name("fmt", bs).is_some());
+        assert!(svc.gate_for_name("custom", bs).is_some());
+        assert!(svc.gate_for_name("judge", bs).is_some());
+        assert!(svc.gate_for_name("nonexistent", bs).is_none());
+    }
+
+    #[test]
+    fn orders_all_seven_rungs_correctly() {
+        let config = GateConfig {
+            workdir: ".".into(),
+            enabled_gates: vec![
+                "judge".into(),
+                "fmt".into(),
+                "test".into(),
+                "diff".into(),
+                "compile".into(),
+                "custom".into(),
+                "clippy".into(),
+            ],
+            max_rung: None,
+        };
+        assert_eq!(
+            GateService::ordered_gate_names(&config),
+            vec!["compile", "clippy", "test", "diff", "fmt", "custom", "judge"]
+        );
+    }
+
+    #[test]
+    fn max_rung_filters_higher_rungs() {
+        let config = GateConfig {
+            workdir: ".".into(),
+            enabled_gates: vec![
+                "compile".into(),
+                "clippy".into(),
+                "test".into(),
+                "diff".into(),
+                "fmt".into(),
+                "custom".into(),
+                "judge".into(),
+            ],
+            max_rung: Some(3),
+        };
+        assert_eq!(
+            GateService::ordered_gate_names(&config),
+            vec!["compile", "clippy", "test", "diff"]
+        );
+    }
 
     #[test]
     fn unknown_gate_produces_failure_mapping() {
