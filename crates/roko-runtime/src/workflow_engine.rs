@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use roko_core::RuntimeEvent;
 use roko_core::foundation::EventConsumer;
 
+use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
 use crate::event_bus::emit_runtime_event;
 pub use crate::pipeline_state::WorkflowOutcome;
@@ -76,6 +77,24 @@ impl WorkflowEngine {
     /// 3. Runs the state machine loop: step -> execute -> feed back -> repeat.
     /// 4. Returns the outcome.
     pub async fn run(&self, config: WorkflowRunConfig) -> Result<WorkflowResult> {
+        self.run_with_cancel(config, CancelToken::new()).await
+    }
+
+    /// Execute a workflow run with cooperative cancellation.
+    ///
+    /// The token is checked at the top of each iteration of the run loop. If the
+    /// token is cancelled, the pipeline transitions to `Cancelled` state and the
+    /// method returns with `WorkflowOutcome::Cancelled`. Any in-flight effect
+    /// (agent call, gate run) is awaited to completion before the cancellation
+    /// check takes effect -- this is cooperative, not preemptive.
+    ///
+    /// If `token` is already cancelled before the call, the workflow starts and
+    /// then cancels at the first iteration check.
+    pub async fn run_with_cancel(
+        &self,
+        config: WorkflowRunConfig,
+        token: CancelToken,
+    ) -> Result<WorkflowResult> {
         let run_id = generate_run_id();
 
         let mut pipeline = PipelineStateV2::new(config.workflow.clone(), config.prompt.clone());
@@ -100,6 +119,21 @@ impl WorkflowEngine {
         let mut output = pipeline.step(PipelineInput::Start);
 
         loop {
+            if token.is_cancelled() {
+                let cancel_output = pipeline.step(PipelineInput::UserCancel);
+                if let PipelineOutput::Done { outcome } = cancel_output {
+                    self.emit(RuntimeEvent::WorkflowCompleted {
+                        run_id: run_id.clone(),
+                        outcome: runtime_workflow_outcome(&outcome),
+                    });
+                    return Ok(WorkflowResult {
+                        run_id,
+                        outcome,
+                        iterations: pipeline.iteration,
+                    });
+                }
+            }
+
             let old_phase = pipeline.phase.label();
 
             let input = match &output {

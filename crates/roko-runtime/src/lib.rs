@@ -61,6 +61,7 @@ pub mod task_scheduler;
 pub mod theta_consumer;
 pub mod workflow_engine;
 
+pub use cancel::CancelToken;
 pub use effect_driver::{EffectDriver, EffectServices};
 // Foundation types re-exported from roko-core for backwards compatibility
 pub use jsonl_logger::JsonlLogger;
