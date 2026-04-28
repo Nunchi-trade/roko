@@ -1096,6 +1096,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_v2_run_end_to_end() {
+        let tempdir = isolated_git_workdir();
+        let workdir = tempdir.path().to_path_buf();
+        let roko_dir = workdir.join(".roko");
+        let event_log = roko_dir.join("runtime-events.jsonl");
+        let feedback_log = roko_dir.join("learn").join("efficiency.jsonl");
+
+        let services = EffectServices {
+            model: "mock".to_string(),
+            model_caller: Arc::new(RecordingModelCaller {
+                roles: Arc::new(Mutex::new(Vec::new())),
+            }),
+            prompt_assembler: Arc::new(roko_compose::PromptAssemblyService::new()),
+            feedback_sink: Arc::new(roko_learn::FeedbackService::from_roko_dir_with_episodes(
+                &roko_dir,
+            )),
+            gate_runner: Arc::new(roko_gate::GateService::new()),
+            affect_policy: None,
+        };
+
+        let mut engine = WorkflowEngine::new(services);
+        engine.add_consumer(Arc::new(crate::jsonl_logger::JsonlLogger::new(
+            event_log.clone(),
+        )));
+
+        let report = engine
+            .run(WorkflowRunConfig {
+                prompt: "write the smallest useful change".to_string(),
+                workdir,
+                workflow: WorkflowConfig::standard(),
+                enabled_gates: vec!["shell".to_string()],
+                shell_gates: vec![ShellGateCommand {
+                    program: "true".to_string(),
+                    args: Vec::new(),
+                    timeout_ms: 30_000,
+                }],
+                commit_prefix: None,
+            })
+            .await
+            .expect("v2 workflow should complete with mock provider");
+
+        assert!(report.success);
+        assert_eq!(report.model, "mock");
+        assert!(!report.output.trim().is_empty());
+        assert!(report.token_usage > 0);
+        assert!(report.events.iter().any(|event| {
+            matches!(event.payload, RuntimeEvent::WorkflowStarted { .. })
+        }));
+        assert!(report.events.iter().any(|event| {
+            matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. })
+        }));
+
+        let event_lines = std::fs::read_to_string(&event_log)
+            .expect("runtime event JSONL should be written");
+        let envelopes = event_lines
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<RuntimeEventEnvelope>(line)
+                    .expect("runtime event log line should be typed JSON")
+            })
+            .collect::<Vec<_>>();
+        assert!(envelopes.iter().any(|event| {
+            matches!(event.payload, RuntimeEvent::WorkflowStarted { .. })
+        }));
+        assert!(envelopes.iter().any(|event| {
+            matches!(event.payload, RuntimeEvent::WorkflowCompleted { .. })
+        }));
+
+        let feedback_lines =
+            std::fs::read_to_string(&feedback_log).expect("feedback JSONL should be written");
+        let feedback = feedback_lines
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("feedback JSON"))
+            .collect::<Vec<_>>();
+        assert!(feedback.iter().any(|event| {
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("model_call")
+        }));
+        assert!(feedback.iter().any(|event| {
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("gate_result")
+        }));
+        assert!(feedback.iter().any(|event| {
+            event.get("kind").and_then(serde_json::Value::as_str) == Some("workflow_completed")
+        }));
+
+        let summary = crate::projection::RuntimeProjection::for_run(&event_log, &report.run_id)
+            .expect("projection should read typed runtime event JSONL")
+            .expect("projection should include completed run");
+        assert!(summary.is_complete);
+        assert!(
+            summary
+                .outcome
+                .as_deref()
+                .is_some_and(|outcome| outcome.starts_with("success"))
+        );
+        assert_eq!(summary.prompt.as_deref(), Some("write the smallest useful change"));
+    }
+
+    #[tokio::test]
     async fn test_checkpoint_resume_round_trip() {
         let (config, _tempdir) = workflow_config();
         let roles = Arc::new(Mutex::new(Vec::new()));
