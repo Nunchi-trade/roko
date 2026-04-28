@@ -1066,6 +1066,12 @@ mod tests {
         ToolCall::new("test-id", "bash", serde_json::json!({ "command": cmd }))
     }
 
+    /// Safety layer with a permissive contract for tests that check allow behavior.
+    fn permissive_layer() -> SafetyLayer {
+        SafetyLayer::with_defaults()
+            .with_contract(AgentContract::permissive("test"))
+    }
+
     #[test]
     fn safety_layer_blocks_dangerous_bash() {
         let layer = SafetyLayer::with_defaults();
@@ -1076,7 +1082,7 @@ mod tests {
 
     #[test]
     fn safety_layer_allows_safe_bash() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("cargo test");
         assert!(layer.check_pre_execution(&call, &ctx).is_ok());
@@ -1116,7 +1122,7 @@ mod tests {
     #[test]
     fn safety_layer_no_safety_means_passthrough() {
         // Verify that non-filesystem tools pass through without errors.
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = ToolCall::new("test-id", "exit_plan_mode", serde_json::json!({}));
         // exit_plan_mode is not in any policy group; should pass all checks.
@@ -1137,7 +1143,7 @@ mod tests {
 
     #[test]
     fn rate_limiter_eventually_blocks() {
-        let mut layer = SafetyLayer::with_defaults();
+        let mut layer = permissive_layer();
         // Custom tight limit: 2 calls per window.
         layer.rate_limiter = Some(Arc::new(RateLimiter::new(rate_limit::RateLimitPolicy {
             max_calls_per_window: 2,
@@ -1223,7 +1229,7 @@ mod tests {
 
     #[test]
     fn taint_escalates_network_to_allow_with_confirm() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = ToolContext::testing("/tmp/worktree");
         let call = ToolCall::new(
             "test-id",
@@ -1245,7 +1251,7 @@ mod tests {
         let worktree = tmp.path().to_path_buf();
         let file_path = worktree.join("x.txt");
         let ctx = ToolContext::testing(&worktree);
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let call = ToolCall::new(
             "test-id",
             "write_file",
@@ -1261,7 +1267,7 @@ mod tests {
 
     #[test]
     fn taint_escalates_bash_to_allow_with_confirm() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let taint = Taint::UserInput;
@@ -1274,7 +1280,7 @@ mod tests {
 
     #[test]
     fn no_taint_means_normal_allow() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let decision = layer.authorize_call_with_taint(&call, &ctx, None);
@@ -1286,7 +1292,7 @@ mod tests {
 
     #[test]
     fn inactive_taint_means_normal_allow() {
-        let layer = SafetyLayer::with_defaults();
+        let layer = permissive_layer();
         let ctx = test_ctx();
         let call = bash_call("echo hi");
         let taint = Taint::None;
@@ -1299,7 +1305,7 @@ mod tests {
 
     #[test]
     fn safety_budget_blocks_after_limit_is_spent() {
-        let layer = SafetyLayer::with_defaults().with_safety_budget(SafetyBudgetTracker::new(
+        let layer = permissive_layer().with_safety_budget(SafetyBudgetTracker::new(
             risk::SafetyBudget {
                 footprint_limit: 1,
                 ..risk::SafetyBudget::default()
@@ -1328,7 +1334,7 @@ mod tests {
             pattern: "force-push main".into(),
             description: "never force-push main".into(),
         }]);
-        let layer = SafetyLayer::with_defaults().with_temporal_monitor(monitor);
+        let layer = permissive_layer().with_temporal_monitor(monitor);
         let ctx = test_ctx();
 
         // Safe command passes.

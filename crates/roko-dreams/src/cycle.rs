@@ -2559,7 +2559,7 @@ fn build_cross_episode_report(episodes: &[Episode]) -> Option<CrossEpisodeConsol
         return None;
     }
     let consolidator =
-        CrossEpisodeConsolidator::new((episodes.len() / 3).max(2).min(8), 3, 50, 0.55);
+        CrossEpisodeConsolidator::new((episodes.len() / 3).clamp(2, 8), 3, 50, 0.55);
     Some(consolidator.discover(episodes))
 }
 

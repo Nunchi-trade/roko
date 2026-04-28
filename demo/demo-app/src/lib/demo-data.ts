@@ -22,13 +22,13 @@ export const DEMO_HEALTH = {
   },
 };
 
-// 5 agents
+// 5 agents (matches real /api/managed-agents shape)
 export const DEMO_AGENTS = [
-  { id: 'a1', name: 'rustsmith', domain: 'systems', status: 'active', model: 'claude-sonnet', capabilities: ['rust', 'systems', 'testing'], reputation: 92, stats: { tasks: 156, cost: 0.34, tokens: 42000 } },
-  { id: 'a2', name: 'ethdev', domain: 'blockchain', status: 'active', model: 'claude-sonnet', capabilities: ['solidity', 'evm', 'defi'], reputation: 88, stats: { tasks: 89, cost: 0.28, tokens: 31000 } },
-  { id: 'a3', name: 'fullstack', domain: 'web', status: 'idle', model: 'gpt-4o', capabilities: ['typescript', 'react', 'api'], reputation: 85, stats: { tasks: 203, cost: 0.41, tokens: 55000 } },
-  { id: 'a4', name: 'researcher', domain: 'research', status: 'active', model: 'claude-haiku', capabilities: ['research', 'papers', 'docs'], reputation: 90, stats: { tasks: 312, cost: 0.18, tokens: 89000 } },
-  { id: 'a5', name: 'auditor', domain: 'security', status: 'idle', model: 'claude-opus', capabilities: ['security', 'audit', 'review'], reputation: 95, stats: { tasks: 67, cost: 0.21, tokens: 28000 } },
+  { id: 'a1', label: 'rustsmith', domain_tags: ['systems'], status: 'registered', model: 'claude-sonnet', capabilities: ['rust', 'systems', 'testing'], reputation: 92, performance: { completed_tasks: 156, failed_tasks: 3, active_tasks: 1, reputation: 92 }, costs: { cumulative_usd: 0.34 }, last_seen_at: Math.floor(Date.now() / 1000) - 120 },
+  { id: 'a2', label: 'ethdev', domain_tags: ['blockchain'], status: 'registered', model: 'claude-sonnet', capabilities: ['solidity', 'evm', 'defi'], reputation: 88, performance: { completed_tasks: 89, failed_tasks: 2, active_tasks: 0, reputation: 88 }, costs: { cumulative_usd: 0.28 }, last_seen_at: Math.floor(Date.now() / 1000) - 300 },
+  { id: 'a3', label: 'fullstack', domain_tags: ['web'], status: 'registered', model: 'gpt-4o', capabilities: ['typescript', 'react', 'api'], reputation: 85, performance: { completed_tasks: 203, failed_tasks: 5, active_tasks: 0, reputation: 85 }, costs: { cumulative_usd: 0.41 }, last_seen_at: Math.floor(Date.now() / 1000) - 600 },
+  { id: 'a4', label: 'researcher', domain_tags: ['research'], status: 'registered', model: 'claude-haiku', capabilities: ['research', 'papers', 'docs'], reputation: 90, performance: { completed_tasks: 312, failed_tasks: 1, active_tasks: 2, reputation: 90 }, costs: { cumulative_usd: 0.18 }, last_seen_at: Math.floor(Date.now() / 1000) - 60 },
+  { id: 'a5', label: 'auditor', domain_tags: ['security'], status: 'registered', model: 'claude-opus', capabilities: ['security', 'audit', 'review'], reputation: 95, performance: { completed_tasks: 67, failed_tasks: 0, active_tasks: 0, reputation: 95 }, costs: { cumulative_usd: 0.21 }, last_seen_at: Math.floor(Date.now() / 1000) - 1800 },
 ];
 
 // 18 knowledge entries across domains
@@ -85,45 +85,45 @@ export const DEMO_KNOWLEDGE_EDGES = [
   { source: 'k03', target: 'k01', frequency: 2 },
 ];
 
-// 20 sample episodes
+// 20 sample episodes (matches real /api/episodes shape)
 export const DEMO_EPISODES = [
-  { id: 'ep-001', kind: 'agent_turn', agent: 'rustsmith', task: 'wire-gate-pipeline', model: 'claude-sonnet', cost_usd: 0.018, timestamp: '2026-04-27T14:02:11Z' },
-  { id: 'ep-002', kind: 'gate_result', agent: 'rustsmith', task: 'wire-gate-pipeline', model: 'claude-sonnet', cost_usd: 0.003, timestamp: '2026-04-27T14:02:44Z' },
-  { id: 'ep-003', kind: 'tool_call', agent: 'rustsmith', task: 'wire-gate-pipeline', model: 'claude-sonnet', cost_usd: 0.001, timestamp: '2026-04-27T14:03:01Z' },
-  { id: 'ep-004', kind: 'agent_turn', agent: 'ethdev', task: 'deploy-witness-contract', model: 'claude-sonnet', cost_usd: 0.024, timestamp: '2026-04-27T14:10:33Z' },
-  { id: 'ep-005', kind: 'agent_turn', agent: 'researcher', task: 'enhance-prd-cascade', model: 'claude-haiku', cost_usd: 0.006, timestamp: '2026-04-27T14:15:22Z' },
-  { id: 'ep-006', kind: 'gate_result', agent: 'ethdev', task: 'deploy-witness-contract', model: 'claude-sonnet', cost_usd: 0.002, timestamp: '2026-04-27T14:18:07Z' },
-  { id: 'ep-007', kind: 'agent_turn', agent: 'fullstack', task: 'build-dashboard-ui', model: 'gpt-4o', cost_usd: 0.032, timestamp: '2026-04-27T14:22:45Z' },
-  { id: 'ep-008', kind: 'tool_call', agent: 'fullstack', task: 'build-dashboard-ui', model: 'gpt-4o', cost_usd: 0.002, timestamp: '2026-04-27T14:23:18Z' },
-  { id: 'ep-009', kind: 'agent_turn', agent: 'auditor', task: 'review-safety-layer', model: 'claude-opus', cost_usd: 0.045, timestamp: '2026-04-27T14:30:00Z' },
-  { id: 'ep-010', kind: 'gate_result', agent: 'fullstack', task: 'build-dashboard-ui', model: 'gpt-4o', cost_usd: 0.003, timestamp: '2026-04-27T14:31:55Z' },
-  { id: 'ep-011', kind: 'agent_turn', agent: 'rustsmith', task: 'wire-episode-logger', model: 'claude-sonnet', cost_usd: 0.015, timestamp: '2026-04-27T14:35:12Z' },
-  { id: 'ep-012', kind: 'agent_turn', agent: 'researcher', task: 'analyze-cost-data', model: 'claude-haiku', cost_usd: 0.005, timestamp: '2026-04-27T14:40:03Z' },
-  { id: 'ep-013', kind: 'tool_call', agent: 'rustsmith', task: 'wire-episode-logger', model: 'claude-sonnet', cost_usd: 0.001, timestamp: '2026-04-27T14:41:29Z' },
-  { id: 'ep-014', kind: 'gate_result', agent: 'rustsmith', task: 'wire-episode-logger', model: 'claude-sonnet', cost_usd: 0.002, timestamp: '2026-04-27T14:42:50Z' },
-  { id: 'ep-015', kind: 'agent_turn', agent: 'ethdev', task: 'wire-chain-witness', model: 'claude-sonnet', cost_usd: 0.021, timestamp: '2026-04-27T14:48:11Z' },
-  { id: 'ep-016', kind: 'agent_turn', agent: 'auditor', task: 'audit-mcp-config', model: 'claude-opus', cost_usd: 0.038, timestamp: '2026-04-27T14:55:30Z' },
-  { id: 'ep-017', kind: 'agent_turn', agent: 'researcher', task: 'research-model-routing', model: 'claude-haiku', cost_usd: 0.004, timestamp: '2026-04-27T15:01:42Z' },
-  { id: 'ep-018', kind: 'gate_result', agent: 'ethdev', task: 'wire-chain-witness', model: 'claude-sonnet', cost_usd: 0.003, timestamp: '2026-04-27T15:05:18Z' },
-  { id: 'ep-019', kind: 'tool_call', agent: 'auditor', task: 'audit-mcp-config', model: 'claude-opus', cost_usd: 0.002, timestamp: '2026-04-27T15:08:44Z' },
-  { id: 'ep-020', kind: 'agent_turn', agent: 'fullstack', task: 'wire-tui-dashboard', model: 'gpt-4o', cost_usd: 0.028, timestamp: '2026-04-27T15:12:09Z' },
+  { id: 'ep-001', kind: 'agent_turn', agent_id: 'rustsmith', task_id: 'wire-gate-pipeline', model: 'claude-sonnet', usage: { cost_usd: 0.018 }, timestamp_ms: 1777388531000, gate_verdicts: [{ gate: 'compile', passed: true }], duration_secs: 12, turns: 3 },
+  { id: 'ep-002', kind: 'gate_result', agent_id: 'rustsmith', task_id: 'wire-gate-pipeline', model: 'claude-sonnet', usage: { cost_usd: 0.003 }, timestamp_ms: 1777388564000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'test', passed: true }], duration_secs: 4, turns: 1 },
+  { id: 'ep-003', kind: 'tool_call', agent_id: 'rustsmith', task_id: 'wire-gate-pipeline', model: 'claude-sonnet', usage: { cost_usd: 0.001 }, timestamp_ms: 1777388581000, gate_verdicts: [], duration_secs: 2, turns: 1 },
+  { id: 'ep-004', kind: 'agent_turn', agent_id: 'ethdev', task_id: 'deploy-witness-contract', model: 'claude-sonnet', usage: { cost_usd: 0.024 }, timestamp_ms: 1777389033000, gate_verdicts: [{ gate: 'compile', passed: true }], duration_secs: 18, turns: 4 },
+  { id: 'ep-005', kind: 'agent_turn', agent_id: 'researcher', task_id: 'enhance-prd-cascade', model: 'claude-haiku', usage: { cost_usd: 0.006 }, timestamp_ms: 1777389322000, gate_verdicts: [], duration_secs: 8, turns: 2 },
+  { id: 'ep-006', kind: 'gate_result', agent_id: 'ethdev', task_id: 'deploy-witness-contract', model: 'claude-sonnet', usage: { cost_usd: 0.002 }, timestamp_ms: 1777389487000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'test', passed: true }], duration_secs: 3, turns: 1 },
+  { id: 'ep-007', kind: 'agent_turn', agent_id: 'fullstack', task_id: 'build-dashboard-ui', model: 'gpt-4o', usage: { cost_usd: 0.032 }, timestamp_ms: 1777389765000, gate_verdicts: [{ gate: 'compile', passed: true }], duration_secs: 22, turns: 5 },
+  { id: 'ep-008', kind: 'tool_call', agent_id: 'fullstack', task_id: 'build-dashboard-ui', model: 'gpt-4o', usage: { cost_usd: 0.002 }, timestamp_ms: 1777389798000, gate_verdicts: [], duration_secs: 1, turns: 1 },
+  { id: 'ep-009', kind: 'agent_turn', agent_id: 'auditor', task_id: 'review-safety-layer', model: 'claude-opus', usage: { cost_usd: 0.045 }, timestamp_ms: 1777390200000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'clippy', passed: true }], duration_secs: 30, turns: 6 },
+  { id: 'ep-010', kind: 'gate_result', agent_id: 'fullstack', task_id: 'build-dashboard-ui', model: 'gpt-4o', usage: { cost_usd: 0.003 }, timestamp_ms: 1777390315000, gate_verdicts: [{ gate: 'test', passed: true }], duration_secs: 5, turns: 1 },
+  { id: 'ep-011', kind: 'agent_turn', agent_id: 'rustsmith', task_id: 'wire-episode-logger', model: 'claude-sonnet', usage: { cost_usd: 0.015 }, timestamp_ms: 1777390512000, gate_verdicts: [{ gate: 'compile', passed: true }], duration_secs: 10, turns: 3 },
+  { id: 'ep-012', kind: 'agent_turn', agent_id: 'researcher', task_id: 'analyze-cost-data', model: 'claude-haiku', usage: { cost_usd: 0.005 }, timestamp_ms: 1777390803000, gate_verdicts: [], duration_secs: 6, turns: 2 },
+  { id: 'ep-013', kind: 'tool_call', agent_id: 'rustsmith', task_id: 'wire-episode-logger', model: 'claude-sonnet', usage: { cost_usd: 0.001 }, timestamp_ms: 1777390889000, gate_verdicts: [], duration_secs: 1, turns: 1 },
+  { id: 'ep-014', kind: 'gate_result', agent_id: 'rustsmith', task_id: 'wire-episode-logger', model: 'claude-sonnet', usage: { cost_usd: 0.002 }, timestamp_ms: 1777390970000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'test', passed: true }, { gate: 'clippy', passed: true }], duration_secs: 4, turns: 1 },
+  { id: 'ep-015', kind: 'agent_turn', agent_id: 'ethdev', task_id: 'wire-chain-witness', model: 'claude-sonnet', usage: { cost_usd: 0.021 }, timestamp_ms: 1777391291000, gate_verdicts: [{ gate: 'compile', passed: false }], duration_secs: 15, turns: 4 },
+  { id: 'ep-016', kind: 'agent_turn', agent_id: 'auditor', task_id: 'audit-mcp-config', model: 'claude-opus', usage: { cost_usd: 0.038 }, timestamp_ms: 1777391730000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'clippy', passed: true }], duration_secs: 25, turns: 5 },
+  { id: 'ep-017', kind: 'agent_turn', agent_id: 'researcher', task_id: 'research-model-routing', model: 'claude-haiku', usage: { cost_usd: 0.004 }, timestamp_ms: 1777392102000, gate_verdicts: [], duration_secs: 7, turns: 2 },
+  { id: 'ep-018', kind: 'gate_result', agent_id: 'ethdev', task_id: 'wire-chain-witness', model: 'claude-sonnet', usage: { cost_usd: 0.003 }, timestamp_ms: 1777392318000, gate_verdicts: [{ gate: 'compile', passed: true }, { gate: 'test', passed: true }], duration_secs: 4, turns: 1 },
+  { id: 'ep-019', kind: 'tool_call', agent_id: 'auditor', task_id: 'audit-mcp-config', model: 'claude-opus', usage: { cost_usd: 0.002 }, timestamp_ms: 1777392524000, gate_verdicts: [], duration_secs: 2, turns: 1 },
+  { id: 'ep-020', kind: 'agent_turn', agent_id: 'fullstack', task_id: 'wire-tui-dashboard', model: 'gpt-4o', usage: { cost_usd: 0.028 }, timestamp_ms: 1777392729000, gate_verdicts: [{ gate: 'compile', passed: true }], duration_secs: 20, turns: 4 },
 ];
 
-// Efficiency
+// Efficiency (real API does not include `passed` field)
 export const DEMO_EFFICIENCY = {
   total_cost: 1.42,
   cost_per_task: 0.017,
   tasks: [
-    { task_id: 'wire-gate-pipeline', cost_usd: 0.022, passed: true, tokens: 3200, duration_ms: 4500 },
-    { task_id: 'deploy-witness-contract', cost_usd: 0.026, passed: true, tokens: 4100, duration_ms: 6200 },
-    { task_id: 'enhance-prd-cascade', cost_usd: 0.006, passed: true, tokens: 1800, duration_ms: 2100 },
-    { task_id: 'build-dashboard-ui', cost_usd: 0.037, passed: true, tokens: 5500, duration_ms: 8400 },
-    { task_id: 'review-safety-layer', cost_usd: 0.047, passed: true, tokens: 6200, duration_ms: 9800 },
-    { task_id: 'wire-episode-logger', cost_usd: 0.018, passed: true, tokens: 2800, duration_ms: 3900 },
-    { task_id: 'analyze-cost-data', cost_usd: 0.005, passed: true, tokens: 1200, duration_ms: 1600 },
-    { task_id: 'wire-chain-witness', cost_usd: 0.024, passed: false, tokens: 3800, duration_ms: 5700 },
-    { task_id: 'audit-mcp-config', cost_usd: 0.040, passed: true, tokens: 5800, duration_ms: 8100 },
-    { task_id: 'wire-tui-dashboard', cost_usd: 0.030, passed: true, tokens: 4600, duration_ms: 7000 },
+    { task_id: 'wire-gate-pipeline', cost_usd: 0.022, tokens: 3200, duration_ms: 4500 },
+    { task_id: 'deploy-witness-contract', cost_usd: 0.026, tokens: 4100, duration_ms: 6200 },
+    { task_id: 'enhance-prd-cascade', cost_usd: 0.006, tokens: 1800, duration_ms: 2100 },
+    { task_id: 'build-dashboard-ui', cost_usd: 0.037, tokens: 5500, duration_ms: 8400 },
+    { task_id: 'review-safety-layer', cost_usd: 0.047, tokens: 6200, duration_ms: 9800 },
+    { task_id: 'wire-episode-logger', cost_usd: 0.018, tokens: 2800, duration_ms: 3900 },
+    { task_id: 'analyze-cost-data', cost_usd: 0.005, tokens: 1200, duration_ms: 1600 },
+    { task_id: 'wire-chain-witness', cost_usd: 0.024, tokens: 3800, duration_ms: 5700 },
+    { task_id: 'audit-mcp-config', cost_usd: 0.040, tokens: 5800, duration_ms: 8100 },
+    { task_id: 'wire-tui-dashboard', cost_usd: 0.030, tokens: 4600, duration_ms: 7000 },
   ],
 };
 
@@ -139,15 +139,22 @@ export const DEMO_CFACTOR = {
   },
 };
 
-// Router models
+// Router models (matches real /api/learn/cascade-router shape)
 export const DEMO_ROUTER_MODELS = {
-  models: [
-    { model: 'claude-haiku', weight: 0.45, trials: 380 },
-    { model: 'claude-sonnet', weight: 0.30, trials: 254 },
-    { model: 'gpt-4o', weight: 0.15, trials: 127 },
-    { model: 'claude-opus', weight: 0.10, trials: 86 },
-  ],
-  current_model: 'claude-haiku',
+  model_slugs: ['haiku', 'sonnet', 'opus', 'gpt-4o'],
+  role_table: {
+    implementer: 'claude-sonnet-4-20250514',
+    researcher: 'claude-haiku-3-20250414',
+    reviewer: 'claude-opus-4-20250414',
+    planner: 'claude-sonnet-4-20250514',
+  },
+  confidence_stats: {
+    'claude-haiku-3-20250414': { successes: 342, trials: 380 },
+    'claude-sonnet-4-20250514': { successes: 236, trials: 254 },
+    'gpt-4o': { successes: 108, trials: 127 },
+    'claude-opus-4-20250414': { successes: 82, trials: 86 },
+  },
+  total_observations: 847,
 };
 
 // Gates summary

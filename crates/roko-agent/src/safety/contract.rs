@@ -25,7 +25,7 @@ const EDIT_TOOLS: &[&str] = &[
 ///
 /// Used by [`AgentContract::load_for_role_with_mode`] to choose between a
 /// hard error and a deny-everything fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ContractLoadMode {
     /// Treat a missing or malformed asset as a fatal error.
     ///
@@ -39,13 +39,8 @@ pub enum ContractLoadMode {
     /// invariants beyond the implicit deny-by-default. This keeps the
     /// dispatcher safe when an unfamiliar role is requested without
     /// breaking the orchestrator.
+    #[default]
     RestrictedFallback,
-}
-
-impl Default for ContractLoadMode {
-    fn default() -> Self {
-        Self::RestrictedFallback
-    }
 }
 
 /// Behavioral contract for a specific agent role.

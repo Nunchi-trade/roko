@@ -39,7 +39,7 @@ impl JsonlLogger {
         let mut writer = self
             .writer
             .lock()
-            .expect("jsonl logger writer lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if writer.is_none() {
             if let Some(parent) = self.path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -51,6 +51,7 @@ impl JsonlLogger {
                 .open(&self.path)?;
             *writer = Some(std::io::BufWriter::new(file));
         }
+        drop(writer);
 
         Ok(())
     }
@@ -70,7 +71,7 @@ impl JsonlLogger {
         let mut writer = self
             .writer
             .lock()
-            .expect("jsonl logger writer lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref mut w) = *writer {
             let _ = writeln!(w, "{json}");
             let _ = w.flush();

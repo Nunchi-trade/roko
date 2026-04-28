@@ -1304,7 +1304,7 @@ impl RuntimeProjectionSet {
             );
         }
 
-        values.sort_by(|left, right| value_ts(right).cmp(&value_ts(left)));
+        values.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
         truncate_values(&mut values, query.limit.unwrap_or(250));
         values
     }
@@ -1362,7 +1362,7 @@ impl RuntimeProjectionSet {
             }
         }
 
-        records.sort_by(|left, right| value_ts(right).cmp(&value_ts(left)));
+        records.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
         records
     }
 
@@ -1417,7 +1417,7 @@ impl RuntimeProjectionSet {
             })
             .collect::<Vec<_>>();
 
-        values.sort_by(|left, right| value_ts(right).cmp(&value_ts(left)));
+        values.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
         values
     }
 
@@ -1517,7 +1517,7 @@ impl RuntimeProjectionSet {
             }));
         }
 
-        values.sort_by(|left, right| value_ts(right).cmp(&value_ts(left)));
+        values.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
         values
     }
 }
@@ -2451,7 +2451,7 @@ fn dedupe_and_sort_evidence(values: Vec<Value>) -> Vec<Value> {
             out.push(value);
         }
     }
-    out.sort_by(|left, right| value_ts(right).cmp(&value_ts(left)));
+    out.sort_by_key(|v| std::cmp::Reverse(value_ts(v)));
     out
 }
 

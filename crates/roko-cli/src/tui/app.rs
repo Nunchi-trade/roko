@@ -3259,7 +3259,7 @@ mod tests {
     #[test]
     fn app_new_connected_installs_snapshot_receiver() {
         let dir = tempdir().unwrap();
-        let hub = roko_core::shared_state_hub();
+        let hub = crate::state_hub::shared_state_hub();
         let app = App::new_connected(dir.path(), &hub);
         assert!(app.snapshot_rx.is_some());
     }

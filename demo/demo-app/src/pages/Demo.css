@@ -403,3 +403,113 @@
   0%, 100% { transform: scale(1); opacity: 0.7; }
   50% { transform: scale(1.2); opacity: 0; }
 }
+
+/* ── Playback bar (bottom) ── */
+
+.demo-playback-bar {
+  display: flex;
+  align-items: center;
+  padding: 10px 20px;
+  gap: 12px;
+  border-top: 1px solid var(--glass-border);
+  background: var(--bg-raised);
+  flex-shrink: 0;
+  height: 48px;
+}
+
+.demo-pb-controls {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.demo-pb-btn {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text-dim);
+  width: 30px;
+  height: 30px;
+  border-radius: 2px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 200ms var(--ease);
+}
+
+.demo-pb-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--rose-dim);
+}
+
+.demo-pb-btn.primary {
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+  color: var(--rose-bright);
+}
+
+.demo-pb-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.demo-mode-toggle {
+  display: flex;
+  gap: 0;
+  align-items: center;
+  margin-left: 8px;
+}
+
+.demo-mode-btn {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text-dim);
+  padding: 5px 12px;
+  font-family: var(--sans);
+  font-size: 0.62rem;
+  cursor: pointer;
+  transition: all 200ms var(--ease);
+}
+
+.demo-mode-btn:first-child {
+  border-radius: 2px 0 0 2px;
+}
+
+.demo-mode-btn:last-child {
+  border-radius: 0 2px 2px 0;
+  border-left: none;
+}
+
+.demo-mode-btn.active {
+  background: var(--rose-deep);
+  border-color: var(--rose-dim);
+  color: var(--rose-bright);
+}
+
+.demo-pb-progress {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  margin-left: 12px;
+  white-space: nowrap;
+}
+
+.demo-pb-step-label {
+  color: var(--rose-bright);
+  font-weight: 600;
+}
+
+.demo-pb-cmd-preview {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 10px;
+  background: var(--glass-bg);
+  border-radius: 2px;
+  border: 1px solid var(--glass-border);
+}

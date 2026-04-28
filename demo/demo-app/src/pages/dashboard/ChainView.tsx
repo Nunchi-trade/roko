@@ -6,9 +6,14 @@ import Mosaic, { MosaicCell } from '../../components/Mosaic';
 /* ── Types ───────────────────────────────────────────────── */
 
 interface HealthResponse {
+  status?: string;
+  uptime_secs?: number;
+  version?: string;
+  active_agents?: number;
   statehub?: {
     snapshot?: {
       episodes_total?: number;
+      cost_usd_total?: number;
       gates_passed?: number;
       gates_failed?: number;
     };

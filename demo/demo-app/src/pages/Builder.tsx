@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react';
-import TerminalPane from '../components/Terminal/TerminalPane';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import { useTerminal } from '../hooks/useTerminal';
+import { setupWorkspace, showCmd, getRoko } from '../hooks/useTerminalSession';
+import { MODEL_CATALOG, ALL_MODELS } from '../lib/model-catalog';
 import GateBar from '../components/GateBar';
 import Pane from '../components/Pane';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
 import './Builder.css';
 
 const PRESETS = [
@@ -11,6 +12,16 @@ const PRESETS = [
   { label: 'md-html', prompt: 'Write a markdown to HTML converter' },
   { label: 'dedup', prompt: 'Build a file deduplication tool' },
   { label: 'commitgen', prompt: 'Create a git commit message generator' },
+  { label: 'web scraper', prompt: 'Build an async web scraper with rate limiting' },
+  { label: 'test harness', prompt: 'Create a test harness with fixtures and assertions' },
+  { label: 'config parser', prompt: 'Build a TOML/YAML config parser with validation' },
+  { label: 'log analyzer', prompt: 'Create a structured log analyzer with filters' },
+  { label: 'task queue', prompt: 'Build an async task queue with retries' },
+  { label: 'HTTP client', prompt: 'Create an HTTP client with connection pooling' },
+  { label: 'JSON validator', prompt: 'Build a JSON schema validator' },
+  { label: 'path finder', prompt: 'Create a shortest-path finder with A* algorithm' },
+  { label: 'state machine', prompt: 'Build a typed state machine with transitions' },
+  { label: 'rate limiter', prompt: 'Create a token bucket rate limiter' },
 ];
 
 interface FileEntry { name: string; isNew: boolean }
@@ -18,7 +29,6 @@ interface FileEntry { name: string; isNew: boolean }
 export default function Builder() {
   const [prompt, setPrompt] = useState('');
   const [running, setRunning] = useState(false);
-  const [sessionId] = useState(() => `builder-${Date.now()}`);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [gates, setGates] = useState<{ name: string; status: 'pass' | 'fail' | 'pending' | 'skip' }[]>([
     { name: 'compile', status: 'pending' },
@@ -27,56 +37,174 @@ export default function Builder() {
     { name: 'diff', status: 'pending' },
   ]);
   const [statusText, setStatusText] = useState('idle');
-  const { post } = useApiWithFallback();
+  const [selectedModel, setSelectedModel] = useState(ALL_MODELS[0].id);
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const [autocompleteItems, setAutocompleteItems] = useState<string[]>([]);
+  const [showAutocomplete, setShowAutocomplete] = useState(false);
+  const [autocompleteIdx, setAutocompleteIdx] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<string | null>(null);
+  const setupDoneRef = useRef(false);
+
+  const { attach, status, handle } = useTerminal('builder-pty');
+
+  // Setup workspace on mount
+  useEffect(() => {
+    if (setupDoneRef.current) return;
+    const h = handle.current;
+    if (!h) return;
+    setupDoneRef.current = true;
+    setupWorkspace(h, 'roko-builder').then(dir => {
+      workspaceRef.current = dir;
+    });
+  }, [handle, status]);
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setShowModelDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  // Autocomplete from presets
+  const updateAutocomplete = useCallback((value: string) => {
+    if (!value.trim()) {
+      setAutocompleteItems([]);
+      setShowAutocomplete(false);
+      return;
+    }
+    const lower = value.toLowerCase();
+    const matches = PRESETS
+      .map(p => p.prompt)
+      .filter(p => p.toLowerCase().includes(lower));
+    setAutocompleteItems(matches);
+    setShowAutocomplete(matches.length > 0);
+    setAutocompleteIdx(-1);
+  }, []);
 
   const submitTask = useCallback(async (text: string) => {
-    if (running || !text.trim()) return;
+    const h = handle.current;
+    if (running || !text.trim() || !h) return;
     setRunning(true);
     setStatusText('building...');
+    setShowAutocomplete(false);
     setFiles([]);
-    setGates((g) => g.map((gate) => ({ ...gate, status: 'pending' as const })));
+    setGates(g => g.map(gate => ({ ...gate, status: 'pending' as const })));
 
-    try {
-      const res = await post<{ run_id?: string; files?: string[] }>('/api/run', {
-        prompt: text.trim(),
-        workdir: `/tmp/roko-builder-${Date.now()}`,
+    const cmd = `${getRoko()} run "${text.trim()}"`;
+
+    await showCmd(h, cmd, {
+      timeout: 120000,
+      onGate: (name, gateStatus) => {
+        setGates(prev => prev.map(g =>
+          g.name === name ? { ...g, status: gateStatus } : g
+        ));
+      },
+      onCost: (cost) => {
+        setStatusText(prev => prev.includes('$') ? prev : `${prev} | ${cost}`);
+      },
+      onTokens: (tokens) => {
+        setStatusText(prev => prev.includes('tok') ? prev : `${prev} | ${tokens} tok`);
+      },
+      onLog: (_cmd, desc) => {
+        setStatusText(desc);
+      },
+    });
+
+    // Detect files from terminal output
+    const output = h.getOutputBuffer();
+    const fileMatches = output.match(/(?:created?|wrote|generated?)\s+(\S+\.\w+)/gi);
+    if (fileMatches) {
+      const detected = fileMatches.map(m => {
+        const parts = m.split(/\s+/);
+        return { name: parts[parts.length - 1], isNew: true };
       });
-
-      if (res.files) {
-        setFiles(res.files.map((f) => ({ name: f, isNew: true })));
-      }
-
-      if (res.run_id) {
-        setStatusText(`running (${res.run_id})`);
-      }
-
-      setGates([
-        { name: 'compile', status: 'pass' },
-        { name: 'test', status: 'pass' },
-        { name: 'clippy', status: 'pass' },
-        { name: 'diff', status: 'pass' },
-      ]);
-      setStatusText('complete');
-    } catch (err) {
-      setStatusText(`error: ${err instanceof Error ? err.message : 'unknown'}`);
-      setGates((g) => g.map((gate) => ({ ...gate, status: 'fail' as const })));
-    } finally {
-      setRunning(false);
+      setFiles(detected);
     }
-  }, [running, post]);
+
+    setStatusText('complete');
+    setRunning(false);
+  }, [running, handle]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     submitTask(prompt);
   };
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setPrompt(e.target.value);
+    updateAutocomplete(e.target.value);
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent) => {
+    if (!showAutocomplete) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setAutocompleteIdx(i => Math.min(i + 1, autocompleteItems.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setAutocompleteIdx(i => Math.max(i - 1, -1));
+    } else if (e.key === 'Enter' && autocompleteIdx >= 0) {
+      e.preventDefault();
+      setPrompt(autocompleteItems[autocompleteIdx]);
+      setShowAutocomplete(false);
+    } else if (e.key === 'Escape') {
+      setShowAutocomplete(false);
+    }
+  };
+
+  const selectAutocomplete = (item: string) => {
+    setPrompt(item);
+    setShowAutocomplete(false);
+    inputRef.current?.focus();
+  };
+
+  const currentModelLabel = ALL_MODELS.find(m => m.id === selectedModel)?.label ?? selectedModel;
+
   return (
     <div className="builder-page">
       <div className="builder-header">
         <span className="builder-title">Builder</span>
         <span className="builder-info">type a request -- roko builds it live</span>
+
+        {/* Model selector */}
+        <div className="builder-model-select" ref={modelRef}>
+          <button
+            className="model-select-btn"
+            onClick={() => setShowModelDropdown(v => !v)}
+          >
+            {currentModelLabel}
+          </button>
+          {showModelDropdown && (
+            <div className="model-dropdown">
+              {MODEL_CATALOG.map(group => (
+                <div key={group.name} className="model-group">
+                  <div className="model-group-label">{group.name}</div>
+                  {group.models.map(m => (
+                    <button
+                      key={m.id}
+                      className={`model-option${m.id === selectedModel ? ' active' : ''}`}
+                      onClick={() => {
+                        setSelectedModel(m.id);
+                        setShowModelDropdown(false);
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="builder-presets">
-          {PRESETS.map((p) => (
+          {PRESETS.map(p => (
             <button key={p.label} className="preset-btn" onClick={() => submitTask(p.prompt)} disabled={running}>
               {p.label}
             </button>
@@ -90,7 +218,7 @@ export default function Builder() {
             {files.length === 0 ? (
               <div className="file-placeholder">no project yet</div>
             ) : (
-              files.map((f) => (
+              files.map(f => (
                 <div key={f.name} className={`file-entry${f.isNew ? ' new' : ''}`}>
                   <span className="file-icon">{f.isNew ? '+' : '\u00B7'}</span>
                   {f.name}
@@ -100,20 +228,37 @@ export default function Builder() {
           </Pane>
         </div>
         <div className="builder-terminal">
-          <Pane title="TERMINAL" flat>
-            <TerminalPane sessionId={sessionId} label="builder" />
-          </Pane>
+          <div className="builder-terminal-inner" ref={attach} />
         </div>
       </div>
 
       <form className={`builder-input${running ? ' running' : ''}`} onSubmit={handleSubmit}>
         <span className="prompt-marker">{'\u25B8'}</span>
-        <input
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="describe what to build..."
-          disabled={running}
-        />
+        <div className="builder-input-wrap">
+          <input
+            ref={inputRef}
+            value={prompt}
+            onChange={handleInputChange}
+            onKeyDown={handleInputKeyDown}
+            onFocus={() => updateAutocomplete(prompt)}
+            onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
+            placeholder="describe what to build..."
+            disabled={running}
+          />
+          {showAutocomplete && autocompleteItems.length > 0 && (
+            <div className="builder-autocomplete">
+              {autocompleteItems.map((item, i) => (
+                <button
+                  key={item}
+                  className={`autocomplete-item${i === autocompleteIdx ? ' active' : ''}`}
+                  onMouseDown={() => selectAutocomplete(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         {running && <span className="builder-processing-indicator" aria-hidden="true" />}
         <button type="submit" className="btn-build" disabled={running || !prompt.trim()}>
           {running ? 'Building...' : 'Build'}
@@ -126,6 +271,10 @@ export default function Builder() {
 
       <div className="builder-status-bar">
         <span>{statusText}</span>
+        <span className="builder-status-conn">
+          <span className={`conn-dot ${status}`} />
+          {status}
+        </span>
         <span>{files.length} files</span>
       </div>
     </div>

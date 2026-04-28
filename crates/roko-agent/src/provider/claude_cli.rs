@@ -271,7 +271,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"adapter-ok"}}}}'
         assert!(args_text.contains("--settings"));
         assert!(args_text.contains("--append-system-prompt"));
         assert!(args_text.contains("system guidance"));
-        assert!(args_text.contains("--allowedTools"));
+        assert!(args_text.contains("--tools"));
         assert!(args_text.contains("Read,Edit"));
         assert!(args_text.contains("--mcp-config"));
         assert!(args_text.contains(mcp_config.to_str().expect("mcp path")));

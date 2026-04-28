@@ -5,11 +5,8 @@ import HeroParticleField from './HeroParticleField';
 import Curtain from './Curtain';
 import ScrollTrack from './ScrollTrack';
 import TopNav from './TopNav';
-import { useSeedData } from '../hooks/useSeedData';
 
 export default function AppShell() {
-  useSeedData();
-
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {

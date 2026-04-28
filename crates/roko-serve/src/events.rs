@@ -376,6 +376,48 @@ pub enum ServerEvent {
         /// Number of parsed tactics.
         tactics_count: usize,
     },
+
+    /// A bench run was started.
+    BenchRunStarted {
+        run_id: String,
+        suite_id: String,
+        total_tasks: usize,
+    },
+
+    /// A bench task started executing.
+    BenchTaskStarted {
+        run_id: String,
+        task_id: String,
+        task_index: usize,
+        total_tasks: usize,
+    },
+
+    /// A bench task completed.
+    BenchTaskCompleted {
+        run_id: String,
+        task_id: String,
+        passed: bool,
+        duration_ms: u64,
+        cost_usd: f64,
+    },
+
+    /// Overall progress of a bench run.
+    BenchProgress {
+        run_id: String,
+        completed: usize,
+        total: usize,
+        passed: usize,
+        failed: usize,
+    },
+
+    /// A bench run completed.
+    BenchRunCompleted {
+        run_id: String,
+        suite_id: String,
+        pass_rate: f64,
+        total_cost_usd: f64,
+        total_duration_ms: u64,
+    },
 }
 
 #[cfg(test)]

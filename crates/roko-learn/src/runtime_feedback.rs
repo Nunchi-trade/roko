@@ -547,7 +547,7 @@ impl Default for RetryOutcomeStatus {
 }
 
 /// One retry-policy outcome, append-only and queryable by plan/task.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryOutcomeRecord {
     /// JSON schema version.
     pub schema_version: u32,
@@ -668,7 +668,7 @@ pub enum RunnerFeedbackEvent {
     /// A raw episode should be appended and projected into derived feedback logs.
     Episode {
         /// Episode record.
-        episode: Episode,
+        episode: Box<Episode>,
     },
     /// A raw efficiency event should be appended and projected into summaries.
     EfficiencyEvent {
@@ -1089,8 +1089,9 @@ impl KnowledgeSeedRecord {
             provider.clone(),
         ]);
         tags.retain(|tag| !tag.trim().is_empty());
-        tags.iter_mut()
-            .for_each(|tag| *tag = tag.trim().to_ascii_lowercase());
+        for tag in tags.iter_mut() {
+            *tag = tag.trim().to_ascii_lowercase();
+        }
         tags.sort();
         tags.dedup();
 
@@ -2760,7 +2761,7 @@ pub async fn read_knowledge_seeds(
     read_jsonl_lossy(path).await
 }
 
-async fn append_jsonl_record<T: Serialize + ?Sized>(
+async fn append_jsonl_record<T: Serialize + Sync + ?Sized>(
     path: &Path,
     value: &T,
 ) -> Result<(), LearningRuntimeError> {
@@ -3038,15 +3039,15 @@ fn apply_latest_limit<T>(items: &mut Vec<T>, limit: Option<usize>) {
     }
 }
 
-fn query_matches(value: &str, expected: &Option<String>) -> bool {
+fn query_matches(value: &str, expected: Option<&String>) -> bool {
     expected
-        .as_deref()
+        .map(String::as_str)
         .is_none_or(|expected| value.trim() == expected.trim())
 }
 
-fn query_matches_option(value: Option<&str>, expected: &Option<String>) -> bool {
+fn query_matches_option(value: Option<&str>, expected: Option<&String>) -> bool {
     expected
-        .as_deref()
+        .map(String::as_str)
         .is_none_or(|expected| value.is_some_and(|value| value.trim() == expected.trim()))
 }
 
@@ -3055,49 +3056,49 @@ fn episode_matches_query(episode: &Episode, query: &RuntimeFeedbackQuery) -> boo
         extra_string(episode, "plan_id")
             .unwrap_or_default()
             .as_str(),
-        &query.plan_id,
-    ) && query_matches(&episode.task_id, &query.task_id)
-        && query_matches(episode_source_id(episode), &query.episode_id)
-        && query_matches(episode_provider(episode).as_str(), &query.provider)
-        && query_matches(episode_model(episode).as_str(), &query.model)
+        query.plan_id.as_ref(),
+    ) && query_matches(&episode.task_id, query.task_id.as_ref())
+        && query_matches(episode_source_id(episode), query.episode_id.as_ref())
+        && query_matches(episode_provider(episode).as_str(), query.provider.as_ref())
+        && query_matches(episode_model(episode).as_str(), query.model.as_ref())
 }
 
 fn provider_model_outcome_matches_query(
     record: &ProviderModelOutcomeRecord,
     query: &RuntimeFeedbackQuery,
 ) -> bool {
-    query_matches_option(record.run_id.as_deref(), &query.plan_id)
-        && query_matches(&record.task_id, &query.task_id)
-        && query_matches_option(record.run_id.as_deref(), &query.episode_id)
-        && query_matches(&record.provider, &query.provider)
-        && query_matches(&record.model, &query.model)
+    query_matches_option(record.run_id.as_deref(), query.plan_id.as_ref())
+        && query_matches(&record.task_id, query.task_id.as_ref())
+        && query_matches_option(record.run_id.as_deref(), query.episode_id.as_ref())
+        && query_matches(&record.provider, query.provider.as_ref())
+        && query_matches(&record.model, query.model.as_ref())
 }
 
 fn efficiency_summary_matches_query(
     record: &EfficiencySummaryRecord,
     query: &RuntimeFeedbackQuery,
 ) -> bool {
-    query_matches(&record.plan_id, &query.plan_id)
-        && query_matches(&record.task_id, &query.task_id)
-        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
-        && query_matches(&record.provider, &query.provider)
-        && query_matches(&record.model, &query.model)
+    query_matches(&record.plan_id, query.plan_id.as_ref())
+        && query_matches(&record.task_id, query.task_id.as_ref())
+        && query_matches_option(record.episode_id.as_deref(), query.episode_id.as_ref())
+        && query_matches(&record.provider, query.provider.as_ref())
+        && query_matches(&record.model, query.model.as_ref())
 }
 
 fn gate_outcome_matches_query(record: &GateOutcomeRecord, query: &RuntimeFeedbackQuery) -> bool {
-    query_matches(&record.plan_id, &query.plan_id)
-        && query_matches(&record.task_id, &query.task_id)
-        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
-        && query_matches_option(record.provider.as_deref(), &query.provider)
-        && query_matches_option(record.model.as_deref(), &query.model)
+    query_matches(&record.plan_id, query.plan_id.as_ref())
+        && query_matches(&record.task_id, query.task_id.as_ref())
+        && query_matches_option(record.episode_id.as_deref(), query.episode_id.as_ref())
+        && query_matches_option(record.provider.as_deref(), query.provider.as_ref())
+        && query_matches_option(record.model.as_deref(), query.model.as_ref())
 }
 
 fn retry_outcome_matches_query(record: &RetryOutcomeRecord, query: &RuntimeFeedbackQuery) -> bool {
-    query_matches(&record.plan_id, &query.plan_id)
-        && query_matches(&record.task_id, &query.task_id)
-        && query_matches_option(record.episode_id.as_deref(), &query.episode_id)
-        && query_matches_option(record.provider.as_deref(), &query.provider)
-        && query_matches_option(record.model.as_deref(), &query.model)
+    query_matches(&record.plan_id, query.plan_id.as_ref())
+        && query_matches(&record.task_id, query.task_id.as_ref())
+        && query_matches_option(record.episode_id.as_deref(), query.episode_id.as_ref())
+        && query_matches_option(record.provider.as_deref(), query.provider.as_ref())
+        && query_matches_option(record.model.as_deref(), query.model.as_ref())
 }
 
 fn knowledge_seed_matches_query(
@@ -3114,14 +3115,14 @@ fn knowledge_seed_matches_query(
             .get("model")
             .and_then(serde_json::Value::as_str)
     });
-    query_matches(&record.plan_id, &query.plan_id)
-        && query_matches(&record.task_id, &query.task_id)
+    query_matches(&record.plan_id, query.plan_id.as_ref())
+        && query_matches(&record.task_id, query.task_id.as_ref())
         && query
             .episode_id
             .as_deref()
             .is_none_or(|episode_id| record.source_episodes.iter().any(|id| id == episode_id))
-        && query_matches_option(provider, &query.provider)
-        && query_matches_option(model, &query.model)
+        && query_matches_option(provider, query.provider.as_ref())
+        && query_matches_option(model, query.model.as_ref())
 }
 
 fn episode_dedupe_key(episode: &Episode) -> String {

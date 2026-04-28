@@ -1193,7 +1193,6 @@ fn select_vcg_candidates(
     affect: Option<AuctionAffectState>,
 ) -> (AuctionAllocation, PaymentSummary, VcgAllocation) {
     let modulation = affect
-        .as_ref()
         .map(AuctionAffectState::to_vcg_modulation)
         .unwrap_or_default();
     let bids = candidates
@@ -1388,7 +1387,7 @@ fn bidder_affect_multiplier(section: &PromptSection, affect: Option<&AuctionAffe
 }
 
 impl AuctionAffectState {
-    fn to_vcg_modulation(&self) -> AffectModulation {
+    fn to_vcg_modulation(self) -> AffectModulation {
         AffectModulation::from_pad(self.pleasure as f64, self.arousal as f64)
     }
 }

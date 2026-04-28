@@ -425,6 +425,17 @@ pub struct AppState {
 
     /// PTY-backed terminal sessions for the web UI.
     pub terminal_sessions: crate::terminal::SessionManager,
+
+    /// Active bench runs (keyed by run_id).
+    pub active_bench_runs: RwLock<HashMap<String, BenchRunHandle>>,
+}
+
+/// A tracked bench run with its background task handle.
+pub struct BenchRunHandle {
+    /// Run identifier.
+    pub id: String,
+    /// Background task driving the bench execution.
+    pub handle: JoinHandle<()>,
 }
 
 impl AppState {
@@ -524,6 +535,7 @@ impl AppState {
             gateway_model_counters: RwLock::new(HashMap::new()),
             batch_progress: RwLock::new(HashMap::new()),
             terminal_sessions: crate::terminal::SessionManager::new(layout_root),
+            active_bench_runs: RwLock::new(HashMap::new()),
         }
     }
 

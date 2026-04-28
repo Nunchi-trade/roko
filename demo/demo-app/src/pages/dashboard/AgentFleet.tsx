@@ -26,17 +26,42 @@ const FLEET_STYLES = `
 
 interface Agent {
   id: string;
-  name: string;
-  domain?: string;
+  label?: string;
   status: string;
   model?: string;
+  model_profile?: { provider?: string; key?: string; context_window?: number };
   capabilities?: string[];
   reputation?: number;
-  stats?: {
-    tasks?: number;
-    cost?: number;
-    tokens?: number;
-  };
+  domain_tags?: string[];
+  performance?: { completed_tasks?: number; failed_tasks?: number; active_tasks?: number; reputation?: number };
+  costs?: { cumulative_usd?: number | null };
+  last_seen_at?: number;
+  process_id?: number;
+}
+
+function agentDisplayName(a: Agent): string {
+  return a.label || a.id;
+}
+
+function agentTasks(a: Agent): number {
+  return a.performance?.completed_tasks ?? 0;
+}
+
+function agentCost(a: Agent): number {
+  return a.costs?.cumulative_usd ?? 0;
+}
+
+function isAgentActive(a: Agent): boolean {
+  return a.status === 'active' || a.status === 'registered';
+}
+
+function fmtLastSeen(a: Agent): string {
+  if (!a.last_seen_at) return 'unknown';
+  const diff = Math.floor(Date.now() / 1000) - a.last_seen_at;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 /* ── Component ───────────────────────────────────────────── */
@@ -57,11 +82,11 @@ export default function AgentFleet() {
   }, [get]);
 
   /* Derived */
-  const active = agents.filter((a) => a.status === 'active').length;
+  const active = agents.filter((a) => isAgentActive(a)).length;
   const avgRep = agents.length > 0
-    ? Math.round(agents.reduce((s, a) => s + (a.reputation ?? 0), 0) / agents.length)
+    ? Math.round(agents.reduce((s, a) => s + (a.performance?.reputation ?? a.reputation ?? 0), 0) / agents.length)
     : 90;
-  const totalTasks = agents.reduce((s, a) => s + (a.stats?.tasks ?? 0), 0);
+  const totalTasks = agents.reduce((s, a) => s + agentTasks(a), 0);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
@@ -81,18 +106,18 @@ export default function AgentFleet() {
         gap: 16,
       }}>
         {agents.map((agent) => {
-          const rep = agent.reputation ?? 85;
-          const isActive = agent.status === 'active';
+          const rep = agent.performance?.reputation ?? agent.reputation ?? 85;
+          const active = isAgentActive(agent);
           const isIdle = agent.status === 'idle';
-          const tasks = agent.stats?.tasks ?? 0;
-          const cost = agent.stats?.cost ?? 0;
-          const tokens = agent.stats?.tokens ?? 0;
+          const tasks = agentTasks(agent);
+          const cost = agentCost(agent);
+          const failed = agent.performance?.failed_tasks ?? 0;
 
           return (
             <Pane
               key={agent.id}
               className="agent-card"
-              title={agent.name.toUpperCase()}
+              title={agentDisplayName(agent).toUpperCase()}
               badge={
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{
@@ -107,13 +132,13 @@ export default function AgentFleet() {
                     width: 6,
                     height: 6,
                     borderRadius: '50%',
-                    background: isActive ? 'var(--success)' : isIdle ? 'var(--warning)' : 'var(--bone)',
-                    animation: isActive
+                    background: active ? 'var(--success)' : isIdle ? 'var(--warning)' : 'var(--bone)',
+                    animation: active
                       ? 'fleet-pulse-green 2.4s ease-in-out infinite'
                       : isIdle
                         ? 'fleet-pulse-amber 3s ease-in-out infinite'
                         : 'none',
-                    boxShadow: isActive
+                    boxShadow: active
                       ? '0 0 4px 1px rgba(138,156,134,.6)'
                       : isIdle
                         ? '0 0 4px 1px rgba(216,168,120,.6)'
@@ -128,7 +153,7 @@ export default function AgentFleet() {
                   color: 'var(--text-ghost)',
                   letterSpacing: '.06em',
                 }}>
-                  {isActive ? 'active now' : `last active ${Math.floor(Math.random() * 12 + 2)}m ago`}
+                  {active ? 'active now' : `last active ${fmtLastSeen(agent)}`}
                 </span>
               }
             >
@@ -149,8 +174,8 @@ export default function AgentFleet() {
                       {cap}
                     </span>
                   ))}
-                  {agent.domain && (
-                    <span style={{
+                  {(agent.domain_tags ?? []).map((tag) => (
+                    <span key={tag} style={{
                       fontFamily: 'var(--mono)',
                       fontSize: 9,
                       letterSpacing: '.06em',
@@ -160,9 +185,9 @@ export default function AgentFleet() {
                       border: '1px solid rgba(220,165,189,.12)',
                       color: 'var(--rose-dim)',
                     }}>
-                      {agent.domain}
+                      {tag}
                     </span>
-                  )}
+                  ))}
                 </div>
 
                 {/* Reputation bar */}
@@ -213,7 +238,7 @@ export default function AgentFleet() {
                 }}>
                   <StatPill label="tasks" value={String(tasks)} />
                   <StatPill label="cost" value={`$${cost.toFixed(2)}`} />
-                  <StatPill label="tokens" value={tokens >= 1000 ? `${(tokens / 1000).toFixed(0)}k` : String(tokens)} />
+                  <StatPill label="failed" value={String(failed)} />
                 </div>
               </div>
             </Pane>

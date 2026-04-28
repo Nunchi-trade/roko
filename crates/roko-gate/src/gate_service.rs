@@ -61,6 +61,7 @@ impl GateService {
     }
 
     /// Map a gate name to a concrete gate implementation.
+    #[allow(clippy::unused_self)]
     fn gate_for_name(&self, name: &str, build_system: BuildSystem) -> Option<Box<dyn Verify>> {
         match name {
             "compile" | "compile:cargo" => Some(Box::new(CompileGate::new(build_system))),
@@ -159,10 +160,10 @@ impl Verify for FormatCheckGate {
     }
 }
 
-/// Stub LLM judge gate that always passes.
+/// Stub LLM judge gate that fails with a clear message.
 ///
 /// Replace with `LlmJudgeGate` once model dispatch is available in the gate
-/// service context.
+/// service context. Fails rather than silently passing to prevent false confidence.
 struct StubJudgeGate;
 
 impl roko_core::Cell for StubJudgeGate {
@@ -182,7 +183,7 @@ impl roko_core::Cell for StubJudgeGate {
 #[async_trait]
 impl Verify for StubJudgeGate {
     async fn verify(&self, _signal: &Engram, _ctx: &Context) -> Verdict {
-        Verdict::pass("stub-llm-judge").with_detail("LLM judge stub: always passes")
+        Verdict::fail("stub-llm-judge", "LLM judge gate not yet implemented — enable a real judge or remove from enabled_gates")
     }
 
     fn name(&self) -> &str {

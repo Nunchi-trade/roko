@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::bench::BenchConfigOverrides;
+
 /// Token usage reported by an LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResultUsage {
@@ -148,6 +150,19 @@ impl CliRuntime for NoOpRuntime {
 pub trait CliRuntime: Send + Sync + 'static {
     /// Run a single prompt through the universal loop.
     async fn run_once(&self, workdir: &std::path::Path, prompt: &str) -> anyhow::Result<RunResult>;
+
+    /// Run a single prompt with bench config overrides.
+    ///
+    /// The default ignores the overrides and delegates to `run_once`.
+    /// The real CLI runtime applies model/backend overrides.
+    async fn run_once_with_config(
+        &self,
+        workdir: &std::path::Path,
+        prompt: &str,
+        _overrides: &BenchConfigOverrides,
+    ) -> anyhow::Result<RunResult> {
+        self.run_once(workdir, prompt).await
+    }
 
     /// Generate implementation plans from a PRD.
     ///

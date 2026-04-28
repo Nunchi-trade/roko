@@ -162,7 +162,7 @@ impl PromptAssemblyService {
         self.section_effectiveness
             .as_ref()
             .and_then(|scores| scores.get(section))
-            .map_or(true, |&score| score >= 0.1)
+            .is_none_or(|&score| score >= 0.1)
     }
 
     /// Returns (sum of included section scores, total section count).

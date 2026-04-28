@@ -340,12 +340,9 @@ impl FeedbackService {
         };
 
         let context_vec = model_call_context_vec(role, latency_ms);
-        let model_idx = match router.model_index_for_slug(model) {
-            Some(idx) => idx,
-            None => {
-                tracing::debug!("model {model} not in cascade router slug list, skipping observe");
-                return;
-            }
+        let Some(model_idx) = router.model_index_for_slug(model) else {
+            tracing::debug!("model {model} not in cascade router slug list, skipping observe");
+            return;
         };
 
         let reward = if success { 1.0 } else { 0.0 };

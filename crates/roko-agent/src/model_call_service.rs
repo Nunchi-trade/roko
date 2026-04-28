@@ -152,6 +152,7 @@ impl ModelCallService {
     ///
     /// The adapter should return serialized neuro `KnowledgeEntry` values.
     #[must_use]
+    #[allow(clippy::type_complexity)]
     pub fn with_knowledge_store(
         mut self,
         store: Arc<dyn Fn(&str, usize) -> Result<Vec<serde_json::Value>> + Send + Sync>,

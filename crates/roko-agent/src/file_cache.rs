@@ -62,7 +62,7 @@ impl FileCache {
     pub fn put(&self, key: &ContentHash, entry: &FileCacheEntry) -> std::io::Result<()> {
         let path = self.entry_path(key);
         let json = serde_json::to_string_pretty(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -102,7 +102,7 @@ impl FileCache {
     }
 
     fn entry_path(&self, key: &ContentHash) -> PathBuf {
-        self.dir.join(format!("{key}.json"))
+        self.dir.join(format!("{}.json", key.to_hex()))
     }
 }
 

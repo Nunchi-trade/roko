@@ -20062,7 +20062,11 @@ depends_on = []
             roko_core::config::schema::RokoConfig::default(),
             deploy_backend,
         ));
-        runner.set_state_hub(state.state_hub.sender());
+        // state.state_hub is roko_serve::StateHub (via #[path] include), but
+        // set_state_hub expects roko_cli::state_hub::StateHubSender. Both are the
+        // same source file but distinct types. Create a local hub for the test.
+        let local_hub = crate::state_hub::shared_state_hub();
+        runner.set_state_hub(local_hub.sender());
 
         let app = roko_serve::routes::build_router(
             Arc::clone(&state),

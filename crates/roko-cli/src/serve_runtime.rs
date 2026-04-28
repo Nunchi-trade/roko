@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use async_trait::async_trait;
 use roko_core::config::schema::RokoConfig;
+use roko_serve::bench::BenchConfigOverrides;
 use roko_serve::runtime::{
     CliRuntime, DashboardInfo, PlanExecutionResult, PlanGenerationResult, RepoInfo, RunResult,
     RuntimeGateResult, SessionStatusInfo,
@@ -47,6 +48,25 @@ impl RokoCliRuntime {
 impl CliRuntime for RokoCliRuntime {
     async fn run_once(&self, workdir: &Path, prompt: &str) -> anyhow::Result<RunResult> {
         let report = run_once(workdir, &self.config, prompt, None).await?;
+        Ok(RunResult {
+            success: report.overall_success(),
+            output_text: report.output_text,
+            usage: None,
+        })
+    }
+
+    async fn run_once_with_config(
+        &self,
+        workdir: &Path,
+        prompt: &str,
+        overrides: &BenchConfigOverrides,
+    ) -> anyhow::Result<RunResult> {
+        // Apply model override if provided by cloning the config.
+        let mut config = self.config.clone();
+        if let Some(ref model) = overrides.model {
+            config.agent.model = Some(model.clone());
+        }
+        let report = run_once(workdir, &config, prompt, None).await?;
         Ok(RunResult {
             success: report.overall_success(),
             output_text: report.output_text,

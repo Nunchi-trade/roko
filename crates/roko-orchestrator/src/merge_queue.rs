@@ -183,11 +183,8 @@ fn locked_conflicts(
     let files: HashSet<&str> = files_changed.iter().map(String::as_str).collect();
     locked_files
         .iter()
-        .filter_map(|(file, owner)| {
-            files
-                .contains(file.as_str())
-                .then(|| (file.clone(), owner.clone()))
-        })
+        .filter(|(file, _owner)| files.contains(file.as_str()))
+        .map(|(file, owner)| (file.clone(), owner.clone()))
         .collect()
 }
 

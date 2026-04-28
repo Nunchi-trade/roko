@@ -51,7 +51,7 @@ interface HealthResponse {
 interface EfficiencyResponse {
   total_cost: number;
   cost_per_task: number;
-  tasks: { task_id: string; cost_usd: number; passed: boolean; tokens: number; duration_ms: number }[];
+  tasks: { task_id: string; cost_usd: number; tokens: number; duration_ms: number }[];
 }
 
 interface CFactorResponse {
@@ -60,8 +60,10 @@ interface CFactorResponse {
 }
 
 interface RouterResponse {
-  models: { model: string; weight: number; trials: number }[];
-  current_model: string;
+  model_slugs?: string[];
+  role_table?: Record<string, string>;
+  confidence_stats?: Record<string, { successes: number; trials: number; total_cost_usd: number }>;
+  total_observations?: number;
 }
 
 /* ── Helpers ─────────────────────────────────────────────── */
@@ -131,12 +133,35 @@ export default function CostDashboard() {
     value: t.cost_usd,
   }));
 
-  /* Router bar data */
-  const routerBars = (router?.models ?? []).map((m, i) => ({
-    label: m.model,
-    value: m.weight * 100,
-    color: ['var(--success)', 'var(--rose-bright)', 'var(--bone)', 'var(--dream-bright)'][i % 4],
-  }));
+  /* Router bar data: derive model distribution from role_table */
+  const routerBars = (() => {
+    const rt = router?.role_table;
+    if (!rt || Object.keys(rt).length === 0) return [];
+    const modelCounts: Record<string, number> = {};
+    for (const model of Object.values(rt)) {
+      modelCounts[model] = (modelCounts[model] ?? 0) + 1;
+    }
+    const totalRoles = Object.values(modelCounts).reduce((a, b) => a + b, 0);
+    const colors = ['var(--success)', 'var(--rose-bright)', 'var(--bone)', 'var(--dream-bright)'];
+    return Object.entries(modelCounts)
+      .sort(([, a], [, b]) => b - a)
+      .map(([model, count], i) => ({
+        label: model.replace(/^claude-/, ''),
+        value: (count / totalRoles) * 100,
+        color: colors[i % colors.length],
+      }));
+  })();
+
+  /* Derive current model: most-assigned model in role_table */
+  const currentModel = (() => {
+    const rt = router?.role_table;
+    if (!rt || Object.keys(rt).length === 0) return 'claude-haiku';
+    const modelCounts: Record<string, number> = {};
+    for (const model of Object.values(rt)) {
+      modelCounts[model] = (modelCounts[model] ?? 0) + 1;
+    }
+    return Object.entries(modelCounts).sort(([, a], [, b]) => b - a)[0]?.[0] ?? 'claude-haiku';
+  })();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 1200 }}>
@@ -271,7 +296,7 @@ export default function CostDashboard() {
 
         {/* Right: Model Routing */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{router?.current_model ?? 'claude-haiku'}</span>}>
+          <Pane title="MODEL ROUTING" badge={<span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{currentModel}</span>}>
             <BarChart data={routerBars} height={200} />
           </Pane>
         </div>

@@ -16,7 +16,9 @@ import Terminal from './pages/Terminal';
 import Builder from './pages/Builder';
 import Explorer from './pages/Explorer';
 import Bench from './pages/Bench';
-import BenchLive from './pages/BenchLive';
+import BenchRunDetail from './pages/BenchRunDetail';
+import BenchCompare from './pages/BenchCompare';
+import BenchShowroom from './pages/BenchShowroom';
 import SharePage from './pages/Share';
 import './styles/rosedust.css';
 
@@ -40,7 +42,9 @@ createRoot(document.getElementById('root')!).render(
           <Route path="builder" element={<Builder />} />
           <Route path="explorer" element={<Explorer />} />
           <Route path="bench" element={<Bench />} />
-          <Route path="bench-live" element={<BenchLive />} />
+          <Route path="bench/run/:id" element={<BenchRunDetail />} />
+          <Route path="bench/compare" element={<BenchCompare />} />
+          <Route path="bench/showroom" element={<BenchShowroom />} />
           <Route path="share/:token" element={<SharePage />} />
         </Route>
       </Routes>

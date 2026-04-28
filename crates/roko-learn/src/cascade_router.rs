@@ -23,6 +23,7 @@
 use chrono::Utc;
 use parking_lot::Mutex;
 use roko_agent::AgentResult;
+use roko_core::DaimonPolicy;
 use roko_core::OperatingFrequency;
 use roko_core::agent::TaskRequirements;
 use roko_core::agent::{AgentRole, ModelSpec, ModelTier};
@@ -120,7 +121,7 @@ impl Default for RoutingContext {
             active_agents: 0,
             ready_queue_depth: 0,
             max_queue_wait_hours: 0.0,
-            daimon_policy: Default::default(),
+            daimon_policy: DaimonPolicy::default(),
             thinking_level: None,
             temperament: None,
             previous_model: None,

@@ -16,7 +16,6 @@
   position: relative;
   overflow: hidden;
 }
-/* Radial glow behind hero content */
 .bench-hero::before {
   content: '';
   position: absolute;
@@ -56,6 +55,16 @@
 .bench-hero-stats {
   margin-top: 20px;
 }
+.bench-back {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-decoration: none;
+  transition: color 200ms var(--ease);
+}
+.bench-back:hover {
+  color: var(--text-primary);
+}
 
 /* ── Tabs ── */
 .bench-tabs {
@@ -77,6 +86,9 @@
   text-transform: uppercase;
   cursor: pointer;
   transition: all 200ms var(--ease);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .bench-tab:hover {
   color: var(--text-primary);
@@ -87,11 +99,37 @@
   background: var(--rose-deep);
   border-color: var(--rose-dim);
 }
+.bench-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: bench-tab-pulse 2s ease-in-out infinite;
+}
+@keyframes bench-tab-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 
 /* ── Body ── */
 .bench-body {
   padding: 24px 40px 60px;
   flex: 1;
+}
+
+/* ── Empty state ── */
+.bench-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+}
+.bench-empty-text {
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 300;
+  color: var(--text-soft);
+  line-height: 1.6;
 }
 
 /* ── Configure ── */
@@ -129,7 +167,6 @@
   box-shadow: 0 0 20px rgba(220,165,189,.15), inset 0 1px 0 rgba(220,165,189,0.12);
   position: relative;
 }
-/* Rose gradient left-edge accent on selected cards */
 .config-card.selected::before {
   content: '';
   position: absolute;
@@ -175,10 +212,77 @@
   border-color: var(--rose-dim);
 }
 
+/* Parameters */
+.config-params {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.param-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  min-width: 100px;
+}
+.param-slider {
+  flex: 1;
+  max-width: 200px;
+  accent-color: var(--rose-bright);
+}
+.param-value {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 32px;
+}
+.gate-toggles {
+  display: flex;
+  gap: 12px;
+}
+.gate-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.gate-toggle input {
+  accent-color: var(--rose-bright);
+}
+
+/* Cost estimate */
+.bench-cost-estimate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.cost-label {
+  color: var(--text-dim);
+}
+.cost-value {
+  color: var(--bone-bright);
+  font-weight: 500;
+}
+.cost-detail {
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
 .bench-run-btn {
   margin-top: 24px;
 }
-/* Dramatic glow override for the Run Benchmark button */
 .bench-run-btn .btn {
   position: relative;
   overflow: hidden;
@@ -213,7 +317,175 @@
   box-shadow: 0 0 16px rgba(220,165,189,0.2);
 }
 
+/* ── Live Tab ── */
+.bench-live-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  margin-bottom: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.bench-live-status {
+  color: var(--text-strong);
+  letter-spacing: .08em;
+}
+.bench-live-progress {
+  color: var(--text-dim);
+}
+.bench-live-cost {
+  color: var(--bone-bright);
+}
+.bench-live-progress-bar {
+  height: 3px;
+  background: var(--glass-border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.bench-live-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--rose-dim), var(--rose-bright));
+  border-radius: 2px;
+  transition: width 300ms var(--ease);
+}
+
+.benchlive-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(122,138,120,.5);
+  animation: benchlive-pulse 2s ease-in-out infinite;
+}
+.benchlive-dot.disconnected {
+  background: var(--text-dim);
+  box-shadow: none;
+  animation: none;
+}
+@keyframes benchlive-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(122,138,120,.5); }
+  50% { opacity: 0.5; box-shadow: 0 0 12px rgba(122,138,120,.8); }
+}
+
+.benchlive-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+  min-height: 0;
+}
+.benchlive-grid .pane {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.benchlive-grid .pane .body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+/* Task grid */
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 3px;
+  padding: 12px;
+  background: linear-gradient(135deg, rgba(12,10,18,.6) 0%, rgba(8,8,12,.4) 50%, rgba(14,10,20,.6) 100%);
+  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+}
+.task-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  transition: background 300ms var(--ease);
+}
+.task-pending {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+}
+.task-running {
+  background: var(--bone-dim);
+  border: 1px solid var(--bone);
+  animation: benchlive-pulse 1s infinite;
+}
+.task-pass {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(122,138,120,.3);
+}
+.task-fail {
+  background: var(--rose-dim);
+}
+.task-skipped {
+  background: var(--text-dim);
+  opacity: 0.4;
+}
+
+/* Feed */
+.feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.feed-item {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 4px 6px;
+  line-height: 1.4;
+  animation: feedSlideIn 0.35s var(--ease) both;
+  border-radius: 2px;
+  position: relative;
+}
+.feed-item:first-child {
+  background: rgba(138,156,134,.04);
+}
+.feed-item:first-child::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(138,156,134,.08) 0%, transparent 60%);
+  animation: feedHighlight 1.2s ease forwards;
+}
+@keyframes feedHighlight {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes feedSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.feed-ts {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.feed-text {
+  flex: 1;
+}
+.feed-cost {
+  color: var(--bone);
+}
+.feed-pass .feed-text {
+  color: var(--success);
+}
+.feed-fail .feed-text {
+  color: var(--rose-bright);
+}
+.feed-info .feed-text {
+  color: var(--text-primary);
+}
+.feed-start .feed-text {
+  color: var(--bone-bright);
+}
+
 /* ── Results ── */
+.bench-results-stats {
+  margin-bottom: 24px;
+}
 .run-status {
   padding: 10px 16px;
   border-radius: 6px;
@@ -254,16 +526,295 @@
   to { transform: rotate(360deg); }
 }
 
-.bench-results-stats {
-  margin-bottom: 24px;
+/* ── Task Table ── */
+.task-table-wrap {
+  overflow-x: auto;
+}
+.task-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.task-table th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-size: 9px;
+  border-bottom: 1px solid var(--glass-border);
+  cursor: pointer;
+  user-select: none;
+}
+.task-table th:hover {
+  color: var(--text-primary);
+}
+.task-table td {
+  padding: 8px 12px;
+  color: var(--text-primary);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.task-table .mono {
+  font-family: var(--mono);
+}
+.task-row:hover {
+  background: rgba(255,255,255,0.02);
+}
+.task-name {
+  font-weight: 500;
+  color: var(--text-strong);
 }
 
-/* ── Learning ── */
-.bench-learning-stats {
-  margin-bottom: 24px;
+/* Status badges */
+.status-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: .06em;
+  font-weight: 500;
+}
+.status-pass {
+  background: rgba(122,138,120,0.15);
+  color: var(--success);
+}
+.status-fail {
+  background: rgba(170,112,136,0.15);
+  color: var(--rose-bright);
+}
+.status-pending {
+  background: rgba(255,255,255,0.05);
+  color: var(--text-dim);
+}
+.status-running {
+  background: rgba(200,184,144,0.15);
+  color: var(--bone-bright);
+}
+.status-skipped {
+  background: rgba(255,255,255,0.03);
+  color: var(--text-dim);
+}
+.status-completed {
+  background: rgba(122,138,120,0.15);
+  color: var(--success);
+}
+.status-cancelled {
+  background: rgba(170,112,136,0.15);
+  color: var(--rose-dim);
+}
+
+/* Gate pills */
+.gate-pill {
+  display: inline-block;
+  font-size: 8px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 3px;
+  margin-right: 2px;
+  font-weight: 600;
+}
+.gate-pass {
+  background: rgba(122,138,120,0.2);
+  color: var(--success);
+}
+.gate-fail {
+  background: rgba(170,112,136,0.2);
+  color: var(--rose-bright);
+}
+
+/* Task detail (expanded row) */
+.task-detail-row td {
+  padding: 0 12px 12px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.task-detail {
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+  padding: 12px;
+}
+.task-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-primary);
+}
+.detail-label {
+  color: var(--text-dim);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.task-detail-gates {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.gate-detail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--glass-border);
+}
+.gate-name {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: .04em;
+}
+.gate-ok {
+  color: var(--success);
+  font-weight: 500;
+}
+.gate-err {
+  color: var(--rose-bright);
+  font-weight: 500;
+}
+.gate-time {
+  color: var(--text-soft);
+}
+.gate-msg {
+  color: var(--text-dim);
+  font-size: 9px;
+}
+.task-error {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(170,112,136,0.08);
+  border: 1px solid var(--rose-dim);
+  border-radius: 4px;
+  color: var(--rose-bright);
+  font-size: 10px;
+}
+
+/* ── Gate Breakdown ── */
+.gate-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gate-breakdown-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.gate-breakdown-name {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  min-width: 60px;
+}
+.gate-breakdown-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 3px;
+  overflow: hidden;
+  max-width: 300px;
+}
+.gate-breakdown-fill {
+  height: 100%;
+  background: var(--success);
+  border-radius: 3px;
+  transition: width 400ms var(--ease);
+}
+.gate-breakdown-pct {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-primary);
+  min-width: 36px;
+  text-align: right;
+}
+
+/* ── Gate Waterfall (run detail) ── */
+.gate-waterfall {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gate-waterfall-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+.gate-waterfall-task {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-primary);
+  min-width: 140px;
+}
+.gate-waterfall-cells {
+  display: flex;
+  gap: 3px;
+}
+.gate-waterfall-cell {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  font-family: var(--mono);
+}
+.gate-waterfall-status {
+  margin-left: auto;
+}
+
+/* ── Config detail grid ── */
+.config-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-primary);
 }
 
 /* ── Compare ── */
+.compare-selectors {
+  display: flex;
+  gap: 24px;
+}
+.compare-select {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.compare-select .config-input {
+  max-width: 100%;
+}
+.config-diff {
+  margin-top: 12px;
+}
+.diff-changed td {
+  background: rgba(170,112,136,0.06);
+}
+
+/* ── Showroom controls ── */
+.showroom-controls {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.btn-sm {
+  font-size: 10px;
+  padding: 4px 10px;
+}
+
+/* ── Compare text (legacy) ── */
 .bench-compare-text {
   font-family: var(--display);
   font-size: 16px;

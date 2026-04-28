@@ -104,8 +104,7 @@ impl GateFailureKind {
     pub const fn retry_cooldown_secs(&self) -> u64 {
         match self {
             Self::Transient => 2,
-            Self::Permanent => 0,
-            Self::Resource => 0,
+            Self::Permanent | Self::Resource => 0,
             Self::Structural => 5,
         }
     }
@@ -130,6 +129,7 @@ impl GateFailureKind {
 }
 
 /// Retry inputs derived from a structured gate failure.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GateRetryPolicy {
     /// Whether the orchestrator may retry this failure.

@@ -394,23 +394,23 @@ impl Phase {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Phase::Complete | Phase::Halted { .. } | Phase::Cancelled
+            Self::Complete | Self::Halted { .. } | Self::Cancelled
         )
     }
 
     /// Stable lowercase label for logs, events, and UI adapters.
     pub fn label(&self) -> &'static str {
         match self {
-            Phase::Pending => "pending",
-            Phase::Strategizing => "strategizing",
-            Phase::Implementing => "implementing",
-            Phase::Gating => "gating",
-            Phase::AutoFixing => "auto_fixing",
-            Phase::Reviewing => "reviewing",
-            Phase::Committing => "committing",
-            Phase::Complete => "complete",
-            Phase::Halted { .. } => "halted",
-            Phase::Cancelled => "cancelled",
+            Self::Pending => "pending",
+            Self::Strategizing => "strategizing",
+            Self::Implementing => "implementing",
+            Self::Gating => "gating",
+            Self::AutoFixing => "auto_fixing",
+            Self::Reviewing => "reviewing",
+            Self::Committing => "committing",
+            Self::Complete => "complete",
+            Self::Halted { .. } => "halted",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -582,6 +582,7 @@ impl PipelineStateV2 {
 
     /// Feed an event into the state machine, get an action back.
     /// This is the ONLY way to drive the state machine. No side effects here.
+    #[allow(clippy::too_many_lines)]
     pub fn step(&mut self, input: PipelineInput) -> PipelineOutput {
         match (&self.phase, input) {
             (Phase::Pending, PipelineInput::Start) => {
@@ -661,13 +662,12 @@ impl PipelineStateV2 {
                     PipelineOutput::SpawnImplementer {
                         prompt: self.original_prompt.clone(),
                         context: Some(format!(
-                            "Previous attempt failed gate '{}'. Error:\n{}",
-                            gate, output
+                            "Previous attempt failed gate '{gate}'. Error:\n{output}"
                         )),
                     }
                 } else {
                     let reason =
-                        format!("Gate '{}' failed after {} iterations", gate, self.iteration);
+                        format!("Gate '{gate}' failed after {} iterations", self.iteration);
                     self.phase = Phase::Halted {
                         reason: reason.clone(),
                     };

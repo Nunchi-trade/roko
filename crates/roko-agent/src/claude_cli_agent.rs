@@ -775,7 +775,7 @@ printf '%s\n' '{{"type":"content_block_delta","delta":{{"text":"hello"}}}}'
         assert!(args_text.contains("system guidance"));
         assert!(args_text.contains("--settings"));
         assert!(args_text.contains("--dangerously-skip-permissions"));
-        assert!(args_text.contains("--allowedTools"));
+        assert!(args_text.contains("--tools"));
         assert!(args_text.contains("Read,Edit"));
         assert!(args_text.contains("--resume"));
         assert!(args_text.contains("session-123"));

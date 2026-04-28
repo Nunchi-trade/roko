@@ -148,20 +148,76 @@
   overflow: hidden;
   border-left: 1px solid var(--glass-border);
 }
-.builder-terminal .pane {
-  margin-top: 0;
-  border-radius: 0;
-  border: 0;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-.builder-terminal .body {
+.builder-terminal-inner {
   flex: 1;
   min-height: 0;
+  padding: 4px;
 }
-.builder-terminal .body.flat {
-  padding: 0;
+
+/* ── Model selector ── */
+.builder-model-select {
+  position: relative;
+}
+.model-select-btn {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text-soft);
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: all 200ms var(--ease);
+}
+.model-select-btn:hover {
+  color: var(--bone);
+  border-color: var(--rose-dim);
+}
+.model-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 180px;
+  background: rgba(16, 12, 20, .96);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  padding: 4px 0;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  backdrop-filter: blur(12px);
+}
+.model-group {
+  padding: 2px 0;
+}
+.model-group-label {
+  padding: 4px 12px 2px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-ghost);
+}
+.model-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 5px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all 150ms var(--ease);
+}
+.model-option:hover {
+  background: rgba(170,112,136,.1);
+  color: var(--bone);
+}
+.model-option.active {
+  color: var(--rose-bright);
 }
 
 /* ── Bottom section ── */
@@ -173,6 +229,10 @@
   gap: 8px;
   flex-shrink: 0;
   background: var(--glass-bg);
+  position: relative;
+}
+.builder-input-wrap {
+  flex: 1;
   position: relative;
 }
 /* Pulsing top-edge accent when focused/active */
@@ -211,8 +271,8 @@
   font-weight: 600;
   font-size: 14px;
 }
-.builder-input input {
-  flex: 1;
+.builder-input-wrap input {
+  width: 100%;
   background: transparent;
   border: 1px solid var(--glass-border);
   border-radius: 4px;
@@ -223,11 +283,11 @@
   outline: none;
   transition: border-color 200ms var(--ease);
 }
-.builder-input input:focus {
+.builder-input-wrap input:focus {
   border-color: var(--rose-dim);
   box-shadow: 0 0 12px rgba(220,165,189,.1);
 }
-.builder-input input::placeholder {
+.builder-input-wrap input::placeholder {
   color: var(--text-dim);
 }
 .builder-input .btn-build {
@@ -283,4 +343,58 @@
   color: var(--text-dim);
   letter-spacing: .04em;
   flex-shrink: 0;
+}
+.builder-status-conn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.conn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-ghost);
+}
+.conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.conn-dot.connecting { background: var(--warning, #c8a030); animation: conn-blink 1s infinite; }
+.conn-dot.disconnected { background: var(--text-ghost); }
+@keyframes conn-blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* ── Autocomplete dropdown ── */
+.builder-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: rgba(16, 12, 20, .96);
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  padding: 4px 0;
+  z-index: 100;
+  box-shadow: 0 -4px 16px rgba(0,0,0,.4);
+  backdrop-filter: blur(12px);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.autocomplete-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all 150ms var(--ease);
+}
+.autocomplete-item:hover,
+.autocomplete-item.active {
+  background: rgba(170,112,136,.1);
+  color: var(--bone);
 }

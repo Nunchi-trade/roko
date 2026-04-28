@@ -658,13 +658,13 @@ impl UnifiedTaskDag {
             let dependencies: Vec<_> = self.deps_of(id).iter().cloned().collect();
             let dependents: Vec<_> = self.dependents_of(id).iter().cloned().collect();
             let task = self.tasks.get(id);
-            let status = statuses.get(id).cloned().unwrap_or_else(|| {
+            let status = statuses.get(id).cloned().unwrap_or(
                 if dependencies.is_empty() {
                     DagTaskExecutionStatus::Ready
                 } else {
                     DagTaskExecutionStatus::Pending
-                }
-            });
+                },
+            );
             let metadata = DagTaskExecutionMetadata {
                 task_id: id.clone(),
                 status,

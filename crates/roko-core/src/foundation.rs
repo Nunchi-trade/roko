@@ -341,7 +341,6 @@ pub trait EffectExecutor: Send + Sync {
 /// here for self-contained trait signatures. Use the canonical enum from
 /// `roko_core::BehavioralState` — do NOT duplicate the definition.
 /// (The type is already `pub` in roko-core via `affect.rs`.)
-
 /// Affect context snapshot provided before dispatching a task.
 #[derive(Debug, Clone)]
 pub struct AffectContext {

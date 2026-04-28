@@ -16,19 +16,25 @@ interface HealthData {
   providers?: Record<string, { healthy: boolean; latency_ms?: number }>;
 }
 
+interface GateVerdict {
+  gate: string;
+  passed: boolean;
+}
+
 interface Episode {
   id: string;
   kind: string;
-  agent?: string;
-  task?: string;
+  agent_id?: string;
+  task_id?: string;
   model?: string;
-  role?: string;
-  input_tokens?: number;
-  output_tokens?: number;
-  cost_usd?: number;
+  status?: string;
+  success?: boolean;
+  usage?: { cost_usd?: number; input_tokens?: number; output_tokens?: number };
+  timestamp_ms?: number;
+  gate_verdicts?: GateVerdict[];
+  duration_secs?: number;
+  turns?: number;
   hdc_fingerprint?: string;
-  gate_verdicts?: Record<string, string>;
-  timestamp: string;
   [key: string]: unknown;
 }
 
@@ -202,10 +208,10 @@ export default function Explorer() {
                 >
                   <div className="ep-summary">
                     <span className={`ep-badge ep-${ep.kind}`}>{ep.kind}</span>
-                    <span className="ep-agent">{ep.agent ?? 'system'}</span>
-                    <span className="ep-task">{ep.task ?? ''}</span>
-                    <span className="ep-cost">{ep.cost_usd != null ? `$${ep.cost_usd.toFixed(4)}` : ''}</span>
-                    <span className="ep-ts">{new Date(ep.timestamp).toLocaleTimeString()}</span>
+                    <span className="ep-agent">{ep.agent_id ?? 'system'}</span>
+                    <span className="ep-task">{ep.task_id ?? ''}</span>
+                    <span className="ep-cost">{ep.usage?.cost_usd != null ? `$${ep.usage.cost_usd.toFixed(4)}` : ''}</span>
+                    <span className="ep-ts">{ep.timestamp_ms ? new Date(ep.timestamp_ms).toLocaleTimeString() : ''}</span>
                   </div>
                   {expandedEp === ep.id && (
                     <div className="ep-detail">

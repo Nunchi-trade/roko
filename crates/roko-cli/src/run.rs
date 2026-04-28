@@ -382,12 +382,22 @@ impl RuntimeAffectPolicy for RuntimeAffectPolicyAdapter {
     fn persist(&self) -> RuntimeBoxFuture<'_, RuntimeResult<()>> {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
-            if let Ok(policy) = inner.lock() {
-                if let Err(e) = futures::executor::block_on(policy.persist()) {
-                    tracing::warn!(%e, "affect policy persist failed");
+            // Use spawn_blocking to avoid calling block_on inside a tokio context,
+            // which would panic with "Cannot start a runtime from within a runtime".
+            let result = tokio::task::spawn_blocking(move || {
+                if let Ok(policy) = inner.lock() {
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(policy.persist())
+                } else {
+                    tracing::warn!("affect policy lock poisoned; skipping persist");
+                    Ok(())
                 }
-            } else {
-                tracing::warn!("affect policy lock poisoned; skipping persist");
+            })
+            .await;
+            match result {
+                Ok(Err(e)) => tracing::warn!(%e, "affect policy persist failed"),
+                Err(e) => tracing::warn!(%e, "affect policy persist task panicked"),
+                _ => {}
             }
             Ok(())
         })

@@ -462,7 +462,7 @@ fn build_runtime_entry(observation: &RuntimeEpisodeObservation) -> Option<Knowle
         emotional_tag: None,
         emotional_provenance: None,
         hdc_vector: None,
-        confirmation_count: if observation.gate_passed { 1 } else { 0 },
+        confirmation_count: u32::from(observation.gate_passed),
         distinct_contexts: distinct_contexts(observation),
         deprecated: false,
         balance: 1.0,
@@ -490,7 +490,7 @@ fn candidate_for_observation(
         tags: observation.task_tags.clone(),
     })
     .with_tags(entry.tags.clone());
-    candidate.source_episodes = entry.source_episodes.clone();
+    candidate.source_episodes.clone_from(&entry.source_episodes);
     candidate.evidence = evidence_for_observation(observation);
     candidate
 }

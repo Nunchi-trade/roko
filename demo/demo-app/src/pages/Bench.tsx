@@ -1,175 +1,84 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router';
-import { useApiWithFallback } from '../hooks/useApiWithFallback';
+import { useBench } from '../hooks/useBench';
+import type { AgentStrategy } from '../lib/bench-types';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
 import BarChart from '../components/Charts/BarChart';
+import CostChart from '../components/Charts/CostChart';
+import ParetoChart from '../components/Charts/ParetoChart';
+import type { ParetoPoint } from '../components/Charts/ParetoChart';
+import ModelPicker from '../components/ModelPicker';
+import SuiteSelector from '../components/SuiteSelector';
+import TaskTable from '../components/TaskTable';
 import './Bench.css';
 
-type Tab = 'configure' | 'results' | 'learning' | 'compare';
+type Tab = 'configure' | 'live' | 'results' | 'history' | 'pareto';
 
-const SUITES = [
-  { id: 'smoke', label: 'Smoke', desc: 'Quick validation (5 tasks)', prompt: 'Build a CLI calculator in Rust' },
-  { id: 'swe-lite', label: 'SWE-lite', desc: 'Lightweight SWE-bench subset (25 tasks)', prompt: 'Create a REST API with health check endpoint' },
-  { id: 'swe-verified', label: 'SWE-verified', desc: 'Verified SWE-bench (300 tasks)', prompt: 'Write a markdown to HTML converter' },
-  { id: 'custom', label: 'Custom', desc: 'Custom dataset path', prompt: 'Build a file deduplication tool' },
-];
-
-const STRATEGIES = [
+const STRATEGIES: { id: AgentStrategy; label: string; desc: string }[] = [
   { id: 'minimal', label: 'Minimal', desc: 'Basic agent, no enrichment' },
-  { id: 'context-enriched', label: 'Context-Enriched', desc: 'With context bidders' },
-  { id: 'neuro-augmented', label: 'Neuro-Augmented', desc: 'With knowledge store' },
-  { id: 'full-cascade', label: 'Full Cascade', desc: 'Complete pipeline with replan' },
+  { id: 'context_enriched', label: 'Context-Enriched', desc: 'With context bidders' },
+  { id: 'neuro_augmented', label: 'Neuro-Augmented', desc: 'With knowledge store' },
+  { id: 'full_cascade', label: 'Full Cascade', desc: 'Complete pipeline with replan' },
 ];
 
-interface BenchResult {
-  task: string;
-  pass: boolean;
-  cost: number;
-  tokens: number;
-  duration_ms: number;
-}
-
-interface RouterModel {
-  model: string;
-  weight: number;
-  trials: number;
-}
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'configure', label: 'Configure' },
+  { id: 'live', label: 'Live' },
+  { id: 'results', label: 'Results' },
+  { id: 'history', label: 'History' },
+  { id: 'pareto', label: 'Pareto' },
+];
 
 export default function Bench() {
   const [tab, setTab] = useState<Tab>('configure');
-  const [suite, setSuite] = useState('smoke');
-  const [strategy, setStrategy] = useState('full-cascade');
-  const [model, setModel] = useState('claude-sonnet-4-20250514');
-  const [running, setRunning] = useState(false);
-  const [runStatus, setRunStatus] = useState('');
-  const [results, setResults] = useState<BenchResult[]>([]);
-  const [routerModels, setRouterModels] = useState<RouterModel[]>([]);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const { get, post } = useApiWithFallback();
+  const bench = useBench();
+  const {
+    config, setConfig,
+    selectedSuiteId, setSelectedSuiteId, selectedSuite,
+    suites, models, history,
+    activeRun, activeRunSummary, feed,
+    startRun, cancelRun,
+    lastCompletedRun,
+  } = bench;
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const router = await get<{ models?: RouterModel[] }>('/api/learn/cascade-router');
-        if (router.models) setRouterModels(router.models);
-      } catch { /* not available */ }
-    })();
-  }, [get]);
+  // Compute hero stats from history
+  const totalRuns = history.length;
+  const avgPassRate = history.length > 0
+    ? history.reduce((s, r) => s + (r.summary?.pass_rate ?? 0), 0) / history.length
+    : 0;
+  const totalCost = history.reduce((s, r) => s + (r.summary?.total_cost_usd ?? 0), 0);
 
-  // Load historical efficiency data
-  useEffect(() => {
-    (async () => {
-      try {
-        const eff = await get<{ tasks?: { task_id?: string; cost_usd?: number; passed?: boolean; tokens?: number; duration_ms?: number }[] }>('/api/learn/efficiency');
-        if (eff.tasks && eff.tasks.length > 0) {
-          setResults(eff.tasks.map((t) => ({
-            task: t.task_id ?? 'unknown',
-            pass: t.passed ?? false,
-            cost: t.cost_usd ?? 0,
-            tokens: t.tokens ?? 0,
-            duration_ms: t.duration_ms ?? 0,
-          })));
-        }
-      } catch { /* not available */ }
-    })();
-  }, [get]);
+  // Results for the results tab — from last completed run or active run
+  const displayResults = activeRun?.results ?? (lastCompletedRun && 'results' in lastCompletedRun ? (lastCompletedRun as { results: typeof activeRun extends null ? never : NonNullable<typeof activeRun>['results'] }).results : []);
+  const displaySummary = activeRunSummary ?? (lastCompletedRun && 'summary' in lastCompletedRun ? (lastCompletedRun as { summary?: NonNullable<typeof activeRunSummary> }).summary : undefined);
 
-  const totalCost = results.reduce((s, r) => s + r.cost, 0);
-  const passRate = results.length > 0 ? results.filter((r) => r.pass).length / results.length : 0;
-
-  // Cleanup polling on unmount
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
-  const runBenchmark = useCallback(async () => {
-    setRunning(true);
-    setTab('results');
-    setRunStatus('submitting...');
-
-    const suiteConfig = SUITES.find((s) => s.id === suite);
-    const prompt = suiteConfig?.prompt ?? 'Build a hello-world web server';
-    const startTime = Date.now();
-
-    try {
-      const res = await post<{ id: string }>('/api/run', {
-        prompt: `[bench:${suite}/${strategy}] ${prompt}`,
-        workdir: `/tmp/roko-bench-${Date.now()}`,
-      });
-
-      const runId = res.id;
-      setRunStatus(`running (${runId.slice(0, 8)}...)`);
-
-      pollRef.current = setInterval(async () => {
-        try {
-          const status = await get<{
-            id: string;
-            status: string;
-            success?: boolean;
-            output_text?: string;
-            error?: string;
-            finished: boolean;
-          }>(`/api/run/${runId}/status`);
-
-          if (status.finished || status.status === 'completed' || status.status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            const elapsed = Date.now() - startTime;
-
-            setResults((prev) => [...prev, {
-              task: prompt.slice(0, 40),
-              pass: status.success ?? false,
-              cost: 0,
-              tokens: 0,
-              duration_ms: elapsed,
-            }]);
-
-            setRunStatus(status.success ? 'completed' : `failed: ${status.error ?? 'unknown error'}`);
-            setRunning(false);
-
-            try {
-              const eff = await get<{ tasks?: { task_id?: string; cost_usd?: number; passed?: boolean; tokens?: number; duration_ms?: number }[] }>('/api/learn/efficiency');
-              if (eff.tasks && eff.tasks.length > 0) {
-                setResults(eff.tasks.map((t) => ({
-                  task: t.task_id ?? 'unknown',
-                  pass: t.passed ?? false,
-                  cost: t.cost_usd ?? 0,
-                  tokens: t.tokens ?? 0,
-                  duration_ms: t.duration_ms ?? 0,
-                })));
-              }
-            } catch { /* ok */ }
-          } else {
-            setRunStatus(`${status.status} (${runId.slice(0, 8)}...)`);
-          }
-        } catch {
-          // Poll error -- will retry
-        }
-      }, 2000);
-    } catch (err) {
-      setRunStatus(`error: ${err instanceof Error ? err.message : 'failed to submit run'}`);
-      setRunning(false);
-    }
-  }, [suite, strategy, get, post]);
-
-  const TABS: { id: Tab; label: string }[] = [
-    { id: 'configure', label: 'Configure' },
-    { id: 'results', label: 'Results' },
-    { id: 'learning', label: 'Self-Learning' },
-    { id: 'compare', label: 'Compare' },
-  ];
+  // Pareto data: one point per completed run
+  const paretoData: ParetoPoint[] = history
+    .filter((r) => r.summary)
+    .map((r) => ({
+      label: r.config.model.split('-').slice(0, 2).join('-'),
+      cost: r.summary!.total_cost_usd,
+      passRate: r.summary!.pass_rate,
+      color: r.config.model.includes('haiku') ? 'var(--bone-bright)'
+        : r.config.model.includes('sonnet') ? 'var(--rose-bright)'
+        : r.config.model.includes('opus') ? 'var(--dream-bright)'
+        : 'var(--success)',
+    }));
 
   return (
     <div className="bench-page">
       <div className="bench-hero">
         <div className="bench-hero-header">
           <h1 className="bench-page-title">Benchmark Lab</h1>
-          <p className="bench-page-sub">Configure, run, and analyze SWE-bench evaluations</p>
+          <p className="bench-page-sub">Configure, run, and analyze agent evaluations</p>
         </div>
         <div className="bench-hero-stats">
           <Mosaic columns={4}>
-            <MosaicCell label="TOTAL RUNS" value={String(results.length || 10)} color="bone" />
-            <MosaicCell label="PASS RATE" value={`${((passRate || 0.9) * 100).toFixed(0)}%`} color="success" />
-            <MosaicCell label="TOTAL COST" value={`$${(totalCost || 1.42).toFixed(2)}`} color="warning" />
-            <MosaicCell label="EPISODES" value={String(results.length > 0 ? results.length * 3 : 847)} color="rose" />
+            <MosaicCell label="TOTAL RUNS" value={String(totalRuns || '-')} color="bone" />
+            <MosaicCell label="AVG PASS RATE" value={avgPassRate > 0 ? `${(avgPassRate * 100).toFixed(0)}%` : '-'} color="success" />
+            <MosaicCell label="TOTAL COST" value={totalCost > 0 ? `$${totalCost.toFixed(2)}` : '-'} color="warning" />
+            <MosaicCell label="SUITES" value={String(suites.length)} color="rose" />
           </Mosaic>
         </div>
       </div>
@@ -178,26 +87,23 @@ export default function Bench() {
         {TABS.map((t) => (
           <button key={t.id} className={`bench-tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
+            {t.id === 'live' && activeRun?.status === 'running' && (
+              <span className="bench-tab-dot" />
+            )}
           </button>
         ))}
       </div>
 
       <div className="bench-body">
+        {/* ── Configure Tab ── */}
         {tab === 'configure' && (
           <div className="bench-config">
             <Pane title="TEST SUITE">
-              <div className="config-cards">
-                {SUITES.map((s) => (
-                  <button
-                    key={s.id}
-                    className={`config-card${suite === s.id ? ' selected' : ''}`}
-                    onClick={() => setSuite(s.id)}
-                  >
-                    <span className="card-label">{s.label}</span>
-                    <span className="card-desc">{s.desc}</span>
-                  </button>
-                ))}
-              </div>
+              <SuiteSelector
+                suites={suites}
+                value={selectedSuiteId}
+                onChange={setSelectedSuiteId}
+              />
             </Pane>
 
             <Pane title="AGENT STRATEGY">
@@ -205,8 +111,8 @@ export default function Bench() {
                 {STRATEGIES.map((s) => (
                   <button
                     key={s.id}
-                    className={`config-card${strategy === s.id ? ' selected' : ''}`}
-                    onClick={() => setStrategy(s.id)}
+                    className={`config-card${config.strategy === s.id ? ' selected' : ''}`}
+                    onClick={() => setConfig({ ...config, strategy: s.id })}
                   >
                     <span className="card-label">{s.label}</span>
                     <span className="card-desc">{s.desc}</span>
@@ -216,98 +122,365 @@ export default function Bench() {
             </Pane>
 
             <Pane title="MODEL">
-              <input
-                className="config-input"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="Model identifier"
+              <ModelPicker
+                models={models}
+                value={config.model}
+                onChange={(m) => setConfig({ ...config, model: m })}
               />
             </Pane>
 
+            <Pane title="PARAMETERS">
+              <div className="config-params">
+                <label className="param-row">
+                  <span className="param-label">Temperature</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={config.temperature}
+                    onChange={(e) => setConfig({ ...config, temperature: Number(e.target.value) })}
+                    className="param-slider"
+                  />
+                  <span className="param-value">{config.temperature}</span>
+                </label>
+                <label className="param-row">
+                  <span className="param-label">Max Tokens</span>
+                  <input
+                    type="number"
+                    className="config-input"
+                    value={config.maxTokens}
+                    onChange={(e) => setConfig({ ...config, maxTokens: Number(e.target.value) })}
+                    style={{ maxWidth: 120 }}
+                  />
+                </label>
+                <label className="param-row">
+                  <span className="param-label">Timeout (s)</span>
+                  <input
+                    type="number"
+                    className="config-input"
+                    value={config.timeoutSecs}
+                    onChange={(e) => setConfig({ ...config, timeoutSecs: Number(e.target.value) })}
+                    style={{ maxWidth: 120 }}
+                  />
+                </label>
+                <label className="param-row">
+                  <span className="param-label">Retries</span>
+                  <input
+                    type="number"
+                    className="config-input"
+                    min="0"
+                    max="3"
+                    value={config.retries}
+                    onChange={(e) => setConfig({ ...config, retries: Number(e.target.value) })}
+                    style={{ maxWidth: 80 }}
+                  />
+                </label>
+                <div className="param-row">
+                  <span className="param-label">Gates</span>
+                  <div className="gate-toggles">
+                    {(['compile', 'test', 'clippy', 'diff'] as const).map((g) => (
+                      <label key={g} className="gate-toggle">
+                        <input
+                          type="checkbox"
+                          checked={config.gates[g]}
+                          onChange={(e) => setConfig({
+                            ...config,
+                            gates: { ...config.gates, [g]: e.target.checked },
+                          })}
+                        />
+                        <span>{g}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </Pane>
+
+            {selectedSuite && (
+              <div className="bench-cost-estimate">
+                <span className="cost-label">Estimated cost:</span>
+                <span className="cost-value">${selectedSuite.estimated_cost_usd.toFixed(2)}</span>
+                <span className="cost-detail">
+                  ({selectedSuite.tasks.length} tasks, {config.strategy.replace(/_/g, ' ')})
+                </span>
+              </div>
+            )}
+
             <div className="bench-run-btn" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-              <button className="btn" onClick={runBenchmark} disabled={running}>
-                {running ? 'Running...' : 'Run Benchmark'}
+              <button
+                className="btn"
+                onClick={() => { startRun(); setTab('live'); }}
+                disabled={activeRun?.status === 'running'}
+              >
+                {activeRun?.status === 'running' ? 'Running...' : 'Run Benchmark'}
               </button>
-              <Link to="/bench-live" className="btn bone" style={{ textDecoration: 'none' }}>
-                Live Monitor
+              <Link to="/bench/showroom" className="btn bone" style={{ textDecoration: 'none' }}>
+                Showroom
               </Link>
             </div>
           </div>
         )}
 
+        {/* ── Live Tab ── */}
+        {tab === 'live' && (
+          <div className="bench-live">
+            {!activeRun ? (
+              <div className="bench-empty">
+                <p className="bench-empty-text">No active run. Go to Configure to start one.</p>
+              </div>
+            ) : (
+              <>
+                <div className="bench-live-header">
+                  <span className={`benchlive-dot${activeRun.status === 'running' ? '' : ' disconnected'}`} />
+                  <span className="bench-live-status">
+                    {activeRun.status === 'running' ? 'RUNNING' : activeRun.status.toUpperCase()}
+                  </span>
+                  <span className="bench-live-progress">
+                    {activeRun.progress}/{activeRun.total}
+                  </span>
+                  <span className="bench-live-cost">${activeRun.costSoFar.toFixed(3)}</span>
+                  {activeRun.status === 'running' && (
+                    <button className="btn btn-sm" onClick={cancelRun} style={{ marginLeft: 'auto' }}>
+                      Cancel
+                    </button>
+                  )}
+                </div>
+
+                <div className="bench-live-progress-bar">
+                  <div
+                    className="bench-live-progress-fill"
+                    style={{ width: `${activeRun.total > 0 ? (activeRun.progress / activeRun.total) * 100 : 0}%` }}
+                  />
+                </div>
+
+                <div className="benchlive-grid">
+                  <Pane title="TASK GRID">
+                    <div className="task-grid">
+                      {Array.from({ length: activeRun.total }, (_, i) => {
+                        const result = activeRun.results[i];
+                        const status = result
+                          ? result.status
+                          : i === activeRun.results.length && activeRun.status === 'running'
+                            ? 'running'
+                            : 'pending';
+                        return (
+                          <div
+                            key={i}
+                            className={`task-cell task-${status}`}
+                            title={result ? result.task_name : `Task ${i + 1}`}
+                          />
+                        );
+                      })}
+                    </div>
+                  </Pane>
+
+                  <Pane title="COST CHART">
+                    <CostChart
+                      data={activeRun.results.map((r, i) => ({
+                        label: `T${i + 1}`,
+                        value: r.cost_usd,
+                      }))}
+                      height={260}
+                      color="var(--bone)"
+                    />
+                  </Pane>
+
+                  <Pane title="ACTIVITY FEED">
+                    <div className="feed-list">
+                      {feed.map((item, i) => (
+                        <div key={i} className={`feed-item feed-${item.type}`}>
+                          <span className="feed-ts">{item.ts}</span>
+                          <span className="feed-text">{item.text}</span>
+                          {item.cost != null && <span className="feed-cost">${item.cost.toFixed(3)}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </Pane>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Results Tab ── */}
         {tab === 'results' && (
           <div className="bench-results">
-            {runStatus && (
-              <div className={`run-status ${running ? 'running' : runStatus.startsWith('error') || runStatus.startsWith('failed') ? 'error' : 'done'}`}>
-                {running && <span className="run-spinner" />}
-                {runStatus}
+            {displayResults.length === 0 ? (
+              <div className="bench-empty">
+                <p className="bench-empty-text">No results yet. Run a benchmark to see results here.</p>
               </div>
+            ) : (
+              <>
+                <div className="bench-results-stats">
+                  <Mosaic columns={4}>
+                    <MosaicCell
+                      label="PASS RATE"
+                      value={displaySummary ? `${(displaySummary.pass_rate * 100).toFixed(0)}%` : '-'}
+                      color="success"
+                    />
+                    <MosaicCell
+                      label="TOTAL COST"
+                      value={displaySummary ? `$${displaySummary.total_cost_usd.toFixed(3)}` : '-'}
+                      color="warning"
+                    />
+                    <MosaicCell
+                      label="USD/SUCCESS"
+                      value={displaySummary ? `$${displaySummary.cost_per_success_usd.toFixed(3)}` : '-'}
+                      color="bone"
+                      mono
+                    />
+                    <MosaicCell
+                      label="AVG DURATION"
+                      value={displaySummary ? `${(displaySummary.avg_duration_ms / 1000).toFixed(1)}s` : '-'}
+                      color="dream"
+                      mono
+                    />
+                  </Mosaic>
+                </div>
+
+                <Pane title="TASK RESULTS">
+                  <TaskTable results={displayResults} />
+                </Pane>
+
+                <Pane title="COST PER TASK">
+                  <BarChart
+                    data={displayResults.slice(-30).map((r) => ({
+                      label: r.task_name.slice(0, 20),
+                      value: r.cost_usd,
+                      color: r.status === 'pass' ? 'var(--success)' : 'var(--rose-dim)',
+                    }))}
+                    height={250}
+                  />
+                </Pane>
+
+                {displayResults.length > 0 && (
+                  <Pane title="GATE BREAKDOWN">
+                    <div className="gate-breakdown">
+                      {(() => {
+                        const gateCounts: Record<string, { passed: number; total: number }> = {};
+                        for (const r of displayResults) {
+                          for (const g of r.gate_verdicts) {
+                            if (!gateCounts[g.gate]) gateCounts[g.gate] = { passed: 0, total: 0 };
+                            gateCounts[g.gate].total++;
+                            if (g.passed) gateCounts[g.gate].passed++;
+                          }
+                        }
+                        return Object.entries(gateCounts).map(([gate, { passed, total }]) => (
+                          <div key={gate} className="gate-breakdown-item">
+                            <span className="gate-breakdown-name">{gate}</span>
+                            <div className="gate-breakdown-bar">
+                              <div
+                                className="gate-breakdown-fill"
+                                style={{ width: `${(passed / total) * 100}%` }}
+                              />
+                            </div>
+                            <span className="gate-breakdown-pct">
+                              {((passed / total) * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </Pane>
+                )}
+              </>
             )}
-            <div className="bench-results-stats">
-              <Mosaic columns={3}>
-                <MosaicCell label="PASS RATE" value={`${((passRate || 0.9) * 100).toFixed(0)}%`} color="success" />
-                <MosaicCell label="TOTAL COST" value={`$${(totalCost || 1.42).toFixed(2)}`} color="warning" />
-                <MosaicCell label="AVG TIME" value={results.length > 0 ? `${Math.round(results.reduce((s, r) => s + r.duration_ms, 0) / results.length / 1000)}s` : '5s'} color="bone" mono />
-              </Mosaic>
-            </div>
-            <Pane title="COST PER TASK">
-              <BarChart
-                data={(results.length > 0 ? results : [
-                  { task: 'wire-gate-pipeline', pass: true, cost: 0.022, tokens: 3200, duration_ms: 4500 },
-                  { task: 'deploy-witness', pass: true, cost: 0.026, tokens: 4100, duration_ms: 6200 },
-                  { task: 'enhance-prd', pass: true, cost: 0.006, tokens: 1800, duration_ms: 2100 },
-                  { task: 'build-dashboard', pass: true, cost: 0.037, tokens: 5500, duration_ms: 8400 },
-                  { task: 'review-safety', pass: true, cost: 0.047, tokens: 6200, duration_ms: 9800 },
-                  { task: 'wire-episode-log', pass: true, cost: 0.018, tokens: 2800, duration_ms: 3900 },
-                  { task: 'analyze-cost', pass: true, cost: 0.005, tokens: 1200, duration_ms: 1600 },
-                  { task: 'wire-chain', pass: false, cost: 0.024, tokens: 3800, duration_ms: 5700 },
-                  { task: 'audit-mcp', pass: true, cost: 0.040, tokens: 5800, duration_ms: 8100 },
-                  { task: 'wire-tui', pass: true, cost: 0.030, tokens: 4600, duration_ms: 7000 },
-                ]).slice(-30).map((r) => ({
-                  label: r.task.slice(0, 20),
-                  value: r.cost,
-                  color: r.pass ? 'var(--success)' : 'var(--rose-dim)',
-                }))}
-                height={250}
-              />
-            </Pane>
           </div>
         )}
 
-        {tab === 'learning' && (
-          <div className="bench-learning">
-            <div className="bench-learning-stats">
-              <Mosaic columns={2}>
-                <MosaicCell label="CASCADE ROUTER" value={routerModels.length > 0 ? `${routerModels.length} models` : '4 models'} color="rose" />
-                <MosaicCell label="KNOWLEDGE STORE" value="1.2k" color="bone" sub="distilled entries" />
-              </Mosaic>
-            </div>
-            <Pane title="MODEL ROUTING">
-              <BarChart
-                data={(routerModels.length > 0 ? routerModels : [
-                  { model: 'claude-haiku', weight: 0.45, trials: 380 },
-                  { model: 'claude-sonnet', weight: 0.30, trials: 254 },
-                  { model: 'gpt-4o', weight: 0.15, trials: 127 },
-                  { model: 'claude-opus', weight: 0.10, trials: 86 },
-                ]).map((m) => ({
-                  label: m.model.slice(0, 20),
-                  value: m.weight,
-                  color: 'var(--rose)',
-                }))}
-                height={200}
-              />
-            </Pane>
+        {/* ── History Tab ── */}
+        {tab === 'history' && (
+          <div className="bench-history">
+            {history.length === 0 ? (
+              <div className="bench-empty">
+                <p className="bench-empty-text">No runs recorded yet.</p>
+              </div>
+            ) : (
+              <Pane title="RUN HISTORY">
+                <div className="task-table-wrap">
+                  <table className="task-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Suite</th>
+                        <th>Model</th>
+                        <th>Strategy</th>
+                        <th>Pass Rate</th>
+                        <th>Cost</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.map((run) => (
+                        <tr key={run.id}>
+                          <td className="mono">{new Date(run.started_at).toLocaleDateString()}</td>
+                          <td>{run.suite_name}</td>
+                          <td className="mono">{run.config.model.split('-').slice(0, 2).join('-')}</td>
+                          <td>{run.config.strategy.replace(/_/g, ' ')}</td>
+                          <td className="mono">
+                            {run.summary ? `${(run.summary.pass_rate * 100).toFixed(0)}%` : '-'}
+                          </td>
+                          <td className="mono">
+                            {run.summary ? `$${run.summary.total_cost_usd.toFixed(3)}` : '-'}
+                          </td>
+                          <td>
+                            <span className={`status-badge status-${run.status === 'completed' ? 'pass' : run.status}`}>
+                              {run.status.toUpperCase()}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Pane>
+            )}
           </div>
         )}
 
-        {tab === 'compare' && (
-          <Pane title="COMPARISON">
-            <p className="bench-compare-text">
-              Run benchmarks with different configurations to compare results side by side.
-              Each run is recorded with full cost, latency, and gate pass telemetry.
-              Select multiple runs from the Results tab to populate this view.
-            </p>
-          </Pane>
+        {/* ── Pareto Tab ── */}
+        {tab === 'pareto' && (
+          <div className="bench-pareto">
+            {paretoData.length === 0 ? (
+              <div className="bench-empty">
+                <p className="bench-empty-text">Run benchmarks with different models to see the Pareto frontier.</p>
+              </div>
+            ) : (
+              <>
+                <Pane title="PARETO FRONTIER">
+                  <ParetoChart data={paretoData} height={400} />
+                </Pane>
+
+                <Pane title="MODEL COMPARISON">
+                  <div className="task-table-wrap">
+                    <table className="task-table">
+                      <thead>
+                        <tr>
+                          <th>Model</th>
+                          <th>Pass Rate</th>
+                          <th>Cost</th>
+                          <th>Tasks</th>
+                          <th>Suite</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {history.filter((r) => r.summary).map((run) => (
+                          <tr key={run.id}>
+                            <td className="mono">{run.config.model}</td>
+                            <td className="mono">{(run.summary!.pass_rate * 100).toFixed(1)}%</td>
+                            <td className="mono">${run.summary!.total_cost_usd.toFixed(3)}</td>
+                            <td className="mono">{run.summary!.total_tasks}</td>
+                            <td>{run.suite_name}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Pane>
+              </>
+            )}
+          </div>
         )}
       </div>
     </div>

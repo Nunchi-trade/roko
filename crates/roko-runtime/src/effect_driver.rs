@@ -121,6 +121,7 @@ impl EffectDriver {
     ///
     /// Returns a `PipelineInput::AgentCompleted` or `PipelineInput::AgentFailed`
     /// that should be fed back into the state machine.
+    #[allow(clippy::too_many_lines)]
     pub async fn spawn_agent(
         &self,
         role: &str,
@@ -288,13 +289,13 @@ impl EffectDriver {
                     }
                 }
 
-                match report.first_failure() {
-                    Some(failure) => PipelineInput::GateFailed {
+                report.first_failure().map_or(
+                    PipelineInput::GatesPassed,
+                    |failure| PipelineInput::GateFailed {
                         gate: failure.gate_name.clone(),
                         output: report.failure_summary(),
                     },
-                    None => PipelineInput::GatesPassed,
-                }
+                )
             }
             Err(err) => PipelineInput::GateFailed {
                 gate: "gate_runner".to_string(),
@@ -320,8 +321,10 @@ impl EffectDriver {
                 kind: "commit_error".to_string(),
                 summary: format!("git add failed: {err}"),
             });
-            return PipelineInput::AgentFailed {
-                error: format!("git add failed: {err}"),
+            // Return CommitDone (not AgentFailed) because the state machine is in
+            // Phase::Committing which only handles CommitDone transitions.
+            return PipelineInput::CommitDone {
+                hash: format!("error: git add failed: {err}"),
             };
         }
 
@@ -364,13 +367,13 @@ impl EffectDriver {
                         hash: "noop".to_string(),
                     }
                 } else {
-                    PipelineInput::AgentFailed {
-                        error: format!("git commit failed: {stderr}"),
+                    PipelineInput::CommitDone {
+                        hash: format!("error: git commit failed: {stderr}"),
                     }
                 }
             }
-            Err(err) => PipelineInput::AgentFailed {
-                error: format!("git commit failed: {err}"),
+            Err(err) => PipelineInput::CommitDone {
+                hash: format!("error: git commit failed: {err}"),
             },
         }
     }
@@ -415,18 +418,19 @@ impl EffectDriver {
     }
 
     async fn record_gate_verdict(&self, verdict: &GateVerdict) {
-        let event = match verdict.passed {
-            true => RuntimeEvent::GatePassed {
+        let event = if verdict.passed {
+            RuntimeEvent::GatePassed {
                 run_id: self.run_id.clone(),
                 gate_name: verdict.gate_name.clone(),
                 duration_ms: verdict.duration_ms,
-            },
-            false => RuntimeEvent::GateFailed {
+            }
+        } else {
+            RuntimeEvent::GateFailed {
                 run_id: self.run_id.clone(),
                 gate_name: verdict.gate_name.clone(),
                 output: verdict.output.clone(),
                 duration_ms: verdict.duration_ms,
-            },
+            }
         };
         emit_runtime_event(event);
 
@@ -452,8 +456,20 @@ fn truncate_message(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
-        &s[..s.floor_char_boundary(max)]
+        &s[..floor_char_boundary(s, max)]
     }
+}
+
+/// Manual implementation of `str::floor_char_boundary` for MSRV < 1.91.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Count the number of files changed in the working directory via `git diff --name-only`.

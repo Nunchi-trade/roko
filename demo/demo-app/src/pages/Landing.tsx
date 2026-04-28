@@ -6,6 +6,7 @@ import Mosaic, { MosaicCell } from '../components/Mosaic';
 import Pane from '../components/Pane';
 import CrushedBar from '../components/CrushedBar';
 import PhosphorNumber from '../components/PhosphorNumber';
+import ConnectScreen from '../components/ConnectScreen';
 
 /* ================================================================
    Injected keyframes (Landing-only animations)
@@ -154,6 +155,7 @@ export default function Landing() {
 
   return (
     <div style={{ minHeight: '100vh', overflow: 'auto' }}>
+      {!isConnected && <ConnectScreen />}
       <style>{LANDING_STYLES}</style>
 
       {/* ================================================================

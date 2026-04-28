@@ -321,13 +321,12 @@ async fn handle_ws(
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if pty_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });

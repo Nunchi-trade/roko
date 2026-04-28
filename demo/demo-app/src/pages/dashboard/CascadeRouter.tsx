@@ -1,15 +1,17 @@
 import { type CSSProperties, useEffect, useMemo, useState } from 'react';
 import StatCard from '../../components/StatCard';
-import { useApi } from '../../hooks/useApi';
+import { useApiWithFallback } from '../../hooks/useApiWithFallback';
 
-interface ModelStat {
-  confidence: number;
-  uses: number;
+interface ConfidenceStat {
+  successes: number;
+  trials: number;
 }
 
 interface CascadeState {
-  model_stats?: Record<string, ModelStat>;
-  last_updated?: string;
+  model_slugs?: string[];
+  role_table?: Record<string, string>;
+  confidence_stats?: Record<string, ConfidenceStat>;
+  total_observations?: number;
 }
 
 const pageStyle: CSSProperties = {
@@ -90,7 +92,7 @@ function percent(value: number) {
 }
 
 export default function CascadeRouter() {
-  const { get } = useApi();
+  const { get } = useApiWithFallback();
   const [state, setState] = useState<CascadeState>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -100,7 +102,7 @@ export default function CascadeRouter() {
 
     const poll = async () => {
       try {
-        const data = await get<CascadeState>('/api/learning/cascade-router');
+        const data = await get<CascadeState>('/api/learn/cascade-router');
         if (cancelled) return;
         setState(data ?? {});
         setError(null);
@@ -118,20 +120,20 @@ export default function CascadeRouter() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [get]);
 
   const rows = useMemo(
-    () => Object.entries(state.model_stats ?? {}).sort(([a], [b]) => a.localeCompare(b)),
-    [state.model_stats],
+    () => Object.entries(state.confidence_stats ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    [state.confidence_stats],
   );
 
   const stats = useMemo(() => {
-    const totalUses = rows.reduce((sum, [, model]) => sum + model.uses, 0);
-    const confidenceTotal = rows.reduce((sum, [, model]) => sum + model.confidence, 0);
+    const totalTrials = rows.reduce((sum, [, s]) => sum + s.trials, 0);
+    const totalSuccesses = rows.reduce((sum, [, s]) => sum + s.successes, 0);
 
     return {
-      totalUses,
-      avgConfidence: rows.length > 0 ? confidenceTotal / rows.length : 0,
+      totalTrials,
+      avgConfidence: totalTrials > 0 ? totalSuccesses / totalTrials : 0,
     };
   }, [rows]);
 
@@ -147,7 +149,7 @@ export default function CascadeRouter() {
 
       <div style={statGridStyle}>
         <StatCard label="Models" value={rows.length} color="rose" />
-        <StatCard label="Total Uses" value={stats.totalUses} color="bone" />
+        <StatCard label="Observations" value={state.total_observations ?? stats.totalTrials} color="bone" />
         <StatCard label="Avg Confidence" value={percent(stats.avgConfidence)} color="sage" />
       </div>
 
@@ -162,15 +164,17 @@ export default function CascadeRouter() {
               <tr>
                 <th style={thStyle}>Model</th>
                 <th style={thStyle}>Confidence</th>
-                <th style={thStyle}>Uses</th>
+                <th style={thStyle}>Successes</th>
+                <th style={thStyle}>Trials</th>
               </tr>
             </thead>
             <tbody>
               {rows.map(([model, stat]) => (
                 <tr key={model}>
                   <td style={tdStyle}>{model}</td>
-                  <td style={tdStyle}>{percent(stat.confidence)}</td>
-                  <td style={tdStyle}>{stat.uses}</td>
+                  <td style={tdStyle}>{percent(stat.trials > 0 ? stat.successes / stat.trials : 0)}</td>
+                  <td style={tdStyle}>{stat.successes}</td>
+                  <td style={tdStyle}>{stat.trials}</td>
                 </tr>
               ))}
             </tbody>
@@ -178,7 +182,29 @@ export default function CascadeRouter() {
         )}
       </div>
 
-      <div style={subStyle}>last_updated: {state.last_updated ?? '—'}</div>
+      {/* ═══ ROLE TABLE ═══ */}
+      {state.role_table && Object.keys(state.role_table).length > 0 && (
+        <div style={tableWrapStyle}>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Role</th>
+                <th style={thStyle}>Assigned Model</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(state.role_table).sort(([a], [b]) => a.localeCompare(b)).map(([role, model]) => (
+                <tr key={role}>
+                  <td style={tdStyle}>{role}</td>
+                  <td style={tdStyle}>{model}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={subStyle}>total observations: {state.total_observations ?? '—'}</div>
     </div>
   );
 }

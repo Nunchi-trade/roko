@@ -7,6 +7,7 @@
 mod agents;
 mod aggregator;
 mod auth;
+mod bench;
 mod chain;
 pub(crate) mod config;
 mod connectors;
@@ -96,6 +97,7 @@ pub fn build_router(
         .merge(secrets::routes())
         .merge(vision_loop::routes())
         .merge(team::routes())
+        .merge(bench::routes())
         .nest("/providers", providers::router())
         .nest("/models", providers::models_router())
         .nest("/routing", providers::routing_router())

@@ -113,8 +113,7 @@
 }
 .term-grid.cols-1 { grid-template-columns: 1fr; }
 .term-grid.cols-2 { grid-template-columns: 1fr 1fr; }
-.term-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
-.term-grid.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+.term-grid.cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
 
 .term-cell {
   background: var(--bg-void);
@@ -151,11 +150,59 @@
   z-index: 3;
 }
 
-.term-cell .terminal-pane {
+.term-cell .terminal-pane,
+.term-cell .term-pane-real {
   flex: 1;
   min-height: 0;
   position: relative;
   z-index: 1;
+}
+
+/* ── TerminalPaneReal (direct useTerminal) ── */
+.term-pane-real {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.term-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--glass-border);
+  background: rgba(16, 12, 20, .6);
+  flex-shrink: 0;
+}
+.term-conn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.term-conn-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.term-conn-dot.connecting { background: var(--warning, #c8a030); animation: term-dot-blink 1s infinite; }
+.term-conn-dot.disconnected { background: var(--text-ghost); }
+@keyframes term-dot-blink {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+.term-pane-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-soft);
+  letter-spacing: .04em;
+}
+.term-pane-status {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-ghost);
+  letter-spacing: .06em;
+}
+.term-pane-body {
+  flex: 1;
+  min-height: 0;
+  padding: 2px;
 }
 
 /* ── Empty state ── */

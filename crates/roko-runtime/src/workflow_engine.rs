@@ -92,6 +92,7 @@ impl WorkflowEngine {
     ///
     /// If `token` is already cancelled before the call, the workflow starts and
     /// then cancels at the first iteration check.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_with_cancel(
         &self,
         config: WorkflowRunConfig,
@@ -256,6 +257,7 @@ impl WorkflowEngine {
     /// run uses the same settings as the original.
     ///
     /// Returns an error if the checkpoint JSON is malformed.
+    #[allow(clippy::too_many_lines)]
     pub async fn resume(
         &self,
         config: WorkflowRunConfig,
@@ -434,6 +436,7 @@ impl WorkflowEngine {
         if let Some(ref affect) = self.services.affect_policy {
             let policy = affect.lock().await;
             let _ = policy.persist().await;
+            drop(policy);
         }
     }
 }
@@ -543,8 +546,20 @@ fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
-        &s[..s.floor_char_boundary(max)]
+        &s[..floor_char_boundary(s, max)]
     }
+}
+
+/// Manual implementation of `str::floor_char_boundary` for MSRV < 1.91.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -597,6 +612,7 @@ mod tests {
                     model: "mock".into(),
                     usage: TokenUsage::default(),
                     stop_reason: None,
+                    request_id: None,
                 })
             })
         }

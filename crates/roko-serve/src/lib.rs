@@ -74,6 +74,7 @@ pub mod state_hub {
 pub use state_hub_compat::{SharedStateHub, StateHub};
 
 pub mod adapters;
+pub mod bench;
 pub mod config_watcher;
 pub mod deploy;
 pub mod dispatch;
@@ -219,6 +220,7 @@ impl ServerBuilder {
     /// TUI or other in-process consumers can subscribe to.  The
     /// [`JoinHandle`] resolves when the server shuts down (e.g. because
     /// `state.cancel.cancel()` was called).
+    #[allow(clippy::missing_panics_doc)]
     pub async fn start_background(mut self) -> Result<(Arc<AppState>, JoinHandle<Result<()>>)> {
         // -- PORT env var override (Railway / cloud platforms) -------------
         let addr = if let Ok(env_port) = std::env::var("PORT") {

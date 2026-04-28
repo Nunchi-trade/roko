@@ -170,7 +170,7 @@ async fn researcher_allowed_network() {
 }
 
 #[tokio::test]
-async fn no_contract_means_permissive_default() {
+async fn no_contract_means_restricted_default() {
     assert!(
         AgentContract::load_for_role("does-not-exist").is_err(),
         "missing assets should not load"
@@ -191,12 +191,11 @@ async fn no_contract_means_permissive_default() {
         .safety()
         .expect("dispatcher should retain safety");
     assert_eq!(safety.contract.role, "does-not-exist");
-    assert!(safety.contract.invariants.is_empty());
-    assert!(safety.contract.governance.is_empty());
-    assert!(safety.contract.recovery.is_empty());
+    // X01: fail-closed — restricted contract has an empty allowlist (deny-all)
+    assert!(safety.contract.allowed_tools.as_ref().is_some_and(|t| t.is_empty()));
 
     let call = ToolCall::new(
-        "permissive-default",
+        "restricted-default",
         "bash",
         json!({
             "command": "echo ready",
@@ -205,7 +204,7 @@ async fn no_contract_means_permissive_default() {
     );
     let result = dispatcher.dispatch(call, &full_capability_ctx()).await;
     assert!(
-        result.is_ok(),
-        "permissive fallback should allow call, got {result:?}"
+        result.is_err(),
+        "restricted fallback should deny call, got {result:?}"
     );
 }
