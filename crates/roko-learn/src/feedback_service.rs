@@ -389,11 +389,7 @@ impl FeedbackService {
 
         self.apply_knowledge_outcome(knowledge_ids, outcome)?;
         if let Some(passed) = outcome.passed() {
-            self.apply_section_outcome(
-                prompt_section_ids,
-                role.unwrap_or("model_call"),
-                passed,
-            )?;
+            self.apply_section_outcome(prompt_section_ids, role.unwrap_or("model_call"), passed)?;
         }
 
         Ok(())
@@ -562,20 +558,18 @@ impl FeedbackService {
             }
 
             let value: serde_json::Value = serde_json::from_str(trimmed)?;
-            let gate_passed = if let Some(outcome) = value
-                .get("outcome")
-                .and_then(serde_json::Value::as_str)
-            {
-                match outcome {
-                    "success" => Some(true),
-                    "failure" => Some(false),
-                    _ => None,
-                }
-            } else {
-                value
-                    .get("gate_passed")
-                    .and_then(serde_json::Value::as_bool)
-            };
+            let gate_passed =
+                if let Some(outcome) = value.get("outcome").and_then(serde_json::Value::as_str) {
+                    match outcome {
+                        "success" => Some(true),
+                        "failure" => Some(false),
+                        _ => None,
+                    }
+                } else {
+                    value
+                        .get("gate_passed")
+                        .and_then(serde_json::Value::as_bool)
+                };
             let Some(gate_passed) = gate_passed else {
                 continue;
             };

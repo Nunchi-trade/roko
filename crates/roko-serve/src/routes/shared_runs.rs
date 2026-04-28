@@ -11,6 +11,10 @@ use axum::{
     response::{Html, IntoResponse, Json, Response},
 };
 use roko_core::runtime_event::{RuntimeEvent, RuntimeEventEnvelope, WorkflowOutcome};
+use roko_orchestrator::{ServiceConfig, ServiceFactory};
+use roko_runtime::{
+    JsonlLogger, WorkflowConfig, WorkflowEngine, WorkflowRunConfig, WorkflowRunReport,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -45,8 +49,21 @@ pub struct RunTranscript {
     pub duration_s: Option<f64>,
     /// Episode ID.
     pub episode_id: Option<String>,
+    /// Durable runtime event transcript.
+    #[serde(default)]
+    pub transcript: Vec<RuntimeEventEnvelope>,
     /// Timestamp (ISO 8601).
     pub timestamp: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CreateShareRequest {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    workflow: Option<String>,
+    #[serde(default)]
+    enabled_gates: Option<Vec<String>>,
 }
 
 /// `GET /api/runs/{id}` — JSON transcript.
@@ -69,7 +86,11 @@ pub async fn get_shared_run(
 }
 
 /// `POST /api/runs/{id}/share` — create a shared run token.
-pub async fn create_share(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+pub async fn create_share(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    payload: Option<Json<CreateShareRequest>>,
+) -> Response {
     let token = format!("{}-{:04x}", id, std::process::id() as u16);
     let shared_dir = state.workdir.join(".roko").join("shared");
     if let Some(existing) = load_transcript(&state, &token) {
@@ -87,8 +108,20 @@ pub async fn create_share(State(state): State<Arc<AppState>>, Path(id): Path<Str
         )
             .into_response();
     }
-    let Some(transcript) = transcript_from_runtime_events(&state, &id, &token) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let transcript = match transcript_from_runtime_events(&state, &id, &token) {
+        Some(transcript) => transcript,
+        None => {
+            let Some(Json(request)) = payload else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            match run_shared_workflow(&state, &token, request).await {
+                Ok(transcript) => transcript,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e})))
+                        .into_response();
+                }
+            }
+        }
     };
     let path = shared_dir.join(format!("{token}.json"));
     match serde_json::to_string_pretty(&transcript) {
@@ -152,6 +185,7 @@ fn transcript_from_runtime_events(
     let mut saw_cost = false;
     let mut first_ts = None;
     let mut last_ts = None;
+    let mut transcript = Vec::new();
 
     for line in data.lines().filter(|line| !line.trim().is_empty()) {
         let envelope: RuntimeEventEnvelope = match serde_json::from_str(line) {
@@ -164,6 +198,7 @@ fn transcript_from_runtime_events(
 
         first_ts.get_or_insert(envelope.ts);
         last_ts = Some(envelope.ts);
+        transcript.push(envelope.clone());
 
         match envelope.payload {
             RuntimeEvent::WorkflowStarted {
@@ -257,13 +292,107 @@ fn transcript_from_runtime_events(
         model,
         duration_s: Some(duration_s),
         episode_id: Some(run_id.to_string()),
+        transcript,
         timestamp: started_at.to_rfc3339(),
     })
+}
+
+async fn run_shared_workflow(
+    state: &AppState,
+    token: &str,
+    request: CreateShareRequest,
+) -> Result<RunTranscript, String> {
+    let prompt = request
+        .prompt
+        .as_deref()
+        .and_then(non_empty)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "share request requires a non-empty prompt".to_string())?;
+    let workspace_config = state.load_roko_config().as_ref().clone();
+    let service_bundle = ServiceFactory::build(ServiceConfig::production(
+        state.workdir.clone(),
+        workspace_config,
+    ))
+    .map_err(|error| format!("build workflow services: {error}"))?;
+
+    let workflow = workflow_config_for_name(request.workflow.as_deref().unwrap_or("express"));
+    let config = WorkflowRunConfig {
+        prompt,
+        workdir: state.workdir.clone(),
+        workflow,
+        enabled_gates: request.enabled_gates.unwrap_or_default(),
+        shell_gates: Vec::new(),
+        commit_prefix: Some("feat".to_string()),
+    };
+
+    let mut engine = WorkflowEngine::new(service_bundle.effect_services());
+    engine.add_consumer(Arc::new(JsonlLogger::from_roko_dir(state.layout.root())));
+    let report = engine
+        .run(config)
+        .await
+        .map_err(|error| format!("workflow engine failed: {error}"))?;
+
+    Ok(transcript_from_report(token.to_string(), &report))
+}
+
+fn workflow_config_for_name(name: &str) -> WorkflowConfig {
+    match name {
+        "standard" => WorkflowConfig::standard(),
+        "full" => WorkflowConfig::full(),
+        _ => WorkflowConfig::express(),
+    }
+}
+
+fn transcript_from_report(token: String, report: &WorkflowRunReport) -> RunTranscript {
+    let (agent, role) = report_agent_role(report);
+    RunTranscript {
+        id: token,
+        agent,
+        role,
+        prompt: report.prompt_summary.clone(),
+        success: report.success,
+        gates: report
+            .gates
+            .iter()
+            .map(|gate| (gate.name.clone(), gate.passed))
+            .collect(),
+        output: non_empty(&report.output).map(ToOwned::to_owned),
+        cost_usd: report.cost,
+        input_tokens: None,
+        output_tokens: None,
+        model: Some(report.model.clone()),
+        duration_s: Some(report.duration_secs),
+        episode_id: Some(report.run_id.clone()),
+        transcript: report.events.clone(),
+        timestamp: report
+            .events
+            .first()
+            .map(|event| event.ts.to_rfc3339())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    }
+}
+
+fn report_agent_role(report: &WorkflowRunReport) -> (String, String) {
+    let mut first = None;
+    for envelope in &report.events {
+        if let RuntimeEvent::AgentSpawned { agent_id, role, .. } = &envelope.payload {
+            if role == "implementer" {
+                return (agent_id.clone(), role.clone());
+            }
+            first.get_or_insert_with(|| (agent_id.clone(), role.clone()));
+        }
+    }
+    first.unwrap_or_else(|| ("workflow".to_string(), "workflow".to_string()))
 }
 
 fn non_empty_owned(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn render_html(t: &RunTranscript) -> String {
@@ -478,6 +607,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             duration_s: Some(3.2),
             episode_id: Some("ep_001".to_string()),
+            transcript: Vec::new(),
             timestamp: "2026-04-28T12:00:00Z".to_string(),
         };
 
@@ -515,6 +645,7 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             duration_s: Some(1.5),
             episode_id: Some("ep_002".to_string()),
+            transcript: Vec::new(),
             timestamp: "2026-04-28T13:00:00Z".to_string(),
         };
 
