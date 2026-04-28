@@ -57,6 +57,82 @@ pub async fn dispatch_prompt(auth: &AuthMethod, prompt: &str) -> Result<Dispatch
     }
 }
 
+/// Dispatch a prompt through ModelCallService (v2 path).
+///
+/// Uses the ModelCaller trait that WorkflowEngine uses, giving cost tracking
+/// and feedback recording for free.
+pub async fn dispatch_via_model_call_service(prompt: &str) -> Result<DispatchResult> {
+    use roko_agent::model_call_service::ModelCallService;
+    use roko_core::agent::resolve_model;
+    use roko_core::config::schema::RokoConfig;
+    use roko_core::foundation::{
+        CallerIdentity, ChatMessage, FeedbackSink, MessageRole, ModelCallRequest, ModelCaller,
+    };
+    use roko_learn::feedback_service::FeedbackService;
+    use std::sync::Arc;
+
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = crate::config::load_layered(&workdir)
+        .map(|r| r.config)
+        .unwrap_or_default();
+
+    let mut model_config = RokoConfig::default();
+    model_config.providers.extend(config.providers.clone());
+    model_config.models.extend(config.models.clone());
+    model_config.agent.command = Some(config.agent.command.clone());
+    model_config.agent.args = Some(config.agent.args.clone());
+    model_config.agent.timeout_ms = Some(config.agent.timeout_ms);
+    model_config.agent.env = Some(config.agent.env.clone());
+    model_config.agent.default_effort = config.agent.effort.clone();
+    model_config.agent.bare_mode = config.agent.bare_mode;
+    model_config.agent.fallback_model = config.agent.fallback_model.clone();
+    model_config.agent.tier_models = config.agent.tier_models.clone();
+    if let Some(model) = config.agent.model.clone() {
+        model_config.agent.default_model = model;
+    }
+    let model_key = config
+        .agent
+        .model
+        .clone()
+        .unwrap_or_else(|| model_config.agent.default_model.clone());
+    let model = resolve_model(&model_config, &model_key).slug;
+
+    let feedback_sink: Arc<dyn FeedbackSink> =
+        Arc::new(FeedbackService::from_roko_dir(&workdir.join(".roko")));
+    let mut service = ModelCallService::new(model.clone())
+        .with_config(model_config)
+        .with_feedback_sink(feedback_sink);
+    if let Some(ref mcp_path) = config.agent.mcp_config {
+        service = service.with_mcp_config(mcp_path.clone());
+    }
+
+    let request = ModelCallRequest {
+        model,
+        system: None,
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            content: prompt.to_string(),
+        }],
+        max_tokens: None,
+        caller: Some(CallerIdentity::Cli),
+        ..Default::default()
+    };
+
+    let response = service
+        .call(request)
+        .await
+        .context("ModelCallService dispatch failed")?;
+
+    Ok(DispatchResult {
+        text: response.content,
+        model: response.model,
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+        tool_outputs: Vec::new(), // TODO(converge): capture tool outputs from ModelCallService.
+        session_id: None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Claude CLI
 // ---------------------------------------------------------------------------
@@ -385,6 +461,20 @@ mod tests {
         };
         assert_eq!(r.text, "hello");
         assert_eq!(r.model, "test");
+    }
+
+    #[test]
+    fn dispatch_result_from_model_call() {
+        let result = DispatchResult {
+            text: "hello".into(),
+            model: "test-model".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            tool_outputs: Vec::new(),
+            session_id: None,
+        };
+        assert_eq!(result.text, "hello");
+        assert!(result.tool_outputs.is_empty());
     }
 
     #[test]

@@ -92,7 +92,14 @@ pub async fn cmd_oneshot_inline(prompt: &str, quiet: bool) -> Result<i32> {
         eprintln!("roko — auth: {}", auth.label());
     }
 
-    let result = crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?;
+    // Prefer ModelCallService for cost tracking and feedback recording.
+    let result = match crate::dispatch_direct::dispatch_via_model_call_service(prompt).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("ModelCallService failed ({e:#}), falling back to raw dispatch");
+            crate::dispatch_direct::dispatch_prompt(&auth, prompt).await?
+        }
+    };
 
     // Show tool outputs before the response text
     for tool_output in &result.tool_outputs {
