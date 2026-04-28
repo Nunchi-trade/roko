@@ -25,7 +25,9 @@ use serde_json::json;
 use crate::auth;
 use crate::auth_detect::AuthMethod;
 use crate::chat::{self, extract_clean_text};
-use crate::dispatch_direct::{self, DispatchResult, ToolOutput};
+#[cfg(feature = "legacy-orchestrate")]
+use crate::dispatch_direct;
+use crate::dispatch_v2::{DispatchResult, ToolOutput};
 use crate::inline::primitives::{CostMeter, StreamingState};
 use crate::inline::styled;
 use crate::inline::symbols;
@@ -1483,7 +1485,10 @@ fn dispatch_prompt(session: &mut ChatSession, prompt: &str) {
         DispatchMode::Direct { auth } => {
             let auth_clone = auth.clone();
             tokio::spawn(async move {
+                #[cfg(feature = "legacy-orchestrate")]
                 let result = dispatch_direct::dispatch_prompt(&auth_clone, &text).await;
+                #[cfg(not(feature = "legacy-orchestrate"))]
+                let result = crate::dispatch_v2::dispatch_via_model_call_service(&text).await;
                 let _ = tx.send(result.map_err(|e| e.to_string())).await;
             });
         }

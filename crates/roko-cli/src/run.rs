@@ -917,6 +917,7 @@ fn dependency_ordered_task_defs(
 ///
 /// If `external_hub` is provided, events are published to it (e.g. for HTTP
 /// observability via `roko run --serve`). Otherwise a local hub is created.
+#[cfg(feature = "legacy-orchestrate")]
 #[allow(clippy::too_many_lines)]
 pub async fn run_once(
     workdir: &Path,
@@ -1165,6 +1166,18 @@ pub async fn run_once(
     })
 }
 
+#[cfg(not(feature = "legacy-orchestrate"))]
+pub async fn run_once(
+    _workdir: &Path,
+    _config: &Config,
+    _prompt_text: &str,
+    _external_hub: Option<&StateHub>,
+) -> Result<RunReport> {
+    anyhow::bail!(
+        "legacy run_once is disabled; use the WorkflowEngine v2 path or enable legacy-orchestrate"
+    )
+}
+
 fn build_system_prompt(config: &Config, prompt_text: &str, tools_csv: &str) -> String {
     let role = &config.prompt.role;
     let workspace = "Single-shot execution through `roko run`.";
@@ -1307,6 +1320,7 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
     })
 }
 
+#[cfg(feature = "legacy-orchestrate")]
 async fn dispatch_agent(
     workdir: &Path,
     config: &Config,
@@ -1479,6 +1493,7 @@ async fn dispatch_agent(
 }
 
 /// Ollama agentic path for `roko run`.
+#[cfg(feature = "legacy-orchestrate")]
 async fn run_ollama_agentic_single(
     workdir: &Path,
     config: &Config,
@@ -1568,6 +1583,7 @@ async fn run_ollama_agentic_single(
 }
 
 /// Check whether an Anthropic API key is available for the direct-API path.
+#[cfg(feature = "legacy-orchestrate")]
 fn has_anthropic_api_key(config: &Config) -> bool {
     // Check env var first, then config secret store.
     if std::env::var("ANTHROPIC_API_KEY")
@@ -1586,6 +1602,7 @@ fn has_anthropic_api_key(config: &Config) -> bool {
 }
 
 /// Resolve the Anthropic API key from env or config.
+#[cfg(feature = "legacy-orchestrate")]
 fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
@@ -1605,6 +1622,7 @@ fn resolve_anthropic_api_key(config: &Config) -> Option<String> {
 ///
 /// Uses the Anthropic Messages API directly with the ToolLoop, giving full
 /// tool-call visibility, chain tool support, and real-time turn output.
+#[cfg(feature = "legacy-orchestrate")]
 async fn run_anthropic_api_tool_loop(
     workdir: &Path,
     config: &Config,
@@ -1729,6 +1747,7 @@ async fn run_anthropic_api_tool_loop(
 }
 
 /// Build a chain-aware handler resolver if chain config is present in the workspace.
+#[cfg(feature = "legacy-orchestrate")]
 fn build_chain_resolver(
     workdir: &Path,
 ) -> Option<std::sync::Arc<dyn roko_agent::dispatcher::HandlerResolver>> {
@@ -1769,6 +1788,7 @@ fn build_chain_resolver(
 }
 
 /// Truncate JSON arguments for display.
+#[cfg(feature = "legacy-orchestrate")]
 fn truncate_json_args(args: &serde_json::Value, max_len: usize) -> String {
     let s = args.to_string();
     if s.len() > max_len {
@@ -2246,8 +2266,8 @@ mod tests {
     use super::*;
     use roko_core::foundation::{
         FeedbackEvent, FeedbackSink, GateConfig as WorkflowGateConfig, GateReport, GateRunner,
-        GateVerdict, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler,
-        PromptSpec, TokenUsage,
+        GateVerdict, ModelCallRequest, ModelCallResponse, ModelCaller, PromptAssembler, PromptSpec,
+        TokenUsage,
     };
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
@@ -2413,8 +2433,11 @@ mod tests {
     async fn test_v2_share_produces_real_transcript() {
         let tempdir = TempDir::new().expect("tempdir");
         init_git_workdir(tempdir.path());
-        std::fs::write(tempdir.path().join("change.txt"), "share transcript change\n")
-            .expect("write test change");
+        std::fs::write(
+            tempdir.path().join("change.txt"),
+            "share transcript change\n",
+        )
+        .expect("write test change");
 
         let prompt = "produce a share transcript with real data";
         let role = "implementer";
@@ -2476,17 +2499,17 @@ mod tests {
         assert!(transcript.success);
         assert_eq!(transcript.gates, vec![("compile".to_string(), true)]);
         assert_eq!(transcript.cost_usd, Some(0.001));
-        assert_eq!(transcript.episode_id.as_deref(), Some(report.run_id.as_str()));
-        assert!(report
-            .events
-            .iter()
-            .any(|event| matches!(
-                event.payload,
-                roko_core::RuntimeEvent::AgentSpawned { ref agent_id, ref role, ref model, .. }
-                    if !agent_id.trim().is_empty()
-                        && role == "implementer"
-                        && model == "share-mock-model"
-            )));
+        assert_eq!(
+            transcript.episode_id.as_deref(),
+            Some(report.run_id.as_str())
+        );
+        assert!(report.events.iter().any(|event| matches!(
+            event.payload,
+            roko_core::RuntimeEvent::AgentSpawned { ref agent_id, ref role, ref model, .. }
+                if !agent_id.trim().is_empty()
+                    && role == "implementer"
+                    && model == "share-mock-model"
+        )));
     }
 
     #[test]
