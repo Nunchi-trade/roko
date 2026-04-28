@@ -167,4 +167,4 @@ pub mod task_metric;
 /// Verdict-aware scoring and routing history for gate-verdict re-entry (GATE-05).
 pub mod verdict_scorer;
 
-pub use feedback_service::FeedbackService;
+pub use feedback_service::{FeedbackService, KnowledgeOutcome};
