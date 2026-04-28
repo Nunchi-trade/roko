@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use roko_core::RuntimeEvent;
 use roko_core::foundation::{EventConsumer, FeedbackEvent, ShellGateCommand};
+use roko_core::runtime_event::RuntimeEventEnvelope;
 
 use crate::cancel::CancelToken;
 use crate::effect_driver::{EffectDriver, EffectServices, Result};
@@ -219,11 +220,7 @@ impl WorkflowEngine {
             let new_phase = pipeline.phase.label();
 
             if old_phase != new_phase {
-                self.emit(RuntimeEvent::PhaseTransition {
-                    run_id: run_id.clone(),
-                    from: old_phase.to_string(),
-                    to: new_phase.to_string(),
-                });
+                self.emit_phase_transition(&run_id, old_phase, new_phase);
             }
         }
     }
@@ -296,6 +293,8 @@ impl WorkflowEngine {
         });
 
         let mut pipeline = pipeline;
+        self.emit_phase_transition(&run_id, "checkpoint", pipeline.phase.label());
+
         let mut output = resumed_output(&mut pipeline);
 
         loop {
@@ -376,21 +375,29 @@ impl WorkflowEngine {
             let new_phase = pipeline.phase.label();
 
             if old_phase != new_phase {
-                self.emit(RuntimeEvent::PhaseTransition {
-                    run_id: run_id.clone(),
-                    from: old_phase.to_string(),
-                    to: new_phase.to_string(),
-                });
+                self.emit_phase_transition(&run_id, old_phase, new_phase);
             }
         }
     }
 
-    fn emit(&self, event: RuntimeEvent) {
+    fn emit(&self, event: RuntimeEvent) -> u64 {
         for consumer in &self.consumers {
             consumer.consume(&event);
         }
 
-        emit_runtime_event(event);
+        emit_runtime_event(event)
+    }
+
+    fn emit_phase_transition(&self, run_id: &str, from: &str, to: &str) {
+        let event = RuntimeEvent::PhaseTransition {
+            run_id: run_id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+        };
+
+        let seq = self.emit(event.clone());
+        let envelope = RuntimeEventEnvelope::new(run_id, seq, "workflow_engine", event);
+        emit_runtime_event(envelope);
     }
 
     async fn persist_affect_policy(&self) {
