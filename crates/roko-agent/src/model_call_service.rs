@@ -9,14 +9,17 @@ use async_trait::async_trait;
 use roko_core::agent::ProviderKind;
 use roko_core::config::schema::{ModelProfile, ProviderConfig, RokoConfig};
 use roko_core::foundation::{
-    ChatMessage, FeedbackEvent, FeedbackSink, MessageRole, ModelCallRequest, ModelCallResponse,
-    ModelCaller, TokenUsage,
+    CachePolicy, ChatMessage, FeedbackEvent, FeedbackSink, GatewayError, MessageRole,
+    ModelCallRequest, ModelCallResponse, ModelCaller, TokenBudget, TokenUsage,
 };
 use roko_core::{
     Body, Context, Engram, EventConsumer, Kind, Result, RokoError, RuntimeEvent, Usage,
 };
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
@@ -60,6 +63,10 @@ pub struct ModelCallService {
     openai_base_url: Option<String>,
     /// Explicit MCP config path threaded into provider options.
     mcp_config: Option<PathBuf>,
+    /// L1 exact-match response cache.
+    cache: CacheCell,
+    /// Service-lifetime cost budget tracker.
+    budget: BudgetCell,
     /// Run id used for emitted events and feedback when the request has none.
     run_id: String,
 }
@@ -78,6 +85,8 @@ impl ModelCallService {
             env: Vec::new(),
             openai_base_url: None,
             mcp_config: None,
+            cache: CacheCell::new(128),
+            budget: BudgetCell::new(None),
             run_id: "model-call-service".to_string(),
         }
     }
@@ -138,6 +147,20 @@ impl ModelCallService {
     #[must_use]
     pub fn with_mcp_config(mut self, path: impl Into<PathBuf>) -> Self {
         self.mcp_config = Some(path.into());
+        self
+    }
+
+    /// Set the maximum cache entries.
+    #[must_use]
+    pub fn with_cache_size(mut self, max_entries: usize) -> Self {
+        self.cache = CacheCell::new(max_entries);
+        self
+    }
+
+    /// Set a cumulative cost budget for the lifetime of this service.
+    #[must_use]
+    pub fn with_cost_budget(mut self, max_cost_usd: f64) -> Self {
+        self.budget = BudgetCell::new(Some(max_cost_usd));
         self
     }
 
@@ -383,6 +406,184 @@ fn token_usage(usage: &Usage, cost_usd: f64) -> TokenUsage {
     }
 }
 
+/// L1 in-memory response cache. Keyed by (model, messages, temperature).
+///
+/// TODO(gateway): L2 semantic cache.
+struct CacheCell {
+    /// Maximum number of cached entries.
+    max_entries: usize,
+    /// The cache store. Uses a simple HashMap with LRU eviction.
+    entries: Mutex<HashMap<u64, CachedResponse>>,
+    /// Insertion-order keys for LRU eviction.
+    order: Mutex<Vec<u64>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedResponse {
+    content: String,
+    model: String,
+    usage: TokenUsage,
+    stop_reason: Option<String>,
+}
+
+impl CacheCell {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            entries: Mutex::new(HashMap::new()),
+            order: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Compute a cache key from request fields.
+    /// Hash of: model + sorted message contents + temperature (if set).
+    fn cache_key(model: &str, messages: &[ChatMessage], temperature: Option<f32>) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        model.hash(&mut hasher);
+
+        let mut messages = messages
+            .iter()
+            .map(|message| (message_role_tag(&message.role), message.content.as_str()))
+            .collect::<Vec<_>>();
+        messages.sort_unstable();
+
+        for (role, content) in messages {
+            role.hash(&mut hasher);
+            content.hash(&mut hasher);
+        }
+
+        temperature.map(f32::to_bits).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Look up a cached response. Returns None on miss.
+    fn lookup(&self, key: u64) -> Option<CachedResponse> {
+        let entries = self.entries.lock().expect("cache entries mutex poisoned");
+        let response = entries.get(&key).cloned();
+        drop(entries);
+
+        if response.is_some() {
+            let mut order = self.order.lock().expect("cache order mutex poisoned");
+            if let Some(index) = order.iter().position(|existing| *existing == key) {
+                order.remove(index);
+            }
+            order.push(key);
+        }
+
+        response
+    }
+
+    /// Store a successful response. Evicts the oldest entry if at capacity.
+    fn store(&self, key: u64, response: CachedResponse) {
+        if self.max_entries == 0 {
+            return;
+        }
+
+        let mut entries = self.entries.lock().expect("cache entries mutex poisoned");
+        let mut order = self.order.lock().expect("cache order mutex poisoned");
+
+        if entries.contains_key(&key) {
+            order.retain(|existing| *existing != key);
+        } else if entries.len() >= self.max_entries {
+            if let Some(oldest) = order.first().copied() {
+                entries.remove(&oldest);
+                order.remove(0);
+            }
+        }
+
+        entries.insert(key, response);
+        order.push(key);
+    }
+
+    fn evict(&self, key: u64) {
+        let mut entries = self.entries.lock().expect("cache entries mutex poisoned");
+        let mut order = self.order.lock().expect("cache order mutex poisoned");
+        entries.remove(&key);
+        order.retain(|existing| *existing != key);
+    }
+}
+
+fn message_role_tag(role: &MessageRole) -> u8 {
+    match role {
+        MessageRole::System => 0,
+        MessageRole::User => 1,
+        MessageRole::Assistant => 2,
+    }
+}
+
+/// Tracks cumulative cost across calls within a workflow run and enforces per-call budgets.
+struct BudgetCell {
+    /// Cumulative cost in micro-USD (1e-6 USD) for atomic tracking.
+    cumulative_cost_micro_usd: AtomicU64,
+    /// Maximum cumulative cost in micro-USD, if set.
+    max_cumulative_cost_micro_usd: Option<u64>,
+}
+
+impl BudgetCell {
+    fn new(max_cumulative_cost_usd: Option<f64>) -> Self {
+        Self {
+            cumulative_cost_micro_usd: AtomicU64::new(0),
+            max_cumulative_cost_micro_usd: max_cumulative_cost_usd.map(usd_to_micro_usd),
+        }
+    }
+
+    /// Check whether a request's budget allows it to proceed.
+    /// Returns Err(GatewayError::BudgetExceeded) if the cumulative cost has been exceeded
+    /// or if the request's own TokenBudget.max_cost_usd would be exceeded.
+    fn check(&self, budget: &Option<TokenBudget>) -> std::result::Result<(), GatewayError> {
+        let cumulative = self.cumulative_cost_micro_usd.load(Ordering::Relaxed);
+
+        if let Some(limit) = self.max_cumulative_cost_micro_usd {
+            if cumulative >= limit {
+                return Err(GatewayError::BudgetExceeded {
+                    detail: format!(
+                        "cumulative cost {:.6} USD reached configured limit {:.6} USD",
+                        micro_usd_to_usd(cumulative),
+                        micro_usd_to_usd(limit)
+                    ),
+                });
+            }
+        }
+
+        if let Some(budget) = budget {
+            if let Some(max_cost_usd) = budget.max_cost_usd {
+                if max_cost_usd <= 0.0 {
+                    return Err(GatewayError::BudgetExceeded {
+                        detail: format!(
+                            "per-call max_cost_usd must be positive, got {max_cost_usd:.6}"
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record the cost of a completed call. Adds to cumulative total.
+    fn record_cost(&self, cost_usd: f64) {
+        self.cumulative_cost_micro_usd
+            .fetch_add(usd_to_micro_usd(cost_usd), Ordering::Relaxed);
+    }
+
+    /// Current cumulative cost in USD.
+    fn cumulative_cost_usd(&self) -> f64 {
+        micro_usd_to_usd(self.cumulative_cost_micro_usd.load(Ordering::Relaxed))
+    }
+}
+
+fn usd_to_micro_usd(cost_usd: f64) -> u64 {
+    if !cost_usd.is_finite() || cost_usd <= 0.0 {
+        return 0;
+    }
+
+    (cost_usd * 1_000_000.0).round() as u64
+}
+
+fn micro_usd_to_usd(cost_micro_usd: u64) -> f64 {
+    cost_micro_usd as f64 / 1_000_000.0
+}
+
 /// Encapsulates a single provider execution attempt with fallback support.
 struct ProviderCallCell {
     config: RokoConfig,
@@ -512,6 +713,62 @@ impl ModelCaller for ModelCallService {
         let model = self.resolve_model(&req);
         let start = Instant::now();
         let agent_id = format!("model-call:{model}");
+        let cache_key = CacheCell::cache_key(&model, &req.messages, req.temperature);
+
+        match req.cache_policy {
+            CachePolicy::Default => {
+                if let Some(cached) = self.cache.lookup(cache_key) {
+                    return Ok(ModelCallResponse {
+                        content: cached.content,
+                        model: cached.model,
+                        usage: cached.usage,
+                        stop_reason: cached.stop_reason,
+                        request_id: Some(format!("cache-hit:{cache_key:016x}")),
+                    });
+                }
+            }
+            CachePolicy::Bypass => {}
+            CachePolicy::ForceRefresh => self.cache.evict(cache_key),
+        }
+
+        self.budget.check(&req.budget).map_err(RokoError::from)?;
+        if let Some(budget) = &req.budget {
+            let estimate = self.cost_predict(&req);
+            if let Some(max_input) = budget.max_input {
+                if estimate.estimated_input_tokens > max_input {
+                    return Err(GatewayError::BudgetExceeded {
+                        detail: format!(
+                            "estimated input tokens {} exceed per-call limit {}",
+                            estimate.estimated_input_tokens, max_input
+                        ),
+                    }
+                    .into());
+                }
+            }
+            if let Some(max_output) = budget.max_output {
+                if estimate.max_output_tokens > max_output {
+                    return Err(GatewayError::BudgetExceeded {
+                        detail: format!(
+                            "requested output tokens {} exceed per-call limit {}",
+                            estimate.max_output_tokens, max_output
+                        ),
+                    }
+                    .into());
+                }
+            }
+            if let Some(max_cost_usd) = budget.max_cost_usd {
+                if estimate.predicted_cost_usd > max_cost_usd {
+                    return Err(GatewayError::BudgetExceeded {
+                        detail: format!(
+                            "predicted cost {:.6} USD exceeds per-call limit {:.6} USD",
+                            estimate.predicted_cost_usd, max_cost_usd
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+
         let (message_system, user_content) = request_prompt(&req.messages);
         let system_prompt = req.system.clone().or(message_system);
         let config = self.config_for_model(&model);
@@ -556,6 +813,16 @@ impl ModelCaller for ModelCallService {
         };
 
         let usage = token_usage(&output.usage, output.cost_usd);
+        self.budget.record_cost(usage.cost_usd);
+        self.cache.store(
+            cache_key,
+            CachedResponse {
+                content: output.content.clone(),
+                model: output.model_used.clone(),
+                usage: usage.clone(),
+                stop_reason: Some("end_turn".to_string()),
+            },
+        );
 
         self.emit(RuntimeEvent::AgentCompleted {
             run_id: self.run_id.clone(),
@@ -757,5 +1024,83 @@ mod tests {
         assert_eq!(estimate.estimated_input_tokens, 250);
         assert_eq!(estimate.max_output_tokens, 2048);
         assert!(estimate.predicted_cost_usd > 0.0);
+    }
+
+    #[test]
+    fn cache_key_deterministic() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "hello".into(),
+        }];
+
+        let first = CacheCell::cache_key("model-a", &messages, Some(0.2));
+        let second = CacheCell::cache_key("model-a", &messages, Some(0.2));
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cache_key_differs_on_model() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "hello".into(),
+        }];
+
+        let first = CacheCell::cache_key("model-a", &messages, None);
+        let second = CacheCell::cache_key("model-b", &messages, None);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_differs_on_temperature() {
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "hello".into(),
+        }];
+
+        let first = CacheCell::cache_key("model-a", &messages, Some(0.1));
+        let second = CacheCell::cache_key("model-a", &messages, Some(0.9));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_evicts_oldest_when_full() {
+        let cache = CacheCell::new(2);
+        let response = |content: &str| CachedResponse {
+            content: content.to_string(),
+            model: "model-a".to_string(),
+            usage: TokenUsage::default(),
+            stop_reason: Some("end_turn".to_string()),
+        };
+
+        cache.store(1, response("one"));
+        cache.store(2, response("two"));
+        cache.store(3, response("three"));
+
+        assert!(cache.lookup(1).is_none());
+        assert_eq!(cache.lookup(2).expect("second entry").content, "two");
+        assert_eq!(cache.lookup(3).expect("third entry").content, "three");
+    }
+
+    #[test]
+    fn budget_check_passes_when_no_limit() {
+        let budget = BudgetCell::new(None);
+
+        budget.record_cost(1_000.0);
+
+        assert!(budget.check(&None).is_ok());
+        assert_eq!(budget.cumulative_cost_usd(), 1_000.0);
+    }
+
+    #[test]
+    fn budget_check_fails_when_exceeded() {
+        let budget = BudgetCell::new(Some(1.0));
+
+        budget.record_cost(1.01);
+
+        let err = budget.check(&None).expect_err("budget should be exceeded");
+        assert!(matches!(err, GatewayError::BudgetExceeded { .. }));
     }
 }
