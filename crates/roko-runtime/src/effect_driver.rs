@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub use roko_core::RuntimeEvent;
+use roko_core::foundation::{
+    CachePolicy, FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict,
+    ModelCallRequest, ModelCaller, PromptAssembler, PromptSpec,
+};
 pub use roko_core::foundation::{
     ChatMessage, GateReport, MessageRole, ModelCallResponse, TokenUsage,
-};
-use roko_core::foundation::{
-    FeedbackEvent, FeedbackSink, GateConfig, GateRunner, GateVerdict, ModelCallRequest,
-    ModelCaller, PromptAssembler, PromptSpec,
 };
 
 use crate::event_bus::emit_runtime_event;
@@ -183,6 +183,9 @@ impl EffectDriver {
                 max_tokens: None,
                 temperature: None,
                 role: Some(role.to_string()),
+                caller: None,
+                budget: None,
+                cache_policy: CachePolicy::Default,
             })
             .await;
         let latency_ms = duration_millis(start);

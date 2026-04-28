@@ -20,6 +20,7 @@ use tokio::sync::{OnceCell, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use roko_agent::ModelCallService;
 use roko_core::config::schema::RokoConfig;
 use roko_core::obs::LogScrubber;
 use roko_core::{Engram, Store};
@@ -367,6 +368,8 @@ pub struct AppState {
     pub subscriptions: SubscriptionRegistry,
     /// Runtime bridge to CLI operations (run_once, status, dashboard).
     pub runtime: Arc<dyn CliRuntime>,
+    /// Shared model-call gateway service used by HTTP inference adapters.
+    pub model_call_service: Arc<ModelCallService>,
     /// Full `roko.toml` schema configuration with lock-free reads.
     pub roko_config: ArcSwap<RokoConfig>,
     /// In-memory provider health tracker exposed via serve APIs.
@@ -473,6 +476,10 @@ impl AppState {
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
         let http_client = reqwest::Client::new();
+        let model_call_service = Arc::new(
+            ModelCallService::new(roko_config.agent.default_model.clone())
+                .with_config(roko_config.clone()),
+        );
 
         Self {
             workdir,
@@ -488,6 +495,7 @@ impl AppState {
             sse_adapter: Arc::new(crate::adapters::SseAdapter::new(256)),
             subscriptions,
             runtime,
+            model_call_service,
             roko_config: ArcSwap::from_pointee(roko_config),
             provider_health: ProviderHealthTracker::new(),
             latency_registry: LatencyRegistry::new(),

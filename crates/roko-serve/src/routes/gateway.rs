@@ -19,6 +19,11 @@ use serde_json::{Value, json};
 use validator::Validate;
 
 use roko_core::agent::{AgentRole, resolve_model};
+use roko_core::foundation::{
+    CachePolicy, CallerIdentity, ChatMessage as CoreChatMessage, MessageRole as CoreMessageRole,
+    ModelCallRequest as CoreModelCallRequest, ModelCallResponse as CoreModelCallResponse,
+    ModelCaller,
+};
 use roko_core::task::{TaskCategory, TaskComplexityBand};
 use roko_learn::bandits::UcbBandit;
 use roko_learn::cascade_router::CascadeRouter;
@@ -121,7 +126,6 @@ impl RequestPayload for CompletionRequest {
 struct TokenUsage {
     input_tokens: u64,
     output_tokens: u64,
-    cache_read_tokens: u64,
 }
 
 /// Response body for `POST /api/inference/complete`.
@@ -284,41 +288,29 @@ async fn inference_complete(
         select_model_via_router(&state, &hints).await
     };
 
-    // -----------------------------------------------------------------------
-    // Build the prompt from the messages array
-    // -----------------------------------------------------------------------
-    let prompt = format_messages_as_prompt(&body.messages);
+    let req = model_call_request(
+        model_slug.clone(),
+        &body.messages,
+        body.max_tokens,
+        body.temperature,
+        body.agent_id.clone(),
+    );
 
-    // -----------------------------------------------------------------------
-    // Dispatch through the runtime
-    // -----------------------------------------------------------------------
-    let result = state
-        .runtime
-        .run_once(state.workdir.as_path(), &prompt)
-        .await
-        .map_err(|err| {
-            state.provider_health.record_failure(&model_slug);
-            ApiError::internal(format!("inference dispatch failed: {err}"))
-        })?;
+    let model_response = state.model_call_service.call(req).await.map_err(|err| {
+        state.provider_health.record_failure(&model_slug);
+        ApiError::internal(format!("inference dispatch failed: {err}"))
+    })?;
 
     state.provider_health.record_success(&model_slug);
 
-    let content = result.output_text.unwrap_or_default();
-
-    // Prefer real token counts from the provider when available,
-    // falling back to the character-based heuristic.
-    let (input_tokens, output_tokens) = if let Some(ref usage) = result.usage {
-        (usage.input_tokens, usage.output_tokens)
-    } else {
-        (estimate_tokens(&prompt), estimate_tokens(&content))
-    };
-    let cache_read_tokens: u64 = 0;
-
-    // Compute cost from model profile pricing when available.
-    let cost_usd = compute_cost(&config, &model_slug, input_tokens, output_tokens);
+    let served_model = model_response.model.clone();
+    let input_tokens = model_response.usage.input_tokens;
+    let output_tokens = model_response.usage.output_tokens;
+    let cost_usd = model_response.usage.cost_usd;
+    let content_preview: String = model_response.content.chars().take(200).collect();
 
     // B1: accumulate per-model token + cost counters for gateway_stats.
-    let counters = state.gateway_counters_for(&model_slug).await;
+    let counters = state.gateway_counters_for(&served_model).await;
     counters.record(input_tokens, output_tokens, cost_usd);
 
     let agent_label = body.agent_id.as_deref().unwrap_or("gateway").to_owned();
@@ -327,28 +319,17 @@ async fn inference_complete(
     state.event_bus.publish(ServerEvent::AgentOutput {
         agent_id: agent_label.clone(),
         run_id: Some(request_id.clone()),
-        content: content.chars().take(200).collect(),
+        content: content_preview,
         done: true,
         metadata: Some(json!({
-            "model": model_slug,
+            "model": served_model,
             "cost_usd": cost_usd,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         })),
     });
 
-    let response = CompletionResponse {
-        id: request_id,
-        model: model_slug,
-        content,
-        usage: TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-        },
-        stop_reason: "end_turn".to_string(),
-        cost_usd,
-    };
+    let response = completion_response_from_model_call(request_id, model_response);
 
     Ok(Json(response))
 }
@@ -538,44 +519,28 @@ async fn batch_submit(
                         select_model_via_router(&state_ref, &RoutingHints::default()).await
                     };
 
-                    let prompt = format_messages_as_prompt(&item.messages);
+                    let req =
+                        model_call_request(model_slug.clone(), &item.messages, None, None, None);
 
-                    let result_item = match state_ref
-                        .runtime
-                        .run_once(state_ref.workdir.as_path(), &prompt)
-                        .await
-                    {
-                        Ok(result) => {
+                    let result_item = match state_ref.model_call_service.call(req).await {
+                        Ok(model_response) => {
                             state_ref.provider_health.record_success(&model_slug);
-                            let content = result.output_text.unwrap_or_default();
-                            let (input_tokens, output_tokens) =
-                                if let Some(ref usage) = result.usage {
-                                    (usage.input_tokens, usage.output_tokens)
-                                } else {
-                                    (estimate_tokens(&prompt), estimate_tokens(&content))
-                                };
-                            let cost_usd =
-                                compute_cost(&config_ref, &model_slug, input_tokens, output_tokens);
+                            let served_model = model_response.model.clone();
+                            let input_tokens = model_response.usage.input_tokens;
+                            let output_tokens = model_response.usage.output_tokens;
+                            let cost_usd = model_response.usage.cost_usd;
 
                             // B1: accumulate per-model counters.
-                            let counters = state_ref.gateway_counters_for(&model_slug).await;
+                            let counters = state_ref.gateway_counters_for(&served_model).await;
                             counters.record(input_tokens, output_tokens, cost_usd);
 
                             BatchResultItem {
                                 custom_id: item.custom_id.clone(),
                                 success: true,
-                                response: Some(CompletionResponse {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    model: model_slug,
-                                    content,
-                                    usage: TokenUsage {
-                                        input_tokens,
-                                        output_tokens,
-                                        cache_read_tokens: 0,
-                                    },
-                                    stop_reason: "end_turn".to_string(),
-                                    cost_usd,
-                                }),
+                                response: Some(completion_response_from_model_call(
+                                    uuid::Uuid::new_v4().to_string(),
+                                    model_response,
+                                )),
                                 error: None,
                             }
                         }
@@ -709,20 +674,55 @@ async fn batch_status(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format a message array into a single prompt string suitable for
-/// `CliRuntime::run_once`. System messages are prepended as context,
-/// user/assistant turns follow in order.
-fn format_messages_as_prompt(messages: &[ChatMessage]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(messages.len());
-    for msg in messages {
-        match msg.role.as_str() {
-            "system" => parts.push(format!("[System]\n{}", msg.content)),
-            "user" => parts.push(format!("[User]\n{}", msg.content)),
-            "assistant" => parts.push(format!("[Assistant]\n{}", msg.content)),
-            other => parts.push(format!("[{other}]\n{}", msg.content)),
-        }
+fn model_call_request(
+    model: String,
+    messages: &[ChatMessage],
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    role: Option<String>,
+) -> CoreModelCallRequest {
+    CoreModelCallRequest {
+        model,
+        system: None,
+        messages: messages.iter().map(core_chat_message).collect(),
+        max_tokens,
+        temperature: temperature.map(|t| t as f32),
+        role,
+        caller: Some(CallerIdentity::Serve),
+        budget: None,
+        cache_policy: CachePolicy::Default,
     }
-    parts.join("\n\n")
+}
+
+fn core_chat_message(message: &ChatMessage) -> CoreChatMessage {
+    CoreChatMessage {
+        role: match message.role.as_str() {
+            "system" => CoreMessageRole::System,
+            "assistant" => CoreMessageRole::Assistant,
+            _ => CoreMessageRole::User,
+        },
+        content: message.content.clone(),
+    }
+}
+
+fn completion_response_from_model_call(
+    id: String,
+    response: CoreModelCallResponse,
+) -> CompletionResponse {
+    let cost_usd = response.usage.cost_usd;
+    CompletionResponse {
+        id,
+        model: response.model,
+        content: response.content,
+        usage: TokenUsage {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+        },
+        stop_reason: response
+            .stop_reason
+            .unwrap_or_else(|| "end_turn".to_string()),
+        cost_usd,
+    }
 }
 
 /// Routing hints extracted from an incoming [`CompletionRequest`].
@@ -897,35 +897,6 @@ async fn select_model_via_router(state: &AppState, hints: &RoutingHints) -> Stri
     cascade_pick
 }
 
-/// Fallback token count estimate when the provider doesn't report usage.
-/// ~4 characters per token for English text. Prefer real counts from LLM responses.
-fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(4)
-}
-
-/// Compute the estimated cost of a request in USD from model profile pricing.
-fn compute_cost(
-    config: &roko_core::config::schema::RokoConfig,
-    model_slug: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-) -> f64 {
-    let models = config.effective_models();
-    let profile = models.values().find(|p| p.slug == model_slug);
-
-    let input_cost = profile
-        .and_then(|p| p.cost_input_per_m)
-        .map(|rate| rate * input_tokens as f64 / 1_000_000.0)
-        .unwrap_or(0.0);
-
-    let output_cost = profile
-        .and_then(|p| p.cost_output_per_m)
-        .map(|rate| rate * output_tokens as f64 / 1_000_000.0)
-        .unwrap_or(0.0);
-
-    input_cost + output_cost
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1061,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn format_messages_produces_structured_prompt() {
+    fn model_call_request_maps_messages_and_metadata() {
         let messages = vec![
             ChatMessage {
                 role: "system".into(),
@@ -1073,55 +1044,49 @@ mod tests {
             },
         ];
 
-        let prompt = format_messages_as_prompt(&messages);
-        assert!(prompt.contains("[System]\nYou are helpful."));
-        assert!(prompt.contains("[User]\nHello"));
+        let request = model_call_request(
+            "claude-sonnet-4-6".into(),
+            &messages,
+            Some(1024),
+            Some(0.7),
+            Some("agent-1".into()),
+        );
+
+        assert_eq!(request.model, "claude-sonnet-4-6");
+        assert_eq!(request.max_tokens, Some(1024));
+        assert_eq!(request.temperature, Some(0.7));
+        assert_eq!(request.role.as_deref(), Some("agent-1"));
+        assert_eq!(request.caller, Some(CallerIdentity::Serve));
+        assert_eq!(request.cache_policy, CachePolicy::Default);
+        assert_eq!(request.messages[0].role, CoreMessageRole::System);
+        assert_eq!(request.messages[1].role, CoreMessageRole::User);
     }
 
     #[test]
-    fn estimate_tokens_rounds_up() {
-        assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("hi"), 1);
-        assert_eq!(estimate_tokens("hello"), 2);
-        assert_eq!(estimate_tokens("hello world!!!"), 4);
-    }
+    fn completion_response_uses_model_call_usage_and_cost() {
+        let response = completion_response_from_model_call(
+            "request-1".into(),
+            CoreModelCallResponse {
+                content: "done".into(),
+                model: "served-model".into(),
+                usage: roko_core::foundation::TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                    cost_usd: 0.0123,
+                },
+                stop_reason: Some("max_tokens".into()),
+                request_id: None,
+            },
+        );
 
-    #[test]
-    fn real_token_counts_preferred_over_heuristic() {
-        use crate::runtime::RunResultUsage;
-
-        let prompt = "hello world"; // heuristic: 3
-        let content = "goodbye"; // heuristic: 2
-
-        // When usage is present, real counts win.
-        let usage = Some(RunResultUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-        });
-        let (input, output) = if let Some(ref u) = usage {
-            (u.input_tokens, u.output_tokens)
-        } else {
-            (estimate_tokens(prompt), estimate_tokens(content))
-        };
-        assert_eq!(input, 100);
-        assert_eq!(output, 50);
-
-        // When usage is absent, falls back to heuristic.
-        let usage: Option<RunResultUsage> = None;
-        let (input, output) = if let Some(ref u) = usage {
-            (u.input_tokens, u.output_tokens)
-        } else {
-            (estimate_tokens(prompt), estimate_tokens(content))
-        };
-        assert_eq!(input, 3);
-        assert_eq!(output, 2);
-    }
-
-    #[test]
-    fn compute_cost_zero_when_no_pricing() {
-        let config = roko_core::config::schema::RokoConfig::default();
-        let cost = compute_cost(&config, "nonexistent-model", 1000, 500);
-        assert_eq!(cost, 0.0);
+        assert_eq!(response.id, "request-1");
+        assert_eq!(response.model, "served-model");
+        assert_eq!(response.content, "done");
+        assert_eq!(response.usage.input_tokens, 100);
+        assert_eq!(response.usage.output_tokens, 50);
+        assert_eq!(response.stop_reason, "max_tokens");
+        assert_eq!(response.cost_usd, 0.0123);
     }
 
     #[test]
@@ -1312,8 +1277,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_route_accepts_valid_request() {
-        let (_dir, state) = test_state();
+    async fn complete_route_dispatches_valid_request_to_model_service() {
+        let dir = tempdir().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let deploy_backend =
+            Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.command = Some("false".into());
+        let state = Arc::new(AppState::new(
+            workdir,
+            Arc::new(NoOpRuntime),
+            config,
+            deploy_backend,
+        ));
         let app = build_router(Arc::clone(&state), &[], ServeAuthConfig::default());
 
         let response = app
@@ -1323,23 +1299,27 @@ mod tests {
                     .uri("/api/inference/complete")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"messages":[{"role":"user","content":"Say hello"}]}"#,
+                        r#"{"model":"invalid-model","messages":[{"role":"user","content":"Say hello"}]}"#,
                     ))
                     .expect("request"),
             )
             .await
             .expect("response");
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
         let payload: Value = serde_json::from_slice(&body).expect("parse body");
-        assert!(payload.get("id").is_some());
-        assert!(payload.get("model").is_some());
-        assert!(payload.get("usage").is_some());
-        assert!(payload.get("cost_usd").is_some());
-        assert_eq!(payload["stop_reason"], "end_turn");
+        assert_eq!(payload["code"], "internal_error");
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("inference dispatch failed"))
+        );
     }
 }
