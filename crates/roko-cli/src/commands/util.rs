@@ -202,7 +202,7 @@ pub(crate) async fn cmd_run(
     workdir: Option<PathBuf>,
     prompt: String,
     serve: bool,
-    _engine: crate::EngineVariant,
+    engine: crate::EngineVariant,
 ) -> Result<i32> {
     let workdir = workdir.unwrap_or_else(|| resolve_workdir(cli));
     prepare_runtime_hooks(&workdir, cli.quiet);
@@ -233,6 +233,43 @@ pub(crate) async fn cmd_run(
     // types (same source included via #[path] in both crates). Bridge them once
     // roko-core re-exports StateHub from its crate root.
     let external_hub: Option<&roko_cli::state_hub::StateHub> = None;
+
+    if engine == crate::EngineVariant::V2 {
+        // TODO(W03): expose workflow_template via Config.
+        let template = "standard";
+
+        // Build enabled gates list from declared gate configs.
+        let enabled_gates: Vec<String> = config
+            .gates
+            .iter()
+            .map(|g| match g {
+                roko_cli::config::GateConfig::Compile { .. } => "compile".to_string(),
+                roko_cli::config::GateConfig::Clippy { .. } => "clippy".to_string(),
+                roko_cli::config::GateConfig::Test { .. } => "test".to_string(),
+                roko_cli::config::GateConfig::Shell { .. } => "shell".to_string(),
+            })
+            .collect();
+
+        let result =
+            roko_cli::run::run_with_workflow_engine(&prompt, &workdir, template, enabled_gates)
+                .await;
+
+        // Shut down the HTTP server if it was started.
+        if let Some((state, handle)) = server_guard {
+            state.cancel.cancel();
+            let _ = handle.await;
+        }
+
+        return match result {
+            Ok(()) => Ok(EXIT_SUCCESS),
+            Err(e) => {
+                if !cli.quiet {
+                    eprintln!("workflow engine error: {e:#}");
+                }
+                Ok(EXIT_AGENT_FAILURE)
+            }
+        };
+    }
 
     // Use inline rendering when stdout is a TTY and we're not in --json or --quiet mode.
     if !cli.json && !cli.quiet && roko_cli::inline::should_use_inline() {
