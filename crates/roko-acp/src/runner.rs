@@ -75,10 +75,11 @@ pub async fn run_with_workflow_engine(
     let model = roko_core::agent::resolve_model(&roko_config, &model_key).slug;
 
     let model_caller: Arc<dyn CoreModelCaller> =
-        Arc::new(ModelCallService::new(model).with_config(roko_config));
+        Arc::new(ModelCallService::new(model.clone()).with_config(roko_config));
     let gate_runner: Arc<dyn CoreGateRunner> = Arc::new(GateService::new());
 
     let services = EffectServices {
+        model,
         model_caller,
         prompt_assembler: Arc::new(AcpPromptAssembler),
         feedback_sink: Arc::new(AcpFeedbackSink::from_roko_dir(&workdir.join(".roko"))),

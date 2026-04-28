@@ -425,7 +425,7 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
     // TODO(S01): ModelCallConfig is not available in this worktree; timeout
     // and provider settings are carried through the existing RokoConfig path.
     let run_id = format!("cli_workflow_{}", Utc::now().timestamp_millis());
-    let mut model_caller_inner = ModelCallService::new(model)
+    let mut model_caller_inner = ModelCallService::new(model.clone())
         .with_feedback_sink(Arc::clone(&feedback_sink))
         .with_config(model_config)
         .with_run_id(run_id);
@@ -446,6 +446,7 @@ fn build_workflow_effect_services(workdir: &std::path::Path) -> anyhow::Result<E
     };
 
     Ok(EffectServices {
+        model,
         model_caller: Arc::new(CliModelCaller::new(model_caller)),
         prompt_assembler: Arc::new(RuntimePromptAssemblerAdapter::new(prompt_assembler)),
         feedback_sink: Arc::new(RuntimeFeedbackSinkAdapter::new(feedback_sink)),
