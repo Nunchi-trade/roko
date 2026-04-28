@@ -1320,6 +1320,55 @@ pub trait NeuroStore: Sized {
     /// Returns an error if the backend cannot load or persist the filtered
     /// entries.
     fn gc(&mut self, min_confidence: f64) -> Result<usize>;
+
+    /// Adjust the confidence score of a knowledge entry by `delta`.
+    ///
+    /// Backends that do not support mutable confidence updates may leave this
+    /// as a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entry.
+    fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        let _ = (knowledge_id, delta);
+        Ok(false)
+    }
+
+    /// Record a usage outcome for a knowledge entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entry.
+    fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        let delta = if succeeded { 0.02 } else { -0.05 };
+        self.update_confidence(knowledge_id, delta)?;
+        tracing::debug!(
+            knowledge_id,
+            succeeded,
+            delta,
+            "recorded knowledge usage outcome"
+        );
+        Ok(())
+    }
+
+    /// Record usage outcomes for multiple knowledge entries at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot load or persist the updated
+    /// entries.
+    fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        let mut updated = 0usize;
+        for (knowledge_id, succeeded) in outcomes {
+            let delta = if *succeeded { 0.02 } else { -0.05 };
+            if self.update_confidence(knowledge_id, delta)? {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
 }
 
 /// Evidence-based admission control for durable knowledge.

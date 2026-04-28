@@ -1393,6 +1393,90 @@ impl KnowledgeStore {
         Ok(changed)
     }
 
+    /// Adjust the confidence score of a knowledge entry by `delta`.
+    ///
+    /// The resulting confidence is clamped to `[0.0, 1.0]`. If the entry
+    /// is not found, this is a no-op and returns `Ok(false)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut found = false;
+
+        for entry in &mut entries {
+            if entry.id == knowledge_id {
+                entry.confidence = (entry.confidence + delta).clamp(0.0, 1.0);
+                Self::maybe_adjust_tier(entry);
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            self.rewrite_all(&entries)?;
+        }
+
+        Ok(found)
+    }
+
+    /// Record a usage outcome for a knowledge entry.
+    ///
+    /// Successful usage applies a small positive reinforcement (`+0.02`),
+    /// while failed usage applies a stronger negative signal (`-0.05`).
+    /// Entries that drop below confidence `0.1` after repeated failures are
+    /// candidates for the next garbage-collection pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        let delta = if succeeded { 0.02 } else { -0.05 };
+        self.update_confidence(knowledge_id, delta)?;
+        tracing::debug!(
+            knowledge_id,
+            succeeded,
+            delta,
+            "recorded knowledge usage outcome"
+        );
+        Ok(())
+    }
+
+    /// Record usage outcomes for multiple knowledge entries at once.
+    ///
+    /// More efficient than calling [`Self::record_usage`] in a loop because it
+    /// performs a single load-modify-write cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read or rewritten.
+    pub fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        if outcomes.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self.write_gate.lock();
+        let mut entries = self.read_all()?;
+        let mut updated_ids = HashSet::new();
+
+        for (knowledge_id, succeeded) in outcomes {
+            let delta = if *succeeded { 0.02 } else { -0.05 };
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == *knowledge_id) {
+                entry.confidence = (entry.confidence + delta).clamp(0.0, 1.0);
+                Self::maybe_adjust_tier(entry);
+                updated_ids.insert(knowledge_id.clone());
+            }
+        }
+
+        if !updated_ids.is_empty() {
+            self.rewrite_all(&entries)?;
+        }
+
+        Ok(updated_ids.len())
+    }
+
     /// Read all knowledge entries from the store.
     ///
     /// # Errors
@@ -1493,6 +1577,25 @@ impl KnowledgeStore {
         Ok(())
     }
 
+    /// Check if an entry's confidence warrants tier promotion or demotion.
+    fn maybe_adjust_tier(entry: &mut KnowledgeEntry) {
+        if entry.confidence >= 0.9
+            && entry.tier.multiplier() < KnowledgeTier::Consolidated.multiplier()
+        {
+            entry.tier = KnowledgeTier::Consolidated;
+        }
+
+        if entry.confidence <= 0.2
+            && entry.tier.multiplier() > KnowledgeTier::Transient.multiplier()
+        {
+            entry.tier = KnowledgeTier::Transient;
+        }
+
+        if entry.confidence <= 0.05 {
+            entry.half_life_days = 1.0;
+        }
+    }
+
     fn rewrite_all(&self, entries: &[KnowledgeEntry]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("create knowledge directory")?;
@@ -1567,6 +1670,18 @@ impl NeuroStore for KnowledgeStore {
 
     fn gc(&mut self, min_confidence: f64) -> Result<usize> {
         KnowledgeStore::gc(self, min_confidence)
+    }
+
+    fn update_confidence(&mut self, knowledge_id: &str, delta: f64) -> Result<bool> {
+        KnowledgeStore::update_confidence(self, knowledge_id, delta)
+    }
+
+    fn record_usage(&mut self, knowledge_id: &str, succeeded: bool) -> Result<()> {
+        KnowledgeStore::record_usage(self, knowledge_id, succeeded)
+    }
+
+    fn batch_record_usage(&mut self, outcomes: &[(String, bool)]) -> Result<usize> {
+        KnowledgeStore::batch_record_usage(self, outcomes)
     }
 }
 
@@ -2271,6 +2386,112 @@ mod tests {
         let all = store.read_all().expect("read after gc");
         assert_eq!(all.len(), 2);
         assert!(all.iter().all(|entry| entry.id != "k3"));
+    }
+
+    #[test]
+    fn update_confidence_clamps_and_promotes_tier() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut knowledge = entry(
+            KnowledgeKind::Insight,
+            "confidence-up",
+            "Confidence reinforcement should promote validated knowledge.",
+            &["confidence"],
+            0.89,
+            &["ep1"],
+            Utc::now(),
+        );
+        knowledge.tier = KnowledgeTier::Working;
+        store.add(knowledge).expect("add knowledge");
+
+        assert!(
+            store
+                .update_confidence("confidence-up", 0.20)
+                .expect("update confidence")
+        );
+        assert!(
+            !store
+                .update_confidence("missing", 0.20)
+                .expect("missing update")
+        );
+
+        let all = store.read_all().expect("read all");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].confidence, 1.0);
+        assert_eq!(all[0].tier, KnowledgeTier::Consolidated);
+    }
+
+    #[test]
+    fn record_usage_demotes_low_confidence_entry() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut knowledge = entry(
+            KnowledgeKind::Heuristic,
+            "confidence-down",
+            "Failed usage should reduce confidence.",
+            &["confidence"],
+            0.23,
+            &["ep1"],
+            Utc::now(),
+        );
+        knowledge.tier = KnowledgeTier::Persistent;
+        store.add(knowledge).expect("add knowledge");
+
+        store
+            .record_usage("confidence-down", false)
+            .expect("record usage");
+
+        let all = store.read_all().expect("read all");
+        assert!((all[0].confidence - 0.18).abs() < 1e-9);
+        assert_eq!(all[0].tier, KnowledgeTier::Transient);
+    }
+
+    #[test]
+    fn batch_record_usage_updates_once_and_shortens_weak_entries() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut store = KnowledgeStore::new(tmp.path().join("neuro").join("knowledge.jsonl"));
+        let mut weak = entry(
+            KnowledgeKind::Warning,
+            "weak",
+            "Repeated misses should make this decay quickly.",
+            &["confidence"],
+            0.08,
+            &["ep1"],
+            Utc::now(),
+        );
+        weak.tier = KnowledgeTier::Working;
+        weak.half_life_days = 30.0;
+        let stable = entry(
+            KnowledgeKind::Insight,
+            "stable",
+            "Successful usage should reinforce this entry.",
+            &["confidence"],
+            0.50,
+            &["ep2"],
+            Utc::now(),
+        );
+        store.add(weak).expect("add weak");
+        store.add(stable).expect("add stable");
+
+        let updated = store
+            .batch_record_usage(&[
+                ("weak".to_owned(), false),
+                ("stable".to_owned(), true),
+                ("missing".to_owned(), true),
+            ])
+            .expect("batch record usage");
+
+        assert_eq!(updated, 2);
+        let all = store.read_all().expect("read all");
+        let weak = all.iter().find(|entry| entry.id == "weak").expect("weak");
+        let stable = all
+            .iter()
+            .find(|entry| entry.id == "stable")
+            .expect("stable");
+        assert!((weak.confidence - 0.03).abs() < 1e-9);
+        assert_eq!(weak.tier, KnowledgeTier::Transient);
+        assert_eq!(weak.half_life_days, 1.0);
+        assert!((stable.confidence - 0.52).abs() < 1e-9);
     }
 
     #[test]
