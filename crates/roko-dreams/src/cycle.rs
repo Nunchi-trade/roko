@@ -2558,8 +2558,7 @@ fn build_cross_episode_report(episodes: &[Episode]) -> Option<CrossEpisodeConsol
     if episodes.len() < 6 {
         return None;
     }
-    let consolidator =
-        CrossEpisodeConsolidator::new((episodes.len() / 3).clamp(2, 8), 3, 50, 0.55);
+    let consolidator = CrossEpisodeConsolidator::new((episodes.len() / 3).clamp(2, 8), 3, 50, 0.55);
     Some(consolidator.discover(episodes))
 }
 

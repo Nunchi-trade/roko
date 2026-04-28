@@ -488,9 +488,11 @@ impl AppState {
         // Initialize chain client + wallet from [chain] config section.
         let (chain_client, chain_wallet) = Self::init_chain(&roko_config);
         let http_client = reqwest::Client::new();
-        let service_bundle =
-            ServiceFactory::build(ServiceConfig::production(workdir.clone(), roko_config.clone()))
-                .expect("build shared service bundle");
+        let service_bundle = ServiceFactory::build(ServiceConfig::production(
+            workdir.clone(),
+            roko_config.clone(),
+        ))
+        .expect("build shared service bundle");
         let model_call_service = service_bundle.model_call_service;
 
         Self {

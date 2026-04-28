@@ -102,7 +102,9 @@ impl ServiceFactory {
             .clone()
             .unwrap_or_else(|| workspace_config.agent.default_model.clone());
         if model_key.trim().is_empty() {
-            return Err(RokoError::invalid("model is not configured for service factory"));
+            return Err(RokoError::invalid(
+                "model is not configured for service factory",
+            ));
         }
         let model = resolve_model(&workspace_config, &model_key).slug;
         if model.trim().is_empty() {
@@ -113,7 +115,9 @@ impl ServiceFactory {
         workspace_config.agent.default_model = model.clone();
 
         let feedback_sink: Arc<dyn FeedbackSink> = if config.feedback_enabled {
-            Arc::new(FeedbackService::from_roko_dir_with_episodes(&config.roko_dir))
+            Arc::new(FeedbackService::from_roko_dir_with_episodes(
+                &config.roko_dir,
+            ))
         } else {
             Arc::new(MemoryFeedbackSink::default())
         };
