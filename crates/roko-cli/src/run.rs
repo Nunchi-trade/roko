@@ -140,6 +140,28 @@ pub struct PlanWorkflowReport {
     pub failed: usize,
     /// Per-task outcomes: `(task_id, success, message)`.
     pub outcomes: Vec<(String, bool, String)>,
+    pub task_reports: Vec<PlanTaskWorkflowReport>,
+    pub task_errors: Vec<PlanTaskWorkflowError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanWorkflowTask {
+    pub plan_id: String,
+    pub task: crate::task_parser::TaskDef,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTaskWorkflowReport {
+    pub plan_id: String,
+    pub task_id: String,
+    pub report: WorkflowRunReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanTaskWorkflowError {
+    pub plan_id: String,
+    pub task_id: String,
+    pub error: String,
 }
 
 /// Bridges WorkflowEngine lifecycle events to the StateHub for TUI/SSE/WS
@@ -503,25 +525,22 @@ pub async fn run_plan_with_workflow_engine(
     enabled_gates: Vec<String>,
     shell_gates: Vec<CoreShellGateCommand>,
 ) -> anyhow::Result<PlanWorkflowReport> {
-    let services = build_workflow_effect_services(workdir)?;
-    let engine = WorkflowEngine::new(services);
-    let workflow = workflow_config_for_template(workflow_template);
-
     let mut passed = 0;
     let mut failed = 0;
     let mut outcomes = Vec::with_capacity(tasks.len());
+    let mut task_reports = Vec::new();
+    let mut task_errors = Vec::new();
 
     for (task_id, prompt) in tasks {
-        let config = WorkflowRunConfig {
-            prompt: prompt.clone(),
-            workdir: workdir.to_path_buf(),
-            workflow: workflow.clone(),
-            enabled_gates: enabled_gates.clone(),
-            shell_gates: shell_gates.clone(),
-            commit_prefix: Some("feat".to_string()),
-        };
-
-        match engine.run(config).await {
+        match execute_plan_prompt_with_workflow_engine(
+            prompt,
+            workdir,
+            workflow_template,
+            enabled_gates.clone(),
+            shell_gates.clone(),
+        )
+        .await
+        {
             Ok(result) => {
                 let success = result.success;
                 let message = format!(
@@ -542,6 +561,11 @@ pub async fn run_plan_with_workflow_engine(
                 } else {
                     failed += 1;
                 }
+                task_reports.push(PlanTaskWorkflowReport {
+                    plan_id: "plan".to_string(),
+                    task_id: task_id.clone(),
+                    report: result,
+                });
                 outcomes.push((task_id.clone(), success, message));
             }
             Err(error) => {
@@ -549,6 +573,11 @@ pub async fn run_plan_with_workflow_engine(
                 println!("[{task_id}] failed: {message}");
                 tracing::warn!(task_id, error = %message, "v2 workflow task failed");
                 failed += 1;
+                task_errors.push(PlanTaskWorkflowError {
+                    plan_id: "plan".to_string(),
+                    task_id: task_id.clone(),
+                    error: message.clone(),
+                });
                 outcomes.push((task_id.clone(), false, message));
             }
         }
@@ -559,7 +588,151 @@ pub async fn run_plan_with_workflow_engine(
         passed,
         failed,
         outcomes,
+        task_reports,
+        task_errors,
     })
+}
+
+pub async fn run_plan_tasks_with_workflow_engine(
+    tasks: &[PlanWorkflowTask],
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<PlanWorkflowReport> {
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    let mut task_reports = Vec::new();
+    let mut task_errors = Vec::new();
+
+    for plan_task in tasks {
+        match execute_plan_task_with_workflow_engine(
+            &plan_task.plan_id,
+            &plan_task.task,
+            workdir,
+            workflow_template,
+            enabled_gates.clone(),
+            shell_gates.clone(),
+        )
+        .await
+        {
+            Ok(result) => {
+                let success = result.success;
+                let message = format!(
+                    "{} in {} agent turn{}",
+                    if success { "success" } else { "failed" },
+                    result.agent_turns,
+                    if result.agent_turns == 1 { "" } else { "s" },
+                );
+                println!("[{}:{}] {message}", plan_task.plan_id, plan_task.task.id);
+                tracing::info!(
+                    plan_id = %plan_task.plan_id,
+                    task_id = %plan_task.task.id,
+                    success = result.success,
+                    agent_turns = result.agent_turns,
+                    "v2 workflow task complete"
+                );
+                if success {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+                outcomes.push((plan_task.task.id.clone(), success, message));
+                task_reports.push(PlanTaskWorkflowReport {
+                    plan_id: plan_task.plan_id.clone(),
+                    task_id: plan_task.task.id.clone(),
+                    report: result,
+                });
+            }
+            Err(error) => {
+                let message = error.to_string();
+                println!(
+                    "[{}:{}] failed: {message}",
+                    plan_task.plan_id, plan_task.task.id
+                );
+                tracing::warn!(
+                    plan_id = %plan_task.plan_id,
+                    task_id = %plan_task.task.id,
+                    error = %message,
+                    "v2 workflow task failed"
+                );
+                failed += 1;
+                outcomes.push((plan_task.task.id.clone(), false, message.clone()));
+                task_errors.push(PlanTaskWorkflowError {
+                    plan_id: plan_task.plan_id.clone(),
+                    task_id: plan_task.task.id.clone(),
+                    error: message,
+                });
+            }
+        }
+    }
+
+    Ok(PlanWorkflowReport {
+        total: tasks.len(),
+        passed,
+        failed,
+        outcomes,
+        task_reports,
+        task_errors,
+    })
+}
+
+pub async fn execute_plan_task_with_workflow_engine(
+    plan_id: &str,
+    task: &crate::task_parser::TaskDef,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<WorkflowRunReport> {
+    let prompt = task.build_prompt(plan_id, workdir);
+    execute_plan_prompt_with_workflow_engine(
+        &prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+    )
+    .await
+}
+
+async fn execute_plan_prompt_with_workflow_engine(
+    prompt: &str,
+    workdir: &std::path::Path,
+    workflow_template: &str,
+    enabled_gates: Vec<String>,
+    shell_gates: Vec<CoreShellGateCommand>,
+) -> anyhow::Result<WorkflowRunReport> {
+    run_workflow_engine_report_with_hub(
+        prompt,
+        workdir,
+        workflow_template,
+        enabled_gates,
+        shell_gates,
+        None,
+    )
+    .await
+}
+
+pub fn discover_plan_workflow_tasks(
+    plans_dir: &std::path::Path,
+) -> anyhow::Result<Vec<PlanWorkflowTask>> {
+    let mut tasks = Vec::new();
+    for tasks_path in discover_task_files(plans_dir)? {
+        let tasks_file = crate::task_parser::TasksFile::parse(&tasks_path)?;
+        let plan_id = tasks_file.meta.plan.clone();
+        tasks.extend(
+            dependency_ordered_task_defs(tasks_file.tasks)
+                .into_iter()
+                .map(|task| PlanWorkflowTask {
+                    plan_id: plan_id.clone(),
+                    task,
+                }),
+        );
+    }
+
+    Ok(tasks)
 }
 
 /// Discover task (id, prompt) pairs from a plans directory.
@@ -645,6 +818,24 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
         ordered
     }
 
+    let mut prompts = Vec::new();
+    for tasks_path in discover_task_files(plans_dir)? {
+        let content = std::fs::read_to_string(&tasks_path)
+            .with_context(|| format!("read {}", tasks_path.display()))?;
+        let tasks = toml::from_str::<TasksToml>(&content)
+            .with_context(|| format!("parse {}", tasks_path.display()))?;
+
+        prompts.extend(
+            dependency_ordered_tasks(tasks.tasks)
+                .into_iter()
+                .map(|task| (task.id.clone(), task_prompt(&task))),
+        );
+    }
+
+    Ok(prompts)
+}
+
+fn discover_task_files(plans_dir: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     let mut task_files = Vec::new();
     if plans_dir.join("tasks.toml").is_file() {
         task_files.push(plans_dir.join("tasks.toml"));
@@ -662,21 +853,55 @@ pub fn discover_task_prompts(plans_dir: &std::path::Path) -> anyhow::Result<Vec<
         task_files.sort();
     }
 
-    let mut prompts = Vec::new();
-    for tasks_path in task_files {
-        let content = std::fs::read_to_string(&tasks_path)
-            .with_context(|| format!("read {}", tasks_path.display()))?;
-        let tasks = toml::from_str::<TasksToml>(&content)
-            .with_context(|| format!("parse {}", tasks_path.display()))?;
+    Ok(task_files)
+}
 
-        prompts.extend(
-            dependency_ordered_tasks(tasks.tasks)
-                .into_iter()
-                .map(|task| (task.id.clone(), task_prompt(&task))),
-        );
+fn dependency_ordered_task_defs(
+    tasks: Vec<crate::task_parser::TaskDef>,
+) -> Vec<crate::task_parser::TaskDef> {
+    let mut index_by_id = HashMap::with_capacity(tasks.len());
+    for (index, task) in tasks.iter().enumerate() {
+        index_by_id.entry(task.id.clone()).or_insert(index);
     }
 
-    Ok(prompts)
+    let mut emitted = vec![false; tasks.len()];
+    let mut ordered = Vec::with_capacity(tasks.len());
+
+    loop {
+        let mut progressed = false;
+        for (index, task) in tasks.iter().enumerate() {
+            if emitted[index] {
+                continue;
+            }
+
+            let deps_ready =
+                task.depends_on
+                    .iter()
+                    .all(|dependency| match index_by_id.get(dependency) {
+                        Some(dependency_index) => emitted[*dependency_index],
+                        None => true,
+                    });
+            if deps_ready {
+                emitted[index] = true;
+                ordered.push(task.clone());
+                progressed = true;
+            }
+        }
+
+        if ordered.len() == tasks.len() {
+            break;
+        }
+        if !progressed {
+            for (index, task) in tasks.iter().enumerate() {
+                if !emitted[index] {
+                    ordered.push(task.clone());
+                }
+            }
+            break;
+        }
+    }
+
+    ordered
 }
 
 /// Run the universal loop once for `prompt_text` under `workdir`.
