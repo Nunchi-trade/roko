@@ -54,6 +54,7 @@ pub mod metrics;
 pub mod pipeline_state;
 pub mod process;
 pub mod resource;
+pub mod task_scheduler;
 pub mod theta_consumer;
 
 pub use lifecycle::{
@@ -66,3 +67,4 @@ pub use lifecycle::{
 pub use pipeline_state::{
     Phase, PipelineInput, PipelineOutput, PipelineStateV2, WorkflowConfig, WorkflowOutcome,
 };
+pub use task_scheduler::{SchedulableTask, TaskScheduler, TaskStatus};
