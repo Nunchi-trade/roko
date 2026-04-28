@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 type ModelRouter = dyn Fn(Option<&str>) -> String + Send + Sync;
+type KnowledgeStoreQuery = dyn Fn(&str, usize) -> Result<Vec<serde_json::Value>> + Send + Sync;
 
 /// Records explicit model override outcomes for cascade-router learning.
 pub trait ForceBackendOverrideRecorder: Send + Sync {
@@ -61,6 +62,14 @@ pub struct ModelCallService {
     event_consumers: Vec<Arc<dyn EventConsumer>>,
     /// Optional sink for model-call feedback.
     feedback_sink: Option<Arc<dyn FeedbackSink>>,
+    /// Optional knowledge store query adapter for knowledge-informed routing.
+    ///
+    /// TODO(converge): Replace this erased adapter with
+    /// `Arc<dyn roko_neuro::NeuroStore + Send + Sync>` once `roko-agent` has a
+    /// normal `roko-neuro` dependency and `NeuroStore` is object-safe. In this
+    /// worktree `NeuroStore: Sized`, and this batch's scope forbids Cargo.toml
+    /// changes, so direct trait-object storage cannot compile here.
+    knowledge_store: Option<Arc<KnowledgeStoreQuery>>,
     /// Optional model router used when requests omit an explicit model.
     model_router: Option<Arc<ModelRouter>>,
     /// Optional cascade router callback for recording forced model observations.
@@ -97,6 +106,7 @@ impl ModelCallService {
             cost_table: CostTable::default(),
             event_consumers: Vec::new(),
             feedback_sink: None,
+            knowledge_store: None,
             model_router: None,
             cascade_router: None,
             env: Vec::new(),
@@ -135,6 +145,18 @@ impl ModelCallService {
     #[must_use]
     pub fn with_feedback_sink(mut self, feedback_sink: Arc<dyn FeedbackSink>) -> Self {
         self.feedback_sink = Some(feedback_sink);
+        self
+    }
+
+    /// Attach a knowledge store query adapter for knowledge-informed model routing.
+    ///
+    /// The adapter should return serialized neuro `KnowledgeEntry` values.
+    #[must_use]
+    pub fn with_knowledge_store(
+        mut self,
+        store: Arc<dyn Fn(&str, usize) -> Result<Vec<serde_json::Value>> + Send + Sync>,
+    ) -> Self {
+        self.knowledge_store = Some(store);
         self
     }
 
@@ -438,6 +460,88 @@ impl ModelCallService {
             );
         }
     }
+
+    fn build_knowledge_advice(
+        &self,
+        candidate_slugs: &[String],
+        role: Option<&str>,
+        task_hint: Option<&str>,
+    ) -> Option<KnowledgeRoutingAdvice> {
+        let store = self.knowledge_store.as_ref()?;
+
+        let query = format!(
+            "{} {} routing model",
+            role.unwrap_or("default"),
+            task_hint.unwrap_or("general")
+        );
+
+        let entries = match store(&query, 10) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::debug!(error = %err, "knowledge store query failed for routing");
+                return None;
+            }
+        };
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut hints = Vec::new();
+
+        for slug in candidate_slugs {
+            let slug_lower = slug.to_lowercase();
+            let mut score = 0.0_f64;
+            let mut supporting = 0_u32;
+
+            for entry in &entries {
+                let content_matches = knowledge_content(entry)
+                    .to_lowercase()
+                    .contains(&slug_lower)
+                    || knowledge_source_model(entry)
+                        .is_some_and(|sm| sm.eq_ignore_ascii_case(slug))
+                    || knowledge_tags(entry)
+                        .iter()
+                        .any(|tag| tag.eq_ignore_ascii_case(slug));
+                if !content_matches {
+                    continue;
+                }
+                supporting += 1;
+                let weight = knowledge_confidence(entry).clamp(0.0, 1.0);
+                if knowledge_is_anti(entry) {
+                    score -= weight * 0.15;
+                } else {
+                    score += weight * 0.10;
+                }
+            }
+
+            if supporting > 0 {
+                hints.push(KnowledgeHint {
+                    model_slug: slug.clone(),
+                    score: score.clamp(-0.3, 0.3),
+                    supporting_entries: supporting,
+                    reason: format!("{supporting} knowledge entries for {slug}"),
+                });
+            }
+        }
+
+        let has_signal = !hints.is_empty();
+        Some(KnowledgeRoutingAdvice { hints, has_signal })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgeHint {
+    model_slug: String,
+    score: f64,
+    supporting_entries: u32,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgeRoutingAdvice {
+    hints: Vec<KnowledgeHint>,
+    has_signal: bool,
 }
 
 fn request_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
@@ -459,6 +563,56 @@ fn request_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
     }
 
     (system_prompt, user_content)
+}
+
+fn request_task_hint(messages: &[ChatMessage]) -> Option<&str> {
+    messages
+        .iter()
+        .find(|message| matches!(message.role, MessageRole::User) && !message.content.is_empty())
+        .map(|message| message.content.as_str())
+}
+
+fn knowledge_content(entry: &serde_json::Value) -> &str {
+    entry
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+fn knowledge_source_model(entry: &serde_json::Value) -> Option<&str> {
+    entry
+        .get("source_model")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn knowledge_tags(entry: &serde_json::Value) -> Vec<&str> {
+    entry
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn knowledge_confidence(entry: &serde_json::Value) -> f64 {
+    entry
+        .get("confidence")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_default()
+}
+
+fn knowledge_is_anti(entry: &serde_json::Value) -> bool {
+    entry
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| {
+            kind.eq_ignore_ascii_case("AntiKnowledge")
+                || kind.eq_ignore_ascii_case("anti_knowledge")
+                || kind.eq_ignore_ascii_case("anti-knowledge")
+        })
 }
 
 fn output_text(output: &Engram) -> String {
@@ -976,6 +1130,34 @@ fn is_retryable_provider_message(message: &str) -> bool {
 #[async_trait]
 impl ModelCaller for ModelCallService {
     async fn call(&self, req: ModelCallRequest) -> Result<ModelCallResponse> {
+        let mut knowledge_candidates = Vec::new();
+        if !req.model.is_empty() {
+            knowledge_candidates.push(req.model.clone());
+        }
+        if !self.default_model.is_empty() && !knowledge_candidates.contains(&self.default_model) {
+            knowledge_candidates.push(self.default_model.clone());
+        }
+        let knowledge_advice = self.build_knowledge_advice(
+            &knowledge_candidates,
+            req.role.as_deref(),
+            request_task_hint(&req.messages),
+        );
+        if self.knowledge_store.is_some() {
+            if let Some(advice) = &knowledge_advice {
+                tracing::debug!(
+                    has_signal = advice.has_signal,
+                    hints = advice.hints.len(),
+                    candidates = ?knowledge_candidates,
+                    "knowledge routing advice produced"
+                );
+            } else {
+                tracing::debug!(
+                    candidates = ?knowledge_candidates,
+                    "knowledge routing advice unavailable"
+                );
+            }
+        }
+
         let model = self.resolve_model(&req);
         let start = Instant::now();
         let agent_id = format!("model-call:{model}");
@@ -1128,7 +1310,10 @@ impl ModelCaller for ModelCallService {
             model: output.model_used,
             usage,
             stop_reason: Some("end_turn".to_string()),
-            request_id: None,
+            request_id: knowledge_advice
+                .as_ref()
+                .filter(|advice| advice.has_signal)
+                .map(|advice| format!("knowledge-routing:{}-hints", advice.hints.len())),
         })
     }
 }
