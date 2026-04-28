@@ -12,6 +12,7 @@ use crate::agent_spawn::{SpawnAgentSpec, spawn_agent_scoped};
 use crate::clean;
 use crate::config::{Config, GateConfig, PromptFile};
 use crate::episode::EpisodePolicy;
+use crate::output_format;
 use crate::prompting::{PromptBuildOptions, build_role_system_prompt_validated};
 use crate::state_hub::{StateHub, StateHubSender};
 use anyhow::{Context as _, Result, anyhow};
@@ -43,7 +44,7 @@ use roko_runtime::effect_driver::{
     BoxFuture as RuntimeBoxFuture, EffectServices, Result as RuntimeResult,
 };
 use roko_runtime::pipeline_state::WorkflowConfig;
-use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowRunConfig};
+use roko_runtime::workflow_engine::{WorkflowEngine, WorkflowOutcome, WorkflowRunConfig};
 use roko_runtime::{
     FeedbackEvent as RuntimeFeedbackEvent, FeedbackSink as RuntimeFeedbackSink,
     GateConfig as RuntimeGateConfig, GateReport as RuntimeGateReport,
@@ -454,6 +455,14 @@ pub async fn run_with_workflow_engine_with_hub(
         commit_prefix: Some("feat".to_string()),
     };
 
+    output_format::intro("roko run");
+    output_format::step("prompt", &output_format::dim(&truncate(prompt, 60)));
+    output_format::step("workflow", workflow_template);
+    output_format::step("model", "claude-sonnet-4-20250514");
+    output_format::divider();
+    output_format::bar("starting workflow...");
+    output_format::divider();
+
     // Run the workflow.
     let mut engine = WorkflowEngine::new(services);
     let roko_dir = workdir.join(".roko");
@@ -474,11 +483,26 @@ pub async fn run_with_workflow_engine_with_hub(
         .await
         .map_err(|error| anyhow!("workflow engine failed: {error}"))?;
 
-    println!(
-        "Workflow complete: {} ({:?})",
-        result.run_id, result.outcome
-    );
-    println!("Iterations: {}", result.iterations);
+    match &result.outcome {
+        WorkflowOutcome::Success { commit_hash } => {
+            let hash_str = commit_hash
+                .as_deref()
+                .map(|h| format!(" ({})", &h[..7.min(h.len())]))
+                .unwrap_or_default();
+            output_format::success(&format!(
+                "workflow completed ({} iteration{}){hash_str}",
+                result.iterations,
+                if result.iterations == 1 { "" } else { "s" },
+            ));
+        }
+        WorkflowOutcome::Halted { reason } => {
+            output_format::error(&format!("workflow halted: {reason}"));
+        }
+        WorkflowOutcome::Cancelled => {
+            output_format::warning("workflow cancelled");
+        }
+    }
+    output_format::end(&output_format::dim(&result.run_id));
 
     Ok(())
 }
