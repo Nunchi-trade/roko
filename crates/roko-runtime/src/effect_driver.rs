@@ -28,6 +28,64 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// Boxed future (kept for internal use).
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+// -- AffectPolicy --
+
+/// Affect context snapshot for pre-dispatch modulation.
+#[derive(Debug, Clone)]
+pub struct AffectContext {
+    /// Current behavioral state label.
+    pub behavioral_state: String,
+    /// PAD vector: [Pleasure, Arousal, Dominance].
+    pub pad: [f32; 3],
+    /// Emotional tag label, if available.
+    pub emotional_tag: Option<String>,
+}
+
+/// Dispatch modulation parameters from the affect policy.
+#[derive(Debug, Clone)]
+pub struct DispatchModulation {
+    /// Tier bias: -1.0 (cheapest) to +1.0 (most capable).
+    pub tier_bias: f32,
+    /// Turn limit multiplier (1.0 = no change).
+    pub turn_limit_factor: f32,
+    /// Exploration rate [0.0, 1.0].
+    pub exploration_rate: f32,
+}
+
+impl Default for DispatchModulation {
+    fn default() -> Self {
+        Self {
+            tier_bias: 0.0,
+            turn_limit_factor: 1.0,
+            exploration_rate: 0.0,
+        }
+    }
+}
+
+/// Behavioral affect modulation policy for workflow dispatch.
+///
+/// When wired, the effect driver calls these methods at lifecycle points.
+/// The trait uses `BoxFuture` for persist to match the local async pattern.
+pub trait AffectPolicy: Send + Sync {
+    /// Called before dispatching a task.
+    fn pre_dispatch(&self, task_id: &str, role: &str) -> AffectContext;
+
+    /// Called after task completion.
+    fn on_task_outcome(&mut self, task_id: &str, succeeded: bool, tokens_used: u64, cost_usd: f64);
+
+    /// Called after gate verdict.
+    fn on_gate_result(&mut self, gate_name: &str, passed: bool, rung: u8, confidence: f64);
+
+    /// Modulate dispatch parameters based on current affect state.
+    fn modulate_dispatch(&self, role: &str, params: &mut DispatchModulation);
+
+    /// Current behavioral state label for logging.
+    fn behavioral_state_label(&self) -> String;
+
+    /// Persist state to disk.
+    fn persist(&self) -> BoxFuture<'_, Result<()>>;
+}
+
 /// Services required by the `EffectDriver`.
 pub struct EffectServices {
     /// Model call service.
@@ -38,6 +96,8 @@ pub struct EffectServices {
     pub feedback_sink: Arc<dyn FeedbackSink>,
     /// Gate execution service.
     pub gate_runner: Arc<dyn GateRunner>,
+    /// Optional affect policy for behavioral modulation.
+    pub affect_policy: Option<Arc<std::sync::Mutex<dyn AffectPolicy>>>,
 }
 
 /// Drives workflow execution by translating state-machine actions into effects.
@@ -68,6 +128,14 @@ impl EffectDriver {
         context: Option<&str>,
     ) -> PipelineInput {
         let agent_id = format!("{role}_{}", uuid_short());
+
+        let mut modulation = DispatchModulation::default();
+        if let Some(ref affect) = self.services.affect_policy {
+            if let Ok(policy) = affect.lock() {
+                let _ctx = policy.pre_dispatch(&agent_id, role);
+                policy.modulate_dispatch(role, &mut modulation);
+            }
+        }
 
         let system_prompt = match self
             .services
@@ -121,6 +189,17 @@ impl EffectDriver {
 
         match result {
             Ok(response) => {
+                if let Some(ref affect) = self.services.affect_policy {
+                    if let Ok(mut policy) = affect.lock() {
+                        policy.on_task_outcome(
+                            &agent_id,
+                            true,
+                            response.usage.total_tokens,
+                            response.usage.cost_usd,
+                        );
+                    }
+                }
+
                 let _record_result = self
                     .services
                     .feedback_sink
@@ -152,6 +231,12 @@ impl EffectDriver {
             }
             Err(err) => {
                 let error = err.to_string();
+                if let Some(ref affect) = self.services.affect_policy {
+                    if let Ok(mut policy) = affect.lock() {
+                        policy.on_task_outcome(&agent_id, false, 0, 0.0);
+                    }
+                }
+
                 let _record_result = self
                     .services
                     .feedback_sink
@@ -194,6 +279,14 @@ impl EffectDriver {
             Ok(report) => {
                 for verdict in &report.verdicts {
                     self.record_gate_verdict(verdict).await;
+                }
+
+                if let Some(ref affect) = self.services.affect_policy {
+                    if let Ok(mut policy) = affect.lock() {
+                        for verdict in &report.verdicts {
+                            policy.on_gate_result(&verdict.gate_name, verdict.passed, 0, 0.0);
+                        }
+                    }
                 }
 
                 match report.first_failure() {

@@ -106,9 +106,7 @@ impl WorkflowConfig {
     /// preset is used as the base; any additional keys override the preset values.
     ///
     /// Returns an error if the TOML is malformed or `template` is an unknown value.
-    pub fn from_toml_str(
-        s: &str,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_toml_str(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let raw = parse_workflow_config_toml(s)?;
 
         let mut config = match raw.template.as_deref() {
@@ -244,10 +242,7 @@ fn parse_workflow_toml_scope(
         if !line.ends_with("]]") {
             return Err(config_parse_error("unterminated array table header"));
         }
-        let name = line
-            .trim_start_matches("[[")
-            .trim_end_matches("]]")
-            .trim();
+        let name = line.trim_start_matches("[[").trim_end_matches("]]").trim();
         return Ok(match name {
             "workflow.steps" => WorkflowTomlScope::WorkflowStep,
             _ => WorkflowTomlScope::Other,
@@ -264,9 +259,7 @@ fn parse_workflow_toml_scope(
     })
 }
 
-fn strip_toml_comment(
-    line: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn strip_toml_comment(line: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let mut in_string = false;
     let mut escaped = false;
     let mut out = String::new();
@@ -355,13 +348,13 @@ fn parse_toml_u32(
     line_number: usize,
 ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
     value.parse::<u32>().map_err(|err| {
-        config_parse_error(format!("line {line_number}: expected unsigned integer: {err}"))
+        config_parse_error(format!(
+            "line {line_number}: expected unsigned integer: {err}"
+        ))
     })
 }
 
-fn config_parse_error(
-    message: impl Into<String>,
-) -> Box<dyn std::error::Error + Send + Sync> {
+fn config_parse_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         message.into(),
@@ -583,9 +576,7 @@ impl PipelineStateV2 {
     /// `phase.is_terminal()` before resuming.
     ///
     /// Returns an error if the JSON is malformed or missing required fields.
-    pub fn from_checkpoint(
-        json: &str,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn from_checkpoint(json: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(serde_json::from_str(json)?)
     }
 
@@ -891,8 +882,7 @@ mod tests {
 
     #[test]
     fn toml_full_template_with_override() {
-        let cfg =
-            WorkflowConfig::from_toml_str("template = \"full\"\nmax_iterations = 5").unwrap();
+        let cfg = WorkflowConfig::from_toml_str("template = \"full\"\nmax_iterations = 5").unwrap();
         assert!(cfg.has_strategy);
         assert_eq!(cfg.max_iterations, 5);
     }

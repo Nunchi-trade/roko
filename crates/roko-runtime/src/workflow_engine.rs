@@ -107,6 +107,7 @@ impl WorkflowEngine {
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
                 gate_runner: Arc::clone(&self.services.gate_runner),
+                affect_policy: self.services.affect_policy.clone(),
             },
             run_id.clone(),
             config.workdir.clone(),
@@ -128,6 +129,7 @@ impl WorkflowEngine {
                         run_id: run_id.clone(),
                         outcome: runtime_workflow_outcome(&outcome),
                     });
+                    self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
                         outcome,
@@ -199,6 +201,7 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
+                    self.persist_affect_policy().await;
                     // TODO(arch): Record final workflow feedback once the local
                     // `FeedbackEvent` includes `WorkflowComplete`.
                     return Ok(WorkflowResult {
@@ -216,6 +219,7 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
+                    self.persist_affect_policy().await;
                     // TODO(arch): Record final workflow feedback once the local
                     // `FeedbackEvent` includes `WorkflowComplete`.
                     return Ok(WorkflowResult {
@@ -291,6 +295,7 @@ impl WorkflowEngine {
                 prompt_assembler: Arc::clone(&self.services.prompt_assembler),
                 feedback_sink: Arc::clone(&self.services.feedback_sink),
                 gate_runner: Arc::clone(&self.services.gate_runner),
+                affect_policy: self.services.affect_policy.clone(),
             },
             run_id.clone(),
             config.workdir.clone(),
@@ -372,6 +377,7 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(outcome),
                     });
 
+                    self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
                         outcome: outcome.clone(),
@@ -387,6 +393,7 @@ impl WorkflowEngine {
                         outcome: runtime_workflow_outcome(&outcome),
                     });
 
+                    self.persist_affect_policy().await;
                     return Ok(WorkflowResult {
                         run_id,
                         outcome,
@@ -421,6 +428,14 @@ impl WorkflowEngine {
         }
 
         emit_runtime_event(event);
+    }
+
+    async fn persist_affect_policy(&self) {
+        if let Some(ref affect) = self.services.affect_policy {
+            if let Ok(policy) = affect.lock() {
+                let _ = policy.persist().await;
+            }
+        }
     }
 }
 
@@ -754,6 +769,7 @@ mod tests {
             prompt_assembler: Arc::new(MockPromptAssembler),
             feedback_sink: Arc::new(MockFeedbackSink),
             gate_runner: Arc::new(MockGateRunner),
+            affect_policy: None,
         }
     }
 
