@@ -223,9 +223,7 @@ impl CoreEventConsumer for AcpWorkflowEventConsumer {
     fn consume(&self, event: &CoreRuntimeEvent) {
         match event {
             CoreRuntimeEvent::WorkflowStarted {
-                run_id,
-                template,
-                ..
+                run_id, template, ..
             } => {
                 if let Ok(mut current) = self.run_id.lock() {
                     *current = Some(run_id.clone());
@@ -416,7 +414,13 @@ fn workflow_plan_entries(template: &str, phase: &str) -> Vec<PlanEntry> {
             status: plan_status(
                 phase,
                 &["reviewing"],
-                &["pending", "strategizing", "implementing", "auto_fixing", "gating"],
+                &[
+                    "pending",
+                    "strategizing",
+                    "implementing",
+                    "auto_fixing",
+                    "gating",
+                ],
             ),
         });
     }
