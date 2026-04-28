@@ -2,7 +2,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-: "${ARCH_MODEL:=codex-5.5}"
+: "${ARCH_MODEL:=gpt-5.5}"
 : "${ARCH_REASONING:=high}"
 : "${ARCH_TIMEOUT:=5400}"
 

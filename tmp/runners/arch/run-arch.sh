@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 source "$SCRIPT_DIR/lib/spawn.sh"
 source "$SCRIPT_DIR/lib/verify.sh"
 
-: "${ARCH_MODEL:=codex-5.5}"
+: "${ARCH_MODEL:=gpt-5.5}"
 : "${ARCH_REASONING:=high}"
 : "${ARCH_TIMEOUT:=5400}"
 : "${ARCH_MAX_RETRIES:=2}"
