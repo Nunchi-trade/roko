@@ -10486,6 +10486,13 @@ impl PlanRunner {
             self.learning
                 .cascade_router()
                 .observe(context_vec, model_idx, reward);
+            tracing::debug!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                model = %model_slug,
+                reward = reward,
+                "cascade router: recorded observation"
+            );
         } else {
             tracing::debug!(
                 plan_id = %plan_id,
@@ -12959,8 +12966,17 @@ impl PlanRunner {
             .as_ref()
             .map_or(OperatingFrequency::Theta, |td| td.operating_frequency());
         let selected_model = selected_model.filter(|model| !model.trim().is_empty());
-        if let Some(model) = selected_model {
-            self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), model, 0.0);
+        let failure_model = selected_model
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.effective_model());
+        self.observe_cascade_router(plan_id, task_id, task_def.as_ref(), &failure_model, 0.0);
+        if let Err(e) = self.learning.save_cascade_router() {
+            tracing::warn!(
+                plan_id = %plan_id,
+                task_id = %task_id,
+                error = %e,
+                "failed to persist cascade router after failure observation"
+            );
         }
         // UX34: record force_backend failure with dampened reward so the
         // router learns from override failures without over-penalizing.
