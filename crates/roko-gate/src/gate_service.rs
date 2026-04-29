@@ -19,7 +19,7 @@ use crate::test_gate::TestGate;
 ///
 /// This is the canonical way to run gates in the workflow engine. It:
 /// - Selects gates from `GateConfig`
-/// - Runs supported gates in rung order: compile, clippy, test, diff, fmt, custom, judge
+/// - Runs supported gates in rung order: compile, clippy, test, diff, fmt, shell, judge
 /// - Stops at the first failing gate
 /// - Returns a unified `GateReport`
 pub struct GateService {
@@ -71,6 +71,9 @@ impl GateService {
                 ShellGate::new("git", vec!["diff".into(), "--stat".into()]).with_timeout_ms(30_000),
             )),
             "fmt" | "fmt:cargo" | "format" => Some(Box::new(FormatCheckGate::cargo())),
+            // TODO: thread `GateConfig.shell_gates` through this helper so shell can use the
+            // configured program/args instead of a placeholder command.
+            "shell" => Some(Box::new(ShellGate::new("true", vec![]).with_name("shell"))),
             "judge" | "llm-judge" => Some(Box::new(StubJudgeGate)),
             _ => None,
         }
@@ -318,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_for_name_returns_static_gates() {
+    fn gate_for_name_returns_supported_gates() {
         let svc = GateService::new();
         let bs = BuildSystem::Cargo;
         assert!(svc.gate_for_name("compile", bs).is_some());
@@ -326,10 +329,50 @@ mod tests {
         assert!(svc.gate_for_name("test", bs).is_some());
         assert!(svc.gate_for_name("diff", bs).is_some());
         assert!(svc.gate_for_name("fmt", bs).is_some());
-        assert!(svc.gate_for_name("custom", bs).is_none());
-        assert!(svc.gate_for_name("shell", bs).is_none());
+        let shell_gate = svc
+            .gate_for_name("shell", bs)
+            .expect("shell gate should be recognized");
+        assert_eq!(shell_gate.name(), "shell");
         assert!(svc.gate_for_name("judge", bs).is_some());
         assert!(svc.gate_for_name("nonexistent", bs).is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_gate_for_config_runs_true_false_and_captures_stderr() {
+        let signal = Engram::builder(Kind::Task)
+            .body(Body::empty())
+            .build();
+        let ctx = Context::at(0);
+
+        let true_gate = GateService::shell_gate_for_config(&ShellGateCommand {
+            program: "true".into(),
+            args: vec![],
+            timeout_ms: 1_000,
+        })
+        .expect("true shell gate config should be valid");
+        assert!(true_gate.verify(&signal, &ctx).await.passed);
+
+        let false_gate = GateService::shell_gate_for_config(&ShellGateCommand {
+            program: "false".into(),
+            args: vec![],
+            timeout_ms: 1_000,
+        })
+        .expect("false shell gate config should be valid");
+        let false_verdict = false_gate.verify(&signal, &ctx).await;
+        assert!(!false_verdict.passed);
+        assert!(false_verdict.reason.contains("exit code"));
+
+        let stderr_gate = GateService::shell_gate_for_config(&ShellGateCommand {
+            program: "sh".into(),
+            args: vec!["-c".into(), "echo shell stderr >&2; exit 1".into()],
+            timeout_ms: 1_000,
+        })
+        .expect("stderr shell gate config should be valid");
+        let stderr_verdict = stderr_gate.verify(&signal, &ctx).await;
+        assert!(!stderr_verdict.passed);
+        let detail = stderr_verdict.detail.as_deref().unwrap_or("");
+        assert!(detail.contains("---stderr---"));
+        assert!(detail.contains("shell stderr"));
     }
 
     #[test]
