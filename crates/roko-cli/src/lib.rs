@@ -135,7 +135,7 @@ pub use orchestrate::{OrchestrationReport, PlanRunReport, PlanRunner};
 pub use pipe::{PipeInput, PipeMode, stdin_is_tty};
 pub use plan::{Plan, PlanSummary, PlanTask};
 pub use repl::{ReplCommand, ReplMode, WorkspaceContext};
-pub use run::{RunReport, run_once};
+pub use run::{RunReport, RunUsage, run_once};
 pub use secrets::SecretsCmd;
 pub use status::SessionStatus;
 pub use tui::{
