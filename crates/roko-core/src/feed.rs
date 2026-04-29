@@ -7,7 +7,7 @@
 //!
 //! **Migration note (Phase 1, §1.12):** Feeds will become Pulse streams on
 //! the Bus, managed via the `Connect` + `Trigger` protocols defined in
-//! `tmp/unified/12-CONNECTIVITY.md`. The `FeedRegistry` is actively used by
+//! `docs/v2/11-CONNECTIVITY.md`. The `FeedRegistry` is actively used by
 //! `roko-serve` HTTP routes and will be migrated in M037. Do not add new
 //! callers — prefer Bus-based Pulse streams once available.
 
@@ -76,7 +76,7 @@ pub struct FeedInfo {
 ///
 /// **Migration (M037):** Will be replaced by Bus-based Pulse streams
 /// with the `Connect` + `Trigger` protocols (Phase 1 §1.12).
-/// See `tmp/unified/12-CONNECTIVITY.md` for the replacement design.
+/// See `docs/v2/11-CONNECTIVITY.md` for the replacement design.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FeedRegistry {
     feeds: Vec<FeedInfo>,

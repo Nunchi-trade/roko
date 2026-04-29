@@ -6,7 +6,7 @@
 //!
 //! **Migration note (Phase 1, §1.12):** This module will be superseded by the
 //! `Connect` protocol trait (`connect/query/execute/health/disconnect`) defined
-//! in `tmp/unified/12-CONNECTIVITY.md`. The `ConnectorRegistry` is actively
+//! in `docs/v2/11-CONNECTIVITY.md`. The `ConnectorRegistry` is actively
 //! used by `roko-serve` HTTP routes and will be migrated to the new trait-based
 //! approach in M037. Do not add new callers — prefer the Connect trait once
 //! available.
@@ -106,7 +106,7 @@ pub struct ConnectorInfo {
 /// In-memory registry of [`ConnectorInfo`] entries.
 ///
 /// **Migration (M037):** Will be replaced by the `Connect` trait (Phase 1 §1.12).
-/// See `tmp/unified/12-CONNECTIVITY.md` for the replacement design.
+/// See `docs/v2/11-CONNECTIVITY.md` for the replacement design.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectorRegistry {
     connectors: Vec<ConnectorInfo>,

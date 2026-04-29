@@ -1,7 +1,7 @@
 //! Chain domain tool definitions for DeFi operations.
 //!
 //! These [`ToolDef`] registrations define the 10 core DeFi tools specified in
-//! `docs/18-tools/03-chain-domain-tools.md`. The tools use the [`ChainClient`]
+//! `docs/v1/18-tools/03-chain-domain-tools.md`. The tools use the [`ChainClient`]
 //! and [`ChainWallet`] traits for EVM interaction, allowing the same tool
 //! definitions to work against both mocked and live backends.
 //!

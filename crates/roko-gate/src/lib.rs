@@ -1,6 +1,6 @@
 //! Concrete verification gates and orchestration primitives for Roko.
 //!
-//! This crate ships the verification stack described in `docs/04-verification`:
+//! This crate ships the verification stack described in `docs/v1/04-verification`:
 //! concrete gate implementations, the rung selector, the sequential pipeline,
 //! adaptive thresholds, runtime dispatch, and the agent feedback filter.
 //! Gates verify a signal against ground truth and produce
