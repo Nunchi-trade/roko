@@ -136,6 +136,10 @@ pub enum AgentCmd {
         /// roko-serve base URL.
         #[arg(long, default_value_t = roko_cli::DEFAULT_SERVE_URL.to_string())]
         serve_url: String,
+        /// Use a direct API provider instead of sidecar/serve routing.
+        /// Accepted values: anthropic_api, openai_compat.
+        #[arg(long)]
+        provider: Option<String>,
     },
 }
 
@@ -653,7 +657,7 @@ pub async fn run(cmd: AgentCmd) -> Result<()> {
         } => run_agent_stop(&name, force, workdir.as_deref()),
         AgentCmd::Status { name, workdir } => run_agent_status(&name, workdir.as_deref()),
         AgentCmd::Serve(args) => AgentServeRuntimeConfig::from_args(args).run().await,
-        AgentCmd::Chat { agent, serve_url } => {
+        AgentCmd::Chat { agent, serve_url, .. } => {
             roko_cli::chat_inline::run_chat_inline(&agent, &serve_url).await?;
             Ok(())
         }

@@ -10,7 +10,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -234,6 +234,112 @@ pub async fn run_chat_repl(agent_id: &str, serve_url: &str) -> Result<()> {
 
     println!("\nbye.");
     Ok(())
+}
+
+/// Run a chat REPL that talks directly to a provider adapter.
+///
+/// `provider_name` must be a key in `config.providers` (for example
+/// `"anthropic_api"` or `"openai_compat"`). The model is resolved via
+/// `config.agent.default_model` or the first model whose provider matches
+/// `provider_name`.
+pub async fn run_direct_provider_chat(
+    agent_id: &str,
+    provider_name: &str,
+    config: &roko_core::config::schema::RokoConfig,
+) -> Result<()> {
+    use roko_agent::provider::{AgentOptions, create_agent_for_model};
+    use roko_core::{Body, Context, Engram, Kind};
+
+    let model_key = find_model_for_provider(config, provider_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no model configured for provider '{provider_name}'; add a [[models]] entry with provider = \"{provider_name}\" in roko.toml"
+        )
+    })?;
+
+    let options = AgentOptions {
+        name: agent_id.to_string(),
+        timeout_ms: Some(120_000),
+        ..Default::default()
+    };
+
+    let agent = create_agent_for_model(config, &model_key, options)
+        .map_err(|e| anyhow::anyhow!("create agent: {e}"))?;
+
+    println!("roko chat (direct) — provider: {provider_name}, model: {model_key}");
+    println!("Type a message. Press Ctrl-D to exit.\n");
+
+    let stdin = io::stdin();
+    let mut stdin_lock = stdin.lock();
+    let mut history: Vec<serde_json::Value> = Vec::new();
+
+    loop {
+        print!("\x1b[36myou>\x1b[0m ");
+        std::io::stdout().flush().context("flush prompt")?;
+
+        let mut line = String::new();
+        if stdin_lock.read_line(&mut line).context("read input")? == 0 {
+            break;
+        }
+        let message = line.trim();
+        if message.is_empty() {
+            continue;
+        }
+
+        history.push(json!({
+            "role": "user",
+            "content": message,
+        }));
+
+        let engram = Engram::builder(Kind::Prompt)
+            .body(Body::text(message))
+            .build();
+        let ctx = Context::now();
+        let result = agent.run(&engram, &ctx).await;
+
+        print!("\x1b[33m{agent_id}>\x1b[0m ");
+        std::io::stdout().flush().context("flush agent prompt")?;
+
+        let text = result.output.body.as_text().unwrap_or("[no text output]");
+        history.push(json!({
+            "role": "assistant",
+            "content": text,
+            "success": result.success,
+        }));
+
+        if result.success {
+            println!("{text}");
+        } else {
+            eprintln!("[agent error] {text}");
+        }
+        println!();
+    }
+
+    println!("\nbye.");
+    Ok(())
+}
+
+/// Find the first model key in `config` whose provider name matches `provider_name`.
+///
+/// Tries `config.agent.default_model` first; if that model's provider matches,
+/// returns it. Otherwise scans `config.models` for the first match.
+fn find_model_for_provider(
+    config: &roko_core::config::schema::RokoConfig,
+    provider_name: &str,
+) -> Option<String> {
+    if !config.agent.default_model.is_empty() {
+        let default_model = &config.agent.default_model;
+        if let Some(profile) = config.models.get(default_model.as_str()) {
+            if profile.provider == provider_name {
+                return Some(default_model.clone());
+            }
+        }
+    }
+
+    config
+        .models
+        .iter()
+        .find(|(_, profile)| profile.provider == provider_name)
+        .map(|(key, _)| key.clone())
 }
 
 /// Determine which backend to use. Prefers sidecar when available.
@@ -652,5 +758,70 @@ mod tests {
             format!("http://{bind}")
         };
         assert_eq!(url, "http://127.0.0.1:8081");
+    }
+
+    fn model(provider: &str, slug: &str) -> roko_core::config::schema::ModelProfile {
+        roko_core::config::schema::ModelProfile {
+            provider: provider.to_string(),
+            slug: slug.to_string(),
+            context_window: 128_000,
+            max_output: Some(1_024),
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            supports_web_search: false,
+            supports_mcp_tools: false,
+            supports_partial: false,
+            supports_grounding: false,
+            supports_code_execution: false,
+            supports_caching: false,
+            provider_routing: None,
+            tool_format: "openai_json".to_string(),
+            cost_input_per_m: None,
+            cost_output_per_m: None,
+            cost_input_per_m_high: None,
+            cost_output_per_m_high: None,
+            cost_cache_read_per_m: None,
+            cost_cache_write_per_m: None,
+            thinking_level: None,
+            max_tools: None,
+            tokenizer_ratio: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn find_model_for_provider_prefers_default_model() {
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = "default-model".to_string();
+        config
+            .models
+            .insert("default-model".to_string(), model("anthropic_api", "default-model"));
+        config
+            .models
+            .insert("fallback-model".to_string(), model("anthropic_api", "fallback-model"));
+
+        assert_eq!(
+            find_model_for_provider(&config, "anthropic_api"),
+            Some("default-model".to_string())
+        );
+    }
+
+    #[test]
+    fn find_model_for_provider_scans_for_matching_provider() {
+        let mut config = roko_core::config::schema::RokoConfig::default();
+        config.agent.default_model = "unrelated".to_string();
+        config
+            .models
+            .insert("anthropic-model".to_string(), model("anthropic_api", "anthropic-model"));
+        config
+            .models
+            .insert("openai-model".to_string(), model("openai_compat", "openai-model"));
+
+        assert_eq!(
+            find_model_for_provider(&config, "openai_compat"),
+            Some("openai-model".to_string())
+        );
+        assert_eq!(find_model_for_provider(&config, "missing"), None);
     }
 }
