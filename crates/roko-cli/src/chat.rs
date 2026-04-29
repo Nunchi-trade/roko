@@ -264,7 +264,6 @@ pub async fn run_direct_provider_chat(
 
     let agent = create_agent_for_model(config, &model_key, options)
         .map_err(|e| anyhow::anyhow!("create agent: {e}"))?;
-
     println!("roko chat (direct) — provider: {provider_name}, model: {model_key}");
     println!("Type a message. Press Ctrl-D to exit.\n");
 
@@ -290,8 +289,9 @@ pub async fn run_direct_provider_chat(
             "content": message,
         }));
 
+        let prompt_text = render_history_prompt(&history);
         let engram = Engram::builder(Kind::Prompt)
-            .body(Body::text(message))
+            .body(Body::text(&prompt_text))
             .build();
         let ctx = Context::now();
         let result = agent.run(&engram, &ctx).await;
@@ -316,6 +316,34 @@ pub async fn run_direct_provider_chat(
 
     println!("\nbye.");
     Ok(())
+}
+
+fn render_history_prompt(history: &[serde_json::Value]) -> String {
+    let mut prompt = String::new();
+
+    for message in history {
+        let role = message.get("role").and_then(serde_json::Value::as_str);
+        let content = message
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let label = match role {
+            Some("assistant") => "Assistant",
+            Some("system") => "System",
+            _ => "User",
+        };
+
+        prompt.push_str(label);
+        prompt.push_str(":\n");
+        prompt.push_str(content);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.trim_end().to_string()
 }
 
 /// Find the first model key in `config` whose provider name matches `provider_name`.
@@ -758,6 +786,21 @@ mod tests {
             format!("http://{bind}")
         };
         assert_eq!(url, "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn render_history_prompt_formats_turns() {
+        let history = vec![
+            json!({ "role": "user", "content": "hello" }),
+            json!({ "role": "assistant", "content": "world" }),
+            json!({ "role": "assistant", "content": "" }),
+        ];
+
+        let prompt = render_history_prompt(&history);
+
+        assert!(prompt.contains("User:\nhello"));
+        assert!(prompt.contains("Assistant:\nworld"));
+        assert!(!prompt.contains("Assistant:\n\n"));
     }
 
     fn model(provider: &str, slug: &str) -> roko_core::config::schema::ModelProfile {
