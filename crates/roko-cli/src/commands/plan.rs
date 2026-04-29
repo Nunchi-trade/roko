@@ -787,9 +787,9 @@ fn resolve_effective_model_key_from_config(
     context: &str,
 ) -> Result<String> {
     let selection =
-        roko_cli::model_selection::resolve_effective_model(cli_model, None, role, None, config)
+        roko_cli::model_selection::resolve_effective_model(cli_model, None, role.map(str::to_string), None, config)
             .map_err(|err| anyhow!("resolve model selection for {context}: {err}"))?;
-    selection.print_stderr();
+    eprintln!("[model] {} via {} ({})", selection.effective_model_key, selection.provider_key, selection.reason);
     Ok(selection.effective_model_key)
 }
 
