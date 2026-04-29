@@ -130,10 +130,29 @@ fn validate_plans_dir_impl(
     for tasks_path in tasks_files {
         let mut plan = validate_tasks_file(&tasks_path, models)
             .with_context(|| format!("validate {}", tasks_path.display()))?;
-        if let Some(workdir) = workdir
-            && let Ok(ref_diagnostics) = validate_file_references(&tasks_path, workdir)
-        {
-            plan.diagnostics.extend(ref_diagnostics);
+        if let Some(workdir) = workdir {
+            if let Ok(ref_diagnostics) = validate_file_references(&tasks_path, workdir) {
+                plan.diagnostics.extend(ref_diagnostics);
+            }
+
+            let existing_crates = collect_workspace_package_names(workdir, "crates");
+            if !existing_crates.is_empty()
+                && let Ok(content) = std::fs::read_to_string(&tasks_path)
+                && let Ok(parsed) = toml::from_str::<Value>(&content)
+            {
+                let gf_plan_id = parsed
+                    .get("meta")
+                    .and_then(Value::as_table)
+                    .and_then(|meta| meta.get("plan"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("unknown-plan");
+                let gf_diagnostics =
+                    validate_no_greenfield_duplicates(&parsed, gf_plan_id, &existing_crates);
+                plan.diagnostics.extend(gf_diagnostics);
+            }
+
             plan.diagnostics.sort_by(|left, right| {
                 left.severity
                     .cmp(&right.severity)
@@ -1097,6 +1116,124 @@ fn normalize_model_alias(alias: &str) -> Option<&'static str> {
     }
 }
 
+/// Phrases that indicate ungrounded generation in an existing workspace.
+///
+/// These phrases should never appear in a plan generated for a workspace with
+/// existing crates.
+const GREENFIELD_PHRASES: &[&str] = &[
+    "no rust crates exist",
+    "no existing crates",
+    "starting from scratch",
+    "greenfield project",
+    "greenfield implementation",
+    "new project from scratch",
+    "no existing code",
+    "empty workspace",
+];
+
+/// Validate that a plan does not treat an existing workspace as greenfield.
+///
+/// Checks:
+/// 1. Task prompts for "create crate X" where X already exists -> PLAN_032 Error
+/// 2. Task prompts for banned greenfield phrases in a non-empty workspace -> PLAN_033 Error
+///
+/// If workspace is empty (no crates dir or zero members), all checks are skipped.
+fn validate_no_greenfield_duplicates(
+    parsed: &Value,
+    plan_id: &str,
+    existing_crates: &HashSet<String>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    if existing_crates.is_empty() {
+        return diagnostics;
+    }
+
+    let plan_id = plan_id.to_owned();
+    let existing_crates_lower = existing_crates
+        .iter()
+        .map(|crate_name| crate_name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    let tasks = parsed
+        .get("task")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    for task in tasks {
+        let table = match task.as_table() {
+            Some(table) => table,
+            None => continue,
+        };
+        let task_id = table
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        let text_fields = [
+            table.get("prompt").and_then(Value::as_str),
+            table.get("description").and_then(Value::as_str),
+            table.get("title").and_then(Value::as_str),
+        ];
+
+        for text in text_fields.into_iter().flatten() {
+            let text_lower = text.to_ascii_lowercase();
+
+            for pattern in &["create crate ", "new crate ", "add crate "] {
+                if let Some(idx) = text_lower.find(pattern) {
+                    let after_raw = &text[idx + pattern.len()..];
+                    let candidate = after_raw.trim_start_matches(|c: char| {
+                        c.is_whitespace()
+                            || matches!(
+                                c,
+                                '`' | '"' | '\'' | ':' | ',' | '.' | ';' | '(' | '[' | '{' | '='
+                            )
+                    });
+                    let proposed = candidate
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                        .collect::<String>()
+                        .to_ascii_lowercase();
+
+                    if !proposed.is_empty() && existing_crates_lower.contains(&proposed) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            rule_id: "PLAN_032".to_string(),
+                            plan_id: Some(plan_id.clone()),
+                            task_id: Some(task_id.clone()),
+                            message: format!(
+                                "task '{}' proposes creating crate '{}' which already exists in the workspace",
+                                task_id, proposed
+                            ),
+                        });
+                    }
+                }
+            }
+
+            for phrase in GREENFIELD_PHRASES {
+                if text_lower.contains(phrase) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        rule_id: "PLAN_033".to_string(),
+                        plan_id: Some(plan_id.clone()),
+                        task_id: Some(task_id.clone()),
+                        message: format!(
+                            "task '{}' contains greenfield claim '{}' but workspace has {} existing crates",
+                            task_id,
+                            phrase,
+                            existing_crates.len()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,5 +1390,153 @@ verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
                 .iter()
                 .any(|diag| diag.rule_id == "PLAN_031")
         );
+    }
+
+    #[test]
+    fn validate_no_greenfield_duplicates_flags_existing_crate_and_phrases() {
+        let parsed: Value = toml::from_str(
+            r#"
+[meta]
+plan = "demo-plan"
+
+[[task]]
+id = "T1"
+prompt = "Please Create Crate ROKO-COMPOSE."
+title = "Build the bridge"
+
+[[task]]
+id = "T2"
+description = "This is a GREENFIELD PROJECT starting from scratch."
+title = "Rewrite the pipeline"
+
+[[task]]
+id = "T3"
+title = "Add crate ROKO-CORE"
+"#,
+        )
+        .unwrap();
+        let existing_crates = ["roko-compose".to_string(), "roko-core".to_string()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        let diagnostics = validate_no_greenfield_duplicates(&parsed, "demo-plan", &existing_crates);
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diag| diag.rule_id == "PLAN_032")
+                .count(),
+            2
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diag| diag.rule_id == "PLAN_033")
+                .count(),
+            1
+        );
+        assert!(
+            diagnostics.iter().any(|diag| {
+                diag.rule_id == "PLAN_032" && diag.task_id.as_deref() == Some("T1")
+            })
+        );
+        assert!(
+            diagnostics.iter().any(|diag| {
+                diag.rule_id == "PLAN_033" && diag.task_id.as_deref() == Some("T2")
+            })
+        );
+        assert!(
+            diagnostics.iter().any(|diag| {
+                diag.rule_id == "PLAN_032" && diag.task_id.as_deref() == Some("T3")
+            })
+        );
+    }
+
+    #[test]
+    fn validate_plans_dir_with_workdir_rejects_greenfield_duplicates() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("plans/demo")).unwrap();
+        fs::create_dir_all(root.join("crates/roko-compose")).unwrap();
+        fs::create_dir_all(root.join("crates/roko-core")).unwrap();
+
+        let tasks_path = root.join("plans/demo/tasks.toml");
+        fs::write(
+            &tasks_path,
+            r#"
+[meta]
+plan = "demo-plan"
+
+[[task]]
+id = "T1"
+title = "Create crate ROKO-COMPOSE"
+prompt = "Please create crate ROKO-COMPOSE for the workspace."
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+
+[[task]]
+id = "T2"
+title = "Rewrite the pipeline"
+description = "This is a greenfield implementation starting from scratch."
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+        )
+        .unwrap();
+
+        let report =
+            validate_plans_dir_with_workdir(root.join("plans").as_path(), None, Some(root))
+                .unwrap();
+
+        assert_eq!(report.totals.errors, 3);
+        assert!(report.plans.iter().any(|plan| {
+            plan.diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_032" && diag.task_id.as_deref() == Some("T1"))
+        }));
+        assert!(report.plans.iter().any(|plan| {
+            plan.diagnostics
+                .iter()
+                .any(|diag| diag.rule_id == "PLAN_033" && diag.task_id.as_deref() == Some("T2"))
+        }));
+    }
+
+    #[test]
+    fn validate_plans_dir_with_workdir_skips_greenfield_checks_for_empty_workspace() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        fs::create_dir_all(root.join("plans/demo")).unwrap();
+        let tasks_path = root.join("plans/demo/tasks.toml");
+        fs::write(
+            &tasks_path,
+            r#"
+[meta]
+plan = "demo-plan"
+
+[[task]]
+id = "T1"
+title = "Create crate roko-compose"
+prompt = "Please create crate roko-compose."
+role = "implementer"
+depends_on = []
+verify = [{ phase = "compile", command = "cargo check -p roko-cli" }]
+"#,
+        )
+        .unwrap();
+
+        let report =
+            validate_plans_dir_with_workdir(root.join("plans").as_path(), None, Some(root))
+                .unwrap();
+
+        assert_eq!(report.totals.errors, 0);
+        assert!(report.plans.iter().all(|plan| {
+            plan.diagnostics
+                .iter()
+                .all(|diag| diag.rule_id != "PLAN_032" && diag.rule_id != "PLAN_033")
+        }));
     }
 }
