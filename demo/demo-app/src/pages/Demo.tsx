@@ -4,7 +4,6 @@ import { PlaybackController, TimelineStepper, type TimelineStepState } from '../
 import { useTerminal, type TerminalHandle } from '../hooks/useTerminal';
 import { setSpeedMultiplier } from '../hooks/useTerminalSession';
 import { useServerHealth } from '../hooks/useServerHealth';
-import { useRokoConfig } from '../hooks/useRokoConfig';
 import { lookupCmdDesc } from '../lib/cmd-descriptions';
 import Pane from '../components/Pane';
 import Mosaic, { MosaicCell } from '../components/Mosaic';
@@ -43,6 +42,15 @@ const timeline = new TimelineStepper();
 
 const SPEEDS = [0.5, 1, 2, 4];
 
+type TerminalPaneState = {
+  status: TerminalHandle['status'];
+  connected: boolean;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function Demo() {
   const [activeIdx, setActiveIdx] = useState(0);
   const [showIntro, setShowIntro] = useState(true);
@@ -52,7 +60,6 @@ export default function Demo() {
   const [playbackMode, setPlaybackMode] = useState<'auto' | 'step'>('auto');
   const scenario = SCENARIOS[activeIdx];
   const serverHealth = useServerHealth();
-  const { defaultModel } = useRokoConfig();
 
   // Sidebar state
   const [stats, setStats] = useState({ model: '--', cost: '--', tokens: '--', time: '--' });
@@ -166,6 +173,12 @@ export default function Demo() {
   const pausedRef = useRef(false);
   const runningRef = useRef(false);
   const handleRefs = useRef<(React.RefObject<TerminalHandle | null>)[]>([]);
+  const [terminalStates, setTerminalStates] = useState<TerminalPaneState[]>([]);
+
+  const readyTerminalCount = useMemo(
+    () => terminalStates.slice(0, scenario.panes).filter((state) => state.connected).length,
+    [scenario.panes, terminalStates],
+  );
 
   // Wire change listeners
   useEffect(() => {
@@ -223,7 +236,9 @@ export default function Demo() {
   const buildContext = useCallback((): ScenarioContext => {
     const entries = handleRefs.current
       .map((ref) => ref.current)
-      .filter((h): h is TerminalHandle => h !== null);
+      .filter((h): h is TerminalHandle =>
+        h !== null && h.status === 'connected' && h.ws?.readyState === WebSocket.OPEN,
+      );
 
     return {
       entries,
@@ -266,6 +281,32 @@ export default function Demo() {
       running: runningRef,
     };
   }, [appendPipelineEvent, patchPipeline, patchPipelineStream, selectedPipelineExample, updatePipelineTask]);
+
+  const getReadyTerminalEntries = useCallback((): TerminalHandle[] => (
+    handleRefs.current
+      .slice(0, scenario.panes)
+      .map((ref) => ref.current)
+      .filter((h): h is TerminalHandle =>
+        h !== null && h.status === 'connected' && h.ws?.readyState === WebSocket.OPEN,
+      )
+  ), [scenario.panes]);
+
+  const waitForTerminalReadiness = useCallback(async (): Promise<TerminalHandle[] | null> => {
+    const timeoutMs = 20000;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs && runningRef.current) {
+      const entries = getReadyTerminalEntries();
+      if (entries.length >= scenario.panes) return entries;
+
+      setProgressLabel('Terminals');
+      setProgressText(`waiting for terminals (${entries.length}/${scenario.panes})...`);
+      await sleep(150);
+    }
+
+    const entries = getReadyTerminalEntries();
+    return entries.length >= scenario.panes ? entries : null;
+  }, [getReadyTerminalEntries, scenario.panes]);
 
   // ── Scenario lifecycle ──────────────────────────────────────
 
@@ -344,16 +385,29 @@ export default function Demo() {
       { label: 'SAVINGS', value: 0, format: (n) => `${n.toFixed(0)}%`, color: 'bone' },
     ]);
 
-    const ctx = buildContext();
-    if (ctx.entries.length < scenario.panes) {
+    const entries = await waitForTerminalReadiness();
+    if (!entries) {
+      const connected = getReadyTerminalEntries().length;
+      const now = new Date();
+      const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
       console.error(
-        `Waiting for terminals: need ${scenario.panes} but only ${ctx.entries.length} connected`,
+        `Timed out waiting for terminals: need ${scenario.panes} but only ${connected} connected`,
       );
       runningRef.current = false;
       setIsRunning(false);
-      setProgressText('waiting for terminals to connect...');
+      setProgressLabel('Terminals');
+      setProgressText(`terminal connection timed out (${connected}/${scenario.panes})`);
+      setLogEntries((prev) => [
+        ...prev,
+        {
+          ts,
+          text: `Timed out waiting for ${scenario.panes} terminal connection${scenario.panes === 1 ? '' : 's'}.`,
+          type: 'error' as const,
+        },
+      ]);
       return;
     }
+    const ctx = { ...buildContext(), entries };
     try {
       await scenario.run(ctx);
     } catch (err) {
@@ -363,7 +417,7 @@ export default function Demo() {
     runningRef.current = false;
     setIsRunning(false);
     setIsPaused(false);
-  }, [scenario, serverHealth, buildContext, selectedPipelineExample]);
+  }, [scenario, serverHealth, buildContext, selectedPipelineExample, waitForTerminalReadiness, getReadyTerminalEntries]);
 
   const handlePauseResume = useCallback(() => {
     pausedRef.current = !isPaused;
@@ -443,7 +497,25 @@ export default function Demo() {
       { length: scenario.panes },
       () => ({ current: null }) as React.RefObject<TerminalHandle | null>,
     );
+    setTerminalStates(Array.from(
+      { length: scenario.panes },
+      () => ({ status: 'connecting' as const, connected: false }),
+    ));
   }, [scenario.panes, activeIdx]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const updateTerminalState = useCallback((
+    index: number,
+    state: TerminalPaneState,
+  ) => {
+    setTerminalStates((prev) => {
+      if (prev[index]?.status === state.status && prev[index]?.connected === state.connected) {
+        return prev;
+      }
+      const next = prev.slice();
+      next[index] = state;
+      return next;
+    });
+  }, []);
 
   // ── Timeline display ────────────────────────────────────────
 
@@ -488,7 +560,11 @@ export default function Demo() {
               {isPaused ? '\u25B6' : '\u275A\u275A'}
             </button>
           ) : (
-            <button className="demo-ctrl-btn play" onClick={handlePlay}>
+            <button
+              className="demo-ctrl-btn play"
+              onClick={handlePlay}
+              title={`Play (${readyTerminalCount}/${scenario.panes} terminals ready)`}
+            >
               {'\u25B6'}
             </button>
           )}
@@ -522,6 +598,8 @@ export default function Demo() {
                 sessionId={sessionIds[i]}
                 label={scenario.labels[i] || `pane ${i + 1}`}
                 handleRef={handleRefs.current[i]}
+                paneIndex={i}
+                onStatusChange={updateTerminalState}
               />
             ))}
           </div>
@@ -648,7 +726,7 @@ export default function Demo() {
               {isPaused ? '\u25B6' : '\u275A\u275A'}
             </button>
           ) : (
-            <button className="demo-pb-btn primary" onClick={handlePlay} title="Play (Space)">
+            <button className="demo-pb-btn primary" onClick={handlePlay} title={`Play (Space) - ${readyTerminalCount}/${scenario.panes} terminals ready`}>
               {'\u25B6'}
             </button>
           )}
@@ -693,10 +771,14 @@ function TerminalPaneWithHandle({
   sessionId,
   label,
   handleRef,
+  paneIndex,
+  onStatusChange,
 }: {
   sessionId: string;
   label: string;
   handleRef: React.RefObject<TerminalHandle | null> | undefined;
+  paneIndex: number;
+  onStatusChange?: (index: number, state: TerminalPaneState) => void;
 }) {
   const { attach, status, handle } = useTerminal(sessionId);
 
@@ -704,7 +786,11 @@ function TerminalPaneWithHandle({
     if (handleRef && 'current' in handleRef) {
       (handleRef as React.MutableRefObject<TerminalHandle | null>).current = handle.current;
     }
-  }, [handleRef, handle, status]);
+    onStatusChange?.(paneIndex, {
+      status,
+      connected: status === 'connected' && handle.current?.ws?.readyState === WebSocket.OPEN,
+    });
+  }, [handleRef, handle, onStatusChange, paneIndex, status]);
 
   return (
     <div className="demo-term-pane">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRokoConfig } from '../hooks/useRokoConfig';
 import { useApiWithFallback } from '../hooks/useApiWithFallback';
 import {
@@ -65,7 +65,15 @@ export default function Settings() {
     if (defaultBackend && !loaded) setBackend(defaultBackend);
   }, [defaultModel, defaultBackend, loaded]);
 
-  const allModels = flattenProviderModels(providers);
+  const allModels = useMemo(() => flattenProviderModels(providers), [providers]);
+
+  useEffect(() => {
+    if (!model || allModels.length === 0) return;
+    const modelKey = resolveModelKey(allModels, model);
+    if (modelKey !== model) setModel(modelKey);
+    const provider = providerForModelKey(allModels, modelKey);
+    if (provider && backend !== provider) setBackend(provider);
+  }, [allModels, backend, model]);
 
   const handleModelChange = (value: string) => {
     const modelKey = resolveModelKey(allModels, value);
