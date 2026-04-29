@@ -1,3 +1,7 @@
+/* ═══════════════════════════════════════════════════════════
+   TERMINAL PANE — rosedust-integrated xterm container
+   ═══════════════════════════════════════════════════════════ */
+
 .terminal-pane {
   background: var(--bg-deeper);
   border: 1px solid var(--glass-border);
@@ -5,76 +9,133 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-}
-.pane-header {
-  padding: 4px 12px;
-  background: var(--bg-raised);
-  border-bottom: 1px solid var(--glass-border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.88rem;
-  color: var(--text-dim);
-  flex-shrink: 0;
-}
-.pane-label {
-  color: var(--rose-bright);
-  font-weight: 500;
-}
-.pane-status {
-  margin-left: auto;
-  font-size: 0.96rem;
-}
-.pane-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-.pane-dot.connected { background: var(--success); }
-.pane-dot.disconnected { background: var(--rose-dim); }
-.pane-dot.connecting { background: var(--warning); animation: pulse 1.5s ease-in-out infinite; }
-
-.pane-body {
-  flex: 1;
-  padding: 4px;
-  min-height: 0;
+  position: relative;
+  transition: border-color .3s var(--ease), box-shadow .4s var(--ease);
 }
 
 /* Active column glow */
 .terminal-pane:focus-within {
-  border-color: rgba(204,144,168,.2);
+  border-color: rgba(204, 144, 168, .18);
+  box-shadow: 0 0 16px rgba(184, 122, 148, 0.06);
+}
+
+/* ── Pane header ── */
+
+.pane-header {
+  padding: 1px 10px;
+  height: 20px;
+  background: rgba(16, 14, 20, 0.7);
+  border-bottom: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  transition: border-color .3s, background .3s;
+}
+
+.terminal-pane:focus-within .pane-header {
+  border-bottom-color: rgba(216, 154, 178, 0.2);
+  background: rgba(20, 16, 26, 0.8);
+}
+
+.pane-label {
+  color: var(--text-strong);
+  font-weight: 400;
+  letter-spacing: .12em;
+}
+
+.terminal-pane:focus-within .pane-label {
+  color: var(--rose-glow);
+  text-shadow: 0 0 8px rgba(216, 154, 178, 0.2);
+}
+
+.pane-status {
+  margin-left: auto;
+  font-size: 8px;
+  color: var(--text-ghost);
+  letter-spacing: .10em;
+}
+
+.pane-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background .3s, box-shadow .3s;
+}
+
+.pane-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(122, 138, 120, 0.6);
+}
+
+.pane-dot.disconnected {
+  background: var(--rose-dim);
+  opacity: 0.5;
+}
+
+.pane-dot.connecting {
+  background: var(--warning);
+  box-shadow: 0 0 4px rgba(200, 154, 104, 0.5);
+  animation: pane-dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pane-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Pane body ── */
+
+.pane-body {
+  flex: 1;
+  padding: 0;
+  min-height: 0;
+  position: relative;
 }
 
 /* Blinking cursor for empty state */
 .pane-body:empty::after {
   content: "\2588";
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: 12px;
   color: var(--rose-dim);
   animation: cursorBlink 1.2s step-end infinite;
-  margin-left: 4px;
+  margin: 4px;
+  display: block;
 }
+
 @keyframes cursorBlink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
 
-/* ── xterm viewport & scrollbar overrides ── */
+/* ═══════════════════════════════════════════════════════════
+   XTERM VIEWPORT & CHROME OVERRIDES
+   ═══════════════════════════════════════════════════════════ */
 
+/* Inner padding */
 .pane-body .xterm,
 .demo-term-body .xterm {
   padding: 2px 0 2px 4px;
 }
 
+/* ── Thin rose-tinted scrollbar ── */
+
 .pane-body .xterm-viewport,
 .demo-term-body .xterm-viewport {
   scrollbar-width: thin;
-  scrollbar-color: rgba(184, 122, 148, 0.2) transparent;
+  scrollbar-color: rgba(184, 122, 148, 0.15) transparent;
 }
 
 .pane-body .xterm-viewport::-webkit-scrollbar,
 .demo-term-body .xterm-viewport::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 .pane-body .xterm-viewport::-webkit-scrollbar-track,
@@ -84,32 +145,59 @@
 
 .pane-body .xterm-viewport::-webkit-scrollbar-thumb,
 .demo-term-body .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(184, 122, 148, 0.18);
+  background: rgba(184, 122, 148, 0.14);
   border-radius: 3px;
+  transition: background .2s;
 }
 
 .pane-body .xterm-viewport::-webkit-scrollbar-thumb:hover,
 .demo-term-body .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(184, 122, 148, 0.35);
+  background: rgba(184, 122, 148, 0.32);
 }
 
-/* Overview ruler (minimap scrollbar) */
+/* Hide scrollbar when terminal not hovered — cleaner look */
+.pane-body .xterm-viewport::-webkit-scrollbar-thumb,
+.demo-term-body .xterm-viewport::-webkit-scrollbar-thumb {
+  opacity: 0;
+  transition: opacity .3s;
+}
+
+.pane-body:hover .xterm-viewport::-webkit-scrollbar-thumb,
+.demo-term-body:hover .xterm-viewport::-webkit-scrollbar-thumb {
+  opacity: 1;
+}
+
+/* ── Overview ruler (minimap) ── */
+
 .pane-body .xterm-overview-ruler,
 .demo-term-body .xterm-overview-ruler {
-  opacity: 0.6;
+  opacity: 0.5;
+  transition: opacity .3s;
 }
 
-/* Selection styling */
+.pane-body:hover .xterm-overview-ruler,
+.demo-term-body:hover .xterm-overview-ruler {
+  opacity: 0.8;
+}
+
+/* ── Selection ── */
+
 .pane-body .xterm-selection div,
 .demo-term-body .xterm-selection div {
   border-radius: 2px;
 }
 
-/* Focus ring on active terminal */
-.demo-term-pane:focus-within .demo-term-head {
-  border-bottom-color: rgba(216, 154, 178, 0.3);
+/* ── Link hover ── */
+
+.pane-body .xterm a,
+.demo-term-body .xterm a {
+  text-decoration: underline;
+  text-decoration-color: rgba(184, 122, 148, 0.4);
+  text-underline-offset: 2px;
 }
 
-.demo-term-pane:focus-within {
-  box-shadow: inset 0 0 0 1px rgba(184, 122, 148, 0.12);
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-dot.connecting { animation: none; }
 }

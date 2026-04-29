@@ -82,20 +82,34 @@ export function useTerminal(sessionId?: string) {
       cursorWidth: 2,
       cursorInactiveStyle: 'outline',
       scrollback: 5000,
+      scrollSensitivity: 2,
+      fastScrollSensitivity: 8,
+      fastScrollModifier: 'alt',
       drawBoldTextInBrightColors: false,
       fontWeight: '400',
       fontWeightBold: '600',
       minimumContrastRatio: 1,
       smoothScrollDuration: 80,
       allowProposedApi: true,
+      allowTransparency: true,
       overviewRulerWidth: 8,
       customGlyphs: true,
+      rescaleOverlappingGlyphs: true,
+      macOptionIsMeta: true,
+      macOptionClickForcesSelection: true,
+      rightClickSelectsWord: true,
+      altClickMovesCursor: true,
     });
 
     // Core addons
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
-    term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new WebLinksAddon(undefined, {
+      hover: (event, uri) => {
+        const target = event.target as HTMLElement;
+        if (target) target.title = uri;
+      },
+    }));
     term.loadAddon(new ClipboardAddon());
 
     // Unicode 11 for better character width handling
