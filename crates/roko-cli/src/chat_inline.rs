@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{bail, Context as _, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
+    Frame,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -65,7 +65,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/version", "show version info"),
     ("/stats", "detailed session statistics"),
     ("/context", "show session context"),
-    ("/history", "show input history"),
+    ("/history", "show conversation turns"),
+    ("/input-history", "show typed input history"),
     ("/copy", "copy last response to clipboard"),
     ("/compact", "toggle compact output mode"),
     ("/system", "set system message for session"),
@@ -986,6 +987,18 @@ fn truncate_str(s: &str, max: usize) -> String {
         format!("{}...", &s[..max - 3])
     } else {
         s[..max].to_string()
+    }
+}
+
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text
+        .chars()
+        .map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c });
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }
 
@@ -2144,11 +2157,17 @@ fn handle_slash_command(
                 styled::continuation(theme, "/provider", "show auth/provider info", None),
                 styled::continuation(theme, "/cost", "session cost summary", None),
                 styled::continuation(theme, "/stats", "detailed session statistics", None),
-                styled::continuation(theme, "/context", "session context (model, tools, mcp)", None),
+                styled::continuation(
+                    theme,
+                    "/context",
+                    "session context (model, tools, mcp)",
+                    None,
+                ),
                 styled::continuation(theme, "/tools", "list available tools", None),
                 styled::continuation(theme, "/mcp", "MCP config status", None),
                 styled::continuation(theme, "/version", "version info", None),
-                styled::continuation(theme, "/history", "show input history", None),
+                styled::continuation(theme, "/history", "show conversation turns", None),
+                styled::continuation(theme, "/input-history", "show typed input history", None),
                 styled::continuation(theme, "/copy", "copy last response to clipboard", None),
                 styled::continuation(theme, "/compact", "toggle compact output", None),
                 styled::continuation(theme, "/system <text>", "set system message", None),
@@ -2324,22 +2343,87 @@ fn handle_slash_command(
                 styled::continuation(theme, "mcp", &mcp_status, None),
                 styled::continuation(theme, "tokens", &total_tokens.to_string(), None),
                 styled::continuation(theme, "system", &system_preview, None),
-                styled::section_end(
-                    theme,
-                    "cost",
-                    &format!("${:.4}", session.cost.total_cost),
-                ),
+                styled::section_end(theme, "cost", &format!("${:.4}", session.cost.total_cost)),
             ])?;
         }
         "/history" => {
+            let is_claude_cli = matches!(
+                &session.dispatch,
+                DispatchMode::Direct {
+                    auth: AuthMethod::ClaudeCli
+                }
+            );
+
+            if session.conversation.is_empty() {
+                let mut lines = vec![styled::section_start(
+                    theme,
+                    "history",
+                    "no turns yet",
+                    None,
+                )];
+                if is_claude_cli {
+                    lines.push(styled::continuation(
+                        theme,
+                        "note",
+                        "Claude CLI manages its own session history",
+                        None,
+                    ));
+                }
+                lines.push(styled::section_end(theme, "tip", "send a message to start"));
+                term.push_lines(&lines)?;
+            } else {
+                let cli_badge = if is_claude_cli {
+                    Some("CLI-managed")
+                } else {
+                    None
+                };
+                let mut lines = vec![styled::section_start(
+                    theme,
+                    "history",
+                    &format!("{} turns", session.turn_count),
+                    cli_badge,
+                )];
+                let start = session.conversation.len().saturating_sub(20);
+                for (i, msg) in session.conversation[start..].iter().enumerate() {
+                    let turn_num = start + i + 1;
+                    let preview = preview_text(&msg.text, 50);
+                    let badge = format!("{} chars", msg.text.chars().count());
+                    lines.push(styled::continuation(
+                        theme,
+                        &format!("#{turn_num} {}", msg.role),
+                        &preview,
+                        Some(badge.as_str()),
+                    ));
+                }
+                if is_claude_cli {
+                    lines.push(styled::continuation(
+                        theme,
+                        "note",
+                        "full history managed by Claude CLI process",
+                        None,
+                    ));
+                }
+                lines.push(Line::from(vec![Span::styled(
+                    symbols::END.to_string(),
+                    theme.muted(),
+                )]));
+                term.push_lines(&lines)?;
+            }
+        }
+        "/input-history" => {
             let history = &session.input.history;
             if history.is_empty() {
-                term.push_lines(&[styled::continuation(theme, "history", "no history", None)])?;
+                term.push_lines(&[styled::continuation(
+                    theme,
+                    "input-history",
+                    "no input history",
+                    None,
+                )])?;
             } else {
                 let start = history.len().saturating_sub(20);
                 let mut lines = vec![styled::section_start(
                     theme,
-                    "history",
+                    "input-history",
                     &format!(
                         "{} entries (showing last {})",
                         history.len(),
@@ -2348,11 +2432,7 @@ fn handle_slash_command(
                     None,
                 )];
                 for (i, entry) in history[start..].iter().enumerate() {
-                    let display = if entry.len() > 60 {
-                        format!("{}...", &entry[..57])
-                    } else {
-                        entry.clone()
-                    };
+                    let display = preview_text(entry, 60);
                     lines.push(styled::continuation(
                         theme,
                         &format!("{}", start + i + 1),
