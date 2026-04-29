@@ -42,6 +42,7 @@ mod workflows;
 mod ws;
 
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use super::state::AppState;
@@ -72,6 +73,9 @@ pub fn build_router(
     state.sse_adapter.start_runtime_event_subscription();
 
     let cors = middleware::cors_layer(cors_origins);
+    let roko_config = state.load_roko_config();
+    let terminal_enabled = roko_config.serve.terminal_enabled;
+    let terminal_requires_auth = terminal_enabled && !bind_is_loopback(&roko_config.server.bind);
 
     let api = Router::new()
         .merge(crate::openapi::routes())
@@ -128,6 +132,20 @@ pub fn build_router(
         middleware::scrub_secrets,
     ));
 
+    let terminal = if terminal_enabled {
+        let terminal = crate::terminal::routes();
+        if terminal_requires_auth {
+            terminal.layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                middleware::require_api_key,
+            ))
+        } else {
+            terminal
+        }
+    } else {
+        crate::terminal::disabled_routes()
+    };
+
     let ws = if api_auth.enabled {
         ws::routes().layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -143,8 +161,8 @@ pub fn build_router(
         .merge(webhooks::routes())
         // Shareable run pages — no auth, serves HTML at /runs/{id}
         .merge(shared_runs::routes())
-        // PTY terminal sessions for web UI — no auth
-        .merge(crate::terminal::routes())
+        // PTY terminal sessions for web UI — gated by config and bind policy.
+        .merge(terminal)
         .nest("/api", api)
         .merge(ws)
         // SPA fallback — serves embedded React app for all unmatched routes
@@ -194,4 +212,111 @@ fn workflow_sse_from_adapter(
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    let host = bind
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(bind);
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host.parse::<IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use roko_core::config::{RokoConfig, ServeAuthConfig};
+    use serde_json::Value;
+    use tempfile::tempdir;
+    use tower::ServiceExt as _;
+
+    use crate::deploy::create_backend;
+    use crate::runtime::NoOpRuntime;
+
+    fn build_test_router(config: RokoConfig) -> (tempfile::TempDir, axum::Router) {
+        let dir = tempdir().expect("tempdir");
+        let deploy = Arc::from(create_backend("manual", None, None, None).expect("manual backend"));
+        let state = Arc::new(
+            AppState::new(
+                dir.path().to_path_buf(),
+                Arc::new(NoOpRuntime),
+                config.clone(),
+                deploy,
+            )
+            .expect("AppState::new"),
+        );
+        let router = build_router(Arc::clone(&state), &[], config.serve.auth.clone());
+        (dir, router)
+    }
+
+    async fn get_json(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        let status = resp.status();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn terminal_routes_are_disabled_by_default() {
+        let (_dir, app) = build_test_router(RokoConfig::default());
+        let (status, body) = get_json(&app, "/api/terminal/sessions").await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "Terminal disabled");
+        assert_eq!(
+            body["hint"],
+            "Set serve.terminal_enabled=true or use --enable-terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_routes_allow_loopback_without_auth() {
+        let mut config = RokoConfig::default();
+        config.serve.terminal_enabled = true;
+
+        let (_dir, app) = build_test_router(config);
+        let (status, body) = get_json(&app, "/api/terminal/sessions").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({ "sessions": [] }));
+    }
+
+    #[tokio::test]
+    async fn terminal_routes_require_auth_on_public_bind() {
+        let mut config = RokoConfig::default();
+        config.server.bind = "0.0.0.0".into();
+        config.serve.terminal_enabled = true;
+        config.serve.auth = ServeAuthConfig {
+            enabled: true,
+            api_key: "terminal-secret".into(),
+            api_keys: Vec::new(),
+            privy_app_id: None,
+        };
+
+        let (_dir, app) = build_test_router(config);
+        let (status, body) = get_json(&app, "/api/terminal/sessions").await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "unauthorized");
+    }
 }

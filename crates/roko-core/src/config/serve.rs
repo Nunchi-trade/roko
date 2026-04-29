@@ -12,6 +12,11 @@ pub struct ServeConfig {
     /// Port override for `roko serve`. Falls back to `server.port` (default 6677).
     #[serde(default)]
     pub port: Option<u16>,
+    /// Whether to expose the PTY terminal routes.
+    ///
+    /// Disabled by default because the terminal is shell access.
+    #[serde(default)]
+    pub terminal_enabled: bool,
     /// Automatically orchestrate follow-up work when publish events arrive.
     #[serde(default = "default_true")]
     pub auto_orchestrate: bool,
@@ -27,6 +32,7 @@ impl Default for ServeConfig {
     fn default() -> Self {
         Self {
             port: None,
+            terminal_enabled: false,
             auto_orchestrate: true,
             auth: ServeAuthConfig::default(),
             deploy: ServeDeployConfig::default(),

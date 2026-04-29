@@ -131,6 +131,7 @@ pub fn run_init_wizard(target: Option<PathBuf>, inputs: &WizardInputs) -> Result
         models: None,
         serve: Some(ServeLayer {
             port: None,
+            terminal_enabled: None,
             auto_orchestrate: None,
             auth: Some(ServeAuthLayer {
                 enabled: Some(false),

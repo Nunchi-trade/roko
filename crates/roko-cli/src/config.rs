@@ -1226,6 +1226,10 @@ impl ConfigLayer {
                 let defaults = ServeConfig::default();
                 ServeConfig {
                     port: s.port,
+                    terminal_enabled: match s.terminal_enabled {
+                        Some(terminal_enabled) => terminal_enabled,
+                        None => defaults.terminal_enabled,
+                    },
                     auto_orchestrate: match s.auto_orchestrate {
                         Some(auto_orchestrate) => auto_orchestrate,
                         None => defaults.auto_orchestrate,
@@ -2382,6 +2386,9 @@ pub struct ServeLayer {
     /// Port override for `roko serve`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Whether to expose the PTY terminal routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_enabled: Option<bool>,
     /// Whether serve-side publish events trigger orchestration automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_orchestrate: Option<bool>,
@@ -2399,6 +2406,7 @@ impl ServeLayer {
     pub fn merge(self, overlay: Self) -> Self {
         Self {
             port: overlay.port.or(self.port),
+            terminal_enabled: overlay.terminal_enabled.or(self.terminal_enabled),
             auto_orchestrate: overlay.auto_orchestrate.or(self.auto_orchestrate),
             auth: match (self.auth, overlay.auth) {
                 (Some(base), Some(overlay)) => Some(base.merge(overlay)),
@@ -3133,8 +3141,9 @@ command = "cat"
 [serve.auth]
 enabled = true
 api_key = "secret"
-"#;
+        "#;
         let cfg = Config::parse_toml(toml).unwrap();
+        assert!(!cfg.serve.terminal_enabled);
         assert!(cfg.serve.auth.enabled);
         assert_eq!(cfg.serve.auth.api_key, "secret");
     }
@@ -3242,6 +3251,7 @@ use_worktrees = true
         assert_eq!(cfg.executor.task_timeout_secs, 900);
         assert!(!cfg.executor.auto_replan);
         assert!(cfg.executor.use_worktrees);
+        assert!(!cfg.serve.terminal_enabled);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
         assert_eq!(cfg.serve.deploy.provider, "railway");
@@ -3255,6 +3265,20 @@ use_worktrees = true
             ]
         );
         assert!(cfg.serve.deploy.webhooks.is_empty());
+    }
+
+    #[test]
+    fn layer_resolve_uses_terminal_override() {
+        let layer = ConfigLayer::parse_toml(
+            r#"
+[serve]
+terminal_enabled = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = layer.resolve().unwrap();
+        assert!(cfg.serve.terminal_enabled);
     }
 
     #[test]
@@ -3335,6 +3359,7 @@ auto_plan = true
         assert_eq!(parsed.models, cfg.models);
         assert_eq!(parsed.repos.len(), cfg.repos.len());
         assert_eq!(parsed.gates.len(), cfg.gates.len());
+        assert_eq!(parsed.serve.terminal_enabled, cfg.serve.terminal_enabled);
         assert_eq!(parsed.serve.auth.enabled, cfg.serve.auth.enabled);
         assert_eq!(parsed.serve.auth.api_key, cfg.serve.auth.api_key);
         assert_eq!(parsed.serve.deploy.provider, cfg.serve.deploy.provider);
@@ -3550,6 +3575,7 @@ base_url = "https://api.z.ai/api/paas/v4"
         assert_eq!(cfg.daimon.strategy_space.domain, "coding");
         assert_eq!(cfg.daimon.strategy_space.dimensions[0], "complexity");
         assert!(cfg.gates.is_empty());
+        assert!(!cfg.serve.terminal_enabled);
         assert!(!cfg.serve.auth.enabled);
         assert!(cfg.serve.auth.api_key.is_empty());
     }
