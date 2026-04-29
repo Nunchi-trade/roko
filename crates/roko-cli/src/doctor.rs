@@ -173,6 +173,7 @@ pub async fn run_doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         &loaded_config,
     ));
     checks.push(check_layout_basics(&workdir));
+    checks.push(check_chain_mode(&workdir));
     checks.push(check_serve_auth(&loaded_config));
     checks.push(check_serve_health(options.serve_url.as_deref(), &loaded_config).await?);
 
@@ -414,6 +415,82 @@ fn check_layout_basics(workdir: &Path) -> DoctorCheck {
             path: Some(root),
             url: None,
         }
+    }
+}
+
+fn check_chain_mode(workdir: &Path) -> DoctorCheck {
+    use roko_core::config::schema::{ChainMode, RokoConfig};
+
+    // Mirror `load_roko_config` from `main.rs` (kept local to avoid a public-API churn).
+    let path = workdir.join("roko.toml");
+    let config = if path.is_file() {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => RokoConfig::from_toml(&text).unwrap_or_default(),
+            Err(_) => RokoConfig::default(),
+        }
+    } else {
+        RokoConfig::default()
+    };
+
+    let configured = config.chain.mode;
+    let active = crate::orchestrate::effective_chain_mode_for_doctor(configured);
+    let overridden = active != configured;
+
+    let (status, message, detail) = match active {
+        ChainMode::Light | ChainMode::Follower => (
+            DoctorStatus::Warn,
+            format!("chain.mode = {active} (Phase A stub: subprocess not yet wired)"),
+            Some(format!(
+                "Reads via this backend currently return Unsupported until Phase B \
+                 (alto-follower wiring). See ~/.claude/plans/greedy-moseying-cerf.md.{}",
+                if overridden {
+                    format!(" Override active: --chain-mode={active} (config = {configured}).")
+                } else {
+                    String::new()
+                }
+            )),
+        ),
+        ChainMode::Rpc => match config.chain.rpc_url.as_deref() {
+            Some(url) => (
+                DoctorStatus::Ok,
+                format!("chain.mode = rpc → {url}"),
+                if overridden {
+                    Some(format!(
+                        "Override active: --chain-mode=rpc (config = {configured})."
+                    ))
+                } else {
+                    None
+                },
+            ),
+            None => (
+                DoctorStatus::Warn,
+                "chain.mode = rpc but no rpc_url configured".to_string(),
+                Some(
+                    "set [chain].rpc_url in roko.toml or pass --chain-mode mock for tests"
+                        .to_string(),
+                ),
+            ),
+        },
+        ChainMode::Mock => (
+            DoctorStatus::Ok,
+            "chain.mode = mock (in-memory test backend)".to_string(),
+            if overridden {
+                Some(format!(
+                    "Override active: --chain-mode=mock (config = {configured})."
+                ))
+            } else {
+                None
+            },
+        ),
+    };
+
+    DoctorCheck {
+        id: "chain_mode".to_string(),
+        status,
+        message,
+        detail,
+        path: None,
+        url: None,
     }
 }
 
