@@ -280,10 +280,17 @@ pub struct GateConfig {
 }
 
 /// Result from a single gate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GateVerdict {
     pub gate_name: String,
+    /// True when the gate ran and succeeded.
     pub passed: bool,
+    /// True when the gate did not run.
+    #[serde(default)]
+    pub skipped: bool,
+    /// Why the gate did not run.
+    #[serde(default)]
+    pub skip_reason: Option<String>,
     pub output: String,
     pub duration_ms: u64,
 }
@@ -298,7 +305,7 @@ impl GateReport {
     /// Returns true if all gates passed.
     #[must_use]
     pub fn all_passed(&self) -> bool {
-        self.verdicts.iter().all(|v| v.passed)
+        self.verdicts.iter().all(|v| v.passed && !v.skipped)
     }
 
     /// Returns the first failing gate, if any.
