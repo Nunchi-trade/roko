@@ -8,6 +8,7 @@ import * as BenchDemo from '../lib/bench-demo-data';
 function getFallback(path: string): unknown {
   if (path.includes('/health') && !path.includes('/providers/health')) return Demo.DEMO_HEALTH;
   if (path.includes('/managed-agents')) return Demo.DEMO_AGENTS;
+  if (path.includes('/agents/topology')) return Demo.DEMO_AGENT_TOPOLOGY;
   if (path.includes('/knowledge/entries')) return Demo.DEMO_KNOWLEDGE_ENTRIES;
   if (path.includes('/knowledge/edges')) return Demo.DEMO_KNOWLEDGE_EDGES;
   if (path.includes('/episodes')) return Demo.DEMO_EPISODES;
