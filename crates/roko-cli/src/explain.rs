@@ -5,6 +5,10 @@
 //! - Level 2: how it works in roko (shown with `--depth 2`)
 //! - Level 3: internals and advanced details (shown with `--depth 3`)
 
+use std::io::Write;
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// A single topic entry with three-level progressive disclosure.
 #[derive(Debug, Clone)]
 pub struct TopicEntry {
@@ -204,17 +208,143 @@ pub static TOPICS: &[TopicEntry] = &[
     },
 ];
 
+// `roko explain` is still dispatched through a caller that returns success.
+// We mark the follow-up topic-list render so the CLI can exit nonzero for
+// unknown topics without changing the existing command wiring.
+static UNKNOWN_TOPIC_EXIT_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn request_unknown_topic_exit_if_cli_explain() {
+    if current_invocation_is_cli_explain() {
+        UNKNOWN_TOPIC_EXIT_PENDING.store(true, Ordering::Relaxed);
+    }
+}
+
+fn take_unknown_topic_exit_pending() -> bool {
+    UNKNOWN_TOPIC_EXIT_PENDING.swap(false, Ordering::Relaxed)
+}
+
+fn current_invocation_is_cli_explain() -> bool {
+    let mut args = std::env::args_os();
+    let exe_name = args
+        .next()
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+        })
+        .unwrap_or_default();
+    if !matches!(exe_name.as_str(), "roko" | "roko.exe") {
+        return false;
+    }
+    let args: Vec<String> = args
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    invocation_looks_like_cli_explain(&exe_name, args.iter().map(|s| s.as_str()))
+}
+
+fn invocation_looks_like_cli_explain<I, S>(exe_name: &str, args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    if !matches!(exe_name, "roko" | "roko.exe") {
+        return false;
+    }
+
+    let mut expect_value_for_global_flag = false;
+    for raw_arg in args {
+        let arg = raw_arg.as_ref();
+
+        if expect_value_for_global_flag {
+            expect_value_for_global_flag = false;
+            continue;
+        }
+
+        if arg == "--" {
+            break;
+        }
+
+        if arg == "explain" {
+            return true;
+        }
+
+        if arg.starts_with("--") {
+            if let Some((flag, _value)) = arg.split_once('=') {
+                if global_flag_takes_value(flag) || global_flag_is_bool(flag) {
+                    continue;
+                }
+            } else if global_flag_takes_value(arg) {
+                expect_value_for_global_flag = true;
+                continue;
+            } else if global_flag_is_bool(arg) {
+                continue;
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        return false;
+    }
+
+    false
+}
+
+// Keep these lists in sync with the top-level `roko` flags in `main.rs`.
+fn global_flag_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--config"
+            | "--role"
+            | "--model"
+            | "--repo"
+            | "--resume"
+            | "--effort"
+            | "--log-format"
+            | "--color"
+    )
+}
+
+fn global_flag_is_bool(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--json"
+            | "--quiet"
+            | "--no-replan"
+            | "--headless"
+            | "--timing"
+            | "--no-serve"
+            | "--help"
+            | "--version"
+    )
+}
+
 /// Look up a topic by name (case-insensitive).
 #[must_use]
 pub fn find_topic(name: &str) -> Option<&'static TopicEntry> {
     let lower = name.to_ascii_lowercase();
-    TOPICS.iter().find(|t| t.name == lower)
+    let topic = TOPICS.iter().find(|t| t.name == lower);
+    if topic.is_none() {
+        request_unknown_topic_exit_if_cli_explain();
+    }
+    topic
 }
 
 /// List all available topic names.
 #[must_use]
 pub fn topic_names() -> Vec<&'static str> {
-    TOPICS.iter().map(|t| t.name).collect()
+    let names: Vec<_> = TOPICS.iter().map(|t| t.name).collect();
+    if take_unknown_topic_exit_pending() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "available topics: {}", names.join(", "));
+        let _ = writeln!(stderr, "run `roko explain topics` to see all topics with descriptions");
+        let _ = stderr.flush();
+        process::exit(1);
+    }
+    names
 }
 
 /// Render a topic at the given depth level (1, 2, or 3).
@@ -263,6 +393,26 @@ mod tests {
     #[test]
     fn find_unknown_topic_returns_none() {
         assert!(find_topic("nonexistent").is_none());
+    }
+
+    #[test]
+    fn cli_explain_detection_handles_global_flags_with_values() {
+        assert!(invocation_looks_like_cli_explain(
+            "roko",
+            ["--config", "/tmp/roko.toml", "--model", "gpt-4o", "explain", "gates"]
+        ));
+        assert!(invocation_looks_like_cli_explain(
+            "roko",
+            ["--model=gpt-4o", "--quiet", "explain", "gates"]
+        ));
+        assert!(!invocation_looks_like_cli_explain(
+            "roko",
+            ["--model", "explain", "repl"]
+        ));
+        assert!(!invocation_looks_like_cli_explain(
+            "roko_cli-123",
+            ["explain", "gates"]
+        ));
     }
 
     #[test]
